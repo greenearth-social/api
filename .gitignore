@@ -1,0 +1,9 @@
+# environment files
+.env*
+
+# Editor/IDE
+.vscode/
+
+# Claude configurations
+claude.md
+.claude/
