@@ -7,3 +7,6 @@
 # Claude configurations
 claude.md
 .claude/
+
+# generated requirements.txt
+requirements.txt
