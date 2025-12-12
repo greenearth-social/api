@@ -112,18 +112,6 @@ create_service_account() {
         --role="roles/secretmanager.secretAccessor" \
         --condition=None
 
-    # Cloud Run Invoker - for service-to-service communication
-    # gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    #     --member="serviceAccount:$sa_email" \
-    #     --role="roles/run.invoker" \
-    #     --condition=None
-
-    # If you need to access GCS buckets, add this:
-    # gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    #     --member="serviceAccount:$sa_email" \
-    #     --role="roles/storage.objectViewer" \
-    #     --condition=None
-
     log_info "IAM roles granted successfully"
 }
 
