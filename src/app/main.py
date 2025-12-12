@@ -9,7 +9,6 @@ app = FastAPI(
 
 app.include_router(health.router)
 
-
 @app.get("/")
 async def root():
     return {"message": "Green Earth API"}
