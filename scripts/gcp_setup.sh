@@ -13,7 +13,10 @@ ENVIRONMENT="${ENVIRONMENT:-stage}"
 
 # Elasticsearch configuration - only API key is secret, URL is public
 ELASTICSEARCH_URL="${ELASTICSEARCH_URL:-INTERNAL_LB_PLACEHOLDER}"
-ELASTICSEARCH_API_KEY="${ELASTICSEARCH_API_KEY:-your-api-key}"
+ELASTICSEARCH_API_KEY="${ELASTICSEARCH_API_KEY:-}"
+
+# API authentication
+API_KEY="${API_KEY:-}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -61,10 +64,16 @@ validate_config() {
     log_info "Configuration validation complete."
     log_info "Using Elasticsearch URL: $ELASTICSEARCH_URL"
 
-    if [ -n "$ELASTICSEARCH_API_KEY" ] && [ "$ELASTICSEARCH_API_KEY" != "your-api-key" ]; then
+    if [ -n "$ELASTICSEARCH_API_KEY" ]; then
         log_info "Elasticsearch API key provided - will be stored/updated in Secret Manager"
     else
         log_warn "Elasticsearch API key not provided - skipping secret creation (assuming it already exists)"
+    fi
+
+    if [ -n "$API_KEY" ]; then
+        log_info "API key provided - will be stored/updated in Secret Manager"
+    else
+        log_warn "API key not provided - skipping secret creation (assuming it already exists)"
     fi
 }
 
@@ -150,6 +159,35 @@ setup_secrets() {
         fi
     fi
 
+    # API key for authentication
+    if [ -n "$API_KEY" ]; then
+        if ! gcloud secrets describe api-key > /dev/null 2>&1; then
+            echo -n "$API_KEY" | gcloud secrets create api-key --data-file=-
+            log_info "API key secret created."
+        else
+            log_info "API key secret already exists. Updating..."
+            echo -n "$API_KEY" | gcloud secrets versions add api-key --data-file=-
+            log_info "API key secret updated."
+        fi
+
+        # Grant service account access to api-key
+        gcloud secrets add-iam-policy-binding api-key \
+            --member="serviceAccount:$sa_email" \
+            --role="roles/secretmanager.secretAccessor" \
+            --condition=None
+    else
+        log_warn "API key not provided. Skipping secret creation."
+        log_info "Ensuring service account has access to existing secret..."
+        if gcloud secrets describe api-key > /dev/null 2>&1; then
+            gcloud secrets add-iam-policy-binding api-key \
+                --member="serviceAccount:$sa_email" \
+                --role="roles/secretmanager.secretAccessor" \
+                --condition=None 2>/dev/null || log_info "Service account already has access to api-key"
+        else
+            log_warn "API key secret does not exist. You'll need to create it manually or re-run with API_KEY set"
+        fi
+    fi
+
     log_info "Secret setup complete"
 }
 
@@ -221,6 +259,8 @@ while [[ $# -gt 0 ]]; do
             echo "  PROJECT_ID              Same as --project-id"
             echo "  REGION                  Same as --region"
             echo "  ENVIRONMENT             Same as --environment"
+            echo "  API_KEY                 API key for authentication (stored in Secret Manager)"
+            echo "  ELASTICSEARCH_API_KEY   Elasticsearch API key (stored in Secret Manager)"
             exit 0
             ;;
         *)

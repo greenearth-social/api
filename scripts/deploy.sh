@@ -157,6 +157,7 @@ deploy_api_service() {
 
     # Add secrets
     deploy_cmd="$deploy_cmd --set-secrets=ELASTICSEARCH_API_KEY=elasticsearch-api-key:latest"
+    deploy_cmd="$deploy_cmd --set-secrets=API_KEY=api-key:latest"
 
     # Resource and scaling configuration
     deploy_cmd="$deploy_cmd --min-instances=$API_INSTANCES_MIN"
