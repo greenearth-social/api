@@ -13,6 +13,7 @@ def es_response():
                     "_source": {
                         "at_uri": "at://1",
                         "content": "hello world",
+                        "contains_video": True,
                         "embeddings": {
                             "all_MiniLM_L12_v2": [0.1, 0.2],
                             "all_MiniLM_L6_v2": [0.3, 0.4],

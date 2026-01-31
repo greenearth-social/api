@@ -46,11 +46,16 @@ async def skylight_search(
     Returns stored MiniLM vectors (`embeddings.all_MiniLM_L12_v2` and
     `embeddings.all_MiniLM_L6_v2`) when present.
     """
+    # Only return posts that contain video. Use a boolean query with a
+    # `must` for the original query_string and a `filter` for the
+    # `contains_video` flag (non-scoring, cached by ES).
     body = {
         "query": {
-            "query_string": {
-                "query": q,
-                "fields": ["content"]
+            "bool": {
+                "must": {
+                    "query_string": {"query": q, "fields": ["content"]}
+                },
+                "filter": [{"term": {"contains_video": True}}]
             }
         }
     }
