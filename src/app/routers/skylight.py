@@ -8,21 +8,13 @@ import struct
 # The `elasticsearch` package exposes several specific exceptions; catch
 # client errors as general exceptions here to avoid import-time issues.
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from ..models import GreenEarthPost
 
 router = APIRouter(tags=["skylight"])
 
 logger = logging.getLogger(__name__)
 
-
-class GreenEarthPost(BaseModel):
-    """Represents a post returned by any search method."""
-    at_uri: str | None = Field(
-        None, description="The AT URI of the post (e.g. at://...)")
-    content: str | None = Field(None, description="The post text content")
-    minilm_l12_embedding: str | None = Field(
-        None, description="Base64-encoded float32 array (384 floats)"
-    )
 
 class SkylightSearchResponse(BaseModel):
     """Search response returning a list of `GreenEarthPost` results."""
