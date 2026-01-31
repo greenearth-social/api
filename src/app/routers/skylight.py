@@ -2,16 +2,16 @@ import base64
 import json
 import logging
 from elastic_transport import ObjectApiResponse
-import os
 import struct
 
 # The `elasticsearch` package exposes several specific exceptions; catch
 # client errors as general exceptions here to avoid import-time issues.
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Depends
+from ..security import verify_api_key
 from pydantic import BaseModel
 from ..models import GreenEarthPost
 
-router = APIRouter(tags=["skylight"])
+router = APIRouter(tags=["skylight"], dependencies=[Depends(verify_api_key)])
 
 logger = logging.getLogger(__name__)
 

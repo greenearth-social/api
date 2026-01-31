@@ -1,3 +1,4 @@
+import os
 import pytest
 from fastapi.testclient import TestClient
 
@@ -44,6 +45,10 @@ def fake_app_es(es_response):
                     return es_response
                 return es_response
 
+    # ensure a predictable API key for tests and restore previous value
+    prev = os.environ.get("API_KEY")
+    os.environ["API_KEY"] = "testkey"
+
     from ..main import app
 
     app.state.es = FakeEs()
@@ -52,10 +57,14 @@ def fake_app_es(es_response):
         delattr(app.state, "es")
     except Exception:
         pass
+    if prev is None:
+        del os.environ["API_KEY"]
+    else:
+        os.environ["API_KEY"] = prev
 
 
 def test_search_returns_embedding():
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-API-Key": "testkey"})
     resp = client.get("/skylight/search?q=hello")
     assert resp.status_code == 200
     from .skylight import encode_float32_b64
@@ -73,7 +82,7 @@ def test_search_returns_embedding():
 
 
 def test_similar_with_at_uris():
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-API-Key": "testkey"})
     resp = client.post("/skylight/similar", json={"at_uris": ["at://1"], "size": 1})
     assert resp.status_code == 200
     from .skylight import encode_float32_b64
@@ -91,7 +100,7 @@ def test_similar_with_at_uris():
 
 
 def test_similar_with_embeddings():
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-API-Key": "testkey"})
     from .skylight import encode_float32_b64
 
     b64 = encode_float32_b64([0.1, 0.2])
@@ -110,19 +119,19 @@ def test_similar_with_embeddings():
 
 
 def test_similar_no_embeddings_for_at_uris_returns_404():
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-API-Key": "testkey"})
     resp = client.post("/skylight/similar", json={"at_uris": ["missing"], "size": 1})
     assert resp.status_code == 404
 
 
 def test_similar_invalid_base64_returns_400():
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-API-Key": "testkey"})
     resp = client.post("/skylight/similar", json={"embeddings": ["not-base64"], "size": 1})
     assert resp.status_code == 400
 
 
 def test_similar_embedding_dimension_mismatch_returns_400():
-    client = TestClient(app)
+    client = TestClient(app, headers={"X-API-Key": "testkey"})
     from .skylight import encode_float32_b64
 
     b1 = encode_float32_b64([0.1, 0.2])
