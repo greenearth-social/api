@@ -15,7 +15,7 @@ def get_api_key() -> str | None:
 
 async def verify_api_key(
     api_key: Annotated[str | None, Depends(api_key_header)],
-) -> str:
+) -> str | None:
     expected_key = get_api_key()
     if not expected_key or api_key != expected_key:
         raise HTTPException(

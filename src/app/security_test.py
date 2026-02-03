@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from src.app.main import app
+from .main import app
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def client_with_api_key(api_key):
     with patch.dict(os.environ, {"API_KEY": api_key}):
         from importlib import reload
 
-        from src.app import security
+        from . import security
 
         reload(security)
         yield TestClient(app), api_key
