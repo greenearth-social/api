@@ -49,6 +49,56 @@ def decode_float32_b64(b64: str) -> list[float]:
     return list(struct.unpack(f"<{count}f", raw))
 
 
+def unwrap_es_response(resp) -> dict:
+    """Unwrap an Elasticsearch response, handling both ObjectApiResponse and dict.
+
+    Raises HTTPException with 502 if the response type is unexpected.
+    """
+    if isinstance(resp, ObjectApiResponse):
+        return resp.body
+    elif isinstance(resp, dict):
+        return resp
+    else:
+        logger.error("Unexpected Elasticsearch response type: %s", type(resp))
+        raise HTTPException(status_code=502, detail="Invalid Elasticsearch response")
+
+
+def posts_response_to_results(resp) -> list[GreenEarthPost]:
+    """Convert an Elasticsearch response from the posts index to a list of GreenEarthPost objects.
+
+    Handles ObjectApiResponse unwrapping, extracts hits, encodes embeddings as base64,
+    and constructs GreenEarthPost objects.
+    """
+    data = unwrap_es_response(resp)
+    results = []
+
+    for hit in data.get("hits", {}).get("hits", []):
+        src = hit.get("_source", {}) or {}
+        embeddings_obj = src.get("embeddings") or {}
+
+        l12 = (
+            embeddings_obj.get("all_MiniLM_L12_v2")
+            if isinstance(embeddings_obj, dict)
+            else None
+        )
+
+        encoded = None
+        if l12 is not None:
+            try:
+                encoded = encode_float32_b64(l12)
+            except Exception:
+                encoded = None
+
+        results.append(
+            GreenEarthPost(
+                at_uri=src.get("at_uri"),
+                content=src.get("content"),
+                minilm_l12_embedding=encoded,
+            )
+        )
+
+    return results
+
 
 @router.get("/skylight/search", response_model=SkylightSearchResponse)
 async def skylight_search(
@@ -94,41 +144,7 @@ async def skylight_search(
         )
         raise HTTPException(status_code=502, detail="Elasticsearch request failed") from exc
 
-    # `AsyncElasticsearch.search` returns an elastic_transport.ObjectApiResponse
-    # wrapper; prefer the underlying body (a dict) for downstream processing.
-    if isinstance(resp, ObjectApiResponse):
-        data = resp.body
-    elif isinstance(resp, dict):
-        data = resp
-    else:
-        logger.error("Unexpected Elasticsearch response type: %s", type(resp))
-        raise HTTPException(status_code=502, detail="Invalid Elasticsearch response")
-    results = []
-    for hit in data.get("hits", {}).get("hits", []):
-        src = hit.get("_source", {}) or {}
-        embeddings_obj = src.get("embeddings") or {}
-
-        l12 = (
-            embeddings_obj.get("all_MiniLM_L12_v2")
-            if isinstance(embeddings_obj, dict)
-            else None
-        )
-
-        encoded = None
-        if l12 is not None:
-            try:
-                encoded = encode_float32_b64(l12)
-            except Exception:
-                encoded = None
-
-        results.append(
-            GreenEarthPost(
-                at_uri=src.get("at_uri"),
-                content=src.get("content"),
-                minilm_l12_embedding=encoded,
-            )
-        )
-
+    results = posts_response_to_results(resp)
     return SkylightSearchResponse(results=results)
 
 
@@ -154,11 +170,7 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
             logger.exception("Failed to lookup at_uris for similar search")
             raise HTTPException(status_code=502, detail="Elasticsearch request failed") from exc
 
-        # unwrap ObjectApiResponse if necessary
-        if isinstance(hits_resp, ObjectApiResponse):
-            hits_data = hits_resp.body
-        else:
-            hits_data = hits_resp
+        hits_data = unwrap_es_response(hits_resp)
 
         for hit in hits_data.get("hits", {}).get("hits", []):
             src = hit.get("_source", {}) or {}
@@ -217,35 +229,5 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
         logger.exception("Elasticsearch similar search failed")
         raise HTTPException(status_code=502, detail="Elasticsearch request failed") from exc
 
-    if isinstance(resp, ObjectApiResponse):
-        data = resp.body
-    elif isinstance(resp, dict):
-        data = resp
-    else:
-        logger.error("Unexpected Elasticsearch response type: %s", type(resp))
-        raise HTTPException(status_code=502, detail="Invalid Elasticsearch response")
-
-    results = []
-    for hit in data.get("hits", {}).get("hits", []):
-        src = hit.get("_source", {}) or {}
-        l12 = None
-        emb_obj = src.get("embeddings") or {}
-        if isinstance(emb_obj, dict):
-            l12 = emb_obj.get("all_MiniLM_L12_v2")
-
-        encoded = None
-        if l12 is not None:
-            try:
-                encoded = encode_float32_b64(l12)
-            except Exception:
-                encoded = None
-
-        results.append(
-            GreenEarthPost(
-                at_uri=src.get("at_uri"),
-                content=src.get("content"),
-                minilm_l12_embedding=encoded,
-            )
-        )
-
+    results = posts_response_to_results(resp)
     return SkylightSearchResponse(results=results)
