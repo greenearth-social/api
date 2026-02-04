@@ -251,22 +251,6 @@ fetch_elasticsearch_api_key() {
         fi
     fi
 
-    # For prod, try to copy from the stage secret if prod doesn't exist
-    if [ "$ENVIRONMENT" = "prod" ]; then
-        log_info "Prod secret not found. Checking for stage secret to copy..."
-        if gcloud secrets describe "elasticsearch-api-key" > /dev/null 2>&1; then
-            local stage_key
-            stage_key=$(gcloud secrets versions access latest --secret="elasticsearch-api-key" 2>/dev/null)
-            if [ -n "$stage_key" ]; then
-                log_info "Copying ES API key from stage to prod secret..."
-                echo -n "$stage_key" | gcloud secrets create "$es_api_key_secret" --data-file=-
-                log_info "Created secret: $es_api_key_secret"
-                ELASTICSEARCH_API_KEY="$stage_key"
-                return 0
-            fi
-        fi
-    fi
-
     log_warn "Could not fetch ES API key from Secret Manager."
     log_warn "Make sure ingex's k8s_recreate_api_key.sh has been run first."
     return 1
