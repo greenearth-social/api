@@ -169,6 +169,17 @@ setup_secrets() {
     fi
 
     # API key for authentication
+    # If not provided, try to fetch from the base api-key secret (for creating prod from stage)
+    if [ -z "$API_KEY" ] && [ "$ENVIRONMENT" = "prod" ]; then
+        if gcloud secrets describe "api-key" > /dev/null 2>&1; then
+            log_info "Fetching API key from existing 'api-key' secret..."
+            API_KEY=$(gcloud secrets versions access latest --secret="api-key" 2>/dev/null)
+            if [ -n "$API_KEY" ]; then
+                log_info "Successfully fetched API key from Secret Manager"
+            fi
+        fi
+    fi
+
     if [ -n "$API_KEY" ]; then
         if ! gcloud secrets describe "$api_key_secret" > /dev/null 2>&1; then
             echo -n "$API_KEY" | gcloud secrets create "$api_key_secret" --data-file=-
@@ -218,14 +229,11 @@ check_vpc_connector() {
 }
 
 fetch_elasticsearch_api_key() {
-    # Fetch the ES API key from Kubernetes and store it in Secret Manager
-    # This connects to the K8s cluster, creates an API key via the ES API,
-    # and stores it in GCP Secret Manager
+    # Fetch the ES API key from Secret Manager
+    # The key is created by ingex's k8s_recreate_api_key.sh and shared between services
+    # For prod, if the -prod secret doesn't exist, copy from the stage secret
 
-    log_info "Fetching Elasticsearch API key from Kubernetes cluster..."
-
-    local k8s_namespace="greenearth-$ENVIRONMENT"
-    local k8s_cluster="greenearth-$ENVIRONMENT-cluster"
+    log_info "Fetching Elasticsearch API key from Secret Manager..."
 
     # Determine secret name based on environment
     local es_api_key_secret="elasticsearch-api-key"
@@ -233,90 +241,35 @@ fetch_elasticsearch_api_key() {
         es_api_key_secret="elasticsearch-api-key-prod"
     fi
 
-    # Check if kubectl is available
-    if ! command -v kubectl &> /dev/null; then
-        log_error "kubectl is not installed. Cannot fetch ES API key from K8s."
-        log_error "Install kubectl or provide ELASTICSEARCH_API_KEY manually."
-        return 1
+    # Check if the target secret exists
+    if gcloud secrets describe "$es_api_key_secret" > /dev/null 2>&1; then
+        log_info "Secret '$es_api_key_secret' exists in Secret Manager"
+        ELASTICSEARCH_API_KEY=$(gcloud secrets versions access latest --secret="$es_api_key_secret" 2>/dev/null)
+        if [ -n "$ELASTICSEARCH_API_KEY" ]; then
+            log_info "Successfully fetched ES API key from Secret Manager"
+            return 0
+        fi
     fi
 
-    # Set up kubectl context for the target environment
-    log_info "Setting kubectl context for $ENVIRONMENT environment..."
-    if ! gcloud container clusters get-credentials "$k8s_cluster" \
-        --location="$REGION" \
-        --project="$PROJECT_ID" 2>/dev/null; then
-        log_error "Failed to get K8s credentials. Is the cluster deployed?"
-        return 1
-    fi
-
-    # Get elastic superuser credentials (required for creating API keys)
-    log_info "Retrieving elastic superuser password..."
-    local es_password
-    es_password=$(kubectl get secret greenearth-es-elastic-user -n "$k8s_namespace" -o jsonpath='{.data.elastic}' 2>/dev/null | base64 -d)
-
-    if [ -z "$es_password" ]; then
-        log_error "Could not retrieve elastic superuser password from K8s secret."
-        log_error "Is Elasticsearch deployed in namespace $k8s_namespace?"
-        return 1
-    fi
-
-    # Determine ES pod name based on environment
-    local es_pod
+    # For prod, try to copy from the stage secret if prod doesn't exist
     if [ "$ENVIRONMENT" = "prod" ]; then
-        es_pod="greenearth-es-data-0"
-    else
-        es_pod="greenearth-es-data-only-0"
+        log_info "Prod secret not found. Checking for stage secret to copy..."
+        if gcloud secrets describe "elasticsearch-api-key" > /dev/null 2>&1; then
+            local stage_key
+            stage_key=$(gcloud secrets versions access latest --secret="elasticsearch-api-key" 2>/dev/null)
+            if [ -n "$stage_key" ]; then
+                log_info "Copying ES API key from stage to prod secret..."
+                echo -n "$stage_key" | gcloud secrets create "$es_api_key_secret" --data-file=-
+                log_info "Created secret: $es_api_key_secret"
+                ELASTICSEARCH_API_KEY="$stage_key"
+                return 0
+            fi
+        fi
     fi
 
-    log_info "Creating API key via Elasticsearch API (pod: $es_pod)..."
-
-    # Create API key with permissions for the API service
-    local api_key_response
-    api_key_response=$(kubectl exec -n "$k8s_namespace" "$es_pod" -- curl -k -s -X POST \
-        -u "elastic:$es_password" \
-        "https://localhost:9200/_security/api_key" \
-        -H "Content-Type: application/json" \
-        -d '{
-            "name": "greenearth-api-'"$ENVIRONMENT"'",
-            "expiration": "365d",
-            "role_descriptors": {
-                "api_role": {
-                    "cluster": ["monitor"],
-                    "indices": [
-                        {
-                            "names": ["posts", "posts_*", "likes", "likes_*", "hashtags", "hashtags_*"],
-                            "privileges": ["read", "view_index_metadata"]
-                        }
-                    ]
-                }
-            }
-        }')
-
-    # Extract the encoded API key
-    local encoded_key
-    encoded_key=$(echo "$api_key_response" | grep -o '"encoded":"[^"]*"' | cut -d'"' -f4)
-
-    if [ -z "$encoded_key" ]; then
-        log_error "Failed to create API key. Response: $api_key_response"
-        return 1
-    fi
-
-    log_info "API key created successfully."
-
-    # Store in Secret Manager
-    log_info "Storing API key in Secret Manager ($es_api_key_secret)..."
-    if ! gcloud secrets describe "$es_api_key_secret" > /dev/null 2>&1; then
-        echo -n "$encoded_key" | gcloud secrets create "$es_api_key_secret" --data-file=-
-        log_info "Secret created: $es_api_key_secret"
-    else
-        echo -n "$encoded_key" | gcloud secrets versions add "$es_api_key_secret" --data-file=-
-        log_info "Secret updated: $es_api_key_secret"
-    fi
-
-    # Export for use in setup_secrets
-    ELASTICSEARCH_API_KEY="$encoded_key"
-    log_info "Elasticsearch API key fetched and stored successfully."
-    return 0
+    log_warn "Could not fetch ES API key from Secret Manager."
+    log_warn "Make sure ingex's k8s_recreate_api_key.sh has been run first."
+    return 1
 }
 
 main() {
