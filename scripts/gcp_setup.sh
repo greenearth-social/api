@@ -129,62 +129,82 @@ setup_secrets() {
 
     local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
 
+    # Determine secret names based on environment
+    # Stage uses no suffix for backwards compatibility, prod uses -prod suffix
+    local es_api_key_secret="elasticsearch-api-key"
+    local api_key_secret="api-key"
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        es_api_key_secret="elasticsearch-api-key-prod"
+        api_key_secret="api-key-prod"
+    fi
+
     # Elasticsearch API key
     if [ -n "$ELASTICSEARCH_API_KEY" ] && [ "$ELASTICSEARCH_API_KEY" != "your-api-key" ]; then
-        if ! gcloud secrets describe elasticsearch-api-key > /dev/null 2>&1; then
-            echo -n "$ELASTICSEARCH_API_KEY" | gcloud secrets create elasticsearch-api-key --data-file=-
-            log_info "Elasticsearch API key secret created."
+        if ! gcloud secrets describe "$es_api_key_secret" > /dev/null 2>&1; then
+            echo -n "$ELASTICSEARCH_API_KEY" | gcloud secrets create "$es_api_key_secret" --data-file=-
+            log_info "Elasticsearch API key secret created: $es_api_key_secret"
         else
-            log_info "Elasticsearch API key secret already exists. Updating..."
-            echo -n "$ELASTICSEARCH_API_KEY" | gcloud secrets versions add elasticsearch-api-key --data-file=-
-            log_info "Elasticsearch API key secret updated."
+            log_info "Elasticsearch API key secret already exists: $es_api_key_secret. Updating..."
+            echo -n "$ELASTICSEARCH_API_KEY" | gcloud secrets versions add "$es_api_key_secret" --data-file=-
+            log_info "Elasticsearch API key secret updated: $es_api_key_secret"
         fi
 
         # Grant service account access to elasticsearch-api-key
-        gcloud secrets add-iam-policy-binding elasticsearch-api-key \
+        gcloud secrets add-iam-policy-binding "$es_api_key_secret" \
             --member="serviceAccount:$sa_email" \
             --role="roles/secretmanager.secretAccessor" \
             --condition=None
     else
         log_warn "Elasticsearch API key not provided. Skipping secret creation."
         log_info "Ensuring service account has access to existing secret..."
-        if gcloud secrets describe elasticsearch-api-key > /dev/null 2>&1; then
+        if gcloud secrets describe "$es_api_key_secret" > /dev/null 2>&1; then
             # Grant service account access even if we're not creating/updating the secret
-            gcloud secrets add-iam-policy-binding elasticsearch-api-key \
+            gcloud secrets add-iam-policy-binding "$es_api_key_secret" \
                 --member="serviceAccount:$sa_email" \
                 --role="roles/secretmanager.secretAccessor" \
-                --condition=None 2>/dev/null || log_info "Service account already has access to elasticsearch-api-key"
+                --condition=None 2>/dev/null || log_info "Service account already has access to $es_api_key_secret"
         else
-            log_warn "Elasticsearch API key secret does not exist. You'll need to create it manually or re-run with ELASTICSEARCH_API_KEY set"
+            log_warn "Elasticsearch API key secret does not exist: $es_api_key_secret. You'll need to create it manually or re-run with ELASTICSEARCH_API_KEY set"
         fi
     fi
 
     # API key for authentication
+    # If not provided, try to fetch from the base api-key secret (for creating prod from stage)
+    if [ -z "$API_KEY" ] && [ "$ENVIRONMENT" = "prod" ]; then
+        if gcloud secrets describe "api-key" > /dev/null 2>&1; then
+            log_info "Fetching API key from existing 'api-key' secret..."
+            API_KEY=$(gcloud secrets versions access latest --secret="api-key" 2>/dev/null)
+            if [ -n "$API_KEY" ]; then
+                log_info "Successfully fetched API key from Secret Manager"
+            fi
+        fi
+    fi
+
     if [ -n "$API_KEY" ]; then
-        if ! gcloud secrets describe api-key > /dev/null 2>&1; then
-            echo -n "$API_KEY" | gcloud secrets create api-key --data-file=-
-            log_info "API key secret created."
+        if ! gcloud secrets describe "$api_key_secret" > /dev/null 2>&1; then
+            echo -n "$API_KEY" | gcloud secrets create "$api_key_secret" --data-file=-
+            log_info "API key secret created: $api_key_secret"
         else
-            log_info "API key secret already exists. Updating..."
-            echo -n "$API_KEY" | gcloud secrets versions add api-key --data-file=-
-            log_info "API key secret updated."
+            log_info "API key secret already exists: $api_key_secret. Updating..."
+            echo -n "$API_KEY" | gcloud secrets versions add "$api_key_secret" --data-file=-
+            log_info "API key secret updated: $api_key_secret"
         fi
 
         # Grant service account access to api-key
-        gcloud secrets add-iam-policy-binding api-key \
+        gcloud secrets add-iam-policy-binding "$api_key_secret" \
             --member="serviceAccount:$sa_email" \
             --role="roles/secretmanager.secretAccessor" \
             --condition=None
     else
         log_warn "API key not provided. Skipping secret creation."
         log_info "Ensuring service account has access to existing secret..."
-        if gcloud secrets describe api-key > /dev/null 2>&1; then
-            gcloud secrets add-iam-policy-binding api-key \
+        if gcloud secrets describe "$api_key_secret" > /dev/null 2>&1; then
+            gcloud secrets add-iam-policy-binding "$api_key_secret" \
                 --member="serviceAccount:$sa_email" \
                 --role="roles/secretmanager.secretAccessor" \
-                --condition=None 2>/dev/null || log_info "Service account already has access to api-key"
+                --condition=None 2>/dev/null || log_info "Service account already has access to $api_key_secret"
         else
-            log_warn "API key secret does not exist. You'll need to create it manually or re-run with API_KEY set"
+            log_warn "API key secret does not exist: $api_key_secret. You'll need to create it manually or re-run with API_KEY set"
         fi
     fi
 
@@ -208,6 +228,34 @@ check_vpc_connector() {
     fi
 }
 
+fetch_elasticsearch_api_key() {
+    # Fetch the ES API key from Secret Manager
+    # The key is created by ingex's k8s_recreate_api_key.sh and shared between services
+    # For prod, if the -prod secret doesn't exist, copy from the stage secret
+
+    log_info "Fetching Elasticsearch API key from Secret Manager..."
+
+    # Determine secret name based on environment
+    local es_api_key_secret="elasticsearch-api-key"
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        es_api_key_secret="elasticsearch-api-key-prod"
+    fi
+
+    # Check if the target secret exists
+    if gcloud secrets describe "$es_api_key_secret" > /dev/null 2>&1; then
+        log_info "Secret '$es_api_key_secret' exists in Secret Manager"
+        ELASTICSEARCH_API_KEY=$(gcloud secrets versions access latest --secret="$es_api_key_secret" 2>/dev/null)
+        if [ -n "$ELASTICSEARCH_API_KEY" ]; then
+            log_info "Successfully fetched ES API key from Secret Manager"
+            return 0
+        fi
+    fi
+
+    log_warn "Could not fetch ES API key from Secret Manager."
+    log_warn "Make sure ingex's k8s_recreate_api_key.sh has been run first."
+    return 1
+}
+
 main() {
     log_info "Starting GCP setup for Green Earth API..."
     log_info "Project: $PROJECT_ID"
@@ -219,6 +267,16 @@ main() {
     validate_config
     setup_gcp_project
     create_service_account
+
+    # Fetch ES API key from K8s unless disabled or already provided
+    if [ "$FETCH_ES_KEY" = true ] && [ -z "$ELASTICSEARCH_API_KEY" ]; then
+        if ! fetch_elasticsearch_api_key; then
+            log_warn "Failed to fetch ES API key. Continuing with setup..."
+        fi
+    elif [ -n "$ELASTICSEARCH_API_KEY" ]; then
+        log_info "Using provided ELASTICSEARCH_API_KEY (skipping K8s fetch)"
+    fi
+
     setup_secrets
     check_vpc_connector
 
@@ -232,6 +290,7 @@ main() {
 }
 
 # Parse command line arguments
+FETCH_ES_KEY=true
 while [[ $# -gt 0 ]]; do
     case $1 in
         --project-id)
@@ -246,6 +305,10 @@ while [[ $# -gt 0 ]]; do
             ENVIRONMENT="$2"
             shift 2
             ;;
+        --no-fetch-es-key)
+            FETCH_ES_KEY=false
+            shift
+            ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -253,6 +316,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --project-id ID          GCP project ID (default: greenearth-471522)"
             echo "  --region REGION          GCP region (default: us-east1)"
             echo "  --environment ENV        Environment name (default: stage)"
+            echo "  --no-fetch-es-key        Skip fetching ES API key from K8s (use existing secret or env var)"
             echo "  --help                   Show this help message"
             echo ""
             echo "Environment variables:"
@@ -260,7 +324,14 @@ while [[ $# -gt 0 ]]; do
             echo "  REGION                  Same as --region"
             echo "  ENVIRONMENT             Same as --environment"
             echo "  API_KEY                 API key for authentication (stored in Secret Manager)"
-            echo "  ELASTICSEARCH_API_KEY   Elasticsearch API key (stored in Secret Manager)"
+            echo "  ELASTICSEARCH_API_KEY   Elasticsearch API key (skips K8s fetch if provided)"
+            echo ""
+            echo "Examples:"
+            echo "  # Setup for staging (fetches ES key from K8s by default):"
+            echo "  $0 --environment stage"
+            echo ""
+            echo "  # Setup for production with manual ES key:"
+            echo "  ELASTICSEARCH_API_KEY=xxx $0 --environment prod --no-fetch-es-key"
             exit 0
             ;;
         *)

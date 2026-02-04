@@ -2,6 +2,7 @@
 
 # Green Earth API - Cloud Run Source Deployment Script
 # This script deploys the FastAPI service to Google Cloud Run using source deployment
+# with environment-specific service names (greenearth-api-stage, greenearth-api-prod)
 # Source deployment uses Google Cloud buildpacks to automatically build from Python source
 #
 # Prerequisites: Run scripts/gcp_setup.sh first to configure the GCP environment
@@ -135,10 +136,19 @@ generate_requirements() {
 }
 
 deploy_api_service() {
-    log_info "Deploying greenearth-api service from source..."
+    log_info "Deploying greenearth-api-$ENVIRONMENT service from source..."
 
-    # Build base command
-    local deploy_cmd="gcloud run deploy greenearth-api"
+    # Determine secret names based on environment
+    # Stage uses no suffix for backwards compatibility, prod uses -prod suffix
+    local es_api_key_secret="elasticsearch-api-key"
+    local api_key_secret="api-key"
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        es_api_key_secret="elasticsearch-api-key-prod"
+        api_key_secret="api-key-prod"
+    fi
+
+    # Build base command with environment suffix in service name
+    local deploy_cmd="gcloud run deploy greenearth-api-$ENVIRONMENT"
     deploy_cmd="$deploy_cmd --source=."
     deploy_cmd="$deploy_cmd --region=$REGION"
     deploy_cmd="$deploy_cmd --service-account=api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
@@ -152,12 +162,12 @@ deploy_api_service() {
     # Set environment variables
     deploy_cmd="$deploy_cmd --set-env-vars=ENVIRONMENT=$ENVIRONMENT"
     deploy_cmd="$deploy_cmd --set-env-vars=LOG_LEVEL=info"
-    deploy_cmd="$deploy_cmd --set-env-vars=ELASTICSEARCH_URL=$ELASTICSEARCH_URL"
-    deploy_cmd="$deploy_cmd --set-env-vars=ELASTICSEARCH_TLS_SKIP_VERIFY=true"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$ELASTICSEARCH_URL"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
 
-    # Add secrets
-    deploy_cmd="$deploy_cmd --set-secrets=ELASTICSEARCH_API_KEY=elasticsearch-api-key:latest"
-    deploy_cmd="$deploy_cmd --set-secrets=API_KEY=api-key:latest"
+    # Add secrets with environment-specific names
+    deploy_cmd="$deploy_cmd --set-secrets=GE_ELASTICSEARCH_API_KEY=$es_api_key_secret:latest"
+    deploy_cmd="$deploy_cmd --set-secrets=API_KEY=$api_key_secret:latest"
 
     # Resource and scaling configuration
     deploy_cmd="$deploy_cmd --min-instances=$API_INSTANCES_MIN"
@@ -174,13 +184,13 @@ deploy_api_service() {
     eval "$deploy_cmd"
 
     if [ $? -eq 0 ]; then
-        log_info "✓ greenearth-api deployed successfully"
+        log_info "✓ greenearth-api-$ENVIRONMENT deployed successfully"
 
         # Get the service URL
-        local service_url=$(gcloud run services describe greenearth-api --region="$REGION" --format="value(status.url)")
+        local service_url=$(gcloud run services describe greenearth-api-$ENVIRONMENT --region="$REGION" --format="value(status.url)")
         log_info "Service URL: $service_url"
     else
-        log_error "Failed to deploy greenearth-api"
+        log_error "Failed to deploy greenearth-api-$ENVIRONMENT"
         exit 1
     fi
 }
