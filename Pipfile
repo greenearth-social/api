@@ -7,7 +7,7 @@ name = "pypi"
 fastapi = "*"
 uvicorn = {extras = ["standard"], version = "*"}
 python-dotenv = "*"
-elasticsearch = "==8.10.0"
+elasticsearch = "==9.3.0"
 aiohttp = "*"
 
 [dev-packages]
