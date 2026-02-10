@@ -140,10 +140,11 @@ deploy_api_service() {
 
     # Determine secret names based on environment
     # Stage uses no suffix for backwards compatibility, prod uses -prod suffix
-    local es_api_key_secret="elasticsearch-api-key"
+    # API uses the readonly key since it only needs read access to Elasticsearch
+    local es_api_key_secret="elasticsearch-api-key-readonly"
     local api_key_secret="api-key"
     if [ "$ENVIRONMENT" = "prod" ]; then
-        es_api_key_secret="elasticsearch-api-key-prod"
+        es_api_key_secret="elasticsearch-api-key-readonly-prod"
         api_key_secret="api-key-prod"
     fi
 

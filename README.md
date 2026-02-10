@@ -101,8 +101,12 @@ This script will:
 
 - Enable required GCP APIs (Cloud Run, Secret Manager, etc.)
 - Create a service account with appropriate IAM roles
-- Store the Elasticsearch API key in Secret Manager
+- Configure access to the Elasticsearch readonly API key in Secret Manager
 - Verify VPC connector for internal network access
+
+> **Note**: The API uses a separate readonly Elasticsearch API key (`elasticsearch-api-key-readonly`) 
+> that only has read access. This key is created by running `scripts/k8s_recreate_api_key.sh` in the 
+> ingex/ingest directory, which creates both the ingest (read/write) and API (readonly) keys.
 
 ### Deploying the Service
 

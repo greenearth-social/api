@@ -110,6 +110,21 @@ create_service_account() {
             --description="Service account for running the Green Earth API on Cloud Run"
 
         log_info "Service account created: $sa_email"
+
+        # Wait for service account to propagate (GCP eventually consistent)
+        log_info "Waiting for service account to propagate..."
+        local max_attempts=30
+        local attempt=1
+        while ! gcloud iam service-accounts describe "$sa_email" > /dev/null 2>&1; do
+            if [ $attempt -ge $max_attempts ]; then
+                log_error "Service account did not propagate after $max_attempts attempts"
+                exit 1
+            fi
+            log_info "Waiting for service account... (attempt $attempt/$max_attempts)"
+            sleep 2
+            attempt=$((attempt + 1))
+        done
+        log_info "Service account is ready"
     fi
 
     # Grant necessary roles
@@ -131,10 +146,11 @@ setup_secrets() {
 
     # Determine secret names based on environment
     # Stage uses no suffix for backwards compatibility, prod uses -prod suffix
-    local es_api_key_secret="elasticsearch-api-key"
+    # API uses the readonly key since it only needs read access to Elasticsearch
+    local es_api_key_secret="elasticsearch-api-key-readonly"
     local api_key_secret="api-key"
     if [ "$ENVIRONMENT" = "prod" ]; then
-        es_api_key_secret="elasticsearch-api-key-prod"
+        es_api_key_secret="elasticsearch-api-key-readonly-prod"
         api_key_secret="api-key-prod"
     fi
 
@@ -230,15 +246,16 @@ check_vpc_connector() {
 
 fetch_elasticsearch_api_key() {
     # Fetch the ES API key from Secret Manager
-    # The key is created by ingex's k8s_recreate_api_key.sh and shared between services
-    # For prod, if the -prod secret doesn't exist, copy from the stage secret
+    # The key is created by ingex's k8s_recreate_api_key.sh
+    # API uses the readonly key since it only needs read access to Elasticsearch
 
     log_info "Fetching Elasticsearch API key from Secret Manager..."
 
     # Determine secret name based on environment
-    local es_api_key_secret="elasticsearch-api-key"
+    # API uses readonly key (separate from ingest's read/write key)
+    local es_api_key_secret="elasticsearch-api-key-readonly"
     if [ "$ENVIRONMENT" = "prod" ]; then
-        es_api_key_secret="elasticsearch-api-key-prod"
+        es_api_key_secret="elasticsearch-api-key-readonly-prod"
     fi
 
     # Check if the target secret exists
