@@ -58,6 +58,23 @@ validate_config() {
     log_info "Configuration validation complete."
 }
 
+configure_kubectl() {
+    log_info "Configuring kubectl context for $ENVIRONMENT environment..."
+
+    local cluster_name="greenearth-${ENVIRONMENT}-cluster"
+
+    if ! gcloud container clusters get-credentials "$cluster_name" \
+        --location="$REGION" \
+        --project="$PROJECT_ID" 2>/dev/null; then
+        log_warn "Could not configure kubectl for cluster $cluster_name"
+        log_warn "If you need to auto-detect Elasticsearch URL, set ELASTICSEARCH_URL manually"
+        return 1
+    fi
+
+    log_info "kubectl configured for cluster: $cluster_name"
+    return 0
+}
+
 get_elasticsearch_internal_lb_ip() {
     log_info "Getting Elasticsearch internal load balancer IP..."
 
@@ -140,10 +157,11 @@ deploy_api_service() {
 
     # Determine secret names based on environment
     # Stage uses no suffix for backwards compatibility, prod uses -prod suffix
-    local es_api_key_secret="elasticsearch-api-key"
+    # API uses the readonly key since it only needs read access to Elasticsearch
+    local es_api_key_secret="elasticsearch-api-key-readonly"
     local api_key_secret="api-key"
     if [ "$ENVIRONMENT" = "prod" ]; then
-        es_api_key_secret="elasticsearch-api-key-prod"
+        es_api_key_secret="elasticsearch-api-key-readonly-prod"
         api_key_secret="api-key-prod"
     fi
 
@@ -203,6 +221,12 @@ main() {
 
     validate_config
     verify_vpc_connector
+
+    # Configure kubectl if needed for ES URL auto-detection
+    if [ "$ELASTICSEARCH_URL" = "INTERNAL_LB_PLACEHOLDER" ]; then
+        configure_kubectl
+    fi
+
     get_elasticsearch_internal_lb_ip
     generate_requirements
     deploy_api_service
