@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .routers import health, skylight
+from .routers import candidates, health, skylight
 from .security import RequireApiKey
 
 from elasticsearch import AsyncElasticsearch
@@ -52,6 +52,7 @@ app = FastAPI(
 )
 
 
+app.include_router(candidates.router)
 app.include_router(health.router)
 app.include_router(skylight.router)
 
