@@ -5,7 +5,6 @@ internally (as a pipeline step) or via an API endpoint.
 """
 
 from .base import (
-    Candidate,
     CandidateGenerator,
     CandidateResult,
     get_generator,
@@ -19,7 +18,6 @@ _post_similarity = PostSimilarityCandidateGenerator()
 register_generator(_post_similarity)
 
 __all__ = [
-    "Candidate",
     "CandidateGenerator",
     "CandidateResult",
     "get_generator",

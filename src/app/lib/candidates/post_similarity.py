@@ -10,24 +10,15 @@ Generates candidates by finding posts similar to a user's recent likes:
 
 import logging
 
-from elastic_transport import ObjectApiResponse
-
-from .base import Candidate, CandidateGenerator, CandidateResult
+from ...models import CandidatePost
+from .base import CandidateGenerator, CandidateResult
+from ..elasticsearch import unwrap_es_response
 from ..embeddings import encode_float32_b64
 
 logger = logging.getLogger(__name__)
 
 # How many recent likes to consider when building the query vector.
 DEFAULT_LIKED_POSTS_LIMIT = 50
-
-
-def unwrap_es_response(resp) -> dict:
-    """Unwrap an Elasticsearch response (ObjectApiResponse or plain dict)."""
-    if isinstance(resp, ObjectApiResponse):
-        return resp.body
-    if isinstance(resp, dict):
-        return resp
-    raise TypeError(f"Unexpected Elasticsearch response type: {type(resp)}")
 
 
 async def fetch_recent_liked_post_uris(
@@ -115,11 +106,11 @@ async def knn_search_posts(
     es,
     query_vector: list[float],
     num_candidates: int,
-) -> list[Candidate]:
-    """Run a kNN search against the ``posts`` index and return candidates.
+) -> list[CandidatePost]:
+    """Run a kNN search against the ``posts`` index and return candidate posts.
 
     Uses the ``embeddings.all_MiniLM_L12_v2`` field for nearest-neighbour
-    matching.  Each hit is converted to a :class:`Candidate` with the ES
+    matching.  Each hit is converted to a :class:`CandidatePost` with the ES
     score attached.
     """
     knn_query = {
@@ -139,7 +130,7 @@ async def knn_search_posts(
     resp = await es.search(index="posts", query=knn_query, size=num_candidates)
     data = unwrap_es_response(resp)
 
-    candidates: list[Candidate] = []
+    candidates: list[CandidatePost] = []
     for hit in data.get("hits", {}).get("hits", []):
         src = hit.get("_source") or {}
         embeddings_obj = src.get("embeddings") or {}
@@ -158,7 +149,7 @@ async def knn_search_posts(
                 encoded = None
 
         candidates.append(
-            Candidate(
+            CandidatePost(
                 at_uri=src.get("at_uri"),
                 content=src.get("content"),
                 minilm_l12_embedding=encoded,

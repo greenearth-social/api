@@ -1,15 +1,14 @@
-import base64
 import json
 import logging
-from elastic_transport import ObjectApiResponse
-import struct
 
 # The `elasticsearch` package exposes several specific exceptions; catch
 # client errors as general exceptions here to avoid import-time issues.
 from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from ..security import verify_api_key
 from pydantic import BaseModel
-from ..models import GreenEarthPost
+from ..models import CandidatePost
+from ..lib.embeddings import encode_float32_b64, decode_float32_b64
+from ..lib.elasticsearch import unwrap_es_response
 
 router = APIRouter(tags=["skylight"], dependencies=[Depends(verify_api_key)])
 
@@ -17,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 class SkylightSearchResponse(BaseModel):
-    """Search response returning a list of `GreenEarthPost` results."""
-    results: list[GreenEarthPost]
+    """Search response returning a list of post results."""
+    results: list[CandidatePost]
 
 
 class SkylightSimilarRequest(BaseModel):
@@ -27,47 +26,11 @@ class SkylightSimilarRequest(BaseModel):
     size: int = 10
 
 
-def encode_float32_b64(vec: list[float]) -> str:
-    """Encode a list of floats as little-endian float32 bytes, then base64.
-
-    Uses struct.pack with little-endian `<f` format for portability.
-    """
-    if vec is None:
-        raise TypeError("vec must not be None")
-    if not isinstance(vec, (list, tuple)):
-        raise TypeError("vec must be a list or tuple of floats")
-    packed = struct.pack(f"<{len(vec)}f", *vec)
-    return base64.b64encode(packed).decode("ascii")
-
-
-def decode_float32_b64(b64: str) -> list[float]:
-    """Decode a base64 float32 little-endian encoded vector to list[float]."""
-    raw = base64.b64decode(b64)
-    if len(raw) % 4 != 0:
-        raise ValueError("invalid float32 byte length")
-    count = len(raw) // 4
-    return list(struct.unpack(f"<{count}f", raw))
-
-
-def unwrap_es_response(resp) -> dict:
-    """Unwrap an Elasticsearch response, handling both ObjectApiResponse and dict.
-
-    Raises HTTPException with 502 if the response type is unexpected.
-    """
-    if isinstance(resp, ObjectApiResponse):
-        return resp.body
-    elif isinstance(resp, dict):
-        return resp
-    else:
-        logger.error("Unexpected Elasticsearch response type: %s", type(resp))
-        raise HTTPException(status_code=502, detail="Invalid Elasticsearch response")
-
-
-def posts_response_to_results(resp) -> list[GreenEarthPost]:
-    """Convert an Elasticsearch response from the posts index to a list of GreenEarthPost objects.
+def posts_response_to_results(resp) -> list[CandidatePost]:
+    """Convert an Elasticsearch response from the posts index to a list of CandidatePost objects.
 
     Handles ObjectApiResponse unwrapping, extracts hits, encodes embeddings as base64,
-    and constructs GreenEarthPost objects.
+    and constructs CandidatePost objects.  The ES ``_score`` is forwarded when present.
     """
     data = unwrap_es_response(resp)
     results = []
@@ -90,10 +53,11 @@ def posts_response_to_results(resp) -> list[GreenEarthPost]:
                 encoded = None
 
         results.append(
-            GreenEarthPost(
+            CandidatePost(
                 at_uri=src.get("at_uri"),
                 content=src.get("content"),
                 minilm_l12_embedding=encoded,
+                score=hit.get("_score"),
             )
         )
 

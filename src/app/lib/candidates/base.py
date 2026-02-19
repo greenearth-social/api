@@ -10,29 +10,19 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, Field
 
+from ...models import CandidatePost
+
 
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
-
-class Candidate(BaseModel):
-    """A single candidate post returned by a generator."""
-
-    at_uri: str | None = Field(None, description="AT URI of the candidate post")
-    content: str | None = Field(None, description="Post text content")
-    minilm_l12_embedding: str | None = Field(
-        None, description="Base64-encoded float32 MiniLM L12 embedding (384-d)"
-    )
-    score: float | None = Field(
-        None, description="Relevance score assigned by the generator (if available)"
-    )
 
 
 class CandidateResult(BaseModel):
     """The output of a candidate generator invocation."""
 
     generator_name: str = Field(..., description="Name of the generator that produced these candidates")
-    candidates: list[Candidate] = Field(default_factory=list)
+    candidates: list[CandidatePost] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
