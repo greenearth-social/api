@@ -58,6 +58,7 @@ def posts_response_to_results(resp) -> list[CandidatePost]:
                 content=src.get("content"),
                 minilm_l12_embedding=encoded,
                 score=hit.get("_score"),
+                generator_name=None,
             )
         )
 

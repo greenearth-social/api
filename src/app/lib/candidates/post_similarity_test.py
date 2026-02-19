@@ -169,6 +169,30 @@ class TestKnnSearchPosts:
         assert candidates[0].content == "hello"
         assert candidates[0].score == 0.95
         assert candidates[0].minilm_l12_embedding is not None
+        assert candidates[0].generator_name is None
+
+    @pytest.mark.asyncio
+    async def test_passes_generator_name(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_score": 0.8,
+                            "_source": {
+                                "at_uri": "at://post/1",
+                                "content": "hi",
+                                "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                            },
+                        },
+                    ]
+                }
+            }
+        })
+        candidates = await knn_search_posts(
+            es, [0.1, 0.2], num_candidates=5, generator_name="post_similarity"
+        )
+        assert candidates[0].generator_name == "post_similarity"
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +253,7 @@ class TestPostSimilarityGenerator:
         assert len(result.candidates) == 1
         assert result.candidates[0].at_uri == "at://result/1"
         assert result.candidates[0].score == 0.9
+        assert result.candidates[0].generator_name == "post_similarity"
 
     @pytest.mark.asyncio
     async def test_generate_no_likes(self, generator):

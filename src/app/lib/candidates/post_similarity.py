@@ -106,6 +106,7 @@ async def knn_search_posts(
     es,
     query_vector: list[float],
     num_candidates: int,
+    generator_name: str | None = None,
 ) -> list[CandidatePost]:
     """Run a kNN search against the ``posts`` index and return candidate posts.
 
@@ -127,7 +128,7 @@ async def knn_search_posts(
         }
     }
 
-    resp = await es.search(index="posts", query=knn_query, size=num_candidates)
+    resp = await es.search(index="posts", query=knn_query, size=num_candidates, request_timeout=60)
     data = unwrap_es_response(resp)
 
     candidates: list[CandidatePost] = []
@@ -154,6 +155,7 @@ async def knn_search_posts(
                 content=src.get("content"),
                 minilm_l12_embedding=encoded,
                 score=hit.get("_score"),
+                generator_name=generator_name,
             )
         )
     return candidates
@@ -198,6 +200,6 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
         avg_vector = average_vectors(vectors)
 
         # 4. kNN search for similar posts
-        candidates = await knn_search_posts(es, avg_vector, num_candidates)
+        candidates = await knn_search_posts(es, avg_vector, num_candidates, generator_name=self.name)
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

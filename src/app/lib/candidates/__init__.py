@@ -11,11 +11,15 @@ from .base import (
     list_generators,
     register_generator,
 )
+from .popularity import PopularityCandidateGenerator
 from .post_similarity import PostSimilarityCandidateGenerator
 
 # Register built-in generators
 _post_similarity = PostSimilarityCandidateGenerator()
 register_generator(_post_similarity)
+
+_popularity = PopularityCandidateGenerator()
+register_generator(_popularity)
 
 __all__ = [
     "CandidateGenerator",
@@ -23,5 +27,6 @@ __all__ = [
     "get_generator",
     "list_generators",
     "register_generator",
+    "PopularityCandidateGenerator",
     "PostSimilarityCandidateGenerator",
 ]

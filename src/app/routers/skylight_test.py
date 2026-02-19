@@ -78,6 +78,7 @@ def test_search_returns_embedding():
                 "content": "hello world",
                 "minilm_l12_embedding": expected,
                 "score": 1.5,
+                "generator_name": None,
             }
         ]
     }
@@ -96,6 +97,7 @@ def test_similar_with_at_uris():
                 "content": "hello world",
                 "minilm_l12_embedding": expected,
                 "score": 1.5,
+                "generator_name": None,
             }
         ]
     }
@@ -114,6 +116,7 @@ def test_similar_with_embeddings():
                 "content": "hello world",
                 "minilm_l12_embedding": expected,
                 "score": 1.5,
+                "generator_name": None,
             }
         ]
     }

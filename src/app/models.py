@@ -13,3 +13,6 @@ class CandidatePost(BaseModel):
     score: float | None = Field(
         None, description="Relevance score (e.g. from ES or a model)"
     )
+    generator_name: str | None = Field(
+        None, description="Name of the candidate generator that produced this post"
+    )
