@@ -45,6 +45,7 @@ class CandidateGenerateRequest(BaseModel):
     )
     user_did: str = Field(..., description="AT Protocol DID of the user")
     num_candidates: int = Field(100, ge=1, le=1000, description="Total candidates to return")
+    video_only: bool = Field(False, description="When true, only return posts containing video")
     infill: str | None = Field(
         None,
         description=(
@@ -144,6 +145,7 @@ async def candidates_generate(
                 es=es,
                 user_did=payload.user_did,
                 num_candidates=count,
+                video_only=payload.video_only,
             )
         except Exception as exc:
             logger.exception("Candidate generator '%s' failed", spec.name)
@@ -172,6 +174,7 @@ async def candidates_generate(
                 es=es,
                 user_did=payload.user_did,
                 num_candidates=shortfall * 2,
+                video_only=payload.video_only,
             )
         except Exception as exc:
             logger.exception("Infill generator '%s' failed", payload.infill)

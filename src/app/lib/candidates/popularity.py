@@ -56,6 +56,7 @@ async def popularity_search(
     es,
     num_candidates: int,
     generator_name: str | None = None,
+    video_only: bool = False,
 ) -> list[CandidatePost]:
     """Run a function_score query combining recency and like_count."""
 
@@ -64,8 +65,10 @@ async def popularity_search(
             "query": {
                 "bool": {
                     "filter": [
-                        {"term": {"contains_video": True}},
-                        {"range": {"created_at": {"gte": f"now-{RECENCY_WINDOW}"}}},
+                        f for f in [
+                            {"term": {"contains_video": True}} if video_only else None,
+                            {"range": {"created_at": {"gte": f"now-{RECENCY_WINDOW}"}}},
+                        ] if f is not None
                     ],
                 }
             },
@@ -147,6 +150,9 @@ class PopularityCandidateGenerator(CandidateGenerator):
         es,
         user_did: str,
         num_candidates: int = 100,
+        video_only: bool = False,
     ) -> CandidateResult:
-        candidates = await popularity_search(es, num_candidates, generator_name=self.name)
+        candidates = await popularity_search(
+            es, num_candidates, generator_name=self.name, video_only=video_only,
+        )
         return CandidateResult(generator_name=self.name, candidates=candidates)

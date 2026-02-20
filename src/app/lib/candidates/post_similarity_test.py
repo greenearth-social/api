@@ -194,6 +194,24 @@ class TestKnnSearchPosts:
         )
         assert candidates[0].generator_name == "post_similarity"
 
+    @pytest.mark.asyncio
+    async def test_video_only_true_includes_filter(self):
+        es = FakeEs(responses={
+            "posts": {"hits": {"hits": []}}
+        })
+        await knn_search_posts(es, [0.1, 0.2], num_candidates=5, video_only=True)
+        query = es.calls[0]["query"]
+        assert {"term": {"contains_video": True}} in query["bool"]["filter"]
+
+    @pytest.mark.asyncio
+    async def test_video_only_false_omits_filter(self):
+        es = FakeEs(responses={
+            "posts": {"hits": {"hits": []}}
+        })
+        await knn_search_posts(es, [0.1, 0.2], num_candidates=5, video_only=False)
+        query = es.calls[0]["query"]
+        assert query["bool"]["filter"] == []
+
 
 # ---------------------------------------------------------------------------
 # Integration-style tests – full generator

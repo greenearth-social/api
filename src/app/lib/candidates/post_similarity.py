@@ -107,6 +107,7 @@ async def knn_search_posts(
     query_vector: list[float],
     num_candidates: int,
     generator_name: str | None = None,
+    video_only: bool = False,
 ) -> list[CandidatePost]:
     """Run a kNN search against the ``posts`` index and return candidate posts.
 
@@ -124,7 +125,7 @@ async def knn_search_posts(
                     "num_candidates": max(100, num_candidates * 10),
                 }
             },
-            "filter": [{"term": {"contains_video": True}}],
+            "filter": [{"term": {"contains_video": True}}] if video_only else [],
         }
     }
 
@@ -177,6 +178,7 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
         es,
         user_did: str,
         num_candidates: int = 100,
+        video_only: bool = False,
     ) -> CandidateResult:
         # 1. Get recently liked post URIs
         liked_uris = await fetch_recent_liked_post_uris(es, user_did)
@@ -200,6 +202,8 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
         avg_vector = average_vectors(vectors)
 
         # 4. kNN search for similar posts
-        candidates = await knn_search_posts(es, avg_vector, num_candidates, generator_name=self.name)
+        candidates = await knn_search_posts(
+            es, avg_vector, num_candidates, generator_name=self.name, video_only=video_only,
+        )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

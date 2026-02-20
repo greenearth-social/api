@@ -307,6 +307,35 @@ def test_generate_requires_auth():
     assert resp.status_code == 401
 
 
+def test_video_only_defaults_to_false():
+    """video_only should default to False when not specified."""
+    client = TestClient(app, headers=HEADERS)
+    resp = client.post(
+        "/candidates/generate",
+        json={
+            "generators": [{"name": "popularity"}],
+            "user_did": "did:plc:user1",
+            "num_candidates": 2,
+        },
+    )
+    assert resp.status_code == 200
+
+
+def test_video_only_false_accepted():
+    """Setting video_only=false should be accepted."""
+    client = TestClient(app, headers=HEADERS)
+    resp = client.post(
+        "/candidates/generate",
+        json={
+            "generators": [{"name": "popularity"}],
+            "user_did": "did:plc:user1",
+            "num_candidates": 2,
+            "video_only": False,
+        },
+    )
+    assert resp.status_code == 200
+
+
 def test_generate_no_generators_returns_422():
     """Omitting generators entirely should fail validation."""
     client = TestClient(app, headers=HEADERS)

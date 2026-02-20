@@ -47,6 +47,7 @@ class CandidateGenerator(ABC):
         es,
         user_did: str,
         num_candidates: int = 100,
+        video_only: bool = False,
     ) -> CandidateResult:
         """Produce candidate posts for the given user.
 
@@ -58,6 +59,8 @@ class CandidateGenerator(ABC):
             The AT Protocol DID of the requesting user.
         num_candidates:
             Maximum number of candidates to return.
+        video_only:
+            When ``True``, restrict results to posts containing video.
 
         Returns
         -------

@@ -92,6 +92,22 @@ class TestPopularitySearch:
         assert "field_value_factor" in func_types
 
     @pytest.mark.asyncio
+    async def test_video_only_true_includes_filter(self):
+        es = FakeEs()
+        await popularity_search(es, num_candidates=10, video_only=True)
+        filters = es.calls[0]["query"]["function_score"]["query"]["bool"]["filter"]
+        assert {"term": {"contains_video": True}} in filters
+
+    @pytest.mark.asyncio
+    async def test_video_only_false_omits_video_filter(self):
+        es = FakeEs()
+        await popularity_search(es, num_candidates=10, video_only=False)
+        filters = es.calls[0]["query"]["function_score"]["query"]["bool"]["filter"]
+        assert {"term": {"contains_video": True}} not in filters
+        # Should still have the recency range filter
+        assert any("range" in f for f in filters)
+
+    @pytest.mark.asyncio
     async def test_returns_empty_when_no_results(self):
         es = FakeEs()
         candidates = await popularity_search(es, num_candidates=10)
