@@ -11,6 +11,14 @@ from .base import (
     list_generators,
     register_generator,
 )
+from .generate import (
+    CandidateGenerateRequest,
+    CandidateGenerateResult,
+    GeneratorError,
+    GeneratorNotFoundError,
+    GeneratorSpec,
+    run_generate,
+)
 from .popularity import PopularityCandidateGenerator
 from .post_similarity import PostSimilarityCandidateGenerator
 
@@ -23,10 +31,16 @@ register_generator(_popularity)
 
 __all__ = [
     "CandidateGenerator",
+    "CandidateGenerateRequest",
+    "CandidateGenerateResult",
     "CandidateResult",
+    "GeneratorError",
+    "GeneratorNotFoundError",
+    "GeneratorSpec",
     "get_generator",
     "list_generators",
     "register_generator",
+    "run_generate",
     "PopularityCandidateGenerator",
     "PostSimilarityCandidateGenerator",
 ]

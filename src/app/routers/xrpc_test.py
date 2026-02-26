@@ -144,7 +144,7 @@ class TestGetFeedSkeleton:
                 return infill_gen
             return None
 
-        return patch("app.routers.xrpc.get_generator", side_effect=fake_get_generator)
+        return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator)
 
     # --- basic happy path ---
 
@@ -281,7 +281,7 @@ class TestGetFeedSkeleton:
         def fake_get(name):
             return {"post_similarity": primary_gen, "popularity": infill_gen}.get(name)
 
-        with patch("app.routers.xrpc.get_generator", side_effect=fake_get):
+        with patch("app.lib.candidates.generate.get_generator", side_effect=fake_get):
             data = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": FEED_URI, "limit": 5},

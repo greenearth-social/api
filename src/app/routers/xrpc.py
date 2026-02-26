@@ -18,8 +18,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from ..lib.candidates import get_generator
-from ..models import CandidatePost
+from ..lib.candidates import (
+    CandidateGenerateRequest,
+    GeneratorSpec,
+    run_generate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -179,55 +182,28 @@ async def get_feed_skeleton(
         )
 
     feed_cfg = FEEDS[feed_name]
-    es = request.app.state.es
 
-    # --- primary generator ---
-    primary = get_generator(feed_cfg["primary_generator"])
-    if primary is None:
-        raise HTTPException(status_code=500, detail="Primary generator not registered")
+    # Build a CandidateGenerateRequest from the feed config so we share the
+    # same generation / infill / dedup pipeline as /candidates/generate.
+    gen_request = CandidateGenerateRequest(
+        generators=[GeneratorSpec(name=feed_cfg["primary_generator"], weight=1.0)],
+        # Feed generators don't receive a user DID from the Bluesky AppView
+        # for unauthenticated feeds.  We use a placeholder; post_similarity
+        # will fall through to the infill when there are no likes.
+        user_did="",
+        num_candidates=limit,
+        infill=feed_cfg.get("infill_generator"),
+        video_only=False,
+    )
 
-    # Feed generators don't receive a user DID from the Bluesky AppView for
-    # unauthenticated feeds.  We use a placeholder; the post_similarity
-    # generator will fall through to the popularity infill when there are no
-    # likes for this DID.
-    user_did = ""
+    result = await run_generate(
+        gen_request, request.app.state.es, swallow_errors=True
+    )
 
-    try:
-        result = await primary.generate(
-            es=es,
-            user_did=user_did,
-            num_candidates=limit,
-        )
-    except Exception:
-        logger.exception("Primary generator '%s' failed", feed_cfg["primary_generator"])
-        result_candidates: list[CandidatePost] = []
-    else:
-        result_candidates = result.candidates
-
-    # --- infill with popularity ---
-    shortfall = limit - len(result_candidates)
-    if shortfall > 0 and feed_cfg.get("infill_generator"):
-        infill_gen = get_generator(feed_cfg["infill_generator"])
-        if infill_gen:
-            try:
-                infill_result = await infill_gen.generate(
-                    es=es,
-                    user_did=user_did,
-                    num_candidates=shortfall * 2,
-                )
-            except Exception:
-                logger.exception("Infill generator '%s' failed", feed_cfg["infill_generator"])
-            else:
-                result_candidates.extend(infill_result.candidates)
-
-    # De-duplicate by AT URI and trim to limit.
-    seen: set[str | None] = set()
-    skeleton: list[SkeletonItem] = []
-    for c in result_candidates:
-        if c.at_uri and c.at_uri not in seen:
-            seen.add(c.at_uri)
-            skeleton.append(SkeletonItem(post=c.at_uri))
-        if len(skeleton) >= limit:
-            break
+    skeleton = [
+        SkeletonItem(post=c.at_uri)
+        for c in result.candidates
+        if c.at_uri
+    ]
 
     return FeedSkeletonResponse(feed=skeleton)
