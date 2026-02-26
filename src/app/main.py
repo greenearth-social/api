@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .routers import candidates, health, skylight
+from .routers import candidates, health, skylight, xrpc
 from .security import RequireApiKey
 
 from elasticsearch import AsyncElasticsearch
@@ -55,6 +55,7 @@ app = FastAPI(
 app.include_router(candidates.router)
 app.include_router(health.router)
 app.include_router(skylight.router)
+app.include_router(xrpc.router)
 
 
 @app.get("/")
