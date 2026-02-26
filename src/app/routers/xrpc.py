@@ -23,6 +23,7 @@ from ..lib.candidates import (
     GeneratorSpec,
     run_generate,
 )
+from ..lib.atproto_auth import verify_auth_header
 
 logger = logging.getLogger(__name__)
 
@@ -183,14 +184,23 @@ async def get_feed_skeleton(
 
     feed_cfg = FEEDS[feed_name]
 
+    # Attempt to authenticate the requesting user via the AT Protocol
+    # inter-service JWT.  When a valid token is present we get the user's
+    # DID which enables personalised feeds (e.g. post_similarity uses
+    # liked posts).  Missing or invalid auth falls back to "".
+    user_did = await verify_auth_header(request, service_did=_get_service_did())
+
+    if request.headers.get("Authorization"):
+        if not user_did:
+            logger.warning("Auth header present but verification failed for feed %s", feed_name)
+    else:
+        logger.warning("No auth header present for feed %s; proceeding as unauthenticated", feed_name)
+
     # Build a CandidateGenerateRequest from the feed config so we share the
     # same generation / infill / dedup pipeline as /candidates/generate.
     gen_request = CandidateGenerateRequest(
         generators=[GeneratorSpec(name=feed_cfg["primary_generator"], weight=1.0)],
-        # Feed generators don't receive a user DID from the Bluesky AppView
-        # for unauthenticated feeds.  We use a placeholder; post_similarity
-        # will fall through to the infill when there are no likes.
-        user_did="",
+        user_did=user_did,
         num_candidates=limit,
         infill=feed_cfg.get("infill_generator"),
         video_only=False,

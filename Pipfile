@@ -9,6 +9,7 @@ uvicorn = {extras = ["standard"], version = "*"}
 python-dotenv = "*"
 elasticsearch = "==9.3.0"
 aiohttp = "*"
+atproto = "*"
 
 [dev-packages]
 pytest = "*"

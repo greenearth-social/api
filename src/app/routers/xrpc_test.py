@@ -44,9 +44,14 @@ def set_feed_generator_did(monkeypatch):
 def fake_app_es():
     """Attach a fake ES client so the app doesn't need a real connection."""
     app.state.es = AsyncMock()
+    app.state.id_resolver = AsyncMock()
     yield
     try:
         delattr(app.state, "es")
+    except Exception:
+        pass
+    try:
+        delattr(app.state, "id_resolver")
     except Exception:
         pass
 
@@ -308,6 +313,86 @@ class TestGetFeedSkeleton:
             data = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI}).json()
         assert len(data["feed"]) == 1
         assert data["feed"][0]["post"] == "at://good/1"
+
+
+# ---------------------------------------------------------------------------
+# Authentication integration
+# ---------------------------------------------------------------------------
+
+class TestGetFeedSkeletonAuth:
+    """Tests that getFeedSkeleton correctly passes through the authenticated DID."""
+
+    def _patch_generators(self, primary_candidates):
+        primary_gen = AsyncMock()
+        primary_gen.generate.return_value = CandidateResult(
+            generator_name="post_similarity",
+            candidates=primary_candidates,
+        )
+        infill_gen = AsyncMock()
+        infill_gen.generate.return_value = CandidateResult(
+            generator_name="popularity",
+            candidates=[],
+        )
+
+        def fake_get_generator(name):
+            if name == "post_similarity":
+                return primary_gen
+            if name == "popularity":
+                return infill_gen
+            return None
+
+        return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator)
+
+    def test_authenticated_user_did_passed_to_generator(self):
+        """When a valid JWT is present, the user's DID flows to the generator."""
+        from unittest.mock import MagicMock
+
+        mock_payload = MagicMock()
+        mock_payload.iss = "did:plc:autheduser"
+
+        with (
+            self._patch_generators(_make_candidates("p", 2)),
+            patch(
+                "app.lib.atproto_auth.verify_jwt_async",
+                new_callable=AsyncMock,
+                return_value=mock_payload,
+            ),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers={"Authorization": "Bearer valid.jwt.token"},
+            )
+        assert resp.status_code == 200
+
+    def test_unauthenticated_request_uses_empty_did(self):
+        """Without auth header, user_did should be empty string."""
+        with self._patch_generators(_make_candidates("p", 2)) as mock_get:
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+        assert resp.status_code == 200
+
+    def test_invalid_jwt_still_returns_feed(self):
+        """Auth failure should not prevent the feed from being served."""
+        from atproto_server.exceptions import TokenInvalidSignatureError
+
+        with (
+            self._patch_generators(_make_candidates("p", 2)),
+            patch(
+                "app.lib.atproto_auth.verify_jwt_async",
+                new_callable=AsyncMock,
+                side_effect=TokenInvalidSignatureError("bad sig"),
+            ),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers={"Authorization": "Bearer bad.jwt.token"},
+            )
+        assert resp.status_code == 200
+        assert len(resp.json()["feed"]) == 2
 
 
 # ---------------------------------------------------------------------------
