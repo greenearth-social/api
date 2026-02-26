@@ -188,13 +188,21 @@ pipenv run uvicorn src.app.main:app --reload --port 8000
 
 #### 2. Start an ngrok tunnel
 
-With a free ngrok account:
+If you have a paid ngrok account with a custom domain, use `--url` for a
+stable hostname that persists across restarts:
+
+```bash
+ngrok http --url your-subdomain.ngrok.dev 8000
+```
+
+With a free ngrok account you'll get a random hostname instead:
 
 ```bash
 ngrok http 8000
 ```
 
-ngrok will print a forwarding URL like `https://xxxx-xxx-xxx.ngrok-free.app`.
+ngrok will print a forwarding URL like `https://your-subdomain.ngrok.dev`
+(paid) or `https://xxxx-xxx-xxx.ngrok-free.app` (free).
 
 #### 3. Set your service DID
 
@@ -203,7 +211,7 @@ ngrok hostname. Set the environment variable before starting the server
 (or export it in your shell):
 
 ```bash
-export FEED_GENERATOR_DID="did:web:xxxx-xxx-xxx.ngrok-free.app"
+export FEED_GENERATOR_DID="did:web:your-subdomain.ngrok.dev"
 ```
 
 Then restart the API server so the new DID takes effect.
@@ -218,7 +226,7 @@ generator record in your Bluesky account's repo.  You'll need a
 python scripts/publish_feed.py \
   --handle your-handle.bsky.social \
   --feed-name greenearth-dev \
-  --generator-did "did:web:xxxx-xxx-xxx.ngrok-free.app"
+  --generator-did "did:web:your-subdomain.ngrok.dev"
 ```
 
 > **Note**: The `--handle` must be the full handle including the domain suffix
@@ -241,16 +249,16 @@ Optional flags:
 
 ```bash
 # describeFeedGenerator
-curl https://xxxx-xxx-xxx.ngrok-free.app/xrpc/app.bsky.feed.describeFeedGenerator
+curl https://your-subdomain.ngrok.dev/xrpc/app.bsky.feed.describeFeedGenerator
 
 # getFeedSkeleton
-curl "https://xxxx-xxx-xxx.ngrok-free.app/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:web:xxxx-xxx-xxx.ngrok-free.app/app.bsky.feed.generator/greenearth-dev"
+curl "https://your-subdomain.ngrok.dev/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:web:your-subdomain.ngrok.dev/app.bsky.feed.generator/greenearth-dev"
 ```
 
 > **Note**: Free ngrok URLs change every time you restart the tunnel, so you'll
 > need to update `FEED_GENERATOR_DID` and re-run `publish_feed.py` each
-> session. Consider a paid ngrok plan for a stable subdomain if this gets
-> tedious.
+> session. A paid ngrok plan with `--url` gives you a stable domain so you
+> only need to publish once.
 
 ## Project Structure
 
