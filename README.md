@@ -175,9 +175,7 @@ XRPC endpoints.
 
 ### Available Feeds
 
-| Feed | Path | Description |
-|------|------|-------------|
-| GreenEarth Dev | `greenearth-dev` | Post-similarity candidates with popularity infill |
+See `src/app/feeds.py`
 
 ### Testing Feeds in Development
 
@@ -215,7 +213,7 @@ ngrok hostname. Set the environment variable before starting the server
 (or export it in your shell):
 
 ```bash
-export FEED_GENERATOR_DID="did:web:your-subdomain.ngrok.dev"
+export GE_FEED_GENERATOR_DID="did:web:your-subdomain.ngrok.dev"
 ```
 
 Then restart the API server so the new DID takes effect.
@@ -224,7 +222,12 @@ Then restart the API server so the new DID takes effect.
 
 Use the included `publish_feed.py` script to create (or update) the feed
 generator record in your Bluesky account's repo.  You'll need a
-[Bluesky App Password](https://bsky.app/settings/app-passwords).
+[Bluesky App Password](https://bsky.app/settings/app-passwords). You can
+store it in the environment (see `.env.example`).
+
+It is recommended that you create a new bluesky account for publishing your
+development feeds, rather than using your personal account. Something like
+`greenearth-[username]-dev.bsky.app` is good.
 
 ```bash
 python scripts/publish_feed.py \
@@ -232,14 +235,14 @@ python scripts/publish_feed.py \
   --feed-name greenearth-dev
 ```
 
-The script will read `FEED_GENERATOR_DID` from your `.env` file (or you can
+The script will read `GE_FEED_GENERATOR_DID` from your `.env` file (or you can
 override it with `--generator-did`). This is convenient since the API server
 uses the same environment variable.
 
 > **Note**: The `--handle` must be the full handle including the domain suffix
 > (e.g. `alice.bsky.social`, not just `alice`).
 
-You'll be prompted for your app password, or you can set `BSKY_APP_PASSWORD`
+You'll be prompted for your app password, or you can set `GE_BSKY_APP_PASSWORD`
 in the environment.
 
 The script calls `com.atproto.repo.putRecord`, so re-running it with the same
@@ -248,7 +251,7 @@ hostname).
 
 Optional flags:
 
-- `--generator-did` — override the `FEED_GENERATOR_DID` environment variable
+- `--generator-did` — override the `GE_FEED_GENERATOR_DID` environment variable
 - `--display-name` — override the default display name
 - `--description` — override the default description
 - `--pds` — use a different PDS (default: `https://bsky.social`)
@@ -294,7 +297,7 @@ curl "https://your-subdomain.ngrok.dev/xrpc/app.bsky.feed.getFeedSkeleton?feed=a
 ```
 
 > **Note**: Free ngrok URLs change every time you restart the tunnel, so you'll
-> need to update `FEED_GENERATOR_DID` and re-run `publish_feed.py` each
+> need to update `GE_FEED_GENERATOR_DID` and re-run `publish_feed.py` each
 > session. A paid ngrok plan with `--url` gives you a stable domain so you
 > only need to publish once.
 

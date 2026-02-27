@@ -37,7 +37,7 @@ def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[
 @pytest.fixture(autouse=True)
 def set_feed_generator_did(monkeypatch):
     """Ensure a deterministic service DID for all tests."""
-    monkeypatch.setenv("FEED_GENERATOR_DID", SERVICE_DID)
+    monkeypatch.setenv("GE_FEED_GENERATOR_DID", SERVICE_DID)
 
 
 @pytest.fixture(autouse=True)
@@ -406,7 +406,7 @@ class TestConfigHelpers:
 
     def test_get_service_did_default(self, monkeypatch):
         from ..routers.xrpc import _get_service_did
-        monkeypatch.delenv("FEED_GENERATOR_DID", raising=False)
+        monkeypatch.delenv("GE_FEED_GENERATOR_DID", raising=False)
         assert _get_service_did() == "did:web:localhost"
 
     def test_get_hostname_from_did_web(self):
@@ -415,5 +415,5 @@ class TestConfigHelpers:
 
     def test_get_hostname_non_web_did(self, monkeypatch):
         from ..routers.xrpc import _get_hostname
-        monkeypatch.setenv("FEED_GENERATOR_DID", "did:plc:abc123")
+        monkeypatch.setenv("GE_FEED_GENERATOR_DID", "did:plc:abc123")
         assert _get_hostname() == "localhost"

@@ -8,7 +8,7 @@ with the same feed name will update the existing record in place.
 The script can also delete feed records using ``--delete`` or ``--delete-all``.
 
 Usage:
-    # Publish a feed (reads FEED_GENERATOR_DID from .env)
+    # Publish a feed (reads GE_FEED_GENERATOR_DID from .env)
     python scripts/publish_feed.py \\
         --handle  alice.bsky.social \\
         --feed-name greenearth-dev
@@ -34,7 +34,7 @@ Usage:
         --handle  alice.bsky.social \\
         --list
 
-    You will be prompted for your app password (or set BSKY_APP_PASSWORD).
+    You will be prompted for your app password (or set GE_BSKY_APP_PASSWORD).
 
 Dependencies (already in the API Pipfile):
     pip install httpx python-dotenv
@@ -344,7 +344,7 @@ def main() -> None:
         default=None,
         help=(
             "DID of the feed generator service (e.g. did:web:xxxx.ngrok-free.app). "
-            "Falls back to FEED_GENERATOR_DID environment variable if not specified."
+            "Falls back to GE_FEED_GENERATOR_DID environment variable if not specified."
         ),
     )
     parser.add_argument(
@@ -364,10 +364,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Load .env file to pick up FEED_GENERATOR_DID and other env vars
+    # Load .env file to pick up GE_FEED_GENERATOR_DID and other env vars
     load_dotenv()
 
-    password = os.environ.get("BSKY_APP_PASSWORD")
+    password = os.environ.get("GE_BSKY_APP_PASSWORD")
     if not password:
         password = getpass.getpass("App password: ")
 
@@ -406,10 +406,10 @@ def main() -> None:
         return
 
     # Publishing mode (default)
-    generator_did = args.generator_did or os.environ.get("FEED_GENERATOR_DID")
+    generator_did = args.generator_did or os.environ.get("GE_FEED_GENERATOR_DID")
     if not generator_did:
         parser.error(
-            "--generator-did is required (or set FEED_GENERATOR_DID environment variable)"
+            "--generator-did is required (or set GE_FEED_GENERATOR_DID environment variable)"
         )
 
     if args.publish_all:

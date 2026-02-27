@@ -38,11 +38,11 @@ router = APIRouter(tags=["xrpc"])
 def _get_service_did() -> str:
     """Return the DID of this feed generator service.
 
-    Set via the ``FEED_GENERATOR_DID`` environment variable.  For local
+    Set via the ``GE_FEED_GENERATOR_DID`` environment variable.  For local
     development behind ngrok this will be something like
     ``did:web:xxxx-xxx-xxx.ngrok-free.app``.
     """
-    return os.environ.get("FEED_GENERATOR_DID", "did:web:localhost")
+    return os.environ.get("GE_FEED_GENERATOR_DID", "did:web:localhost")
 
 
 def _get_hostname() -> str:
