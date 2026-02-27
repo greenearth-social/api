@@ -24,6 +24,7 @@ from ..lib.candidates import (
     run_generate,
 )
 from ..lib.atproto_auth import verify_auth_header
+from ..feeds import FEEDS
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +57,6 @@ def _get_hostname() -> str:
 # ---------------------------------------------------------------------------
 # Feed catalogue
 # ---------------------------------------------------------------------------
-
-# Each entry maps a short feed name to the generator specs used to produce it.
-# The full feed URI is  at://<service_did>/app.bsky.feed.generator/<name>
-FEEDS: dict[str, dict] = {
-    "greenearth-dev": {
-        "display_name": "GreenEarth Dev",
-        "description": "Development feed — post-similarity candidates with popularity infill.",
-        "primary_generator": "post_similarity",
-        "infill_generator": "popularity",
-        "default_limit": 30,
-    },
-}
 
 
 def _feed_uri(feed_name: str) -> str:
@@ -196,14 +185,10 @@ async def get_feed_skeleton(
     else:
         logger.warning("No auth header present for feed %s; proceeding as unauthenticated", feed_name)
 
-    # Build a CandidateGenerateRequest from the feed config so we share the
-    # same generation / infill / dedup pipeline as /candidates/generate.
-    gen_request = CandidateGenerateRequest(
-        generators=[GeneratorSpec(name=feed_cfg["primary_generator"], weight=1.0)],
-        user_did=user_did,
-        num_candidates=limit,
-        infill=feed_cfg.get("infill_generator"),
-        video_only=False,
+    # Start from the feed's generator template and fill in session-specific
+    # values (user identity and the per-request limit).
+    gen_request = feed_cfg.gen_request_template.model_copy(
+        update={"user_did": user_did, "num_candidates": limit}
     )
 
     result = await run_generate(

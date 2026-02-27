@@ -1,0 +1,32 @@
+"""Feed catalog — the canonical registry of all published feeds.
+
+Each entry maps a short feed name (the AT Protocol rkey) to a ``FeedConfig``
+that holds display metadata **and** the generator pipeline template.  The
+template is a ``CandidateGenerateRequest`` with placeholder values for
+session-specific fields (``user_did``, ``num_candidates``), which are filled
+in at request time by the XRPC router.
+
+This module is intentionally separate from the router so that other parts of
+the codebase (e.g.  the ``publish_feed.py`` script) can import it without
+pulling in FastAPI.
+"""
+
+from .lib.candidates.generate import CandidateGenerateRequest, GeneratorSpec
+from .models import FeedConfig, _rebuild_feed_config
+
+# Resolve the forward reference so Pydantic can validate gen_request_template.
+_rebuild_feed_config()
+
+FEEDS: dict[str, FeedConfig] = {
+    "greenearth-dev": FeedConfig(
+        display_name="GreenEarth Dev",
+        description="Development feed — post-similarity candidates with popularity infill.",
+        gen_request_template=CandidateGenerateRequest(
+            generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
+            infill="popularity",
+            user_did="",
+            num_candidates=30,
+            video_only=False,
+        ),
+    ),
+}

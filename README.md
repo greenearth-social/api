@@ -17,6 +17,10 @@ An API server for handling bluesky content recommendation requests.
    pipenv install
    ```
 
+   This installs all required packages **and** the `greenearth-api` package
+   itself in editable mode (development install). This allows scripts in
+   `scripts/` to import from `app.*` without path manipulation.
+
 1. Install development dependencies:
 
    ```bash
@@ -225,9 +229,12 @@ generator record in your Bluesky account's repo.  You'll need a
 ```bash
 python scripts/publish_feed.py \
   --handle your-handle.bsky.social \
-  --feed-name greenearth-dev \
-  --generator-did "did:web:your-subdomain.ngrok.dev"
+  --feed-name greenearth-dev
 ```
+
+The script will read `FEED_GENERATOR_DID` from your `.env` file (or you can
+override it with `--generator-did`). This is convenient since the API server
+uses the same environment variable.
 
 > **Note**: The `--handle` must be the full handle including the domain suffix
 > (e.g. `alice.bsky.social`, not just `alice`).
@@ -241,9 +248,40 @@ hostname).
 
 Optional flags:
 
+- `--generator-did` — override the `FEED_GENERATOR_DID` environment variable
 - `--display-name` — override the default display name
 - `--description` — override the default description
 - `--pds` — use a different PDS (default: `https://bsky.social`)
+- `--all` — publish all feeds defined in the `FEEDS` config
+
+**Deleting feeds:**
+
+To delete a specific feed:
+
+```bash
+python scripts/publish_feed.py \
+  --handle your-handle.bsky.social \
+  --feed-name greenearth-dev \
+  --delete
+```
+
+To delete all feeds published under your handle:
+
+```bash
+python scripts/publish_feed.py \
+  --handle your-handle.bsky.social \
+  --delete-all
+```
+
+**Listing feeds:**
+
+To list all feeds published under your handle:
+
+```bash
+python scripts/publish_feed.py \
+  --handle your-handle.bsky.social \
+  --list
+```
 
 #### 5. Verify it works
 
