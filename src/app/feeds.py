@@ -19,7 +19,7 @@ _rebuild_feed_config()
 
 FEEDS: dict[str, FeedConfig] = {
     "greenearth-dev": FeedConfig(
-        display_name="GreenEarth Dev",
+        display_name="GE Dev",
         description="Development feed — post-similarity candidates with popularity infill.",
         gen_request_template=CandidateGenerateRequest(
             generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
