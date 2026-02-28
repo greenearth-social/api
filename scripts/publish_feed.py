@@ -52,7 +52,7 @@ from dotenv import load_dotenv
 
 # Add the repo's src/ directory to the path so we can import app.*
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src"))  # type: ignore
-from app.feeds import FEEDS
+from app.feeds import FEEDS  # type: ignore
 
 DEFAULT_PDS = "https://bsky.social"
 
