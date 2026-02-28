@@ -226,12 +226,12 @@
         },
         "fastapi": {
             "hashes": [
-                "sha256:61315cebd2e65df5f97ec298c888f9de30430dd0612d59d6480beafbc10655af",
-                "sha256:b4946880e48f462692b31c083be0432275cbfb6e2274566b1be91479cc1a84ec"
+                "sha256:658f34ba334605b1617a65adf2ea6461901bdb9af3a3080d63ff791ecf7dc2e2",
+                "sha256:ed152a45912f102592976fde6cbce7dae1a8a1053da94202e51dd35d184fadd6"
             ],
             "index": "pypi",
             "markers": "python_version >= '3.10'",
-            "version": "==0.129.0"
+            "version": "==0.133.1"
         },
         "frozenlist": {
             "hashes": [
