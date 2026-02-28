@@ -1,21 +1,5 @@
-[project]
-name = "greenearth-api"
-version = "0.1.0"
-requires-python = ">=3.13"
-description = "GreenEarth API server for Bluesky content recommendation"
-
-[project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "httpx", "ruff"]
-
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
 [tool.pytest.ini_options]
-pythonpath = [".", "scripts"]
+pythonpath = ["src", "scripts"]
 
 [tool.ruff]
 line-length = 100

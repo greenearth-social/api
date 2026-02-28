@@ -10,7 +10,6 @@ python-dotenv = "*"
 elasticsearch = "==9.3.0"
 aiohttp = "*"
 atproto = "*"
-greenearth-api = {editable = true, path = "."}
 
 [dev-packages]
 pytest = "*"
