@@ -180,7 +180,7 @@ class TestListRecords:
 
 
 class TestPublishFeed:
-    @patch("scripts.publish_feed.httpx.Client")
+    @patch("publish_feed.httpx.Client")
     def test_publishes_known_feed(self, MockClient, capsys):
         """Publishing a feed defined in FEEDS uses its display metadata."""
         client = MagicMock()
@@ -212,7 +212,7 @@ class TestPublishFeed:
         captured = capsys.readouterr()
         assert "Published feed record:" in captured.out
 
-    @patch("scripts.publish_feed.httpx.Client")
+    @patch("publish_feed.httpx.Client")
     def test_publishes_unknown_feed_uses_name_as_display(self, MockClient, capsys):
         """Publishing a feed not in FEEDS falls back to feed_name."""
         client = MagicMock()
@@ -237,7 +237,7 @@ class TestPublishFeed:
         assert record["displayName"] == "unknown-feed"
         assert record["description"] == ""
 
-    @patch("scripts.publish_feed.httpx.Client")
+    @patch("publish_feed.httpx.Client")
     def test_display_name_override(self, MockClient):
         """Explicit display_name / description override FEEDS metadata."""
         client = MagicMock()
@@ -271,7 +271,7 @@ class TestPublishFeed:
 
 
 class TestDeleteFeed:
-    @patch("scripts.publish_feed.httpx.Client")
+    @patch("publish_feed.httpx.Client")
     def test_deletes_single_feed(self, MockClient, capsys):
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -301,7 +301,7 @@ class TestDeleteFeed:
 
 
 class TestDeleteAllFeeds:
-    @patch("scripts.publish_feed.httpx.Client")
+    @patch("publish_feed.httpx.Client")
     def test_deletes_all_listed_feeds(self, MockClient, capsys):
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -329,7 +329,7 @@ class TestDeleteAllFeeds:
         assert "Deleted: feed-b" in captured.out
         assert "Deleted 2 feed record(s)." in captured.out
 
-    @patch("scripts.publish_feed.httpx.Client")
+    @patch("publish_feed.httpx.Client")
     def test_no_records_prints_message(self, MockClient, capsys):
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -350,7 +350,7 @@ class TestDeleteAllFeeds:
 
 
 class TestListFeeds:
-    @patch("scripts.publish_feed.httpx.Client")
+    @patch("publish_feed.httpx.Client")
     def test_lists_feeds_with_details(self, MockClient, capsys):
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -388,7 +388,7 @@ class TestListFeeds:
         # "other-feed" has no description, so "Desc:" should only appear once
         assert captured.out.count("Desc:") == 1
 
-    @patch("scripts.publish_feed.httpx.Client")
+    @patch("publish_feed.httpx.Client")
     def test_no_feeds_prints_message(self, MockClient, capsys):
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -413,14 +413,14 @@ class TestMainCLI:
         monkeypatch.setenv("GE_BSKY_APP_PASSWORD", PASSWORD)
         with pytest.raises(SystemExit):
             with patch("sys.argv", ["publish_feed.py", "--handle", HANDLE, "--all", "--delete"]):
-                from scripts.publish_feed import main
+                from publish_feed import main
                 main()
 
     def test_delete_requires_feed_name(self, monkeypatch):
         monkeypatch.setenv("GE_BSKY_APP_PASSWORD", PASSWORD)
         with pytest.raises(SystemExit):
             with patch("sys.argv", ["publish_feed.py", "--handle", HANDLE, "--delete"]):
-                from scripts.publish_feed import main
+                from publish_feed import main
                 main()
 
     def test_publish_requires_feed_name_or_all(self, monkeypatch):
@@ -428,5 +428,5 @@ class TestMainCLI:
         monkeypatch.setenv("GE_FEED_GENERATOR_DID", GENERATOR_DID)
         with pytest.raises(SystemExit):
             with patch("sys.argv", ["publish_feed.py", "--handle", HANDLE]):
-                from scripts.publish_feed import main
+                from publish_feed import main
                 main()
