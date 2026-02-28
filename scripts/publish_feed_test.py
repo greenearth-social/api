@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from scripts.publish_feed import (
+from publish_feed import (
     _create_session,
     _delete_record,
     _list_records,
