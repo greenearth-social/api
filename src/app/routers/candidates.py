@@ -12,9 +12,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..models import CandidatePost
+from ..models import CandidateGenerateRequest, CandidatePost
 from ..lib.candidates import (
-    CandidateGenerateRequest,
     GeneratorError,
     GeneratorNotFoundError,
     list_generators,

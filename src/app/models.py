@@ -18,6 +18,46 @@ class CandidatePost(BaseModel):
     )
 
 
+class GeneratorSpec(BaseModel):
+    """Specifies a generator and the proportion of candidates it should supply."""
+
+    name: str = Field(..., description="Name of the candidate generator")
+    weight: float = Field(
+        1.0, gt=0, description="Relative weight — proportional share of total candidates"
+    )
+
+
+class CandidateGenerateRequest(BaseModel):
+    """Describes a candidate-generation job.
+
+    Used as the POST body for ``/candidates/generate`` and constructed
+    internally by other endpoints (e.g. XRPC feed skeleton).
+    """
+
+    generators: list[GeneratorSpec] = Field(
+        ...,
+        min_length=1,
+        description="List of generators with relative weights",
+    )
+    user_did: str = Field(..., description="AT Protocol DID of the user")
+    num_candidates: int = Field(100, ge=1, le=1000, description="Total candidates to return")
+    video_only: bool = Field(False, description="When true, only return posts containing video")
+    infill: str | None = Field(
+        None,
+        description=(
+            "Generator used to fill remaining slots when the primary "
+            "generators return fewer candidates than requested. "
+            "If omitted, no infill is performed."
+        ),
+    )
+
+
+class CandidateGenerateResult(BaseModel):
+    """The output of a generation pipeline run."""
+
+    candidates: list[CandidatePost]
+
+
 class FeedConfig(BaseModel):
     """Configuration for a single published feed.
 
@@ -28,12 +68,4 @@ class FeedConfig(BaseModel):
 
     display_name: str
     description: str = ""
-    gen_request_template: "CandidateGenerateRequest"  # noqa: F821 — forward ref resolved at import time
-
-
-# Resolve the forward reference once CandidateGenerateRequest is available.
-# Callers that need FeedConfig with gen_request_template must ensure
-# CandidateGenerateRequest has been imported first (feeds.py does this).
-def _rebuild_feed_config() -> None:
-    from .lib.candidates.generate import CandidateGenerateRequest  # noqa: F811
-    FeedConfig.model_rebuild()
+    gen_request_template: CandidateGenerateRequest

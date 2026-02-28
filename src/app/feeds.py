@@ -11,11 +11,7 @@ the codebase (e.g.  the ``publish_feed.py`` script) can import it without
 pulling in FastAPI.
 """
 
-from .lib.candidates.generate import CandidateGenerateRequest, GeneratorSpec
-from .models import FeedConfig, _rebuild_feed_config
-
-# Resolve the forward reference so Pydantic can validate gen_request_template.
-_rebuild_feed_config()
+from .models import CandidateGenerateRequest, FeedConfig, GeneratorSpec
 
 FEEDS: dict[str, FeedConfig] = {
     "greenearth-dev": FeedConfig(

@@ -11,12 +11,14 @@ from .base import (
     list_generators,
     register_generator,
 )
-from .generate import (
+from ...models import (
     CandidateGenerateRequest,
     CandidateGenerateResult,
+    GeneratorSpec,
+)
+from .generate import (
     GeneratorError,
     GeneratorNotFoundError,
-    GeneratorSpec,
     run_generate,
 )
 from .popularity import PopularityCandidateGenerator

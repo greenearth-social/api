@@ -18,11 +18,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from ..lib.candidates import (
-    CandidateGenerateRequest,
-    GeneratorSpec,
-    run_generate,
-)
+from ..lib.candidates import run_generate
+from ..models import CandidateGenerateRequest, GeneratorSpec
 from ..lib.atproto_auth import verify_auth_header
 from ..feeds import FEEDS
 

@@ -9,56 +9,15 @@ REST API and the XRPC feed-skeleton endpoint.
 import logging
 import math
 
-from pydantic import BaseModel, Field
-
-from ...models import CandidatePost
+from ...models import (
+    CandidateGenerateRequest,
+    CandidateGenerateResult,
+    CandidatePost,
+    GeneratorSpec,
+)
 from .base import CandidateResult, get_generator
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Request / Response models
-# ---------------------------------------------------------------------------
-
-class GeneratorSpec(BaseModel):
-    """Specifies a generator and the proportion of candidates it should supply."""
-
-    name: str = Field(..., description="Name of the candidate generator")
-    weight: float = Field(
-        1.0, gt=0, description="Relative weight — proportional share of total candidates"
-    )
-
-
-class CandidateGenerateRequest(BaseModel):
-    """Describes a candidate-generation job.
-
-    Used as the POST body for ``/candidates/generate`` and constructed
-    internally by other endpoints (e.g. XRPC feed skeleton).
-    """
-
-    generators: list[GeneratorSpec] = Field(
-        ...,
-        min_length=1,
-        description="List of generators with relative weights",
-    )
-    user_did: str = Field(..., description="AT Protocol DID of the user")
-    num_candidates: int = Field(100, ge=1, le=1000, description="Total candidates to return")
-    video_only: bool = Field(False, description="When true, only return posts containing video")
-    infill: str | None = Field(
-        None,
-        description=(
-            "Generator used to fill remaining slots when the primary "
-            "generators return fewer candidates than requested. "
-            "If omitted, no infill is performed."
-        ),
-    )
-
-
-class CandidateGenerateResult(BaseModel):
-    """The output of a generation pipeline run."""
-
-    candidates: list[CandidatePost]
 
 
 # ---------------------------------------------------------------------------
