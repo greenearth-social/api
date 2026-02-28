@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from .routers import candidates, health, skylight, xrpc
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
+from .lib.firestore import init_firestore_client
 
 from elasticsearch import AsyncElasticsearch
 
@@ -37,11 +38,16 @@ async def lifespan(app: FastAPI):
 
     app.state.es = es
     app.state.id_resolver = init_id_resolver()
+    app.state.firestore = init_firestore_client()
     try:
         yield
     finally:
         try:
             await es.close()
+        except Exception:
+            pass
+        try:
+            app.state.firestore.close()
         except Exception:
             pass
 
