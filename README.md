@@ -17,6 +17,10 @@ An API server for handling bluesky content recommendation requests.
    pipenv install
    ```
 
+   This installs all required packages **and** the `greenearth-api` package
+   itself in editable mode (development install). This allows scripts in
+   `scripts/` to import from `app.*` without path manipulation.
+
 1. Install development dependencies:
 
    ```bash
@@ -46,24 +50,6 @@ Run tests with verbose output:
 ```bash
 pipenv run pytest -v
 ```
-
-## API Endpoints
-
-### Healthcheck
-
-- **URL**: `/health`
-- **Method**: `GET`
-- **Success Response**:
-  - **Code**: 200
-  - **Content**: `{"status": "ok"}`
-
-### Root
-
-- **URL**: `/`
-- **Method**: `GET`
-- **Success Response**:
-  - **Code**: 200
-  - **Content**: `{"message": "Green Earth API"}`
 
 ## API Documentation
 
@@ -104,8 +90,8 @@ This script will:
 - Configure access to the Elasticsearch readonly API key in Secret Manager
 - Verify VPC connector for internal network access
 
-> **Note**: The API uses a separate readonly Elasticsearch API key (`elasticsearch-api-key-readonly`) 
-> that only has read access. This key is created by running `scripts/k8s_recreate_api_key.sh` in the 
+> **Note**: The API uses a separate readonly Elasticsearch API key (`elasticsearch-api-key-readonly`)
+> that only has read access. This key is created by running `scripts/k8s_recreate_api_key.sh` in the
 > ingex/ingest directory, which creates both the ingest (read/write) and API (readonly) keys.
 
 ### Deploying the Service
@@ -181,15 +167,139 @@ curl https://greenearth-api-<hash>-<region>.a.run.app/health
 open https://greenearth-api-<hash>-<region>.a.run.app/docs
 ```
 
-## Development Workflow
+## Feed Generator (AT Protocol)
 
-1. Create a new branch for your feature/fix
-2. Make your changes incrementally
-3. Run tests to ensure everything passes: `pipenv run pytest`
-4. Commit your changes with descriptive messages
-5. Push and create a pull request
-6. After merge, deploy to staging: `./scripts/deploy.sh`
-7. Test in staging, then deploy to production: `ENVIRONMENT=prod ./scripts/deploy.sh`
+The API serves as an AT Protocol feed generator, implementing the
+`app.bsky.feed.describeFeedGenerator` and `app.bsky.feed.getFeedSkeleton`
+XRPC endpoints.
+
+### Available Feeds
+
+See `src/app/feeds.py`
+
+### Testing Feeds in Development
+
+Bluesky's AppView needs to reach your feed generator over the public internet.
+The simplest way to do this during development is with [ngrok](https://ngrok.com/).
+
+#### 1. Start the API server
+
+```bash
+pipenv run uvicorn src.app.main:app --reload --port 8000
+```
+
+#### 2. Start an ngrok tunnel
+
+If you have a paid ngrok account with a custom domain, use `--url` for a
+stable hostname that persists across restarts:
+
+```bash
+ngrok http --url your-subdomain.ngrok.dev 8000
+```
+
+With a free ngrok account you'll get a random hostname instead:
+
+```bash
+ngrok http 8000
+```
+
+ngrok will print a forwarding URL like `https://your-subdomain.ngrok.dev`
+(paid) or `https://xxxx-xxx-xxx.ngrok-free.app` (free).
+
+#### 3. Set your service DID
+
+The feed generator identifies itself with a `did:web` DID derived from the
+ngrok hostname. Set the environment variable before starting the server
+(or export it in your shell):
+
+```bash
+export GE_FEED_GENERATOR_DID="did:web:your-subdomain.ngrok.dev"
+```
+
+Then restart the API server so the new DID takes effect.
+
+#### 4. Publish the feed generator record
+
+Use the included `publish_feed.py` script to create (or update) the feed
+generator record in your Bluesky account's repo.  You'll need a
+[Bluesky App Password](https://bsky.app/settings/app-passwords). You can
+store it in the environment (see `.env.example`).
+
+It is recommended that you create a new bluesky account for publishing your
+development feeds, rather than using your personal account. Something like
+`greenearth-[username]-dev.bsky.app` is good.
+
+```bash
+python scripts/publish_feed.py \
+  --handle your-handle.bsky.social \
+  --feed-name greenearth-dev
+```
+
+The script will read `GE_FEED_GENERATOR_DID` from your `.env` file (or you can
+override it with `--generator-did`). This is convenient since the API server
+uses the same environment variable.
+
+> **Note**: The `--handle` must be the full handle including the domain suffix
+> (e.g. `alice.bsky.social`, not just `alice`).
+
+You'll be prompted for your app password, or you can set `GE_BSKY_APP_PASSWORD`
+in the environment.
+
+The script calls `com.atproto.repo.putRecord`, so re-running it with the same
+`--feed-name` will update the existing record (e.g. to point at a new ngrok
+hostname).
+
+Optional flags:
+
+- `--generator-did` — override the `GE_FEED_GENERATOR_DID` environment variable
+- `--display-name` — override the default display name
+- `--description` — override the default description
+- `--pds` — use a different PDS (default: `https://bsky.social`)
+- `--all` — publish all feeds defined in the `FEEDS` config
+
+**Deleting feeds:**
+
+To delete a specific feed:
+
+```bash
+python scripts/publish_feed.py \
+  --handle your-handle.bsky.social \
+  --feed-name greenearth-dev \
+  --delete
+```
+
+To delete all feeds published under your handle:
+
+```bash
+python scripts/publish_feed.py \
+  --handle your-handle.bsky.social \
+  --delete-all
+```
+
+**Listing feeds:**
+
+To list all feeds published under your handle:
+
+```bash
+python scripts/publish_feed.py \
+  --handle your-handle.bsky.social \
+  --list
+```
+
+#### 5. Verify it works
+
+```bash
+# describeFeedGenerator
+curl https://your-subdomain.ngrok.dev/xrpc/app.bsky.feed.describeFeedGenerator
+
+# getFeedSkeleton
+curl "https://your-subdomain.ngrok.dev/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:web:your-subdomain.ngrok.dev/app.bsky.feed.generator/greenearth-dev"
+```
+
+> **Note**: Free ngrok URLs change every time you restart the tunnel, so you'll
+> need to update `GE_FEED_GENERATOR_DID` and re-run `publish_feed.py` each
+> session. A paid ngrok plan with `--url` gives you a stable domain so you
+> only need to publish once.
 
 ## Project Structure
 
@@ -204,7 +314,8 @@ greenearth/api/
 │           └── health.py        # Healthcheck endpoint
 ├── scripts/
 │   ├── deploy.sh                # Cloud Run deployment script
-│   └── gcp_setup.sh             # GCP environment setup script
+│   ├── gcp_setup.sh             # GCP environment setup script
+│   └── publish_feed.py          # Publish/update feed generator records
 ├── tests/
 │   ├── __init__.py
 │   └── test_health.py           # Healthcheck tests

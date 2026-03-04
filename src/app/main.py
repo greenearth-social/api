@@ -3,8 +3,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .routers import candidates, health, skylight
+from .routers import candidates, health, skylight, xrpc
 from .security import RequireApiKey
+from .lib.atproto_auth import init_id_resolver
 
 from elasticsearch import AsyncElasticsearch
 
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI):
     )
 
     app.state.es = es
+    app.state.id_resolver = init_id_resolver()
     try:
         yield
     finally:
@@ -55,6 +57,7 @@ app = FastAPI(
 app.include_router(candidates.router)
 app.include_router(health.router)
 app.include_router(skylight.router)
+app.include_router(xrpc.router)
 
 
 @app.get("/")

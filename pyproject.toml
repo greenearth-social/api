@@ -1,3 +1,6 @@
+[tool.pytest.ini_options]
+pythonpath = ["src", "scripts"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"
