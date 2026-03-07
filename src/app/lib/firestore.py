@@ -34,7 +34,8 @@ def init_firestore_client() -> AsyncClient:
         logger.info("Firestore emulator configured at %s", emulator_host)
 
     project = os.environ.get("GE_FIRESTORE_PROJECT", os.environ.get("PROJECT_ID"))
-    return AsyncClient(project=project)
+    database = os.environ.get("GE_FIRESTORE_DATABASE", "(default)")
+    return AsyncClient(project=project, database=database)
 
 
 # ---------------------------------------------------------------------------

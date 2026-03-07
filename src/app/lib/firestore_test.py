@@ -54,7 +54,7 @@ class TestInitFirestoreClient:
 
         init_firestore_client()
 
-        MockAsyncClient.assert_called_once_with(project="test-project")
+        MockAsyncClient.assert_called_once_with(project="test-project", database="(default)")
 
     @patch("app.lib.firestore.AsyncClient")
     def test_sets_emulator_host(self, MockAsyncClient, monkeypatch):
@@ -73,7 +73,16 @@ class TestInitFirestoreClient:
 
         init_firestore_client()
 
-        MockAsyncClient.assert_called_once_with(project="ge-project")
+        MockAsyncClient.assert_called_once_with(project="ge-project", database="(default)")
+
+    @patch("app.lib.firestore.AsyncClient")
+    def test_ge_database_env_takes_precedence(self, MockAsyncClient, monkeypatch):
+        monkeypatch.setenv("GE_FIRESTORE_PROJECT", "ge-project")
+        monkeypatch.setenv("GE_FIRESTORE_DATABASE", "greenearth-stage")
+
+        init_firestore_client()
+
+        MockAsyncClient.assert_called_once_with(project="ge-project", database="greenearth-stage")
 
 
 # ---------------------------------------------------------------------------
