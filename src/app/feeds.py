@@ -13,13 +13,25 @@ pulling in FastAPI.
 
 from .models import CandidateGenerateRequest, FeedConfig, GeneratorSpec
 
+# NOTE: display_name is limited to 24 chars, including the prefix ("GreenEarth, GE Dev, or GE Stg")
 FEEDS: dict[str, FeedConfig] = {
-    "greenearth-dev": FeedConfig(
-        display_name="GE Dev",
+    "basic-similarity": FeedConfig(
+        display_name="Similarity",
         description="Development feed — post-similarity candidates with popularity infill.",
         gen_request_template=CandidateGenerateRequest(
             generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
             infill="popularity",
+            user_did="",
+            num_candidates=30,
+            video_only=False,
+        ),
+    ),
+    "random": FeedConfig(
+        display_name="Random",
+        description="Development feed — random posts.",
+        gen_request_template=CandidateGenerateRequest(
+            generators=[GeneratorSpec(name="random_posts", weight=1.0)],
+            infill=None,
             user_did="",
             num_candidates=30,
             video_only=False,

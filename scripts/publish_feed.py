@@ -35,6 +35,7 @@ Usage:
         --list
 
     You will be prompted for your app password (or set GE_BSKY_APP_PASSWORD).
+    Use --app-password to explicitly provide a password at the command line.
 
 Dependencies (already in the API Pipfile):
     pip install httpx python-dotenv
@@ -55,6 +56,61 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src
 from app.feeds import FEEDS  # type: ignore
 
 DEFAULT_PDS = "https://bsky.social"
+
+ENV_DISPLAY_PREFIX: dict[str, str] = {
+    "dev": "GE Dev",
+    "stage": "GE Stg",
+    "prod": "GreenEarth",
+}
+
+ENV_ALIASES: dict[str, str] = {
+    "dev": "dev",
+    "development": "dev",
+    "stage": "stage",
+    "staging": "stage",
+    "prod": "prod",
+    "production": "prod",
+}
+
+
+def _normalize_environment(environment: str | None) -> str | None:
+    """Normalize environment names to ``dev`` / ``stage`` / ``prod``.
+
+    Unknown values return ``None`` so callers can safely skip prefixing.
+    """
+    if not environment:
+        return None
+    return ENV_ALIASES.get(environment.strip().lower())
+
+
+def _resolve_environment(cli_environment: str | None) -> str | None:
+    """Resolve environment from CLI first, then common env vars.
+
+    Priority:
+    1) ``--environment``
+    2) ``ENVIRONMENT``
+    3) ``GE_ENVIRONMENT``
+    """
+    return (
+        _normalize_environment(cli_environment)
+        or _normalize_environment(os.environ.get("ENVIRONMENT"))
+        or _normalize_environment(os.environ.get("GE_ENVIRONMENT"))
+    )
+
+
+def _prefixed_display_name(display_name: str, environment: str | None) -> str:
+    """Prepend an environment-specific prefix to *display_name*.
+
+    Returns *display_name* unchanged when *environment* is ``None`` or not
+    recognised.
+    """
+    normalized_environment = _normalize_environment(environment)
+    if not normalized_environment:
+        return display_name
+    prefix = ENV_DISPLAY_PREFIX.get(normalized_environment)
+    if not prefix:
+        return display_name
+    return f"{prefix} {display_name}"
 
 
 def _create_session(
@@ -150,6 +206,7 @@ def publish_feed(
     generator_did: str,
     display_name: str | None = None,
     description: str | None = None,
+    environment: str | None = None,
     pds: str = DEFAULT_PDS,
 ) -> dict:
     """Publish or update a feed generator record.
@@ -171,6 +228,7 @@ def publish_feed(
     """
     feed_cfg = FEEDS.get(feed_name)
     display_name = display_name or (feed_cfg.display_name if feed_cfg else feed_name)
+    display_name = _prefixed_display_name(display_name, environment)
     description = description or (feed_cfg.description if feed_cfg else "")
 
     with httpx.Client(timeout=30) as client:
@@ -303,6 +361,59 @@ def list_feeds(
             print()
 
 
+def sync_feeds(
+    *,
+    handle: str,
+    password: str,
+    generator_did: str,
+    environment: str | None = None,
+    pds: str = DEFAULT_PDS,
+) -> None:
+    """Sync published feed records with the FEEDS config.
+
+    Creates or updates a record for every feed in ``FEEDS`` and deletes any
+    existing records whose rkey is *not* present in ``FEEDS``.  Because
+    ``putRecord`` is an upsert, feeds that already exist are updated in place
+    without a visible gap.
+    """
+    if not FEEDS:
+        print("No feeds configured in FEEDS.", file=sys.stderr)
+        sys.exit(1)
+
+    with httpx.Client(timeout=30) as client:
+        session = _create_session(client, pds, handle, password)
+        access_jwt = session["accessJwt"]
+        repo_did = session["did"]
+
+        # Discover existing records
+        existing_records = _list_records(client, pds, access_jwt, repo_did)
+        existing_rkeys = {r["uri"].split("/")[-1] for r in existing_records}
+        desired_rkeys = set(FEEDS.keys())
+
+        from datetime import datetime, timezone
+
+        # Publish / update every feed in FEEDS
+        for rkey, feed_cfg in FEEDS.items():
+            display_name = _prefixed_display_name(feed_cfg.display_name, environment)
+            record: dict = {
+                "$type": "app.bsky.feed.generator",
+                "did": generator_did,
+                "displayName": display_name,
+                "description": feed_cfg.description,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+            }
+            _put_record(client, pds, access_jwt, repo_did, rkey, record)
+            print(f"  Published: {rkey} ({display_name})")
+
+        # Remove stale records not in FEEDS
+        stale = existing_rkeys - desired_rkeys
+        for rkey in sorted(stale):
+            _delete_record(client, pds, access_jwt, repo_did, rkey)
+            print(f"  Deleted stale: {rkey}")
+
+        print(f"\nSync complete: {len(desired_rkeys)} published, {len(stale)} deleted.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Publish a feed generator record to Bluesky.",
@@ -337,6 +448,14 @@ def main() -> None:
         help="Delete all feed generator records under the given handle.",
     )
     parser.add_argument(
+        "--sync",
+        action="store_true",
+        help=(
+            "Sync mode: publish/update all feeds from FEEDS config and delete "
+            "any stale records not present in FEEDS. Avoids delete-recreate."
+        ),
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         help="List all feed generator records under the given handle.",
@@ -360,6 +479,23 @@ def main() -> None:
         help="Feed description (defaults to built-in metadata for known feeds)",
     )
     parser.add_argument(
+        "--app-password",
+        default=None,
+        help=(
+            "Bluesky app password. Takes precedence over GE_BSKY_APP_PASSWORD "
+            "from environment or .env."
+        ),
+    )
+    parser.add_argument(
+        "--environment",
+        default=None,
+        choices=["dev", "stage", "prod"],
+        help=(
+            "Environment name (dev/stage/prod). Required for publishing and sync; "
+            "used to prefix feed display names."
+        ),
+    )
+    parser.add_argument(
         "--pds",
         default=DEFAULT_PDS,
         help=f"PDS endpoint to authenticate against (default: {DEFAULT_PDS})",
@@ -368,21 +504,40 @@ def main() -> None:
 
     # Load .env file to pick up GE_FEED_GENERATOR_DID and other env vars
     load_dotenv()
+    resolved_environment = _normalize_environment(args.environment)
 
-    password = os.environ.get("GE_BSKY_APP_PASSWORD")
+    password = args.app_password or os.environ.get("GE_BSKY_APP_PASSWORD")
     if not password:
         password = getpass.getpass("App password: ")
 
     # Validate mutually exclusive flags
-    mode_flags = sum([args.publish_all, args.delete, args.delete_all, args.list])
+    mode_flags = sum([args.publish_all, args.delete, args.delete_all, args.list, args.sync])
     if mode_flags > 1:
-        parser.error("Only one of --all, --delete, --delete-all, or --list can be used at a time.")
+        parser.error("Only one of --all, --delete, --delete-all, --list, or --sync can be used at a time.")
 
     # Handle list mode
     if args.list:
         list_feeds(
             handle=args.handle,
             password=password,
+            pds=args.pds,
+        )
+        return
+
+    # Handle sync mode
+    if args.sync:
+        if not resolved_environment:
+            parser.error("--environment is required for --sync.")
+        generator_did = args.generator_did or os.environ.get("GE_FEED_GENERATOR_DID")
+        if not generator_did:
+            parser.error(
+                "--generator-did is required for --sync (or set GE_FEED_GENERATOR_DID)"
+            )
+        sync_feeds(
+            handle=args.handle,
+            password=password,
+            generator_did=generator_did,
+            environment=resolved_environment,
             pds=args.pds,
         )
         return
@@ -408,6 +563,9 @@ def main() -> None:
         return
 
     # Publishing mode (default)
+    if not resolved_environment:
+        parser.error("--environment is required when publishing feeds.")
+
     generator_did = args.generator_did or os.environ.get("GE_FEED_GENERATOR_DID")
     if not generator_did:
         parser.error(
@@ -433,6 +591,7 @@ def main() -> None:
             generator_did=generator_did,
             display_name=args.display_name,
             description=args.description,
+            environment=resolved_environment,
             pds=args.pds,
         )
         if len(feed_names) > 1:

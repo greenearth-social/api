@@ -5,8 +5,8 @@ query that combines:
 
 * A **recency decay** (Gaussian on ``created_at``) so newer posts are
   boosted relative to older ones.
-* A **like-count boost** (``field_value_factor`` on ``like_count`` with
-  ``log1p`` modifier) so posts with more likes rank higher, but the
+* A **like-count boost** (scripted ``log1p`` on ``like_count``) so posts
+  with more likes rank higher, but the
   effect is sub-linear to avoid mega-viral posts dominating everything.
 
 This produces a single performant query that naturally balances freshness
@@ -42,10 +42,10 @@ DECAY_OFFSET = "1h"
 # ``decay`` — the score at ``scale`` distance from the origin (0–1).
 DECAY_FACTOR = 0.5
 
-# field_value_factor parameters for like_count.
+# Script-score parameters for like_count.
 LIKE_FACTOR = 1.5
-LIKE_MODIFIER = "log1p"  # log(1 + like_count) — gentle sub-linear boost
-LIKE_MISSING = 0  # treat missing like_count as 0
+# log(1 + like_count), clamping bad negative values to avoid NaN.
+LIKE_MISSING = 0
 
 
 # ---------------------------------------------------------------------------
@@ -84,11 +84,19 @@ async def popularity_search(
                     },
                 },
                 {
-                    "field_value_factor": {
-                        "field": "like_count",
-                        "factor": LIKE_FACTOR,
-                        "modifier": LIKE_MODIFIER,
-                        "missing": LIKE_MISSING,
+                    "script_score": {
+                        "script": {
+                            "source": (
+                                "double likes = params.missing; "
+                                "if (!doc['like_count'].empty) { likes = doc['like_count'].value; } "
+                                "likes = Math.max(likes, 0.0); "
+                                "return params.factor * Math.log1p(likes);"
+                            ),
+                            "params": {
+                                "factor": LIKE_FACTOR,
+                                "missing": LIKE_MISSING,
+                            },
+                        },
                     },
                 },
             ],

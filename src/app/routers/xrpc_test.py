@@ -1,7 +1,7 @@
 """Tests for the XRPC feed generator endpoints."""
 
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,10 +17,13 @@ from ..lib.candidates.base import CandidateResult
 
 SERVICE_DID = "did:web:test.example.com"
 PUBLISHER_DID = "did:plc:publisherabc123"
-FEED_RKEY = "greenearth-dev"
+FEED_RKEY = "basic-similarity"
 FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FEED_RKEY}"
+RANDOM_FEED_RKEY = "random"
+RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
 # The AppView sends the publisher DID in the feed URI, not the service DID.
 FEED_URI_FROM_APPVIEW = f"at://{PUBLISHER_DID}/app.bsky.feed.generator/{FEED_RKEY}"
+TEST_USERNAME = "testuser.bsky.app"
 
 
 def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[CandidatePost]:
@@ -45,6 +48,10 @@ def fake_app_es():
     """Attach a fake ES client so the app doesn't need a real connection."""
     app.state.es = AsyncMock()
     app.state.id_resolver = AsyncMock()
+    did_doc = MagicMock()
+    did_doc.get_handle.return_value = TEST_USERNAME
+    app.state.id_resolver.did.resolve = AsyncMock(return_value=did_doc)
+    app.state.firestore = AsyncMock()
     yield
     try:
         delattr(app.state, "es")
@@ -52,6 +59,10 @@ def fake_app_es():
         pass
     try:
         delattr(app.state, "id_resolver")
+    except Exception:
+        pass
+    try:
+        delattr(app.state, "firestore")
     except Exception:
         pass
 
@@ -108,14 +119,19 @@ class TestDescribeFeedGenerator:
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         assert data["did"] == SERVICE_DID
 
-    def test_feeds_list_contains_greenearth_dev(self):
+    def test_feeds_list_contains_basic_similarity(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         uris = [f["uri"] for f in data["feeds"]]
         assert FEED_URI in uris
 
+    def test_feeds_list_contains_random(self):
+        data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
+        uris = [f["uri"] for f in data["feeds"]]
+        assert RANDOM_FEED_URI in uris
+
     def test_feeds_list_length(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
-        assert len(data["feeds"]) == 1
+        assert len(data["feeds"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +140,18 @@ class TestDescribeFeedGenerator:
 
 class TestGetFeedSkeleton:
     """Tests for the getFeedSkeleton endpoint."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_authenticated_user(self):
+        """Default to an authenticated caller for non-auth-focused tests."""
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        """Keep Firestore I/O out of generic feed skeleton tests."""
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock):
+            yield
 
     def _patch_generators(self, primary_candidates, infill_candidates=None):
         """Return a context-manager that patches get_generator.
@@ -343,6 +371,12 @@ class TestGetFeedSkeletonAuth:
 
         return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator)
 
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        """Avoid real Firestore interactions unless a test explicitly patches it."""
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock):
+            yield
+
     def test_authenticated_user_did_passed_to_generator(self):
         """When a valid JWT is present, the user's DID flows to the generator."""
         from unittest.mock import MagicMock
@@ -366,16 +400,16 @@ class TestGetFeedSkeletonAuth:
         assert resp.status_code == 200
 
     def test_unauthenticated_request_uses_empty_did(self):
-        """Without auth header, user_did should be empty string."""
+        """Without auth header, endpoint should reject the request."""
         with self._patch_generators(_make_candidates("p", 2)) as mock_get:
             resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": FEED_URI},
             )
-        assert resp.status_code == 200
+        assert resp.status_code == 401
 
     def test_invalid_jwt_still_returns_feed(self):
-        """Auth failure should not prevent the feed from being served."""
+        """Invalid JWT should be rejected."""
         from atproto_server.exceptions import TokenInvalidSignatureError
 
         with (
@@ -391,8 +425,129 @@ class TestGetFeedSkeletonAuth:
                 params={"feed": FEED_URI},
                 headers={"Authorization": "Bearer bad.jwt.token"},
             )
+        assert resp.status_code == 401
+
+    def test_authenticated_request_upserts_user(self):
+        """Authenticated requests should upsert the user in Firestore."""
+        from unittest.mock import MagicMock
+
+        mock_payload = MagicMock()
+        mock_payload.iss = "did:plc:autheduser"
+
+        with (
+            self._patch_generators(_make_candidates("p", 2)),
+            patch(
+                "app.lib.atproto_auth.verify_jwt_async",
+                new_callable=AsyncMock,
+                return_value=mock_payload,
+            ),
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock) as mock_upsert,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers={"Authorization": "Bearer valid.jwt.token"},
+            )
+
         assert resp.status_code == 200
-        assert len(resp.json()["feed"]) == 2
+        mock_upsert.assert_awaited_once_with(
+            app.state.firestore,
+            "did:plc:autheduser",
+            TEST_USERNAME,
+        )
+
+    def test_username_resolution_failure_is_fatal(self):
+        """Username resolution failures should fail the request."""
+        from unittest.mock import MagicMock
+
+        mock_payload = MagicMock()
+        mock_payload.iss = "did:plc:autheduser"
+
+        with (
+            self._patch_generators(_make_candidates("p", 2)),
+            patch(
+                "app.lib.atproto_auth.verify_jwt_async",
+                new_callable=AsyncMock,
+                return_value=mock_payload,
+            ),
+            patch.object(app.state.id_resolver.did, "resolve", new_callable=AsyncMock, return_value=None),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers={"Authorization": "Bearer valid.jwt.token"},
+            )
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Username resolution failed"
+
+    def test_firestore_upsert_failure_is_fatal(self):
+        """Firestore write errors should fail the request."""
+        from unittest.mock import MagicMock
+
+        mock_payload = MagicMock()
+        mock_payload.iss = "did:plc:autheduser"
+
+        with (
+            self._patch_generators(_make_candidates("p", 2)),
+            patch(
+                "app.lib.atproto_auth.verify_jwt_async",
+                new_callable=AsyncMock,
+                return_value=mock_payload,
+            ),
+            patch(
+                "app.routers.xrpc.upsert_user",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("firestore down"),
+            ),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers={"Authorization": "Bearer valid.jwt.token"},
+            )
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Firestore write failed"
+
+    def test_missing_firestore_client_is_fatal(self):
+        """Missing Firestore client should fail the request."""
+        from unittest.mock import MagicMock
+
+        mock_payload = MagicMock()
+        mock_payload.iss = "did:plc:autheduser"
+
+        with (
+            self._patch_generators(_make_candidates("p", 2)),
+            patch(
+                "app.lib.atproto_auth.verify_jwt_async",
+                new_callable=AsyncMock,
+                return_value=mock_payload,
+            ),
+            patch.object(app.state, "firestore", None),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers={"Authorization": "Bearer valid.jwt.token"},
+            )
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Firestore unavailable"
+
+    def test_unauthenticated_request_does_not_upsert_user(self):
+        """Unauthenticated requests should not write to Firestore."""
+        with (
+            self._patch_generators(_make_candidates("p", 2)),
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock) as mock_upsert,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+
+        assert resp.status_code == 401
+        mock_upsert.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

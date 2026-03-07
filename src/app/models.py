@@ -66,6 +66,6 @@ class FeedConfig(BaseModel):
     (``user_did``, ``num_candidates``) are filled in at request time.
     """
 
-    display_name: str
+    display_name: str = Field(..., max_length=12)
     description: str = ""
     gen_request_template: CandidateGenerateRequest

@@ -89,7 +89,12 @@ class TestPopularitySearch:
         funcs = query["function_score"]["functions"]
         func_types = [list(f.keys())[0] for f in funcs]
         assert "gauss" in func_types
-        assert "field_value_factor" in func_types
+        assert "script_score" in func_types
+
+        script_func = next(f["script_score"] for f in funcs if "script_score" in f)
+        script_source = script_func["script"]["source"]
+        assert "Math.max(likes, 0.0)" in script_source
+        assert "Math.log1p(likes)" in script_source
 
     @pytest.mark.asyncio
     async def test_video_only_true_includes_filter(self):

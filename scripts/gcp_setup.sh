@@ -10,6 +10,7 @@ set -e
 PROJECT_ID="${PROJECT_ID:-greenearth-471522}"
 REGION="${REGION:-us-east1}"
 ENVIRONMENT="${ENVIRONMENT:-stage}"
+FIRESTORE_LOCATION="${FIRESTORE_LOCATION:-$REGION}"
 
 # Elasticsearch configuration - only API key is secret, URL is public
 ELASTICSEARCH_URL="${ELASTICSEARCH_URL:-INTERNAL_LB_PLACEHOLDER}"
@@ -17,6 +18,9 @@ ELASTICSEARCH_API_KEY="${ELASTICSEARCH_API_KEY:-}"
 
 # API authentication
 API_KEY="${API_KEY:-}"
+
+# Bluesky app password for feed publishing
+BSKY_APP_PASSWORD="${BSKY_APP_PASSWORD:-}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -75,6 +79,12 @@ validate_config() {
     else
         log_warn "API key not provided - skipping secret creation (assuming it already exists)"
     fi
+
+    if [ -n "$BSKY_APP_PASSWORD" ]; then
+        log_info "Bluesky app password provided - will be stored/updated in Secret Manager"
+    else
+        log_warn "Bluesky app password not provided - skipping secret creation (assuming it already exists)"
+    fi
 }
 
 setup_gcp_project() {
@@ -88,11 +98,132 @@ setup_gcp_project() {
     gcloud services enable \
         cloudbuild.googleapis.com \
         run.googleapis.com \
+        firestore.googleapis.com \
+        apikeys.googleapis.com \
         secretmanager.googleapis.com \
         vpcaccess.googleapis.com \
         compute.googleapis.com
 
     log_info "GCP APIs enabled successfully"
+}
+
+get_firestore_database() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "greenearth-prod"
+    else
+        echo "greenearth-stage"
+    fi
+}
+
+get_firestore_api_key_secret() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "firestore-api-key-prod"
+    else
+        echo "firestore-api-key-stage"
+    fi
+}
+
+get_firestore_api_key_display_name() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "greenearth-firestore-prod"
+    else
+        echo "greenearth-firestore-stage"
+    fi
+}
+
+ensure_firestore_database() {
+    local firestore_db
+    firestore_db="$(get_firestore_database)"
+
+    log_info "Ensuring Firestore database exists: $firestore_db"
+    if gcloud firestore databases describe --database="$firestore_db" --project="$PROJECT_ID" > /dev/null 2>&1; then
+        log_info "Firestore database already exists: $firestore_db"
+    else
+        gcloud firestore databases create \
+            --database="$firestore_db" \
+            --location="$FIRESTORE_LOCATION" \
+            --type=firestore-native \
+            --project="$PROJECT_ID"
+        log_info "Created Firestore database: $firestore_db"
+    fi
+}
+
+ensure_firestore_api_key_secret() {
+    local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
+    local key_display_name
+    key_display_name="$(get_firestore_api_key_display_name)"
+    local key_secret
+    key_secret="$(get_firestore_api_key_secret)"
+
+    log_info "Ensuring Firestore API key exists for environment: $ENVIRONMENT"
+
+    local key_resource
+    key_resource=$(gcloud services api-keys list \
+        --project="$PROJECT_ID" \
+        --filter="displayName=$key_display_name" \
+        --format="value(name)" | head -n1)
+
+    if [ -z "$key_resource" ]; then
+        log_info "Creating API key: $key_display_name"
+        gcloud services api-keys create \
+            --project="$PROJECT_ID" \
+            --display-name="$key_display_name" > /dev/null
+
+        # API key resources can take a short time to appear in list results.
+        local max_attempts=15
+        local attempt=1
+        while [ -z "$key_resource" ]; do
+            key_resource=$(gcloud services api-keys list \
+                --project="$PROJECT_ID" \
+                --filter="displayName=$key_display_name" \
+                --format="value(name)" | head -n1)
+
+            if [ -n "$key_resource" ]; then
+                break
+            fi
+
+            if [ $attempt -ge $max_attempts ]; then
+                break
+            fi
+
+            sleep 2
+            attempt=$((attempt + 1))
+        done
+    else
+        log_info "API key already exists: $key_display_name"
+    fi
+
+    if [ -z "$key_resource" ]; then
+        log_error "Could not resolve API key resource for $key_display_name"
+        exit 1
+    fi
+
+    gcloud services api-keys update "$key_resource" \
+        --project="$PROJECT_ID" \
+        --api-target=service=firestore.googleapis.com > /dev/null
+
+    local key_string
+    key_string=$(gcloud services api-keys get-key-string "$key_resource" \
+        --project="$PROJECT_ID" \
+        --format="value(keyString)")
+
+    if [ -z "$key_string" ]; then
+        log_error "Could not fetch API key string for $key_display_name"
+        exit 1
+    fi
+
+    if ! gcloud secrets describe "$key_secret" > /dev/null 2>&1; then
+        echo -n "$key_string" | gcloud secrets create "$key_secret" --data-file=-
+        log_info "Firestore API key secret created: $key_secret"
+    else
+        echo -n "$key_string" | gcloud secrets versions add "$key_secret" --data-file=-
+        log_info "Firestore API key secret updated: $key_secret"
+    fi
+
+    gcloud secrets add-iam-policy-binding "$key_secret" \
+        --member="serviceAccount:$sa_email" \
+        --role="roles/secretmanager.secretAccessor" \
+        --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $key_secret"
 }
 
 create_service_account() {
@@ -134,6 +265,12 @@ create_service_account() {
     gcloud projects add-iam-policy-binding "$PROJECT_ID" \
         --member="serviceAccount:$sa_email" \
         --role="roles/secretmanager.secretAccessor" \
+        --condition=None
+
+    # Firestore data access for user upsert/read operations
+    gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+        --member="serviceAccount:$sa_email" \
+        --role="roles/datastore.user" \
         --condition=None
 
     log_info "IAM roles granted successfully"
@@ -227,6 +364,35 @@ setup_secrets() {
     log_info "Secret setup complete"
 }
 
+setup_bsky_secret() {
+    log_info "Setting up Bluesky app password secret..."
+
+    local bsky_secret="bsky-app-password"
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        bsky_secret="bsky-app-password-prod"
+    fi
+
+    if [ -n "$BSKY_APP_PASSWORD" ]; then
+        if ! gcloud secrets describe "$bsky_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            echo -n "$BSKY_APP_PASSWORD" | gcloud secrets create "$bsky_secret" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "Bluesky app password secret created: $bsky_secret"
+        else
+            echo -n "$BSKY_APP_PASSWORD" | gcloud secrets versions add "$bsky_secret" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "Bluesky app password secret updated: $bsky_secret"
+        fi
+    else
+        if gcloud secrets describe "$bsky_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            log_info "Bluesky app password secret already exists: $bsky_secret"
+        else
+            log_warn "Bluesky app password not provided and secret does not exist: $bsky_secret"
+            log_warn "Run with BSKY_APP_PASSWORD=<password> to create it, or create manually:"
+            log_warn "  echo -n '<password>' | gcloud secrets create $bsky_secret --data-file=- --project=$PROJECT_ID"
+        fi
+    fi
+}
+
 check_vpc_connector() {
     log_info "Checking for VPC connector..."
 
@@ -284,6 +450,8 @@ main() {
     validate_config
     setup_gcp_project
     create_service_account
+    ensure_firestore_database
+    ensure_firestore_api_key_secret
 
     # Fetch ES API key from K8s unless disabled or already provided
     if [ "$FETCH_ES_KEY" = true ] && [ -z "$ELASTICSEARCH_API_KEY" ]; then
@@ -295,6 +463,7 @@ main() {
     fi
 
     setup_secrets
+    setup_bsky_secret
     check_vpc_connector
 
     echo ""
@@ -342,6 +511,8 @@ while [[ $# -gt 0 ]]; do
             echo "  ENVIRONMENT             Same as --environment"
             echo "  API_KEY                 API key for authentication (stored in Secret Manager)"
             echo "  ELASTICSEARCH_API_KEY   Elasticsearch API key (skips K8s fetch if provided)"
+            echo "  BSKY_APP_PASSWORD       Bluesky app password for feed publishing (stored in Secret Manager)"
+            echo "  FIRESTORE_LOCATION      Firestore database location (default: REGION)"
             echo ""
             echo "Examples:"
             echo "  # Setup for staging (fetches ES key from K8s by default):"

@@ -23,6 +23,7 @@ from .generate import (
 )
 from .popularity import PopularityCandidateGenerator
 from .post_similarity import PostSimilarityCandidateGenerator
+from .random_posts import RandomPostsCandidateGenerator
 
 # Register built-in generators
 _post_similarity = PostSimilarityCandidateGenerator()
@@ -30,6 +31,9 @@ register_generator(_post_similarity)
 
 _popularity = PopularityCandidateGenerator()
 register_generator(_popularity)
+
+_random_posts = RandomPostsCandidateGenerator()
+register_generator(_random_posts)
 
 __all__ = [
     "CandidateGenerator",
@@ -45,4 +49,5 @@ __all__ = [
     "run_generate",
     "PopularityCandidateGenerator",
     "PostSimilarityCandidateGenerator",
+    "RandomPostsCandidateGenerator",
 ]
