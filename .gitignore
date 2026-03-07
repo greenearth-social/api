@@ -44,3 +44,8 @@ claude.md
 
 # generated requirements.txt
 requirements.txt
+
+# firebase emulator logs
+firestore-debug.log
+firebase-debug.log
+.firebase/

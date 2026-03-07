@@ -60,25 +60,32 @@ so you don't need a live GCP project.
 ### Install the emulator
 
 ```bash
-# Requires the gcloud CLI
-gcloud components install cloud-firestore-emulator
+# Requires Node.js
+npm install -g firebase-tools
 ```
 
-Or via a standalone Java JAR — see the
-[emulator docs](https://cloud.google.com/firestore/docs/emulator#install).
+From the `api/` directory, this project now uses `firebase.json` to define
+Firestore emulator settings (including the Emulator UI).
 
 ### Start the emulator
 
 ```bash
-gcloud emulators firestore start --host-port=localhost:8081
+firebase emulators:start --only firestore
 ```
+
+The Emulator UI is available at:
+
+```text
+http://127.0.0.1:4000
+```
+
 
 ### Configure the API to use it
 
 Set the following in your `.env` (see `.env.example`):
 
 ```bash
-GE_FIRESTORE_EMULATOR_HOST=localhost:8081
+GE_FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
 ```
 
 The API reads this on startup and routes all Firestore traffic to the
@@ -151,6 +158,7 @@ ENVIRONMENT=prod \
 
 The deployment script will:
 
+- Deploy Firestore security rules and indexes (`firestore.rules`, `firestore.indexes.json`) to the target project
 - Generate `requirements.txt` from `Pipfile`
 - Auto-detect the Elasticsearch internal load balancer IP
 - Build the container using Google Cloud buildpacks

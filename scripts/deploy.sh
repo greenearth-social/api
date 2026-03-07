@@ -152,6 +152,31 @@ generate_requirements() {
     fi
 }
 
+deploy_firestore_config() {
+    log_info "Deploying Firestore rules and indexes for project $PROJECT_ID..."
+
+    if ! command -v firebase &> /dev/null; then
+        log_error "firebase CLI is not installed. Install with: npm install -g firebase-tools"
+        exit 1
+    fi
+
+    if [ ! -f "firebase.json" ] || [ ! -f "firestore.rules" ] || [ ! -f "firestore.indexes.json" ]; then
+        log_error "Missing firebase.json, firestore.rules, or firestore.indexes.json in $(pwd)"
+        log_error "Run this script from the api/ directory where Firebase config lives"
+        exit 1
+    fi
+
+    # Deploy Firestore config idempotently: applies rules and creates/updates indexes as needed.
+    firebase deploy --only firestore --project "$PROJECT_ID"
+
+    if [ $? -eq 0 ]; then
+        log_info "✓ Firestore rules and indexes deployed successfully"
+    else
+        log_error "Failed to deploy Firestore rules/indexes"
+        exit 1
+    fi
+}
+
 deploy_api_service() {
     log_info "Deploying greenearth-api-$ENVIRONMENT service from source..."
 
@@ -235,6 +260,7 @@ main() {
     fi
 
     get_elasticsearch_internal_lb_ip
+    deploy_firestore_config
     generate_requirements
     deploy_api_service
 
