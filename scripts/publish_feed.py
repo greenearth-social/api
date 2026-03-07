@@ -35,6 +35,7 @@ Usage:
         --list
 
     You will be prompted for your app password (or set GE_BSKY_APP_PASSWORD).
+    Use --app-password to explicitly provide a password at the command line.
 
 Dependencies (already in the API Pipfile):
     pip install httpx python-dotenv
@@ -443,6 +444,14 @@ def main() -> None:
         help="Feed description (defaults to built-in metadata for known feeds)",
     )
     parser.add_argument(
+        "--app-password",
+        default=None,
+        help=(
+            "Bluesky app password. Takes precedence over GE_BSKY_APP_PASSWORD "
+            "from environment or .env."
+        ),
+    )
+    parser.add_argument(
         "--environment",
         default=None,
         choices=["dev", "stage", "prod"],
@@ -458,7 +467,7 @@ def main() -> None:
     # Load .env file to pick up GE_FEED_GENERATOR_DID and other env vars
     load_dotenv()
 
-    password = os.environ.get("GE_BSKY_APP_PASSWORD")
+    password = args.app_password or os.environ.get("GE_BSKY_APP_PASSWORD")
     if not password:
         password = getpass.getpass("App password: ")
 

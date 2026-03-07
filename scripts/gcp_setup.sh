@@ -267,6 +267,12 @@ create_service_account() {
         --role="roles/secretmanager.secretAccessor" \
         --condition=None
 
+    # Firestore data access for user upsert/read operations
+    gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+        --member="serviceAccount:$sa_email" \
+        --role="roles/datastore.user" \
+        --condition=None
+
     log_info "IAM roles granted successfully"
 }
 

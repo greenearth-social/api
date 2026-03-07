@@ -35,6 +35,11 @@ test_*.py
 htmlcov/
 *.log
 
+# Environment files (never deploy local secrets/config)
+.env
+.env.*
+!.env.example
+
 # IDE
 .vscode/
 .idea/

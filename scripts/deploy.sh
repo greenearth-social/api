@@ -20,6 +20,7 @@ ELASTICSEARCH_URL="${ELASTICSEARCH_URL:-INTERNAL_LB_PLACEHOLDER}"
 # Service configuration
 API_INSTANCES_MIN="${API_INSTANCES_MIN:-1}"
 API_INSTANCES_MAX="${API_INSTANCES_MAX:-10}"
+API_REQUEST_TIMEOUT="${API_REQUEST_TIMEOUT:-60}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -224,7 +225,7 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --max-instances=$API_INSTANCES_MAX"
     deploy_cmd="$deploy_cmd --cpu=1"
     deploy_cmd="$deploy_cmd --memory=512Mi"
-    deploy_cmd="$deploy_cmd --timeout=60"
+    deploy_cmd="$deploy_cmd --timeout=$API_REQUEST_TIMEOUT"
     deploy_cmd="$deploy_cmd --concurrency=80"
 
     # Allow unauthenticated access (adjust based on your needs)
@@ -237,12 +238,47 @@ deploy_api_service() {
         log_info "✓ greenearth-api-$ENVIRONMENT deployed successfully"
 
         # Get the service URL
-        local service_url=$(gcloud run services describe greenearth-api-$ENVIRONMENT --region="$REGION" --format="value(status.url)")
+        local service_url=$(gcloud run services describe greenearth-api-$ENVIRONMENT --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)")
         log_info "Service URL: $service_url"
+
+        # Ensure runtime DID is explicitly set so /.well-known/did.json is env-correct
+        local generator_did
+        if [ "$ENVIRONMENT" = "prod" ]; then
+            generator_did="did:web:api.greenearth.social"
+        else
+            local service_host
+            service_host=$(echo "$service_url" | sed 's|https://||')
+            generator_did="did:web:$service_host"
+        fi
+
+        gcloud run services update "greenearth-api-$ENVIRONMENT" \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --update-env-vars="GE_FEED_GENERATOR_DID=$generator_did" \
+            --remove-env-vars="GE_FIRESTORE_EMULATOR_HOST,FIRESTORE_EMULATOR_HOST" > /dev/null
+        log_info "Set GE_FEED_GENERATOR_DID=$generator_did"
     else
         log_error "Failed to deploy greenearth-api-$ENVIRONMENT"
         exit 1
     fi
+}
+
+resolve_generator_did() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "did:web:api.greenearth.social"
+        return 0
+    fi
+
+    local service_url
+    service_url=$(gcloud run services describe "greenearth-api-$ENVIRONMENT" \
+        --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)" 2>/dev/null)
+    if [ -z "$service_url" ]; then
+        return 1
+    fi
+
+    local service_host
+    service_host=$(echo "$service_url" | sed 's|https://||')
+    echo "did:web:$service_host"
 }
 
 sync_feeds() {
@@ -269,36 +305,24 @@ sync_feeds() {
         return 0
     fi
 
-    # Determine generator DID
-    # Prod uses a custom domain; staging uses the auto-generated Cloud Run URL
     local generator_did
-    if [ "$ENVIRONMENT" = "prod" ]; then
-        generator_did="did:web:api.greenearth.social"
-    else
-        local service_url
-        service_url=$(gcloud run services describe "greenearth-api-$ENVIRONMENT" \
-            --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)" 2>/dev/null)
-        if [ -z "$service_url" ]; then
-            log_warn "Could not determine service URL — skipping feed sync"
-            return 0
-        fi
-        local service_host
-        service_host=$(echo "$service_url" | sed 's|https://||')
-        generator_did="did:web:$service_host"
+    if ! generator_did=$(resolve_generator_did); then
+        log_warn "Could not determine service URL — skipping feed sync"
+        return 0
     fi
 
     log_info "Handle:        $bsky_handle"
     log_info "Generator DID: $generator_did"
 
-    GE_BSKY_APP_PASSWORD="$bsky_password" \
-        pipenv run python scripts/publish_feed.py \
-            --handle "$bsky_handle" \
-            --generator-did "$generator_did" \
-            --environment "$ENVIRONMENT" \
-            --sync
+    pipenv run python scripts/publish_feed.py \
+        --handle "$bsky_handle" \
+        --app-password "$bsky_password" \
+        --generator-did "$generator_did" \
+        --environment "$ENVIRONMENT" \
+        --sync
 
     if [ $? -eq 0 ]; then
-        log_info "\u2713 Feed records synced successfully"
+        log_info "Feed records synced successfully"
     else
         log_warn "Feed sync failed — feeds may be out of date"
     fi
@@ -350,6 +374,10 @@ while [[ $# -gt 0 ]]; do
             API_INSTANCES_MAX="$2"
             shift 2
             ;;
+        --timeout)
+            API_REQUEST_TIMEOUT="$2"
+            shift 2
+            ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -359,12 +387,14 @@ while [[ $# -gt 0 ]]; do
             echo "  --environment ENV        Environment name (default: stage)"
             echo "  --min-instances N        Minimum instances (default: 1)"
             echo "  --max-instances N        Maximum instances (default: 10)"
+            echo "  --timeout SECONDS        Cloud Run request timeout (default: 60)"
             echo "  --help                   Show this help message"
             echo ""
             echo "Environment variables:"
             echo "  PROJECT_ID              Same as --project-id"
             echo "  REGION                  Same as --region"
             echo "  ENVIRONMENT             Same as --environment"
+            echo "  API_REQUEST_TIMEOUT     Same as --timeout"
             exit 0
             ;;
         *)

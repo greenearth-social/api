@@ -459,6 +459,39 @@ class TestMainCLI:
                 from publish_feed import main
                 main()
 
+    def test_app_password_arg_takes_precedence_over_env(self, monkeypatch):
+        monkeypatch.setenv("GE_BSKY_APP_PASSWORD", "env-password")
+        with patch("publish_feed.list_feeds") as mock_list:
+            with patch(
+                "sys.argv",
+                [
+                    "publish_feed.py",
+                    "--handle",
+                    HANDLE,
+                    "--list",
+                    "--app-password",
+                    PASSWORD,
+                ],
+            ):
+                from publish_feed import main
+
+                main()
+
+        mock_list.assert_called_once_with(handle=HANDLE, password=PASSWORD, pds="https://bsky.social")
+
+    def test_prompts_when_no_password_in_arg_or_env(self, monkeypatch):
+        monkeypatch.delenv("GE_BSKY_APP_PASSWORD", raising=False)
+        with patch("publish_feed.load_dotenv"):
+            with patch("publish_feed.getpass.getpass", return_value=PASSWORD) as mock_getpass:
+                with patch("publish_feed.list_feeds") as mock_list:
+                    with patch("sys.argv", ["publish_feed.py", "--handle", HANDLE, "--list"]):
+                        from publish_feed import main
+
+                        main()
+
+        mock_getpass.assert_called_once_with("App password: ")
+        mock_list.assert_called_once_with(handle=HANDLE, password=PASSWORD, pds="https://bsky.social")
+
 
 # ---------------------------------------------------------------------------
 # _prefixed_display_name
