@@ -56,6 +56,26 @@ from app.feeds import FEEDS  # type: ignore
 
 DEFAULT_PDS = "https://bsky.social"
 
+ENV_DISPLAY_PREFIX: dict[str, str] = {
+    "dev": "GE Dev",
+    "stage": "GE Stg",
+    "prod": "GreenEarth",
+}
+
+
+def _prefixed_display_name(display_name: str, environment: str | None) -> str:
+    """Prepend an environment-specific prefix to *display_name*.
+
+    Returns *display_name* unchanged when *environment* is ``None`` or not
+    recognised.
+    """
+    if not environment:
+        return display_name
+    prefix = ENV_DISPLAY_PREFIX.get(environment)
+    if not prefix:
+        return display_name
+    return f"{prefix} {display_name}"
+
 
 def _create_session(
     client: httpx.Client,
@@ -150,6 +170,7 @@ def publish_feed(
     generator_did: str,
     display_name: str | None = None,
     description: str | None = None,
+    environment: str | None = None,
     pds: str = DEFAULT_PDS,
 ) -> dict:
     """Publish or update a feed generator record.
@@ -171,6 +192,7 @@ def publish_feed(
     """
     feed_cfg = FEEDS.get(feed_name)
     display_name = display_name or (feed_cfg.display_name if feed_cfg else feed_name)
+    display_name = _prefixed_display_name(display_name, environment)
     description = description or (feed_cfg.description if feed_cfg else "")
 
     with httpx.Client(timeout=30) as client:
@@ -303,6 +325,59 @@ def list_feeds(
             print()
 
 
+def sync_feeds(
+    *,
+    handle: str,
+    password: str,
+    generator_did: str,
+    environment: str | None = None,
+    pds: str = DEFAULT_PDS,
+) -> None:
+    """Sync published feed records with the FEEDS config.
+
+    Creates or updates a record for every feed in ``FEEDS`` and deletes any
+    existing records whose rkey is *not* present in ``FEEDS``.  Because
+    ``putRecord`` is an upsert, feeds that already exist are updated in place
+    without a visible gap.
+    """
+    if not FEEDS:
+        print("No feeds configured in FEEDS.", file=sys.stderr)
+        sys.exit(1)
+
+    with httpx.Client(timeout=30) as client:
+        session = _create_session(client, pds, handle, password)
+        access_jwt = session["accessJwt"]
+        repo_did = session["did"]
+
+        # Discover existing records
+        existing_records = _list_records(client, pds, access_jwt, repo_did)
+        existing_rkeys = {r["uri"].split("/")[-1] for r in existing_records}
+        desired_rkeys = set(FEEDS.keys())
+
+        from datetime import datetime, timezone
+
+        # Publish / update every feed in FEEDS
+        for rkey, feed_cfg in FEEDS.items():
+            display_name = _prefixed_display_name(feed_cfg.display_name, environment)
+            record: dict = {
+                "$type": "app.bsky.feed.generator",
+                "did": generator_did,
+                "displayName": display_name,
+                "description": feed_cfg.description,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+            }
+            _put_record(client, pds, access_jwt, repo_did, rkey, record)
+            print(f"  Published: {rkey} ({display_name})")
+
+        # Remove stale records not in FEEDS
+        stale = existing_rkeys - desired_rkeys
+        for rkey in sorted(stale):
+            _delete_record(client, pds, access_jwt, repo_did, rkey)
+            print(f"  Deleted stale: {rkey}")
+
+        print(f"\nSync complete: {len(desired_rkeys)} published, {len(stale)} deleted.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Publish a feed generator record to Bluesky.",
@@ -337,6 +412,14 @@ def main() -> None:
         help="Delete all feed generator records under the given handle.",
     )
     parser.add_argument(
+        "--sync",
+        action="store_true",
+        help=(
+            "Sync mode: publish/update all feeds from FEEDS config and delete "
+            "any stale records not present in FEEDS. Avoids delete-recreate."
+        ),
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         help="List all feed generator records under the given handle.",
@@ -360,6 +443,12 @@ def main() -> None:
         help="Feed description (defaults to built-in metadata for known feeds)",
     )
     parser.add_argument(
+        "--environment",
+        default=None,
+        choices=["dev", "stage", "prod"],
+        help="Environment name — prefixes feed display names (dev/stage/prod).",
+    )
+    parser.add_argument(
         "--pds",
         default=DEFAULT_PDS,
         help=f"PDS endpoint to authenticate against (default: {DEFAULT_PDS})",
@@ -374,15 +463,31 @@ def main() -> None:
         password = getpass.getpass("App password: ")
 
     # Validate mutually exclusive flags
-    mode_flags = sum([args.publish_all, args.delete, args.delete_all, args.list])
+    mode_flags = sum([args.publish_all, args.delete, args.delete_all, args.list, args.sync])
     if mode_flags > 1:
-        parser.error("Only one of --all, --delete, --delete-all, or --list can be used at a time.")
+        parser.error("Only one of --all, --delete, --delete-all, --list, or --sync can be used at a time.")
 
     # Handle list mode
     if args.list:
         list_feeds(
             handle=args.handle,
             password=password,
+            pds=args.pds,
+        )
+        return
+
+    # Handle sync mode
+    if args.sync:
+        generator_did = args.generator_did or os.environ.get("GE_FEED_GENERATOR_DID")
+        if not generator_did:
+            parser.error(
+                "--generator-did is required for --sync (or set GE_FEED_GENERATOR_DID)"
+            )
+        sync_feeds(
+            handle=args.handle,
+            password=password,
+            generator_did=generator_did,
+            environment=args.environment,
             pds=args.pds,
         )
         return
@@ -433,6 +538,7 @@ def main() -> None:
             generator_did=generator_did,
             display_name=args.display_name,
             description=args.description,
+            environment=args.environment,
             pds=args.pds,
         )
         if len(feed_names) > 1:

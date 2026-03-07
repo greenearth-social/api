@@ -19,6 +19,9 @@ ELASTICSEARCH_API_KEY="${ELASTICSEARCH_API_KEY:-}"
 # API authentication
 API_KEY="${API_KEY:-}"
 
+# Bluesky app password for feed publishing
+BSKY_APP_PASSWORD="${BSKY_APP_PASSWORD:-}"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -75,6 +78,12 @@ validate_config() {
         log_info "API key provided - will be stored/updated in Secret Manager"
     else
         log_warn "API key not provided - skipping secret creation (assuming it already exists)"
+    fi
+
+    if [ -n "$BSKY_APP_PASSWORD" ]; then
+        log_info "Bluesky app password provided - will be stored/updated in Secret Manager"
+    else
+        log_warn "Bluesky app password not provided - skipping secret creation (assuming it already exists)"
     fi
 }
 
@@ -349,6 +358,35 @@ setup_secrets() {
     log_info "Secret setup complete"
 }
 
+setup_bsky_secret() {
+    log_info "Setting up Bluesky app password secret..."
+
+    local bsky_secret="bsky-app-password"
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        bsky_secret="bsky-app-password-prod"
+    fi
+
+    if [ -n "$BSKY_APP_PASSWORD" ]; then
+        if ! gcloud secrets describe "$bsky_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            echo -n "$BSKY_APP_PASSWORD" | gcloud secrets create "$bsky_secret" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "Bluesky app password secret created: $bsky_secret"
+        else
+            echo -n "$BSKY_APP_PASSWORD" | gcloud secrets versions add "$bsky_secret" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "Bluesky app password secret updated: $bsky_secret"
+        fi
+    else
+        if gcloud secrets describe "$bsky_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            log_info "Bluesky app password secret already exists: $bsky_secret"
+        else
+            log_warn "Bluesky app password not provided and secret does not exist: $bsky_secret"
+            log_warn "Run with BSKY_APP_PASSWORD=<password> to create it, or create manually:"
+            log_warn "  echo -n '<password>' | gcloud secrets create $bsky_secret --data-file=- --project=$PROJECT_ID"
+        fi
+    fi
+}
+
 check_vpc_connector() {
     log_info "Checking for VPC connector..."
 
@@ -419,6 +457,7 @@ main() {
     fi
 
     setup_secrets
+    setup_bsky_secret
     check_vpc_connector
 
     echo ""
@@ -466,6 +505,7 @@ while [[ $# -gt 0 ]]; do
             echo "  ENVIRONMENT             Same as --environment"
             echo "  API_KEY                 API key for authentication (stored in Secret Manager)"
             echo "  ELASTICSEARCH_API_KEY   Elasticsearch API key (skips K8s fetch if provided)"
+            echo "  BSKY_APP_PASSWORD       Bluesky app password for feed publishing (stored in Secret Manager)"
             echo "  FIRESTORE_LOCATION      Firestore database location (default: REGION)"
             echo ""
             echo "Examples:"

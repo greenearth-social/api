@@ -245,6 +245,65 @@ deploy_api_service() {
     fi
 }
 
+sync_feeds() {
+    log_info "Syncing feed generator records for $ENVIRONMENT..."
+
+    # Determine Bluesky handle and secret name for this environment
+    local bsky_handle
+    local bsky_secret
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        bsky_handle="greenearth-social.bsky.app"
+        bsky_secret="bsky-app-password-prod"
+    else
+        bsky_handle="ge-stage.bsky.app"
+        bsky_secret="bsky-app-password"
+    fi
+
+    # Fetch app password from Secret Manager
+    local bsky_password
+    bsky_password=$(gcloud secrets versions access latest --secret="$bsky_secret" --project="$PROJECT_ID" 2>/dev/null)
+    if [ -z "$bsky_password" ]; then
+        log_warn "Could not fetch Bluesky app password from secret '$bsky_secret'"
+        log_warn "Skipping feed sync. Store the password with:"
+        log_warn "  echo -n '<password>' | gcloud secrets create $bsky_secret --data-file=- --project=$PROJECT_ID"
+        return 0
+    fi
+
+    # Determine generator DID
+    # Prod uses a custom domain; staging uses the auto-generated Cloud Run URL
+    local generator_did
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        generator_did="did:web:api.greenearth.social"
+    else
+        local service_url
+        service_url=$(gcloud run services describe "greenearth-api-$ENVIRONMENT" \
+            --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)" 2>/dev/null)
+        if [ -z "$service_url" ]; then
+            log_warn "Could not determine service URL — skipping feed sync"
+            return 0
+        fi
+        local service_host
+        service_host=$(echo "$service_url" | sed 's|https://||')
+        generator_did="did:web:$service_host"
+    fi
+
+    log_info "Handle:        $bsky_handle"
+    log_info "Generator DID: $generator_did"
+
+    GE_BSKY_APP_PASSWORD="$bsky_password" \
+        pipenv run python scripts/publish_feed.py \
+            --handle "$bsky_handle" \
+            --generator-did "$generator_did" \
+            --environment "$ENVIRONMENT" \
+            --sync
+
+    if [ $? -eq 0 ]; then
+        log_info "\u2713 Feed records synced successfully"
+    else
+        log_warn "Feed sync failed — feeds may be out of date"
+    fi
+}
+
 main() {
     log_info "Starting Green Earth API deployment..."
     log_info "Project: $PROJECT_ID"
@@ -263,6 +322,7 @@ main() {
     deploy_firestore_config
     generate_requirements
     deploy_api_service
+    sync_feeds
 
     log_info "Deployment complete!"
 }

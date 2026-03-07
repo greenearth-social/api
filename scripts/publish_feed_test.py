@@ -8,14 +8,17 @@ import httpx
 import pytest
 
 from publish_feed import (
+    ENV_DISPLAY_PREFIX,
     _create_session,
     _delete_record,
     _list_records,
+    _prefixed_display_name,
     _put_record,
     delete_all_feeds,
     delete_feed,
     list_feeds,
     publish_feed,
+    sync_feeds,
 )
 
 
@@ -29,7 +32,7 @@ PDS = "https://pds.example.com"
 REPO_DID = "did:plc:alice123"
 ACCESS_JWT = "fake-jwt-token"
 GENERATOR_DID = "did:web:feed.example.com"
-FEED_NAME = "greenearth-dev"
+FEED_NAME = "basic-similarity"
 
 SESSION_RESPONSE = {"did": REPO_DID, "accessJwt": ACCESS_JWT}
 
@@ -207,7 +210,7 @@ class TestPublishFeed:
         record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
         assert record["$type"] == "app.bsky.feed.generator"
         assert record["did"] == GENERATOR_DID
-        assert record["displayName"] == "GE Dev"  # from FEEDS config
+        assert record["displayName"] == "Basic Similarity"  # from FEEDS config
 
         captured = capsys.readouterr()
         assert "Published feed record:" in captured.out
@@ -263,6 +266,31 @@ class TestPublishFeed:
         record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
         assert record["displayName"] == "Custom Name"
         assert record["description"] == "Custom desc"
+
+    @patch("publish_feed.httpx.Client")
+    def test_environment_prefix_applied(self, MockClient, capsys):
+        """Passing environment prefixes the display name."""
+        client = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=client)
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+        client.post.side_effect = [
+            _mock_response(200, SESSION_RESPONSE),
+            _mock_response(200, {"cid": "bafyenv"}),
+        ]
+
+        publish_feed(
+            handle=HANDLE,
+            password=PASSWORD,
+            feed_name=FEED_NAME,
+            generator_did=GENERATOR_DID,
+            environment="stage",
+            pds=PDS,
+        )
+
+        put_call = client.post.call_args_list[1]
+        record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
+        assert record["displayName"] == "GE Stg Basic Similarity"
 
 
 # ---------------------------------------------------------------------------
@@ -430,3 +458,92 @@ class TestMainCLI:
             with patch("sys.argv", ["publish_feed.py", "--handle", HANDLE]):
                 from publish_feed import main
                 main()
+
+
+# ---------------------------------------------------------------------------
+# _prefixed_display_name
+# ---------------------------------------------------------------------------
+
+
+class TestPrefixedDisplayName:
+    def test_dev_prefix(self):
+        assert _prefixed_display_name("My Feed", "dev") == "GE Dev My Feed"
+
+    def test_stage_prefix(self):
+        assert _prefixed_display_name("My Feed", "stage") == "GE Stg My Feed"
+
+    def test_prod_prefix(self):
+        assert _prefixed_display_name("My Feed", "prod") == "GreenEarth My Feed"
+
+    def test_no_environment(self):
+        assert _prefixed_display_name("My Feed", None) == "My Feed"
+
+    def test_unknown_environment(self):
+        assert _prefixed_display_name("My Feed", "unknown") == "My Feed"
+
+
+# ---------------------------------------------------------------------------
+# sync_feeds
+# ---------------------------------------------------------------------------
+
+
+class TestSyncFeeds:
+    @patch("publish_feed.httpx.Client")
+    def test_publishes_all_and_deletes_stale(self, MockClient, capsys):
+        """sync_feeds publishes every FEEDS entry and removes stale records."""
+        client = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=client)
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+        stale_record = {
+            "uri": f"at://{REPO_DID}/app.bsky.feed.generator/old-feed",
+            "value": {},
+        }
+        client.post.side_effect = [
+            _mock_response(200, SESSION_RESPONSE),  # createSession
+            _mock_response(200, {"cid": "bafyabc"}),  # putRecord for basic-similarity
+            _mock_response(200, {}),  # deleteRecord for old-feed
+        ]
+        client.get.return_value = _mock_response(200, {"records": [stale_record]})
+
+        sync_feeds(
+            handle=HANDLE,
+            password=PASSWORD,
+            generator_did=GENERATOR_DID,
+            environment="prod",
+            pds=PDS,
+        )
+
+        captured = capsys.readouterr()
+        assert "Published: basic-similarity" in captured.out
+        assert "GreenEarth Basic Similarity" in captured.out
+        assert "Deleted stale: old-feed" in captured.out
+        assert "Sync complete:" in captured.out
+
+    @patch("publish_feed.httpx.Client")
+    def test_no_stale_records(self, MockClient, capsys):
+        """sync_feeds with no stale records deletes nothing."""
+        client = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=client)
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+        existing_record = {
+            "uri": f"at://{REPO_DID}/app.bsky.feed.generator/basic-similarity",
+            "value": {},
+        }
+        client.post.side_effect = [
+            _mock_response(200, SESSION_RESPONSE),  # createSession
+            _mock_response(200, {"cid": "bafyabc"}),  # putRecord
+        ]
+        client.get.return_value = _mock_response(200, {"records": [existing_record]})
+
+        sync_feeds(
+            handle=HANDLE,
+            password=PASSWORD,
+            generator_did=GENERATOR_DID,
+            pds=PDS,
+        )
+
+        captured = capsys.readouterr()
+        assert "Deleted stale" not in captured.out
+        assert "1 published, 0 deleted" in captured.out

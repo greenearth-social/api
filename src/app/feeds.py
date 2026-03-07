@@ -14,8 +14,8 @@ pulling in FastAPI.
 from .models import CandidateGenerateRequest, FeedConfig, GeneratorSpec
 
 FEEDS: dict[str, FeedConfig] = {
-    "greenearth-dev": FeedConfig(
-        display_name="GE Dev",
+    "basic-similarity": FeedConfig(
+        display_name="Basic Similarity",
         description="Development feed — post-similarity candidates with popularity infill.",
         gen_request_template=CandidateGenerateRequest(
             generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
