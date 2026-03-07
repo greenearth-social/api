@@ -65,28 +65,39 @@ async def get_user(db: AsyncClient, user_did: str) -> UserDocument | None:
     return UserDocument.model_validate(data)
 
 
-async def upsert_user(db: AsyncClient, user_did: str) -> UserDocument:
+async def upsert_user(db: AsyncClient, user_did: str, username: str) -> UserDocument:
     """Create or update a user document.
 
     On first visit the document is created with all timestamps set to now.
-    On subsequent visits only ``last_seen_at`` is refreshed.  ``updated_at``
-    is reserved for changes to the user's actual data fields.
+    On subsequent visits ``last_seen_at`` is refreshed and ``username`` is
+    updated if it changed.
     """
     ref = db.collection(USERS_COLLECTION).document(user_did)
     doc = await ref.get()
 
     now = datetime.now(timezone.utc)
 
-    # TODO: update updated_at if the document is actually different, once we have more data fields
-
     if doc.exists:
-        await ref.update({"last_seen_at": now})
         data = doc.to_dict()
         if data is None:
             raise ValueError(f"Firestore document exists but to_dict() returned None for {user_did}")
-        data["last_seen_at"] = now
+
+        update_fields: dict[str, object] = {"last_seen_at": now}
+        if data.get("username") != username:
+            update_fields["username"] = username
+            update_fields["updated_at"] = now
+
+        await ref.update(update_fields)
+
+        data.update(update_fields)
         return UserDocument.model_validate(data)
 
-    user = UserDocument(user_did=user_did, created_at=now, updated_at=now, last_seen_at=now)
+    user = UserDocument(
+        user_did=user_did,
+        username=username,
+        created_at=now,
+        updated_at=now,
+        last_seen_at=now,
+    )
     await ref.set(user.model_dump())
     return user

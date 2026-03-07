@@ -21,6 +21,7 @@ from ..lib.firestore import (
 # ---------------------------------------------------------------------------
 
 USER_DID = "did:plc:testuser123"
+USERNAME = "testuser.bsky.app"
 
 
 def _mock_doc_snapshot(exists: bool, data: dict | None = None) -> MagicMock:
@@ -109,6 +110,7 @@ class TestGetUser:
         now = datetime.now(timezone.utc)
         doc_ref.get.return_value = _mock_doc_snapshot(True, {
             "user_did": USER_DID,
+            "username": USERNAME,
             "created_at": now,
             "updated_at": now,
             "last_seen_at": now,
@@ -118,6 +120,7 @@ class TestGetUser:
 
         assert user is not None
         assert user.user_did == USER_DID
+        assert user.username == USERNAME
         assert user.created_at == now
         db.collection.assert_called_with(USERS_COLLECTION)
 
@@ -142,9 +145,10 @@ class TestUpsertUser:
         db, _, doc_ref = _mock_firestore_client()
         doc_ref.get.return_value = _mock_doc_snapshot(False)
 
-        user = await upsert_user(db, USER_DID)
+        user = await upsert_user(db, USER_DID, USERNAME)
 
         assert user.user_did == USER_DID
+        assert user.username == USERNAME
         assert isinstance(user.created_at, datetime)
         assert isinstance(user.updated_at, datetime)
         doc_ref.set.assert_called_once()
@@ -152,6 +156,7 @@ class TestUpsertUser:
         # Verify the data written
         written = doc_ref.set.call_args[0][0]
         assert written["user_did"] == USER_DID
+        assert written["username"] == USERNAME
         assert "created_at" in written
         assert "updated_at" in written
         assert "last_seen_at" in written
@@ -162,18 +167,46 @@ class TestUpsertUser:
         original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
         doc_ref.get.return_value = _mock_doc_snapshot(True, {
             "user_did": USER_DID,
+            "username": USERNAME,
             "created_at": original_time,
             "updated_at": original_time,
             "last_seen_at": original_time,
         })
 
-        user = await upsert_user(db, USER_DID)
+        user = await upsert_user(db, USER_DID, USERNAME)
 
         assert user.user_did == USER_DID
+        assert user.username == USERNAME
         # created_at and updated_at should be preserved from original
         assert user.created_at == original_time
         assert user.updated_at == original_time
         # last_seen_at should be refreshed
         assert user.last_seen_at > original_time
         doc_ref.update.assert_called_once()
+        update_fields = doc_ref.update.call_args[0][0]
+        assert "username" not in update_fields
         doc_ref.set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_updates_username_when_changed(self):
+        db, _, doc_ref = _mock_firestore_client()
+        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        doc_ref.get.return_value = _mock_doc_snapshot(True, {
+            "user_did": USER_DID,
+            "username": "old-handle.bsky.app",
+            "created_at": original_time,
+            "updated_at": original_time,
+            "last_seen_at": original_time,
+        })
+
+        user = await upsert_user(db, USER_DID, USERNAME)
+
+        assert user.user_did == USER_DID
+        assert user.username == USERNAME
+        assert user.created_at == original_time
+        assert user.updated_at > original_time
+        assert user.last_seen_at > original_time
+        doc_ref.update.assert_called_once()
+        update_fields = doc_ref.update.call_args[0][0]
+        assert update_fields["username"] == USERNAME
+        assert "updated_at" in update_fields

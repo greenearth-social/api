@@ -1,7 +1,7 @@
 """Tests for the XRPC feed generator endpoints."""
 
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,6 +21,7 @@ FEED_RKEY = "greenearth-dev"
 FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 # The AppView sends the publisher DID in the feed URI, not the service DID.
 FEED_URI_FROM_APPVIEW = f"at://{PUBLISHER_DID}/app.bsky.feed.generator/{FEED_RKEY}"
+TEST_USERNAME = "testuser.bsky.app"
 
 
 def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[CandidatePost]:
@@ -45,6 +46,9 @@ def fake_app_es():
     """Attach a fake ES client so the app doesn't need a real connection."""
     app.state.es = AsyncMock()
     app.state.id_resolver = AsyncMock()
+    did_doc = MagicMock()
+    did_doc.get_handle.return_value = TEST_USERNAME
+    app.state.id_resolver.did.resolve = AsyncMock(return_value=did_doc)
     app.state.firestore = AsyncMock()
     yield
     try:
@@ -439,7 +443,36 @@ class TestGetFeedSkeletonAuth:
             )
 
         assert resp.status_code == 200
-        mock_upsert.assert_awaited_once_with(app.state.firestore, "did:plc:autheduser")
+        mock_upsert.assert_awaited_once_with(
+            app.state.firestore,
+            "did:plc:autheduser",
+            TEST_USERNAME,
+        )
+
+    def test_username_resolution_failure_is_fatal(self):
+        """Username resolution failures should fail the request."""
+        from unittest.mock import MagicMock
+
+        mock_payload = MagicMock()
+        mock_payload.iss = "did:plc:autheduser"
+
+        with (
+            self._patch_generators(_make_candidates("p", 2)),
+            patch(
+                "app.lib.atproto_auth.verify_jwt_async",
+                new_callable=AsyncMock,
+                return_value=mock_payload,
+            ),
+            patch.object(app.state.id_resolver.did, "resolve", new_callable=AsyncMock, return_value=None),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers={"Authorization": "Bearer valid.jwt.token"},
+            )
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Username resolution failed"
 
     def test_firestore_upsert_failure_is_fatal(self):
         """Firestore write errors should fail the request."""

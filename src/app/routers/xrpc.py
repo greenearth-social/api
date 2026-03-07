@@ -61,6 +61,26 @@ def _feed_uri(feed_name: str) -> str:
     return f"at://{_get_service_did()}/app.bsky.feed.generator/{feed_name}"
 
 
+async def _resolve_username(request: Request, user_did: str) -> str:
+    """Resolve the caller's handle from their DID document."""
+    resolver = getattr(request.app.state, "id_resolver", None)
+    if resolver is None:
+        logger.error("id_resolver not initialized")
+        raise HTTPException(status_code=500, detail="Identity resolver unavailable")
+
+    did_doc = await resolver.did.resolve(user_did)
+    if did_doc is None:
+        logger.error("Failed to resolve DID document for %s", user_did)
+        raise HTTPException(status_code=500, detail="Username resolution failed")
+
+    username = did_doc.get_handle()
+    if not username:
+        logger.error("No handle found in DID document for %s", user_did)
+        raise HTTPException(status_code=500, detail="Username resolution failed")
+
+    return username
+
+
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
@@ -186,6 +206,8 @@ async def get_feed_skeleton(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    username = await _resolve_username(request, user_did)
+
     # Record authenticated users in Firestore for backend analytics/state.
     # Firestore persistence is required and failures are treated as fatal.
     db = getattr(request.app.state, "firestore", None)
@@ -194,7 +216,7 @@ async def get_feed_skeleton(
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
     try:
-        await upsert_user(db, user_did)
+        await upsert_user(db, user_did, username)
     except Exception:
         logger.exception("Failed to upsert user '%s' in Firestore", user_did)
         raise HTTPException(status_code=500, detail="Firestore write failed")

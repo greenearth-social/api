@@ -28,6 +28,10 @@ class UserDocument(BaseModel):
     """
 
     user_did: str = Field(..., description="AT Protocol DID of the user (also the document ID)")
+    username: str | None = Field(
+        default=None,
+        description="AT Protocol handle (e.g. foobar.bsky.app)",
+    )
     created_at: datetime = Field(default_factory=_utcnow, description="When the user was first seen")
     updated_at: datetime = Field(default_factory=_utcnow, description="Last time the document was modified")
     last_seen_at: datetime = Field(default_factory=_utcnow, description="Most recent feed request from this user")
