@@ -17,7 +17,7 @@ from ..lib.candidates.base import CandidateResult
 
 SERVICE_DID = "did:web:test.example.com"
 PUBLISHER_DID = "did:plc:publisherabc123"
-FEED_RKEY = "greenearth-dev"
+FEED_RKEY = "basic-similarity"
 FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 # The AppView sends the publisher DID in the feed URI, not the service DID.
 FEED_URI_FROM_APPVIEW = f"at://{PUBLISHER_DID}/app.bsky.feed.generator/{FEED_RKEY}"
