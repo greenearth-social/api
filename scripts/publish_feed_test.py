@@ -213,7 +213,7 @@ class TestPublishFeed:
         record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
         assert record["$type"] == "app.bsky.feed.generator"
         assert record["did"] == GENERATOR_DID
-        assert record["displayName"] == "Basic Similarity"  # from FEEDS config
+        assert record["displayName"] == "Similarity"  # from FEEDS config
 
         captured = capsys.readouterr()
         assert "Published feed record:" in captured.out
@@ -293,7 +293,7 @@ class TestPublishFeed:
 
         put_call = client.post.call_args_list[1]
         record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
-        assert record["displayName"] == "GE Stg Basic Similarity"
+        assert record["displayName"] == "GE Stg Similarity"
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +625,7 @@ class TestSyncFeeds:
         captured = capsys.readouterr()
         assert "Published: basic-similarity" in captured.out
         assert "Published: random" in captured.out
-        assert "GreenEarth Basic Similarity" in captured.out
+        assert "GreenEarth Similarity" in captured.out
         assert "Deleted stale: old-feed" in captured.out
         assert "Sync complete:" in captured.out
 
