@@ -63,6 +63,40 @@ ENV_DISPLAY_PREFIX: dict[str, str] = {
     "prod": "GreenEarth",
 }
 
+ENV_ALIASES: dict[str, str] = {
+    "dev": "dev",
+    "development": "dev",
+    "stage": "stage",
+    "staging": "stage",
+    "prod": "prod",
+    "production": "prod",
+}
+
+
+def _normalize_environment(environment: str | None) -> str | None:
+    """Normalize environment names to ``dev`` / ``stage`` / ``prod``.
+
+    Unknown values return ``None`` so callers can safely skip prefixing.
+    """
+    if not environment:
+        return None
+    return ENV_ALIASES.get(environment.strip().lower())
+
+
+def _resolve_environment(cli_environment: str | None) -> str | None:
+    """Resolve environment from CLI first, then common env vars.
+
+    Priority:
+    1) ``--environment``
+    2) ``ENVIRONMENT``
+    3) ``GE_ENVIRONMENT``
+    """
+    return (
+        _normalize_environment(cli_environment)
+        or _normalize_environment(os.environ.get("ENVIRONMENT"))
+        or _normalize_environment(os.environ.get("GE_ENVIRONMENT"))
+    )
+
 
 def _prefixed_display_name(display_name: str, environment: str | None) -> str:
     """Prepend an environment-specific prefix to *display_name*.
@@ -70,9 +104,10 @@ def _prefixed_display_name(display_name: str, environment: str | None) -> str:
     Returns *display_name* unchanged when *environment* is ``None`` or not
     recognised.
     """
-    if not environment:
+    normalized_environment = _normalize_environment(environment)
+    if not normalized_environment:
         return display_name
-    prefix = ENV_DISPLAY_PREFIX.get(environment)
+    prefix = ENV_DISPLAY_PREFIX.get(normalized_environment)
     if not prefix:
         return display_name
     return f"{prefix} {display_name}"
@@ -455,7 +490,10 @@ def main() -> None:
         "--environment",
         default=None,
         choices=["dev", "stage", "prod"],
-        help="Environment name — prefixes feed display names (dev/stage/prod).",
+        help=(
+            "Environment name (dev/stage/prod). Required for publishing and sync; "
+            "used to prefix feed display names."
+        ),
     )
     parser.add_argument(
         "--pds",
@@ -466,6 +504,7 @@ def main() -> None:
 
     # Load .env file to pick up GE_FEED_GENERATOR_DID and other env vars
     load_dotenv()
+    resolved_environment = _normalize_environment(args.environment)
 
     password = args.app_password or os.environ.get("GE_BSKY_APP_PASSWORD")
     if not password:
@@ -487,6 +526,8 @@ def main() -> None:
 
     # Handle sync mode
     if args.sync:
+        if not resolved_environment:
+            parser.error("--environment is required for --sync.")
         generator_did = args.generator_did or os.environ.get("GE_FEED_GENERATOR_DID")
         if not generator_did:
             parser.error(
@@ -496,7 +537,7 @@ def main() -> None:
             handle=args.handle,
             password=password,
             generator_did=generator_did,
-            environment=args.environment,
+            environment=resolved_environment,
             pds=args.pds,
         )
         return
@@ -522,6 +563,9 @@ def main() -> None:
         return
 
     # Publishing mode (default)
+    if not resolved_environment:
+        parser.error("--environment is required when publishing feeds.")
+
     generator_did = args.generator_did or os.environ.get("GE_FEED_GENERATOR_DID")
     if not generator_did:
         parser.error(
@@ -547,7 +591,7 @@ def main() -> None:
             generator_did=generator_did,
             display_name=args.display_name,
             description=args.description,
-            environment=args.environment,
+            environment=resolved_environment,
             pds=args.pds,
         )
         if len(feed_names) > 1:

@@ -19,6 +19,8 @@ SERVICE_DID = "did:web:test.example.com"
 PUBLISHER_DID = "did:plc:publisherabc123"
 FEED_RKEY = "basic-similarity"
 FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FEED_RKEY}"
+RANDOM_FEED_RKEY = "random"
+RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
 # The AppView sends the publisher DID in the feed URI, not the service DID.
 FEED_URI_FROM_APPVIEW = f"at://{PUBLISHER_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 TEST_USERNAME = "testuser.bsky.app"
@@ -117,14 +119,19 @@ class TestDescribeFeedGenerator:
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         assert data["did"] == SERVICE_DID
 
-    def test_feeds_list_contains_greenearth_dev(self):
+    def test_feeds_list_contains_basic_similarity(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         uris = [f["uri"] for f in data["feeds"]]
         assert FEED_URI in uris
 
+    def test_feeds_list_contains_random(self):
+        data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
+        uris = [f["uri"] for f in data["feeds"]]
+        assert RANDOM_FEED_URI in uris
+
     def test_feeds_list_length(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
-        assert len(data["feeds"]) == 1
+        assert len(data["feeds"]) == 2
 
 
 # ---------------------------------------------------------------------------

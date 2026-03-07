@@ -9,11 +9,14 @@ import pytest
 
 from publish_feed import (
     ENV_DISPLAY_PREFIX,
+    FEEDS,
     _create_session,
     _delete_record,
     _list_records,
+    _normalize_environment,
     _prefixed_display_name,
     _put_record,
+    _resolve_environment,
     delete_all_feeds,
     delete_feed,
     list_feeds,
@@ -455,7 +458,7 @@ class TestMainCLI:
         monkeypatch.setenv("GE_BSKY_APP_PASSWORD", PASSWORD)
         monkeypatch.setenv("GE_FEED_GENERATOR_DID", GENERATOR_DID)
         with pytest.raises(SystemExit):
-            with patch("sys.argv", ["publish_feed.py", "--handle", HANDLE]):
+            with patch("sys.argv", ["publish_feed.py", "--handle", HANDLE, "--environment", "dev"]):
                 from publish_feed import main
                 main()
 
@@ -492,6 +495,52 @@ class TestMainCLI:
         mock_getpass.assert_called_once_with("App password: ")
         mock_list.assert_called_once_with(handle=HANDLE, password=PASSWORD, pds="https://bsky.social")
 
+    def test_publish_all_requires_environment(self, monkeypatch):
+        monkeypatch.setenv("GE_BSKY_APP_PASSWORD", PASSWORD)
+        monkeypatch.setenv("GE_FEED_GENERATOR_DID", GENERATOR_DID)
+
+        with patch("publish_feed.load_dotenv"):
+            with pytest.raises(SystemExit):
+                with patch(
+                    "sys.argv",
+                    ["publish_feed.py", "--handle", HANDLE, "--all"],
+                ):
+                    from publish_feed import main
+
+                    main()
+
+    def test_publish_all_passes_environment(self, monkeypatch):
+        monkeypatch.setenv("GE_BSKY_APP_PASSWORD", PASSWORD)
+        monkeypatch.setenv("GE_FEED_GENERATOR_DID", GENERATOR_DID)
+
+        with patch("publish_feed.load_dotenv"):
+            with patch("publish_feed.publish_feed") as mock_publish:
+                with patch(
+                    "sys.argv",
+                    ["publish_feed.py", "--handle", HANDLE, "--all", "--environment", "prod"],
+                ):
+                    from publish_feed import main
+
+                    main()
+
+        assert mock_publish.call_count >= 1
+        for call in mock_publish.call_args_list:
+            assert call.kwargs["environment"] == "prod"
+
+    def test_sync_requires_environment(self, monkeypatch):
+        monkeypatch.setenv("GE_BSKY_APP_PASSWORD", PASSWORD)
+        monkeypatch.setenv("GE_FEED_GENERATOR_DID", GENERATOR_DID)
+
+        with patch("publish_feed.load_dotenv"):
+            with pytest.raises(SystemExit):
+                with patch(
+                    "sys.argv",
+                    ["publish_feed.py", "--handle", HANDLE, "--sync"],
+                ):
+                    from publish_feed import main
+
+                    main()
+
 
 # ---------------------------------------------------------------------------
 # _prefixed_display_name
@@ -514,6 +563,31 @@ class TestPrefixedDisplayName:
     def test_unknown_environment(self):
         assert _prefixed_display_name("My Feed", "unknown") == "My Feed"
 
+    def test_alias_environment(self):
+        assert _prefixed_display_name("My Feed", "development") == "GE Dev My Feed"
+
+
+class TestEnvironmentResolution:
+    def test_normalize_environment(self):
+        assert _normalize_environment("DEV") == "dev"
+        assert _normalize_environment("staging") == "stage"
+        assert _normalize_environment("production") == "prod"
+        assert _normalize_environment("unknown") is None
+
+    def test_resolve_prefers_cli(self, monkeypatch):
+        monkeypatch.setenv("ENVIRONMENT", "prod")
+        assert _resolve_environment("dev") == "dev"
+
+    def test_resolve_uses_environment_var(self, monkeypatch):
+        monkeypatch.setenv("ENVIRONMENT", "stage")
+        monkeypatch.delenv("GE_ENVIRONMENT", raising=False)
+        assert _resolve_environment(None) == "stage"
+
+    def test_resolve_uses_ge_environment_var(self, monkeypatch):
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+        monkeypatch.setenv("GE_ENVIRONMENT", "development")
+        assert _resolve_environment(None) == "dev"
+
 
 # ---------------------------------------------------------------------------
 # sync_feeds
@@ -532,9 +606,10 @@ class TestSyncFeeds:
             "uri": f"at://{REPO_DID}/app.bsky.feed.generator/old-feed",
             "value": {},
         }
+        feed_count = len(FEEDS)
         client.post.side_effect = [
             _mock_response(200, SESSION_RESPONSE),  # createSession
-            _mock_response(200, {"cid": "bafyabc"}),  # putRecord for basic-similarity
+            *[_mock_response(200, {"cid": "bafyabc"}) for _ in range(feed_count)],
             _mock_response(200, {}),  # deleteRecord for old-feed
         ]
         client.get.return_value = _mock_response(200, {"records": [stale_record]})
@@ -549,6 +624,7 @@ class TestSyncFeeds:
 
         captured = capsys.readouterr()
         assert "Published: basic-similarity" in captured.out
+        assert "Published: random" in captured.out
         assert "GreenEarth Basic Similarity" in captured.out
         assert "Deleted stale: old-feed" in captured.out
         assert "Sync complete:" in captured.out
@@ -564,9 +640,10 @@ class TestSyncFeeds:
             "uri": f"at://{REPO_DID}/app.bsky.feed.generator/basic-similarity",
             "value": {},
         }
+        feed_count = len(FEEDS)
         client.post.side_effect = [
             _mock_response(200, SESSION_RESPONSE),  # createSession
-            _mock_response(200, {"cid": "bafyabc"}),  # putRecord
+            *[_mock_response(200, {"cid": "bafyabc"}) for _ in range(feed_count)],
         ]
         client.get.return_value = _mock_response(200, {"records": [existing_record]})
 
@@ -579,4 +656,4 @@ class TestSyncFeeds:
 
         captured = capsys.readouterr()
         assert "Deleted stale" not in captured.out
-        assert "1 published, 0 deleted" in captured.out
+        assert f"{feed_count} published, 0 deleted" in captured.out

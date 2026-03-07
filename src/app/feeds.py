@@ -25,4 +25,15 @@ FEEDS: dict[str, FeedConfig] = {
             video_only=False,
         ),
     ),
+    "random": FeedConfig(
+        display_name="Random",
+        description="Development feed — random posts.",
+        gen_request_template=CandidateGenerateRequest(
+            generators=[GeneratorSpec(name="random_posts", weight=1.0)],
+            infill=None,
+            user_did="",
+            num_candidates=30,
+            video_only=False,
+        ),
+    ),
 }
