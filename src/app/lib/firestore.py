@@ -34,7 +34,18 @@ def init_firestore_client() -> AsyncClient:
         logger.info("Firestore emulator configured at %s", emulator_host)
 
     project = os.environ.get("GE_FIRESTORE_PROJECT", os.environ.get("PROJECT_ID"))
+    if emulator_host and not project:
+        # firebase-tools defaults to this demo project when no project is configured.
+        # Aligning the SDK avoids writing into a different project namespace.
+        project = "demo-no-project"
+
     database = os.environ.get("GE_FIRESTORE_DATABASE", "(default)")
+    logger.info(
+        "Initializing Firestore client (project=%s, database=%s, emulator=%s)",
+        project,
+        database,
+        bool(emulator_host),
+    )
     return AsyncClient(project=project, database=database)
 
 

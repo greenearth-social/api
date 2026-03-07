@@ -50,6 +50,7 @@ class TestInitFirestoreClient:
     @patch("app.lib.firestore.AsyncClient")
     def test_creates_client(self, MockAsyncClient, monkeypatch):
         monkeypatch.delenv("GE_FIRESTORE_EMULATOR_HOST", raising=False)
+        monkeypatch.delenv("GE_FIRESTORE_PROJECT", raising=False)
         monkeypatch.setenv("PROJECT_ID", "test-project")
 
         init_firestore_client()
@@ -59,6 +60,7 @@ class TestInitFirestoreClient:
     @patch("app.lib.firestore.AsyncClient")
     def test_sets_emulator_host(self, MockAsyncClient, monkeypatch):
         monkeypatch.setenv("GE_FIRESTORE_EMULATOR_HOST", "localhost:8081")
+        monkeypatch.delenv("GE_FIRESTORE_PROJECT", raising=False)
         monkeypatch.setenv("PROJECT_ID", "test-project")
 
         init_firestore_client()
@@ -83,6 +85,16 @@ class TestInitFirestoreClient:
         init_firestore_client()
 
         MockAsyncClient.assert_called_once_with(project="ge-project", database="greenearth-stage")
+
+    @patch("app.lib.firestore.AsyncClient")
+    def test_emulator_defaults_project_when_unset(self, MockAsyncClient, monkeypatch):
+        monkeypatch.setenv("GE_FIRESTORE_EMULATOR_HOST", "localhost:8080")
+        monkeypatch.delenv("GE_FIRESTORE_PROJECT", raising=False)
+        monkeypatch.delenv("PROJECT_ID", raising=False)
+
+        init_firestore_client()
+
+        MockAsyncClient.assert_called_once_with(project="demo-no-project", database="(default)")
 
 
 # ---------------------------------------------------------------------------
