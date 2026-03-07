@@ -252,10 +252,10 @@ sync_feeds() {
     local bsky_handle
     local bsky_secret
     if [ "$ENVIRONMENT" = "prod" ]; then
-        bsky_handle="greenearth-social.bsky.app"
+        bsky_handle="greenearth-social.bsky.social"
         bsky_secret="bsky-app-password-prod"
     else
-        bsky_handle="ge-stage.bsky.app"
+        bsky_handle="ge-stage.bsky.social"
         bsky_secret="bsky-app-password"
     fi
 
