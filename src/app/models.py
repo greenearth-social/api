@@ -1,4 +1,41 @@
+import base64
+
 from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# Cursor
+# ---------------------------------------------------------------------------
+
+class FeedCursor(BaseModel):
+    """Opaque pagination cursor for scrolling through feed results.
+
+    Serialised as base64-encoded JSON in the ``cursor`` field of XRPC
+    feed-skeleton responses.  The ``v`` field enables forward-compatible
+    format evolution.
+    """
+
+    id: str = Field(..., description="Cache key for the stored result set")
+    offset: int = Field(..., ge=0, description="Next position in the cached result list")
+    v: int = Field(default=1, description="Cursor format version")
+
+    def encode(self) -> str:
+        """Serialise to a URL-safe, opaque string."""
+        return base64.urlsafe_b64encode(
+            self.model_dump_json().encode()
+        ).decode()
+
+    @classmethod
+    def decode(cls, raw: str) -> "FeedCursor":
+        """Deserialise from the opaque string produced by :meth:`encode`.
+
+        Raises ``ValueError`` on any decoding or validation failure.
+        """
+        try:
+            payload = base64.urlsafe_b64decode(raw.encode())
+            return cls.model_validate_json(payload)
+        except Exception as exc:
+            raise ValueError(f"Invalid cursor: {exc}") from exc
 
 
 class CandidatePost(BaseModel):

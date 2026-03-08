@@ -148,6 +148,21 @@ ensure_firestore_database() {
     fi
 }
 
+ensure_feed_cache_ttl_policy() {
+    local firestore_db
+    firestore_db="$(get_firestore_database)"
+
+    log_info "Ensuring TTL policy on feed_cache.expires_at..."
+    gcloud firestore fields ttls update expires_at \
+        --collection-group=feed_cache \
+        --database="$firestore_db" \
+        --project="$PROJECT_ID" \
+        --enable-ttl \
+        --quiet 2>/dev/null \
+        && log_info "TTL policy enabled on feed_cache.expires_at" \
+        || log_warn "TTL policy may already exist or could not be updated (non-fatal)"
+}
+
 ensure_firestore_api_key_secret() {
     local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
     local key_display_name
@@ -451,6 +466,7 @@ main() {
     setup_gcp_project
     create_service_account
     ensure_firestore_database
+    ensure_feed_cache_ttl_policy
     ensure_firestore_api_key_secret
 
     # Fetch ES API key from K8s unless disabled or already provided

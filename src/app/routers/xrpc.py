@@ -13,13 +13,15 @@ See: https://docs.bsky.app/docs/starter-templates/custom-feeds
 
 import logging
 import os
+import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..lib.candidates import run_generate
-from ..models import CandidateGenerateRequest, GeneratorSpec
+from ..lib.feed_cache import FeedCache, FirestoreFeedCache, DEFAULT_TTL_SECONDS
+from ..models import CandidateGenerateRequest, FeedCursor, GeneratorSpec
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.firestore import upsert_user
 from ..feeds import FEEDS
@@ -107,7 +109,29 @@ class FeedSkeletonResponse(BaseModel):
     model_config = {"populate_by_name": True}
 
     feed: list[SkeletonItem] = Field(default_factory=list)
-    cursor: str | None = Field(default=None, description="Pagination cursor (not yet implemented)")
+    cursor: str | None = Field(default=None, description="Pagination cursor")
+
+
+# ---------------------------------------------------------------------------
+# Pagination helpers
+# ---------------------------------------------------------------------------
+
+BATCH_MULTIPLIER = 5
+MAX_BATCH_SIZE = 200
+
+
+def _batch_size(limit: int) -> int:
+    """How many candidates to pre-generate for a new cursor session."""
+    return min(limit * BATCH_MULTIPLIER, MAX_BATCH_SIZE)
+
+
+def _get_feed_cache(request: Request) -> FeedCache:
+    """Return the FeedCache attached during app startup."""
+    cache = getattr(request.app.state, "feed_cache", None)
+    if cache is None:
+        logger.error("FeedCache not initialized")
+        raise HTTPException(status_code=500, detail="Feed cache unavailable")
+    return cache
 
 
 # ---------------------------------------------------------------------------
@@ -221,20 +245,55 @@ async def get_feed_skeleton(
         logger.exception("Failed to upsert user '%s' in Firestore", user_did)
         raise HTTPException(status_code=500, detail="Firestore write failed")
 
-    # Start from the feed's generator template and fill in session-specific
-    # values (user identity and the per-request limit).
+    feed_cache = _get_feed_cache(request)
+
+    # ------------------------------------------------------------------
+    # If the client sent a cursor, try to serve the next page from cache.
+    # ------------------------------------------------------------------
+    if cursor is not None:
+        try:
+            parsed = FeedCursor.decode(cursor)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid cursor")
+
+        cached_uris = await feed_cache.retrieve(parsed.id)
+        if cached_uris is not None:
+            page = cached_uris[parsed.offset : parsed.offset + limit]
+            next_offset = parsed.offset + len(page)
+            next_cursor: str | None = None
+            if next_offset < len(cached_uris) and page:
+                next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+            return FeedSkeletonResponse(
+                feed=[SkeletonItem(post=uri) for uri in page],
+                cursor=next_cursor,
+            )
+        # Cache miss (expired / evicted) — fall through to generate fresh.
+
+    # ------------------------------------------------------------------
+    # No cursor or cache miss — generate a fresh batch.
+    # ------------------------------------------------------------------
+    batch = _batch_size(limit)
     gen_request = feed_cfg.gen_request_template.model_copy(
-        update={"user_did": user_did, "num_candidates": limit}
+        update={"user_did": user_did, "num_candidates": batch}
     )
 
     result = await run_generate(
         gen_request, request.app.state.es, swallow_errors=True
     )
 
-    skeleton = [
-        SkeletonItem(post=c.at_uri)
-        for c in result.candidates
-        if c.at_uri
-    ]
+    all_uris = [c.at_uri for c in result.candidates if c.at_uri]
 
-    return FeedSkeletonResponse(feed=skeleton)
+    # First page to return immediately.
+    page = all_uris[:limit]
+
+    # Store the full batch and issue a cursor only when there are more pages.
+    next_cursor = None
+    if len(all_uris) > limit:
+        cache_key = uuid.uuid4().hex
+        await feed_cache.store(cache_key, all_uris)
+        next_cursor = FeedCursor(id=cache_key, offset=limit).encode()
+
+    return FeedSkeletonResponse(
+        feed=[SkeletonItem(post=uri) for uri in page],
+        cursor=next_cursor,
+    )

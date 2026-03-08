@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from .routers import candidates, health, skylight, xrpc
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
+from .lib.feed_cache import FirestoreFeedCache
 from .lib.firestore import init_firestore_client
 
 from elasticsearch import AsyncElasticsearch
@@ -39,6 +40,7 @@ async def lifespan(app: FastAPI):
     app.state.es = es
     app.state.id_resolver = init_id_resolver()
     app.state.firestore = init_firestore_client()
+    app.state.feed_cache = FirestoreFeedCache(app.state.firestore)
     try:
         yield
     finally:
