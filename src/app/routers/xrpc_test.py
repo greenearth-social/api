@@ -7,8 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ..main import app
-from ..models import CandidatePost
+from ..models import CandidatePost, FeedCursor
 from ..lib.candidates.base import CandidateResult
+from ..lib.feed_cache import FeedCache
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +34,19 @@ def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[
     ]
 
 
+class InMemoryFeedCache(FeedCache):
+    """Trivial in-memory feed cache for tests."""
+
+    def __init__(self):
+        self._store: dict[str, list[str]] = {}
+
+    async def store(self, key: str, items: list[str], ttl_seconds: int = 600) -> None:
+        self._store[key] = items
+
+    async def retrieve(self, key: str) -> list[str] | None:
+        return self._store.get(key)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -52,6 +66,7 @@ def fake_app_es():
     did_doc.get_handle.return_value = TEST_USERNAME
     app.state.id_resolver.did.resolve = AsyncMock(return_value=did_doc)
     app.state.firestore = AsyncMock()
+    app.state.feed_cache = InMemoryFeedCache()
     yield
     try:
         delattr(app.state, "es")
@@ -63,6 +78,10 @@ def fake_app_es():
         pass
     try:
         delattr(app.state, "firestore")
+    except Exception:
+        pass
+    try:
+        delattr(app.state, "feed_cache")
     except Exception:
         pass
 
@@ -285,7 +304,9 @@ class TestGetFeedSkeleton:
         assert len(posts) == 5
 
     def test_infill_not_called_when_primary_sufficient(self):
-        primary = _make_candidates("prim", 5, "post_similarity")
+        # The pipeline pre-generates a batch larger than limit (limit * 5),
+        # so we supply enough candidates to cover the full batch.
+        primary = _make_candidates("prim", 25, "post_similarity")
         with self._patch_generators(primary) as mock_get:
             data = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -341,6 +362,173 @@ class TestGetFeedSkeleton:
             data = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI}).json()
         assert len(data["feed"]) == 1
         assert data["feed"][0]["post"] == "at://good/1"
+
+
+# ---------------------------------------------------------------------------
+# Cursor / pagination
+# ---------------------------------------------------------------------------
+
+class TestFeedSkeletonCursor:
+    """Tests for cursor-based feed pagination."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_authenticated_user(self):
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock):
+            yield
+
+    def _patch_generators(self, primary_candidates, infill_candidates=None):
+        primary_gen = AsyncMock()
+        primary_gen.generate.return_value = CandidateResult(
+            generator_name="post_similarity",
+            candidates=primary_candidates,
+        )
+        infill_gen = AsyncMock()
+        infill_gen.generate.return_value = CandidateResult(
+            generator_name="popularity",
+            candidates=infill_candidates or [],
+        )
+
+        def fake_get_generator(name):
+            if name == "post_similarity":
+                return primary_gen
+            if name == "popularity":
+                return infill_gen
+            return None
+
+        return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator)
+
+    def test_first_page_returns_cursor_when_more_available(self):
+        candidates = _make_candidates("p", 10)
+        with self._patch_generators(candidates):
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            ).json()
+        assert len(data["feed"]) == 3
+        assert "cursor" in data
+        parsed = FeedCursor.decode(data["cursor"])
+        assert parsed.offset == 3
+
+    def test_no_cursor_when_all_results_fit_in_one_page(self):
+        candidates = _make_candidates("p", 3)
+        with self._patch_generators(candidates):
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 5},
+            ).json()
+        assert len(data["feed"]) == 3
+        assert "cursor" not in data
+
+    def test_second_page_via_cursor(self):
+        candidates = _make_candidates("p", 10)
+        with self._patch_generators(candidates):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 4},
+            ).json()
+
+        assert len(first["feed"]) == 4
+        cursor = first["cursor"]
+
+        # Second page — no generator call needed (served from cache).
+        with self._patch_generators([]):
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 4, "cursor": cursor},
+            ).json()
+
+        assert len(second["feed"]) == 4
+        assert second["feed"][0]["post"] == "at://p/4"
+
+    def test_last_page_has_no_cursor(self):
+        candidates = _make_candidates("p", 6)
+        with self._patch_generators(candidates):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 4},
+            ).json()
+
+        with self._patch_generators([]):
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 4, "cursor": first["cursor"]},
+            ).json()
+
+        assert len(second["feed"]) == 2
+        assert "cursor" not in second
+
+    def test_full_scroll_returns_all_items(self):
+        """Scrolling through all pages collects every generated post."""
+        candidates = _make_candidates("p", 12)
+        all_posts: list[str] = []
+
+        with self._patch_generators(candidates):
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 5},
+            ).json()
+        all_posts.extend(item["post"] for item in data["feed"])
+
+        while "cursor" in data:
+            with self._patch_generators([]):
+                data = client.get(
+                    "/xrpc/app.bsky.feed.getFeedSkeleton",
+                    params={"feed": FEED_URI, "limit": 5, "cursor": data["cursor"]},
+                ).json()
+            all_posts.extend(item["post"] for item in data["feed"])
+
+        assert all_posts == [f"at://p/{i}" for i in range(12)]
+
+    def test_invalid_cursor_returns_400(self):
+        with self._patch_generators([]):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "cursor": "not-valid-base64!@#"},
+            )
+        assert resp.status_code == 400
+        assert "Invalid cursor" in resp.json()["detail"]
+
+    def test_expired_cursor_generates_fresh_results(self):
+        """When the cache entry is gone, a fresh batch is generated."""
+        candidates = _make_candidates("p", 8)
+        with self._patch_generators(candidates):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            ).json()
+
+        # Simulate cache eviction.
+        app.state.feed_cache._store.clear()
+
+        fresh = _make_candidates("fresh", 5)
+        with self._patch_generators(fresh):
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3, "cursor": first["cursor"]},
+            ).json()
+
+        # Should have generated fresh results, not errored.
+        assert len(data["feed"]) == 3
+        assert data["feed"][0]["post"] == "at://fresh/0"
+
+    def test_missing_feed_cache_returns_500(self):
+        saved = app.state.feed_cache
+        app.state.feed_cache = None
+        try:
+            with self._patch_generators(_make_candidates("p", 1)):
+                resp = client.get(
+                    "/xrpc/app.bsky.feed.getFeedSkeleton",
+                    params={"feed": FEED_URI},
+                )
+            assert resp.status_code == 500
+            assert resp.json()["detail"] == "Feed cache unavailable"
+        finally:
+            app.state.feed_cache = saved
 
 
 # ---------------------------------------------------------------------------
