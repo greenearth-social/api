@@ -9,18 +9,18 @@
 
 set -e
 
-# Configuration
-PROJECT_ID="${PROJECT_ID:-greenearth-471522}"
-REGION="${REGION:-us-east1}"
-ENVIRONMENT="${ENVIRONMENT:-stage}"
+# Configuration (overridden by CLI args)
+PROJECT_ID="greenearth-471522"
+REGION="us-east1"
+ENVIRONMENT="stage"
 
 # Elasticsearch configuration
-ELASTICSEARCH_URL="${ELASTICSEARCH_URL:-INTERNAL_LB_PLACEHOLDER}"
+ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 
 # Service configuration
-API_INSTANCES_MIN="${API_INSTANCES_MIN:-1}"
-API_INSTANCES_MAX="${API_INSTANCES_MAX:-10}"
-API_REQUEST_TIMEOUT="${API_REQUEST_TIMEOUT:-60}"
+API_INSTANCES_MIN="1"
+API_INSTANCES_MAX="10"
+API_REQUEST_TIMEOUT="60"
 
 # Colors for output
 RED='\033[0;31m'
@@ -49,7 +49,7 @@ validate_config() {
     log_info "Validating configuration..."
 
     if [ "$PROJECT_ID" = "your-project-id" ]; then
-        log_error "Please set PROJECT_ID environment variable or use --project-id"
+        log_error "Please set --project-id"
         exit 1
     fi
 
@@ -68,7 +68,7 @@ configure_kubectl() {
         --location="$REGION" \
         --project="$PROJECT_ID" 2>/dev/null; then
         log_warn "Could not configure kubectl for cluster $cluster_name"
-        log_warn "If you need to auto-detect Elasticsearch URL, set ELASTICSEARCH_URL manually"
+        log_warn "If you need to set Elasticsearch URL manually, use --elasticsearch-url"
         return 1
     fi
 
@@ -100,12 +100,12 @@ get_elasticsearch_internal_lb_ip() {
         else
             log_warn "Could not get internal load balancer IP"
             log_warn "Make sure the Elasticsearch cluster is deployed with internal load balancer"
-            log_error "Please deploy Elasticsearch cluster first or set ELASTICSEARCH_URL manually"
+            log_error "Please deploy Elasticsearch cluster first or pass --elasticsearch-url"
             exit 1
         fi
     else
         log_error "kubectl not available - cannot determine Elasticsearch internal load balancer IP"
-        log_error "Please install kubectl or set ELASTICSEARCH_URL manually"
+        log_error "Please install kubectl or pass --elasticsearch-url"
         exit 1
     fi
 }
@@ -366,6 +366,10 @@ while [[ $# -gt 0 ]]; do
             ENVIRONMENT="$2"
             shift 2
             ;;
+        --elasticsearch-url)
+            ELASTICSEARCH_URL="$2"
+            shift 2
+            ;;
         --min-instances)
             API_INSTANCES_MIN="$2"
             shift 2
@@ -385,16 +389,11 @@ while [[ $# -gt 0 ]]; do
             echo "  --project-id ID          GCP project ID (default: greenearth-471522)"
             echo "  --region REGION          GCP region (default: us-east1)"
             echo "  --environment ENV        Environment name (default: stage)"
+            echo "  --elasticsearch-url URL  Elasticsearch URL (default: INTERNAL_LB_PLACEHOLDER)"
             echo "  --min-instances N        Minimum instances (default: 1)"
             echo "  --max-instances N        Maximum instances (default: 10)"
             echo "  --timeout SECONDS        Cloud Run request timeout (default: 60)"
             echo "  --help                   Show this help message"
-            echo ""
-            echo "Environment variables:"
-            echo "  PROJECT_ID              Same as --project-id"
-            echo "  REGION                  Same as --region"
-            echo "  ENVIRONMENT             Same as --environment"
-            echo "  API_REQUEST_TIMEOUT     Same as --timeout"
             exit 0
             ;;
         *)
