@@ -6,21 +6,21 @@
 
 set -e
 
-# Configuration
-PROJECT_ID="${PROJECT_ID:-greenearth-471522}"
-REGION="${REGION:-us-east1}"
-ENVIRONMENT="${ENVIRONMENT:-stage}"
-FIRESTORE_LOCATION="${FIRESTORE_LOCATION:-$REGION}"
+# Configuration (overridden by CLI args)
+PROJECT_ID="greenearth-471522"
+REGION="us-east1"
+ENVIRONMENT="stage"
+FIRESTORE_LOCATION=""
 
 # Elasticsearch configuration - only API key is secret, URL is public
-ELASTICSEARCH_URL="${ELASTICSEARCH_URL:-INTERNAL_LB_PLACEHOLDER}"
-ELASTICSEARCH_API_KEY="${ELASTICSEARCH_API_KEY:-}"
+ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
+ELASTICSEARCH_API_KEY=""
 
 # API authentication
-API_KEY="${API_KEY:-}"
+API_KEY=""
 
 # Bluesky app password for feed publishing
-BSKY_APP_PASSWORD="${BSKY_APP_PASSWORD:-}"
+BSKY_APP_PASSWORD=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -61,8 +61,12 @@ validate_config() {
     log_info "Validating configuration..."
 
     if [ "$PROJECT_ID" = "your-project-id" ]; then
-        log_error "Please set PROJECT_ID environment variable or update the script"
+        log_error "Please set --project-id"
         exit 1
+    fi
+
+    if [ -z "$FIRESTORE_LOCATION" ]; then
+        FIRESTORE_LOCATION="$REGION"
     fi
 
     log_info "Configuration validation complete."
@@ -332,7 +336,7 @@ setup_secrets() {
                 --role="roles/secretmanager.secretAccessor" \
                 --condition=None 2>/dev/null || log_info "Service account already has access to $es_api_key_secret"
         else
-            log_warn "Elasticsearch API key secret does not exist: $es_api_key_secret. You'll need to create it manually or re-run with ELASTICSEARCH_API_KEY set"
+            log_warn "Elasticsearch API key secret does not exist: $es_api_key_secret. You'll need to create it manually or re-run with --elasticsearch-api-key"
         fi
     fi
 
@@ -372,7 +376,7 @@ setup_secrets() {
                 --role="roles/secretmanager.secretAccessor" \
                 --condition=None 2>/dev/null || log_info "Service account already has access to $api_key_secret"
         else
-            log_warn "API key secret does not exist: $api_key_secret. You'll need to create it manually or re-run with API_KEY set"
+            log_warn "API key secret does not exist: $api_key_secret. You'll need to create it manually or re-run with --api-key"
         fi
     fi
 
@@ -402,7 +406,7 @@ setup_bsky_secret() {
             log_info "Bluesky app password secret already exists: $bsky_secret"
         else
             log_warn "Bluesky app password not provided and secret does not exist: $bsky_secret"
-            log_warn "Run with BSKY_APP_PASSWORD=<password> to create it, or create manually:"
+            log_warn "Run with --bsky-app-password '<password>' to create it, or create manually:"
             log_warn "  echo -n '<password>' | gcloud secrets create $bsky_secret --data-file=- --project=$PROJECT_ID"
         fi
     fi
@@ -507,6 +511,26 @@ while [[ $# -gt 0 ]]; do
             ENVIRONMENT="$2"
             shift 2
             ;;
+        --firestore-location)
+            FIRESTORE_LOCATION="$2"
+            shift 2
+            ;;
+        --elasticsearch-url)
+            ELASTICSEARCH_URL="$2"
+            shift 2
+            ;;
+        --elasticsearch-api-key)
+            ELASTICSEARCH_API_KEY="$2"
+            shift 2
+            ;;
+        --api-key)
+            API_KEY="$2"
+            shift 2
+            ;;
+        --bsky-app-password)
+            BSKY_APP_PASSWORD="$2"
+            shift 2
+            ;;
         --no-fetch-es-key)
             FETCH_ES_KEY=false
             shift
@@ -518,24 +542,21 @@ while [[ $# -gt 0 ]]; do
             echo "  --project-id ID          GCP project ID (default: greenearth-471522)"
             echo "  --region REGION          GCP region (default: us-east1)"
             echo "  --environment ENV        Environment name (default: stage)"
-            echo "  --no-fetch-es-key        Skip fetching ES API key from K8s (use existing secret or env var)"
+            echo "  --firestore-location LOC Firestore database location (default: REGION)"
+            echo "  --elasticsearch-url URL  Elasticsearch URL (default: INTERNAL_LB_PLACEHOLDER)"
+            echo "  --elasticsearch-api-key KEY"
+            echo "                           Elasticsearch API key (skips K8s fetch if provided)"
+            echo "  --api-key KEY            API key for authentication (stored in Secret Manager)"
+            echo "  --bsky-app-password PWD  Bluesky app password (stored in Secret Manager)"
+            echo "  --no-fetch-es-key        Skip fetching ES API key from K8s"
             echo "  --help                   Show this help message"
-            echo ""
-            echo "Environment variables:"
-            echo "  PROJECT_ID              Same as --project-id"
-            echo "  REGION                  Same as --region"
-            echo "  ENVIRONMENT             Same as --environment"
-            echo "  API_KEY                 API key for authentication (stored in Secret Manager)"
-            echo "  ELASTICSEARCH_API_KEY   Elasticsearch API key (skips K8s fetch if provided)"
-            echo "  BSKY_APP_PASSWORD       Bluesky app password for feed publishing (stored in Secret Manager)"
-            echo "  FIRESTORE_LOCATION      Firestore database location (default: REGION)"
             echo ""
             echo "Examples:"
             echo "  # Setup for staging (fetches ES key from K8s by default):"
             echo "  $0 --environment stage"
             echo ""
             echo "  # Setup for production with manual ES key:"
-            echo "  ELASTICSEARCH_API_KEY=xxx $0 --environment prod --no-fetch-es-key"
+            echo "  $0 --environment prod --elasticsearch-api-key xxx --no-fetch-es-key"
             exit 0
             ;;
         *)
