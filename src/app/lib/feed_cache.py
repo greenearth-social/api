@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 
 from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
 
+from ..documents import FeedCacheDocument
+
 logger = logging.getLogger(__name__)
 
 FEED_CACHE_COLLECTION = "feed_cache"
@@ -46,10 +48,11 @@ class FirestoreFeedCache(FeedCache):
 
     async def store(self, key: str, items: list[str], ttl_seconds: int = DEFAULT_TTL_SECONDS) -> None:
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+        cache_doc = FeedCacheDocument(items=items, expires_at=expires_at)
         await (
             self._db.collection(FEED_CACHE_COLLECTION)
             .document(key)
-            .set({"items": items, "expires_at": expires_at})
+            .set(cache_doc.model_dump())
         )
 
     async def retrieve(self, key: str) -> list[str] | None:
@@ -60,15 +63,17 @@ class FirestoreFeedCache(FeedCache):
         if data is None:
             return None
 
-        expires_at = data.get("expires_at")
-        if expires_at is not None:
-            # Firestore may return a native datetime or a proto timestamp;
-            # normalise to offset-aware UTC for comparison.
-            if hasattr(expires_at, "timestamp"):
-                # Already a datetime-like; ensure it's tz-aware.
-                if expires_at.tzinfo is None:
-                    expires_at = expires_at.replace(tzinfo=timezone.utc)
-            if datetime.now(timezone.utc) >= expires_at:
-                return None
+        try:
+            cache_doc = FeedCacheDocument.model_validate(data)
+        except Exception:
+            logger.warning("Invalid feed cache document shape for key=%s", key)
+            return None
 
-        return data.get("items")
+        expires_at = cache_doc.expires_at
+        # Firestore may return naive datetimes; treat them as UTC.
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= expires_at:
+            return None
+
+        return cache_doc.items

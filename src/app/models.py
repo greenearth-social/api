@@ -3,10 +3,6 @@ import base64
 from pydantic import BaseModel, Field
 
 
-# ---------------------------------------------------------------------------
-# Cursor
-# ---------------------------------------------------------------------------
-
 class FeedCursor(BaseModel):
     """Opaque pagination cursor for scrolling through feed results.
 
