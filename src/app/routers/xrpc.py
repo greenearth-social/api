@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from ..lib.candidates import run_generate
 from ..models import CandidateGenerateRequest, GeneratorSpec
 from ..lib.atproto_auth import verify_auth_header
+from ..lib.firestore import upsert_user
 from ..feeds import FEEDS
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,26 @@ def _get_hostname() -> str:
 
 def _feed_uri(feed_name: str) -> str:
     return f"at://{_get_service_did()}/app.bsky.feed.generator/{feed_name}"
+
+
+async def _resolve_username(request: Request, user_did: str) -> str:
+    """Resolve the caller's handle from their DID document."""
+    resolver = getattr(request.app.state, "id_resolver", None)
+    if resolver is None:
+        logger.error("id_resolver not initialized")
+        raise HTTPException(status_code=500, detail="Identity resolver unavailable")
+
+    did_doc = await resolver.did.resolve(user_did)
+    if did_doc is None:
+        logger.error("Failed to resolve DID document for %s", user_did)
+        raise HTTPException(status_code=500, detail="Username resolution failed")
+
+    username = did_doc.get_handle()
+    if not username:
+        logger.error("No handle found in DID document for %s", user_did)
+        raise HTTPException(status_code=500, detail="Username resolution failed")
+
+    return username
 
 
 # ---------------------------------------------------------------------------
@@ -170,17 +191,35 @@ async def get_feed_skeleton(
 
     feed_cfg = FEEDS[feed_name]
 
-    # Attempt to authenticate the requesting user via the AT Protocol
-    # inter-service JWT.  When a valid token is present we get the user's
-    # DID which enables personalised feeds (e.g. post_similarity uses
-    # liked posts).  Missing or invalid auth falls back to "".
+    # Authenticate the requesting user via the AT Protocol inter-service JWT.
+    # A valid DID is required for this feed endpoint.
     user_did = await verify_auth_header(request, service_did=_get_service_did())
 
-    if request.headers.get("Authorization"):
-        if not user_did:
+    if not user_did:
+        if request.headers.get("Authorization"):
             logger.warning("Auth header present but verification failed for feed %s", feed_name)
-    else:
-        logger.warning("No auth header present for feed %s; proceeding as unauthenticated", feed_name)
+        else:
+            logger.warning("No auth header present for feed %s", feed_name)
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    username = await _resolve_username(request, user_did)
+
+    # Record authenticated users in Firestore for backend analytics/state.
+    # Firestore persistence is required and failures are treated as fatal.
+    db = getattr(request.app.state, "firestore", None)
+    if db is None:
+        logger.error("Firestore client not initialized")
+        raise HTTPException(status_code=500, detail="Firestore unavailable")
+
+    try:
+        await upsert_user(db, user_did, username)
+    except Exception:
+        logger.exception("Failed to upsert user '%s' in Firestore", user_did)
+        raise HTTPException(status_code=500, detail="Firestore write failed")
 
     # Start from the feed's generator template and fill in session-specific
     # values (user identity and the per-request limit).

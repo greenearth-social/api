@@ -9,17 +9,18 @@
 
 set -e
 
-# Configuration
-PROJECT_ID="${PROJECT_ID:-greenearth-471522}"
-REGION="${REGION:-us-east1}"
-ENVIRONMENT="${ENVIRONMENT:-stage}"
+# Configuration (overridden by CLI args)
+PROJECT_ID="greenearth-471522"
+REGION="us-east1"
+ENVIRONMENT="stage"
 
 # Elasticsearch configuration
-ELASTICSEARCH_URL="${ELASTICSEARCH_URL:-INTERNAL_LB_PLACEHOLDER}"
+ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 
 # Service configuration
-API_INSTANCES_MIN="${API_INSTANCES_MIN:-1}"
-API_INSTANCES_MAX="${API_INSTANCES_MAX:-10}"
+API_INSTANCES_MIN="1"
+API_INSTANCES_MAX="10"
+API_REQUEST_TIMEOUT="60"
 
 # Colors for output
 RED='\033[0;31m'
@@ -48,7 +49,7 @@ validate_config() {
     log_info "Validating configuration..."
 
     if [ "$PROJECT_ID" = "your-project-id" ]; then
-        log_error "Please set PROJECT_ID environment variable or use --project-id"
+        log_error "Please set --project-id"
         exit 1
     fi
 
@@ -67,7 +68,7 @@ configure_kubectl() {
         --location="$REGION" \
         --project="$PROJECT_ID" 2>/dev/null; then
         log_warn "Could not configure kubectl for cluster $cluster_name"
-        log_warn "If you need to auto-detect Elasticsearch URL, set ELASTICSEARCH_URL manually"
+        log_warn "If you need to set Elasticsearch URL manually, use --elasticsearch-url"
         return 1
     fi
 
@@ -99,12 +100,12 @@ get_elasticsearch_internal_lb_ip() {
         else
             log_warn "Could not get internal load balancer IP"
             log_warn "Make sure the Elasticsearch cluster is deployed with internal load balancer"
-            log_error "Please deploy Elasticsearch cluster first or set ELASTICSEARCH_URL manually"
+            log_error "Please deploy Elasticsearch cluster first or pass --elasticsearch-url"
             exit 1
         fi
     else
         log_error "kubectl not available - cannot determine Elasticsearch internal load balancer IP"
-        log_error "Please install kubectl or set ELASTICSEARCH_URL manually"
+        log_error "Please install kubectl or pass --elasticsearch-url"
         exit 1
     fi
 }
@@ -152,6 +153,31 @@ generate_requirements() {
     fi
 }
 
+deploy_firestore_config() {
+    log_info "Deploying Firestore rules and indexes for project $PROJECT_ID..."
+
+    if ! command -v firebase &> /dev/null; then
+        log_error "firebase CLI is not installed. Install with: npm install -g firebase-tools"
+        exit 1
+    fi
+
+    if [ ! -f "firebase.json" ] || [ ! -f "firestore.rules" ] || [ ! -f "firestore.indexes.json" ]; then
+        log_error "Missing firebase.json, firestore.rules, or firestore.indexes.json in $(pwd)"
+        log_error "Run this script from the api/ directory where Firebase config lives"
+        exit 1
+    fi
+
+    # Deploy Firestore config idempotently: applies rules and creates/updates indexes as needed.
+    firebase deploy --only firestore --project "$PROJECT_ID"
+
+    if [ $? -eq 0 ]; then
+        log_info "✓ Firestore rules and indexes deployed successfully"
+    else
+        log_error "Failed to deploy Firestore rules/indexes"
+        exit 1
+    fi
+}
+
 deploy_api_service() {
     log_info "Deploying greenearth-api-$ENVIRONMENT service from source..."
 
@@ -160,9 +186,13 @@ deploy_api_service() {
     # API uses the readonly key since it only needs read access to Elasticsearch
     local es_api_key_secret="elasticsearch-api-key-readonly"
     local api_key_secret="api-key"
+    local firestore_api_key_secret="firestore-api-key-stage"
+    local firestore_database="greenearth-stage"
     if [ "$ENVIRONMENT" = "prod" ]; then
         es_api_key_secret="elasticsearch-api-key-readonly-prod"
         api_key_secret="api-key-prod"
+        firestore_api_key_secret="firestore-api-key-prod"
+        firestore_database="greenearth-prod"
     fi
 
     # Build base command with environment suffix in service name
@@ -182,17 +212,20 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=LOG_LEVEL=info"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$ELASTICSEARCH_URL"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
 
     # Add secrets with environment-specific names
     deploy_cmd="$deploy_cmd --set-secrets=GE_ELASTICSEARCH_API_KEY=$es_api_key_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=API_KEY=$api_key_secret:latest"
+    deploy_cmd="$deploy_cmd --set-secrets=GE_FIRESTORE_API_KEY=$firestore_api_key_secret:latest"
 
     # Resource and scaling configuration
     deploy_cmd="$deploy_cmd --min-instances=$API_INSTANCES_MIN"
     deploy_cmd="$deploy_cmd --max-instances=$API_INSTANCES_MAX"
     deploy_cmd="$deploy_cmd --cpu=1"
     deploy_cmd="$deploy_cmd --memory=512Mi"
-    deploy_cmd="$deploy_cmd --timeout=60"
+    deploy_cmd="$deploy_cmd --timeout=$API_REQUEST_TIMEOUT"
     deploy_cmd="$deploy_cmd --concurrency=80"
 
     # Allow unauthenticated access (adjust based on your needs)
@@ -205,11 +238,93 @@ deploy_api_service() {
         log_info "✓ greenearth-api-$ENVIRONMENT deployed successfully"
 
         # Get the service URL
-        local service_url=$(gcloud run services describe greenearth-api-$ENVIRONMENT --region="$REGION" --format="value(status.url)")
+        local service_url=$(gcloud run services describe greenearth-api-$ENVIRONMENT --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)")
         log_info "Service URL: $service_url"
+
+        # Ensure runtime DID is explicitly set so /.well-known/did.json is env-correct
+        local generator_did
+        if [ "$ENVIRONMENT" = "prod" ]; then
+            generator_did="did:web:api.greenearth.social"
+        else
+            local service_host
+            service_host=$(echo "$service_url" | sed 's|https://||')
+            generator_did="did:web:$service_host"
+        fi
+
+        gcloud run services update "greenearth-api-$ENVIRONMENT" \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --update-env-vars="GE_FEED_GENERATOR_DID=$generator_did" \
+            --remove-env-vars="GE_FIRESTORE_EMULATOR_HOST,FIRESTORE_EMULATOR_HOST" > /dev/null
+        log_info "Set GE_FEED_GENERATOR_DID=$generator_did"
     else
         log_error "Failed to deploy greenearth-api-$ENVIRONMENT"
         exit 1
+    fi
+}
+
+resolve_generator_did() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "did:web:api.greenearth.social"
+        return 0
+    fi
+
+    local service_url
+    service_url=$(gcloud run services describe "greenearth-api-$ENVIRONMENT" \
+        --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)" 2>/dev/null)
+    if [ -z "$service_url" ]; then
+        return 1
+    fi
+
+    local service_host
+    service_host=$(echo "$service_url" | sed 's|https://||')
+    echo "did:web:$service_host"
+}
+
+sync_feeds() {
+    log_info "Syncing feed generator records for $ENVIRONMENT..."
+
+    # Determine Bluesky handle and secret name for this environment
+    local bsky_handle
+    local bsky_secret
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        bsky_handle="greenearth-social.bsky.social"
+        bsky_secret="bsky-app-password-prod"
+    else
+        bsky_handle="ge-stage.bsky.social"
+        bsky_secret="bsky-app-password"
+    fi
+
+    # Fetch app password from Secret Manager
+    local bsky_password
+    bsky_password=$(gcloud secrets versions access latest --secret="$bsky_secret" --project="$PROJECT_ID" 2>/dev/null)
+    if [ -z "$bsky_password" ]; then
+        log_warn "Could not fetch Bluesky app password from secret '$bsky_secret'"
+        log_warn "Skipping feed sync. Store the password with:"
+        log_warn "  echo -n '<password>' | gcloud secrets create $bsky_secret --data-file=- --project=$PROJECT_ID"
+        return 0
+    fi
+
+    local generator_did
+    if ! generator_did=$(resolve_generator_did); then
+        log_warn "Could not determine service URL — skipping feed sync"
+        return 0
+    fi
+
+    log_info "Handle:        $bsky_handle"
+    log_info "Generator DID: $generator_did"
+
+    pipenv run python scripts/publish_feed.py \
+        --handle "$bsky_handle" \
+        --app-password "$bsky_password" \
+        --generator-did "$generator_did" \
+        --environment "$ENVIRONMENT" \
+        --sync
+
+    if [ $? -eq 0 ]; then
+        log_info "Feed records synced successfully"
+    else
+        log_warn "Feed sync failed — feeds may be out of date"
     fi
 }
 
@@ -228,8 +343,10 @@ main() {
     fi
 
     get_elasticsearch_internal_lb_ip
+    deploy_firestore_config
     generate_requirements
     deploy_api_service
+    sync_feeds
 
     log_info "Deployment complete!"
 }
@@ -249,12 +366,20 @@ while [[ $# -gt 0 ]]; do
             ENVIRONMENT="$2"
             shift 2
             ;;
+        --elasticsearch-url)
+            ELASTICSEARCH_URL="$2"
+            shift 2
+            ;;
         --min-instances)
             API_INSTANCES_MIN="$2"
             shift 2
             ;;
         --max-instances)
             API_INSTANCES_MAX="$2"
+            shift 2
+            ;;
+        --timeout)
+            API_REQUEST_TIMEOUT="$2"
             shift 2
             ;;
         --help)
@@ -264,14 +389,11 @@ while [[ $# -gt 0 ]]; do
             echo "  --project-id ID          GCP project ID (default: greenearth-471522)"
             echo "  --region REGION          GCP region (default: us-east1)"
             echo "  --environment ENV        Environment name (default: stage)"
+            echo "  --elasticsearch-url URL  Elasticsearch URL (default: INTERNAL_LB_PLACEHOLDER)"
             echo "  --min-instances N        Minimum instances (default: 1)"
             echo "  --max-instances N        Maximum instances (default: 10)"
+            echo "  --timeout SECONDS        Cloud Run request timeout (default: 60)"
             echo "  --help                   Show this help message"
-            echo ""
-            echo "Environment variables:"
-            echo "  PROJECT_ID              Same as --project-id"
-            echo "  REGION                  Same as --region"
-            echo "  ENVIRONMENT             Same as --environment"
             exit 0
             ;;
         *)

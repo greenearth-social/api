@@ -107,6 +107,7 @@ def test_list_generators():
     data = resp.json()
     assert "post_similarity" in data["generators"]
     assert "popularity" in data["generators"]
+    assert "random_posts" in data["generators"]
 
 
 def test_generate_single_generator():
@@ -143,6 +144,23 @@ def test_generate_popularity():
     assert len(data["candidates"]) == 2
     assert data["candidates"][0]["at_uri"] == "at://popular/1"
     assert data["candidates"][0]["generator_name"] == "popularity"
+
+
+def test_generate_random_posts():
+    client = TestClient(app, headers=HEADERS)
+    resp = client.post(
+        "/candidates/generate",
+        json={
+            "generators": [{"name": "random_posts"}],
+            "user_did": "did:plc:user1",
+            "num_candidates": 2,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["candidates"]) == 2
+    assert data["candidates"][0]["at_uri"] == "at://popular/1"
+    assert data["candidates"][0]["generator_name"] == "random_posts"
 
 
 def test_generate_multiple_generators():

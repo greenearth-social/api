@@ -1,0 +1,13 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Require an authenticated Firebase identity for all direct Firestore access.
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    match /{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+  }
+}
