@@ -27,6 +27,40 @@ An API server for handling bluesky content recommendation requests.
    pipenv install --dev
    ```
 
+## Shared ML Code (`shared` package)
+
+The API depends on the `shared` package from the private (for now)
+[engagement-prediction](https://github.com/greenearth-social/engagement-prediction)
+repo. This provides ML feature encoding and data preparation helpers that are
+shared between training and inference to avoid bugs from duplicated logic.
+
+The dependency is declared as a git dependency in `Pipfile` and the exact
+commit SHA is pinned in `Pipfile.lock`. You need SSH access to the
+engagement-prediction repo for `pipenv install` to work.
+
+### Updating to the latest shared code
+
+```bash
+pipenv lock
+pipenv install
+```
+
+`pipenv lock` re-resolves the dependency against the `main` branch and pins
+the latest commit SHA in `Pipfile.lock`. Commit the updated lockfile so that
+other developers and deploys use the same version.
+
+### Pinning a specific commit or branch
+
+This might be helpful to, for example, revert to an older version.
+
+Edit the `ref` in `Pipfile`:
+
+```toml
+shared = {git = "ssh://git@github.com/greenearth-social/engagement-prediction.git", ref = "<commit-sha-or-branch>", editable = true}
+```
+
+Then run `pipenv lock && pipenv install`.
+
 ## Running the Server
 
 Start the development server with auto-reload:

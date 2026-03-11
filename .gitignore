@@ -28,6 +28,9 @@ dist/
 .eggs/
 pip-wheel-metadata/
 
+# Vendored wheels for deployment
+vendor/
+
 # Jupyter
 .ipynb_checkpoints/
 

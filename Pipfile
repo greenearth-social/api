@@ -11,6 +11,7 @@ elasticsearch = "==9.3.0"
 aiohttp = "*"
 atproto = "*"
 google-cloud-firestore = "*"
+shared = {git = "ssh://git@github.com/greenearth-social/engagement-prediction.git", ref = "main", editable = true}
 
 [dev-packages]
 pytest = "*"
