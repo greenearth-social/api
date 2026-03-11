@@ -2,6 +2,7 @@
 
 The abstract :class:`FeedCache` interface intentionally hides the storage
 backend so it can be swapped (e.g. to Redis) without touching callers.
+
 """
 
 from __future__ import annotations
