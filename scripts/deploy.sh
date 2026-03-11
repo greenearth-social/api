@@ -134,6 +134,32 @@ verify_vpc_connector() {
     fi
 }
 
+vendor_shared_package() {
+    log_info "Building shared engagement-prediction package wheel from pinned git ref..."
+
+    rm -rf vendor/
+    mkdir -p vendor/
+
+    # Extract the git+ssh URL (with pinned SHA) that pipenv resolved
+    local git_ref
+    git_ref=$(pipenv requirements 2>/dev/null | grep 'engagement-prediction')
+    if [ -z "$git_ref" ]; then
+        log_error "Could not find engagement-prediction dependency in pipenv requirements"
+        log_error "Run 'pipenv lock' to ensure Pipfile.lock is up to date"
+        exit 1
+    fi
+
+    log_info "Building wheel from: $git_ref"
+    pip wheel --no-deps "$git_ref" -w vendor/ --quiet
+    if [ $? -ne 0 ]; then
+        log_error "Failed to build shared package wheel"
+        log_error "Ensure you have git credentials to access the engagement-prediction repo"
+        exit 1
+    fi
+
+    log_info "Shared package wheel built in vendor/"
+}
+
 generate_requirements() {
     log_info "Generating requirements.txt from Pipfile..."
 
@@ -149,6 +175,19 @@ generate_requirements() {
         log_info "Generated requirements.txt successfully"
     else
         log_error "Failed to generate requirements.txt"
+        exit 1
+    fi
+
+    # Replace the git+ssh dependency with the vendored wheel
+    # Cloud Build doesn't have SSH credentials for the private repo
+    sed -i '' '/engagement-prediction/d' requirements.txt
+    local wheel_file
+    wheel_file=$(ls vendor/shared-*.whl 2>/dev/null | head -1)
+    if [ -n "$wheel_file" ]; then
+        echo "$wheel_file" >> requirements.txt
+        log_info "Added vendored wheel to requirements.txt: $wheel_file"
+    else
+        log_error "No shared wheel found in vendor/"
         exit 1
     fi
 }
@@ -344,6 +383,7 @@ main() {
 
     get_elasticsearch_internal_lb_ip
     deploy_firestore_config
+    vendor_shared_package
     generate_requirements
     deploy_api_service
     sync_feeds

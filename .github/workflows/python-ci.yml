@@ -23,6 +23,11 @@ jobs:
     - name: Install pipenv
       run: pip install pipenv
 
+    - name: Configure SSH for private dependencies
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.ENGAGEMENT_PREDICTION_DEPLOY_KEY }}
+
     - name: Install dependencies
       run: pipenv install --dev
 
