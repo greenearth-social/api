@@ -108,6 +108,7 @@ async def knn_search_posts(
     num_candidates: int,
     generator_name: str | None = None,
     video_only: bool = False,
+    exclude_uris: list[str] | None = None,
 ) -> list[CandidatePost]:
     """Run a kNN search against the ``posts`` index and return candidate posts.
 
@@ -115,6 +116,14 @@ async def knn_search_posts(
     matching.  Each hit is converted to a :class:`CandidatePost` with the ES
     score attached.
     """
+    filters: list[dict] = []
+    if video_only:
+        filters.append({"term": {"contains_video": True}})
+
+    must_not: list[dict] = []
+    if exclude_uris:
+        must_not.append({"terms": {"at_uri": exclude_uris}})
+
     knn_query = {
         "bool": {
             "must": {
@@ -125,7 +134,8 @@ async def knn_search_posts(
                     "num_candidates": max(100, num_candidates * 10),
                 }
             },
-            "filter": [{"term": {"contains_video": True}}] if video_only else [],
+            "filter": filters,
+            **("must_not" and {"must_not": must_not} if must_not else {}),
         }
     }
 
@@ -179,6 +189,7 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
         user_did: str,
         num_candidates: int = 100,
         video_only: bool = False,
+        exclude_uris: list[str] | None = None,
     ) -> CandidateResult:
         # 1. Get recently liked post URIs
         liked_uris = await fetch_recent_liked_post_uris(es, user_did)
@@ -204,6 +215,7 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
         # 4. kNN search for similar posts
         candidates = await knn_search_posts(
             es, avg_vector, num_candidates, generator_name=self.name, video_only=video_only,
+            exclude_uris=exclude_uris,
         )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

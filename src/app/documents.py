@@ -35,3 +35,13 @@ class UserDocument(BaseModel):
     created_at: datetime = Field(default_factory=_utcnow, description="When the user was first seen")
     updated_at: datetime = Field(default_factory=_utcnow, description="Last time the document was modified")
     last_seen_at: datetime = Field(default_factory=_utcnow, description="Most recent feed request from this user")
+
+
+class FeedCacheDocument(BaseModel):
+    """Cached feed result set used by cursor pagination.
+
+    The document ID is an opaque cache key generated per feed request.
+    """
+
+    items: list[str] = Field(default_factory=list, description="Cached AT URI list")
+    expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")

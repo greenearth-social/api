@@ -57,19 +57,26 @@ async def popularity_search(
     num_candidates: int,
     generator_name: str | None = None,
     video_only: bool = False,
+    exclude_uris: list[str] | None = None,
 ) -> list[CandidatePost]:
     """Run a function_score query combining recency and like_count."""
+
+    filters: list[dict] = [
+        {"range": {"created_at": {"gte": f"now-{RECENCY_WINDOW}"}}},
+    ]
+    if video_only:
+        filters.append({"term": {"contains_video": True}})
+
+    must_not: list[dict] = []
+    if exclude_uris:
+        must_not.append({"terms": {"at_uri": exclude_uris}})
 
     query = {
         "function_score": {
             "query": {
                 "bool": {
-                    "filter": [
-                        f for f in [
-                            {"term": {"contains_video": True}} if video_only else None,
-                            {"range": {"created_at": {"gte": f"now-{RECENCY_WINDOW}"}}},
-                        ] if f is not None
-                    ],
+                    "filter": filters,
+                    **("must_not" and {"must_not": must_not} if must_not else {}),
                 }
             },
             "functions": [
@@ -159,8 +166,10 @@ class PopularityCandidateGenerator(CandidateGenerator):
         user_did: str,
         num_candidates: int = 100,
         video_only: bool = False,
+        exclude_uris: list[str] | None = None,
     ) -> CandidateResult:
         candidates = await popularity_search(
             es, num_candidates, generator_name=self.name, video_only=video_only,
+            exclude_uris=exclude_uris,
         )
         return CandidateResult(generator_name=self.name, candidates=candidates)
