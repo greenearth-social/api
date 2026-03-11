@@ -79,7 +79,6 @@ The Emulator UI is available at:
 http://127.0.0.1:4000
 ```
 
-
 ### Configure the API to use it
 
 Set the following in your `.env` (see `.env.example`):
