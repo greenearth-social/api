@@ -33,6 +33,14 @@ class FeedCache(ABC):
         """Fetch the cached item list for *key*, or ``None`` if missing/expired."""
         ...
 
+    @abstractmethod
+    async def append(self, key: str, new_items: list[str]) -> list[str] | None:
+        """Append *new_items* to an existing cache entry and return the full list.
+
+        Returns ``None`` if the entry is missing or expired.
+        """
+        ...
+
 
 class FirestoreFeedCache(FeedCache):
     """Firestore-backed feed cache.
@@ -77,3 +85,28 @@ class FirestoreFeedCache(FeedCache):
             return None
 
         return cache_doc.items
+
+    async def append(self, key: str, new_items: list[str]) -> list[str] | None:
+        ref = self._db.collection(FEED_CACHE_COLLECTION).document(key)
+        doc = await ref.get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict()
+        if data is None:
+            return None
+
+        try:
+            cache_doc = FeedCacheDocument.model_validate(data)
+        except Exception:
+            logger.warning("Invalid feed cache document shape for key=%s", key)
+            return None
+
+        expires_at = cache_doc.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= expires_at:
+            return None
+
+        updated_items = cache_doc.items + new_items
+        await ref.update({"items": updated_items})
+        return updated_items

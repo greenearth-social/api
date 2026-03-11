@@ -75,6 +75,13 @@ class CandidateGenerateRequest(BaseModel):
     user_did: str = Field(..., description="AT Protocol DID of the user")
     num_candidates: int = Field(100, ge=1, le=1000, description="Total candidates to return")
     video_only: bool = Field(False, description="When true, only return posts containing video")
+    exclude_uris: list[str] = Field(
+        default_factory=list,
+        description=(
+            "AT URIs to exclude from results (e.g. posts already shown to "
+            "the user in previous pages)."
+        ),
+    )
     infill: str | None = Field(
         None,
         description=(

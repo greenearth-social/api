@@ -120,6 +120,7 @@ async def run_generate(
                 user_did=request.user_did,
                 num_candidates=count,
                 video_only=request.video_only,
+                exclude_uris=request.exclude_uris or None,
             )
         except Exception as exc:
             logger.exception("Candidate generator '%s' failed", spec.name)
@@ -145,6 +146,7 @@ async def run_generate(
                 user_did=request.user_did,
                 num_candidates=shortfall * 2,
                 video_only=request.video_only,
+                exclude_uris=request.exclude_uris or None,
             )
         except Exception as exc:
             logger.exception("Infill generator '%s' failed", request.infill)

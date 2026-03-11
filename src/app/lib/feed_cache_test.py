@@ -169,3 +169,67 @@ class TestFirestoreFeedCacheRetrieve:
 
         result = await cache.retrieve("key1")
         assert result == ["at://a/1"]
+
+
+# ---------------------------------------------------------------------------
+# FirestoreFeedCache.append
+# ---------------------------------------------------------------------------
+
+class TestFirestoreFeedCacheAppend:
+    @pytest.mark.asyncio
+    async def test_appends_items_to_existing_doc(self):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {
+            "items": ["at://a/1"],
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        doc_ref.get.return_value = snap
+
+        result = await cache.append("key1", ["at://a/2", "at://a/3"])
+        assert result == ["at://a/1", "at://a/2", "at://a/3"]
+        doc_ref.update.assert_awaited_once_with({"items": ["at://a/1", "at://a/2", "at://a/3"]})
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_document_missing(self):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        snap = MagicMock()
+        snap.exists = False
+        doc_ref.get.return_value = snap
+
+        result = await cache.append("missing", ["at://a/1"])
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_expired(self):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {
+            "items": ["at://a/1"],
+            "expires_at": datetime.now(timezone.utc) - timedelta(minutes=1),
+        }
+        doc_ref.get.return_value = snap
+
+        result = await cache.append("key1", ["at://a/2"])
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_to_dict_is_none(self):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = None
+        doc_ref.get.return_value = snap
+
+        result = await cache.append("key1", ["at://a/2"])
+        assert result is None

@@ -116,8 +116,8 @@ class FeedSkeletonResponse(BaseModel):
 # Pagination helpers
 # ---------------------------------------------------------------------------
 
-BATCH_MULTIPLIER = 5
-MAX_BATCH_SIZE = 200
+BATCH_MULTIPLIER = 5  # how many pages of results to fetch for each cursor session
+MAX_BATCH_SIZE = 100  # minimum number of results to fetch for each cursor session
 
 
 def _batch_size(limit: int) -> int:
@@ -258,15 +258,53 @@ async def get_feed_skeleton(
 
         cached_uris = await feed_cache.retrieve(parsed.id)
         if cached_uris is not None:
-            page = cached_uris[parsed.offset : parsed.offset + limit]
-            next_offset = parsed.offset + len(page)
-            next_cursor: str | None = None
-            if next_offset < len(cached_uris) and page:
-                next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
-            return FeedSkeletonResponse(
-                feed=[SkeletonItem(post=uri) for uri in page],
-                cursor=next_cursor,
+            if parsed.offset < len(cached_uris):
+                # Serve from the existing cached batch.
+                page = cached_uris[parsed.offset : parsed.offset + limit]
+                next_offset = parsed.offset + len(page)
+                next_cursor: str | None = None
+                if page:
+                    # Always return a cursor when there are results.
+                    # When next_offset reaches the end of the cache the
+                    # next request will fall into the regeneration branch
+                    # below, which fetches fresh candidates.
+                    next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                return FeedSkeletonResponse(
+                    feed=[SkeletonItem(post=uri) for uri in page],
+                    cursor=next_cursor,
+                )
+
+            # Offset is at or past the end — regenerate with exclusions.
+            batch = _batch_size(limit)
+            gen_request = feed_cfg.gen_request_template.model_copy(
+                update={
+                    "user_did": user_did,
+                    "num_candidates": batch,
+                    "exclude_uris": cached_uris,
+                }
             )
+
+            result = await run_generate(
+                gen_request, request.app.state.es, swallow_errors=True
+            )
+
+            new_uris = [c.at_uri for c in result.candidates if c.at_uri]
+            if new_uris:
+                updated = await feed_cache.append(parsed.id, new_uris)
+                if updated is not None:
+                    page = new_uris[:limit]
+                    next_offset = parsed.offset + len(page)
+                    next_cursor = None
+                    if len(page) == limit:
+                        next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                    return FeedSkeletonResponse(
+                        feed=[SkeletonItem(post=uri) for uri in page],
+                        cursor=next_cursor,
+                    )
+
+            # Append failed or nothing new — end of feed.
+            return FeedSkeletonResponse(feed=[])
+
         # Cache miss (expired / evicted) — fall through to generate fresh.
 
     # ------------------------------------------------------------------

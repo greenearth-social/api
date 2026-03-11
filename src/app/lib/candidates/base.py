@@ -48,6 +48,7 @@ class CandidateGenerator(ABC):
         user_did: str,
         num_candidates: int = 100,
         video_only: bool = False,
+        exclude_uris: list[str] | None = None,
     ) -> CandidateResult:
         """Produce candidate posts for the given user.
 
@@ -61,6 +62,8 @@ class CandidateGenerator(ABC):
             Maximum number of candidates to return.
         video_only:
             When ``True``, restrict results to posts containing video.
+        exclude_uris:
+            AT URIs to exclude from results via an ES ``must_not`` filter.
 
         Returns
         -------
