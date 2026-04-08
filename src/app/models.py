@@ -1,4 +1,5 @@
 import base64
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -96,6 +97,61 @@ class CandidateGenerateResult(BaseModel):
     """The output of a generation pipeline run."""
 
     candidates: list[CandidatePost]
+
+
+class RankModel(BaseModel):
+    """A ranking model exposed by the API."""
+
+    name: str = Field(..., description="Rank model identifier")
+    ready: bool = Field(True, description="Whether the rank model is available")
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional model metadata returned to callers",
+    )
+
+
+class RankPredictRequest(BaseModel):
+    """Describes a ranking job over a set of candidate posts."""
+
+    candidates: list[CandidatePost] = Field(
+        ...,
+        min_length=1,
+        description="Candidates to rank in the same shape returned by /candidates/generate",
+    )
+    model: str | None = Field(
+        None,
+        description="Optional ranking model identifier. Defaults to the service default.",
+    )
+    user_did: str | None = Field(
+        None,
+        description="Optional AT Protocol DID of the user being ranked for",
+    )
+
+
+class RankedCandidate(BaseModel):
+    """A single ranked candidate and any metadata produced during ranking."""
+
+    at_uri: str = Field(..., description="AT URI of the ranked post")
+    rank: int = Field(..., ge=1, description="1-based rank of the post")
+    score: float | None = Field(None, description="Ranking score when available")
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional ranking metadata for this candidate",
+    )
+
+
+class RankPredictResult(BaseModel):
+    """The ordered output of a ranking pipeline run."""
+
+    model: str = Field(..., description="Ranking model used for this result")
+    ranked_at_uris: list[str] = Field(
+        default_factory=list,
+        description="Ordered AT URIs from highest-ranked to lowest-ranked",
+    )
+    rankings: list[RankedCandidate] = Field(
+        default_factory=list,
+        description="Per-candidate ranking data in ranked order",
+    )
 
 
 class FeedConfig(BaseModel):

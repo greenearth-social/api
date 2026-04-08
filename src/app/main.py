@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .routers import candidates, health, skylight, xrpc
+from .routers import candidates, health, rank, skylight, xrpc
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
 from .lib.feed_cache import FirestoreFeedCache
@@ -64,6 +64,7 @@ app = FastAPI(
 
 app.include_router(candidates.router)
 app.include_router(health.router)
+app.include_router(rank.router)
 app.include_router(skylight.router)
 app.include_router(xrpc.router)
 
