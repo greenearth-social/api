@@ -6,6 +6,7 @@ posts, and returns the ranker's ordered output.
 
 from ...models import CandidatePost, RankPredictRequest, RankPredictResult
 from .base import get_ranker, list_rankers
+from ..candidates.generate import dedup_candidates
 
 DEFAULT_RANK_MODEL = "candidate_score"
 
@@ -22,20 +23,6 @@ class RankerError(Exception):
     """Raised when ranking cannot be completed for a valid request."""
 
 
-def dedup_candidates(candidates: list[CandidatePost]) -> list[CandidatePost]:
-    """Remove duplicate candidates by `at_uri`, keeping the first occurrence."""
-    seen: set[str] = set()
-    deduped: list[CandidatePost] = []
-    for candidate in candidates:
-        if candidate.at_uri is None:
-            raise RankerError("All candidates must include at_uri")
-        if candidate.at_uri in seen:
-            continue
-        seen.add(candidate.at_uri)
-        deduped.append(candidate)
-    return deduped
-
-
 async def run_predict(
     request: RankPredictRequest,
     es,
@@ -48,6 +35,9 @@ async def run_predict(
     if ranker is None:
         raise RankModelNotFoundError(model_name)
 
-    deduped_request = request.model_copy(update={"candidates": dedup_candidates(request.candidates)})
-    result = await ranker.predict(deduped_request)
+    if any(candidate.at_uri is None for candidate in request.candidates):
+        raise RankerError("All candidates must include at_uri")
+
+    deduped_candidates = dedup_candidates(request.candidates)
+    result = await ranker.predict(es, request.user_did, deduped_candidates)
     return result.result

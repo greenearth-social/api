@@ -4,17 +4,8 @@ Ranks candidates using their existing `score` field. This is a temporary
 fallback until inference-service-backed ranking is wired in.
 """
 
-from ...models import CandidatePost, RankedCandidate, RankPredictRequest, RankPredictResult
+from ...models import RankedCandidate, CandidatePost, RankPredictResult
 from .base import Ranker, RankerResult
-
-
-def _metadata_for_candidate(candidate: CandidatePost) -> dict[str, object]:
-    metadata: dict[str, object] = {}
-    if candidate.generator_name is not None:
-        metadata["generator_name"] = candidate.generator_name
-    if candidate.content is not None:
-        metadata["content"] = candidate.content
-    return metadata
 
 
 class CandidateScoreRanker(Ranker):
@@ -24,9 +15,14 @@ class CandidateScoreRanker(Ranker):
     def name(self) -> str:
         return "candidate_score"
 
-    async def predict(self, request: RankPredictRequest) -> RankerResult:
+    async def predict(
+        self, 
+        es,
+        user_did: str,
+        candidates: list[CandidatePost]
+    ) -> RankerResult:
         ranked_candidates = sorted(
-            enumerate(request.candidates),
+            enumerate(candidates),
             key=lambda item: (
                 -(item[1].score if item[1].score is not None else float("-inf")),
                 item[0],

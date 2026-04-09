@@ -20,33 +20,31 @@ def test_name(ranker):
 def test_predict_ranks_by_descending_score(ranker):
     result = asyncio.run(
         ranker.predict(
-            RankPredictRequest(
-                candidates=[
-                    CandidatePost(
-                        at_uri="at://post/low",
-                        content=None,
-                        minilm_l12_embedding=None,
-                        score=0.1,
-                        generator_name="random_posts",
-                    ),
-                    CandidatePost(
-                        at_uri="at://post/high",
-                        content=None,
-                        minilm_l12_embedding=None,
-                        score=0.9,
-                        generator_name="popularity",
-                    ),
-                    CandidatePost(
-                        at_uri="at://post/mid",
-                        content=None,
-                        minilm_l12_embedding=None,
-                        score=0.4,
-                        generator_name=None,
-                    ),
-                ],
-                model="candidate_score",
-                user_did="abc",
-            )
+            es=None,
+            user_did="user_did",
+            candidates=[
+                CandidatePost(
+                    at_uri="at://post/low",
+                    content=None,
+                    minilm_l12_embedding=None,
+                    score=0.1,
+                    generator_name="random_posts",
+                ),
+                CandidatePost(
+                    at_uri="at://post/high",
+                    content=None,
+                    minilm_l12_embedding=None,
+                    score=0.9,
+                    generator_name="popularity",
+                ),
+                CandidatePost(
+                    at_uri="at://post/mid",
+                    content=None,
+                    minilm_l12_embedding=None,
+                    score=0.4,
+                    generator_name=None,
+                ),
+            ],
         )
     )
 
