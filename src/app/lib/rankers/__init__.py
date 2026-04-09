@@ -20,13 +20,18 @@ from .predict import (
     run_predict,
 )
 from .candidate_score import CandidateScoreRanker
+from .two_tower import TwoTowerRanker
 
 _candidate_score = CandidateScoreRanker()
 register_ranker(_candidate_score)
 
+_two_tower = TwoTowerRanker()
+register_ranker(_two_tower)
+
 __all__ = [
     "DEFAULT_RANK_MODEL",
     "CandidateScoreRanker",
+    "TwoTowerRanker",
     "Ranker",
     "RankerError",
     "RankerResult",
