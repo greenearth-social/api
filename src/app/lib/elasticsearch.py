@@ -66,11 +66,11 @@ async def fetch_recent_liked_post_uris(
 async def fetch_post_embeddings(
     es,
     at_uris: list[str],
-) -> list[list[float]]:
+) -> list[tuple[str, list[float]]]:
     """Fetch MiniLM L12 embeddings for a list of post AT URIs.
 
-    Returns only the embeddings that were found and non-empty;
-    posts without embeddings are silently skipped.
+    Returns ``(at_uri, embedding)`` pairs in the same order as ``at_uris``.
+    Posts without embeddings are silently skipped.
     """
     if not at_uris:
         return []
@@ -81,16 +81,25 @@ async def fetch_post_embeddings(
         index="posts",
         query=query,
         size=len(at_uris),
-        _source=["embeddings.all_MiniLM_L12_v2"],
+        _source=["at_uri", "embeddings.all_MiniLM_L12_v2"],
     )
 
     data = unwrap_es_response(resp)
-    vectors: list[list[float]] = []
+    embeddings_by_uri: dict[str, list[float]] = {}
     for hit in data.get("hits", {}).get("hits", []):
         src = hit.get("_source") or {}
+        at_uri = src.get("at_uri")
+        if not at_uri:
+            continue
         emb = src.get("embeddings")
         if isinstance(emb, dict):
             vec = emb.get("all_MiniLM_L12_v2")
             if vec:
-                vectors.append(vec)
-    return vectors
+                embeddings_by_uri[at_uri] = vec
+
+    ordered_embeddings: list[tuple[str, list[float]]] = []
+    for at_uri in at_uris:
+        vec = embeddings_by_uri.get(at_uri)
+        if vec:
+            ordered_embeddings.append((at_uri, vec))
+    return ordered_embeddings

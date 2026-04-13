@@ -114,15 +114,17 @@ class TwoTowerRanker(Ranker):
             return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
 
         # 2. Fetch embeddings for those posts
-        user_history_vectors = await fetch_post_embeddings(es, user_history_liked_uris)
+        user_history_embedding_pairs = await fetch_post_embeddings(es, user_history_liked_uris)
 
-        if not user_history_vectors:
+        if not user_history_embedding_pairs:
             logger.info(
                 "No embeddings found for %d liked posts of user %s",
                 len(user_history_liked_uris),
                 user_did,
             )
             return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
+
+        user_history_vectors = [embedding for _, embedding in user_history_embedding_pairs]
         
         # Get padded history and mask. Convert to lists for API call. 
         # (This function uses numpy arrays because it is faster for training).
@@ -148,16 +150,26 @@ class TwoTowerRanker(Ranker):
 
         ####### CANDIATE POSTS #######
         candidate_uris = [c.at_uri for c in candidates if c.at_uri is not None]
+        candidates_by_uri = {candidate.at_uri: candidate for candidate in candidates if candidate.at_uri is not None}
         
         # Get the embeddings for all the posts
-        input_post_embeddings = await fetch_post_embeddings(es, candidate_uris)
-        if not input_post_embeddings:
+        candidate_embedding_pairs = await fetch_post_embeddings(es, candidate_uris)
+        if not candidate_embedding_pairs:
             logger.info(
-                "No embeddings found for %d liked posts of user %s",
+                "No embeddings found for %d candidate posts of user %s",
                 len(candidate_uris),
                 user_did,
             )
             return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
+
+        ranked_candidates_input = [
+            candidates_by_uri[at_uri]
+            for at_uri, _ in candidate_embedding_pairs
+            if at_uri in candidates_by_uri
+        ]
+        input_post_embeddings = [
+            embedding for _, embedding in candidate_embedding_pairs
+        ]
 
         # Call the post tower for the whole batch
         output_post_embeddings = await predict_post_tower_batch(
@@ -165,6 +177,10 @@ class TwoTowerRanker(Ranker):
             base_url=inference_base_url,
             api_key=inference_api_key,
         )
+        if len(output_post_embeddings) != len(ranked_candidates_input):
+            raise RankerError(
+                "Two-tower post inference returned a different number of embeddings than requested"
+            )
 
         # For each candidate post, take the dot product of its output embedding with the user output embedding
         final_scores = []
@@ -173,7 +189,7 @@ class TwoTowerRanker(Ranker):
             final_scores.append(sum([ u*p for u,p in zip(post_embedding, output_user_embedding)]))
 
         # Rank by the final scores, breaking ties by original order in candidates list
-        candidates_with_scores = zip(candidates, final_scores)
+        candidates_with_scores = zip(ranked_candidates_input, final_scores)
         ranked_candidates = sorted(
             enumerate(candidates_with_scores), # (index, (candidate, score))
             key=lambda item: (

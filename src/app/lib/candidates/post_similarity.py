@@ -129,9 +129,9 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
             return CandidateResult(generator_name=self.name, candidates=[])
 
         # 2. Fetch embeddings for those posts
-        vectors = await fetch_post_embeddings(es, liked_uris)
+        embedding_pairs = await fetch_post_embeddings(es, liked_uris)
 
-        if not vectors:
+        if not embedding_pairs:
             logger.info(
                 "No embeddings found for %d liked posts of user %s",
                 len(liked_uris),
@@ -140,6 +140,7 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
             return CandidateResult(generator_name=self.name, candidates=[])
 
         # 3. Average the embedding vectors
+        vectors = [embedding for _, embedding in embedding_pairs]
         avg_vector = average_vectors(vectors)
 
         # 4. kNN search for similar posts

@@ -93,19 +93,32 @@ class TestFetchRecentLikedPostUris:
 
 class TestFetchPostEmbeddings:
     @pytest.mark.asyncio
-    async def test_returns_embeddings(self):
+    async def test_returns_embeddings_in_requested_uri_order(self):
         es = FakeEs(responses={
             "posts": {
                 "hits": {
                     "hits": [
-                        {"_source": {"embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]}}},
-                        {"_source": {"embeddings": {"all_MiniLM_L12_v2": [0.3, 0.4]}}},
+                        {
+                            "_source": {
+                                "at_uri": "at://2",
+                                "embeddings": {"all_MiniLM_L12_v2": [0.3, 0.4]},
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://1",
+                                "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                            }
+                        },
                     ]
                 }
             }
         })
         vecs = await fetch_post_embeddings(es, ["at://1", "at://2"])
-        assert vecs == [[0.1, 0.2], [0.3, 0.4]]
+        assert vecs == [
+            ("at://1", [0.1, 0.2]),
+            ("at://2", [0.3, 0.4]),
+        ]
 
     @pytest.mark.asyncio
     async def test_returns_empty_for_empty_input(self):
@@ -120,15 +133,25 @@ class TestFetchPostEmbeddings:
             "posts": {
                 "hits": {
                     "hits": [
-                        {"_source": {"embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]}}},
-                        {"_source": {"embeddings": {}}},
-                        {"_source": {}},
+                        {
+                            "_source": {
+                                "at_uri": "at://1",
+                                "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://2",
+                                "embeddings": {},
+                            }
+                        },
+                        {"_source": {"at_uri": "at://3"}},
                     ]
                 }
             }
         })
         vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
-        assert vecs == [[0.1, 0.2]]
+        assert vecs == [("at://1", [0.1, 0.2])]
 
 
 class TestAverageVectors:
@@ -243,8 +266,18 @@ class TestPostSimilarityGenerator:
                         return {
                             "hits": {
                                 "hits": [
-                                    {"_source": {"embeddings": {"all_MiniLM_L12_v2": [1.0, 0.0]}}},
-                                    {"_source": {"embeddings": {"all_MiniLM_L12_v2": [0.0, 1.0]}}},
+                                    {
+                                        "_source": {
+                                            "at_uri": "at://post/2",
+                                            "embeddings": {"all_MiniLM_L12_v2": [0.0, 1.0]},
+                                        }
+                                    },
+                                    {
+                                        "_source": {
+                                            "at_uri": "at://post/1",
+                                            "embeddings": {"all_MiniLM_L12_v2": [1.0, 0.0]},
+                                        }
+                                    },
                                 ]
                             }
                         }

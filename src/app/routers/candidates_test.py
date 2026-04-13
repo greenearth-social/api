@@ -32,8 +32,18 @@ def fake_app_es():
                     return {
                         "hits": {
                             "hits": [
-                                {"_source": {"embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]}}},
-                                {"_source": {"embeddings": {"all_MiniLM_L12_v2": [0.3, 0.4]}}},
+                                {
+                                    "_source": {
+                                        "at_uri": "at://post/2",
+                                        "embeddings": {"all_MiniLM_L12_v2": [0.3, 0.4]},
+                                    }
+                                },
+                                {
+                                    "_source": {
+                                        "at_uri": "at://post/1",
+                                        "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                                    }
+                                },
                             ]
                         }
                     }
