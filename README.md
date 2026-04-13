@@ -157,7 +157,7 @@ Run the setup script once per environment to configure GCP resources:
 ENVIRONMENT=prod ./scripts/gcp_setup.sh
 
 # With Elasticsearch API key
-ELASTICSEARCH_API_KEY="your-api-key" ./scripts/gcp_setup.sh
+GE_ELASTICSEARCH_API_KEY="your-api-key" ./scripts/gcp_setup.sh
 ```
 
 This script will:
@@ -206,7 +206,7 @@ You can override defaults using environment variables or command-line flags:
 PROJECT_ID=your-project \
   REGION=us-west1 \
   ENVIRONMENT=prod \
-  ELASTICSEARCH_URL=https://custom-es:9200 \
+  GE_ELASTICSEARCH_URL=https://custom-es:9200 \
   ./scripts/deploy.sh
 
 # Using command-line flags
@@ -223,7 +223,7 @@ Available options:
 - `PROJECT_ID` - GCP project ID (default: greenearth-471522)
 - `REGION` - GCP region (default: us-east1)
 - `ENVIRONMENT` - Environment name (default: stage)
-- `ELASTICSEARCH_URL` - Elasticsearch endpoint (auto-detected if not set)
+- `GE_ELASTICSEARCH_URL` - Elasticsearch endpoint (auto-detected if not set)
 - `API_INSTANCES_MIN` - Minimum instances (default: 1)
 - `API_INSTANCES_MAX` - Maximum instances (default: 10)
 

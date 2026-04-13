@@ -13,8 +13,8 @@ ENVIRONMENT="stage"
 FIRESTORE_LOCATION=""
 
 # Elasticsearch configuration - only API key is secret, URL is public
-ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
-ELASTICSEARCH_API_KEY=""
+GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
+GE_ELASTICSEARCH_API_KEY=""
 
 # API authentication
 API_KEY=""
@@ -70,9 +70,9 @@ validate_config() {
     fi
 
     log_info "Configuration validation complete."
-    log_info "Using Elasticsearch URL: $ELASTICSEARCH_URL"
+    log_info "Using Elasticsearch URL: $GE_ELASTICSEARCH_URL"
 
-    if [ -n "$ELASTICSEARCH_API_KEY" ]; then
+    if [ -n "$GE_ELASTICSEARCH_API_KEY" ]; then
         log_info "Elasticsearch API key provided - will be stored/updated in Secret Manager"
     else
         log_warn "Elasticsearch API key not provided - skipping secret creation (assuming it already exists)"
@@ -311,13 +311,13 @@ setup_secrets() {
     fi
 
     # Elasticsearch API key
-    if [ -n "$ELASTICSEARCH_API_KEY" ] && [ "$ELASTICSEARCH_API_KEY" != "your-api-key" ]; then
+    if [ -n "$GE_ELASTICSEARCH_API_KEY" ] && [ "$GE_ELASTICSEARCH_API_KEY" != "your-api-key" ]; then
         if ! gcloud secrets describe "$es_api_key_secret" > /dev/null 2>&1; then
-            echo -n "$ELASTICSEARCH_API_KEY" | gcloud secrets create "$es_api_key_secret" --data-file=-
+            echo -n "$GE_ELASTICSEARCH_API_KEY" | gcloud secrets create "$es_api_key_secret" --data-file=-
             log_info "Elasticsearch API key secret created: $es_api_key_secret"
         else
             log_info "Elasticsearch API key secret already exists: $es_api_key_secret. Updating..."
-            echo -n "$ELASTICSEARCH_API_KEY" | gcloud secrets versions add "$es_api_key_secret" --data-file=-
+            echo -n "$GE_ELASTICSEARCH_API_KEY" | gcloud secrets versions add "$es_api_key_secret" --data-file=-
             log_info "Elasticsearch API key secret updated: $es_api_key_secret"
         fi
 
@@ -446,8 +446,8 @@ fetch_elasticsearch_api_key() {
     # Check if the target secret exists
     if gcloud secrets describe "$es_api_key_secret" > /dev/null 2>&1; then
         log_info "Secret '$es_api_key_secret' exists in Secret Manager"
-        ELASTICSEARCH_API_KEY=$(gcloud secrets versions access latest --secret="$es_api_key_secret" 2>/dev/null)
-        if [ -n "$ELASTICSEARCH_API_KEY" ]; then
+        GE_ELASTICSEARCH_API_KEY=$(gcloud secrets versions access latest --secret="$es_api_key_secret" 2>/dev/null)
+        if [ -n "$GE_ELASTICSEARCH_API_KEY" ]; then
             log_info "Successfully fetched ES API key from Secret Manager"
             return 0
         fi
@@ -474,12 +474,12 @@ main() {
     ensure_firestore_api_key_secret
 
     # Fetch ES API key from K8s unless disabled or already provided
-    if [ "$FETCH_ES_KEY" = true ] && [ -z "$ELASTICSEARCH_API_KEY" ]; then
+    if [ "$FETCH_ES_KEY" = true ] && [ -z "$GE_ELASTICSEARCH_API_KEY" ]; then
         if ! fetch_elasticsearch_api_key; then
             log_warn "Failed to fetch ES API key. Continuing with setup..."
         fi
-    elif [ -n "$ELASTICSEARCH_API_KEY" ]; then
-        log_info "Using provided ELASTICSEARCH_API_KEY (skipping K8s fetch)"
+    elif [ -n "$GE_ELASTICSEARCH_API_KEY" ]; then
+        log_info "Using provided GE_ELASTICSEARCH_API_KEY (skipping K8s fetch)"
     fi
 
     setup_secrets
@@ -516,11 +516,11 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --elasticsearch-url)
-            ELASTICSEARCH_URL="$2"
+            GE_ELASTICSEARCH_URL="$2"
             shift 2
             ;;
         --elasticsearch-api-key)
-            ELASTICSEARCH_API_KEY="$2"
+            GE_ELASTICSEARCH_API_KEY="$2"
             shift 2
             ;;
         --api-key)

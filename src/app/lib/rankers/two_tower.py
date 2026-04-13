@@ -5,30 +5,62 @@ Also calls inference on a post tower for each post to get final post embeddings.
 Performs vector-matrix multiplication to get scores for each post, and returns the posts in order.
 """
 
+import logging
+import os
+
 import httpx
 
 from ...models import RankedCandidate, CandidatePost, RankPredictResult
 from .base import Ranker, RankerResult
-from ..elasticsearch import fetch_post_embeddings
+from ..elasticsearch import fetch_post_embeddings, fetch_recent_liked_post_uris
 
-import logging
+from shared.input_data_helpers import get_padded_embedding_history_and_mask
+
 
 logger = logging.getLogger(__name__)
 
-INFERENCE_BASE_URL = "http://127.0.0.1:8080"
-INFERENCE_API_KEY = "dave-dev-key"
+###### Env vars ######
+INFERENCE_BASE_URL = os.environ.get("GE_INFERENCE_BASE_URL", "").rstrip("/")
+if not INFERENCE_BASE_URL:
+    raise RuntimeError("GE_INFERENCE_BASE_URL environment variable is required")
 
-async def predict_post_tower(post_embeddings: list[list[float]]) -> list[list[float]]:
+INFERENCE_API_KEY = os.environ.get("GE_INFERENCE_API_KEY")
+if not INFERENCE_API_KEY:
+    raise RuntimeError("GE_INFERENCE_API_KEY environment variable is required")
+
+inference_max_history_len = os.environ.get("GE_INFERENCE_MAX_HISTORY_LEN")
+if not inference_max_history_len:
+    raise RuntimeError("GE_INFERENCE_MAX_HISTORY_LEN environment variable is required")
+INFERENCE_MAX_HISTORY_LEN = int(inference_max_history_len)
+
+inference_embed_dim = os.environ.get("GE_INFERENCE_EMBED_DIM")
+if not inference_embed_dim:
+    raise RuntimeError("GE_INFERENCE_EMBED_DIM environment variable is required")
+INFERENCE_EMBED_DIM = int(inference_embed_dim)
+
+
+async def predict_post_tower_batch(post_embeddings: list[list[float]]) -> list[list[float]]:
     url = f"{INFERENCE_BASE_URL}/models/post-tower/predict"
-    headers = {"X-API-Key": "dave-dev-key"}
+    headers = {"X-API-Key": INFERENCE_API_KEY}
     payload = {"post_embeddings": post_embeddings}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(url, json=payload, headers=headers)
+        resp = await client.post(url, json=payload, headers=headers) # type: ignore
         resp.raise_for_status()
         data = resp.json()
         return data["outputs"]
-    
+
+
+async def predict_user_tower_single(history_embeddings: list[list[float]], history_mask: list[bool]) -> list[list[float]]:
+    url = f"{INFERENCE_BASE_URL}/models/user-tower/predict"
+    headers = {"X-API-Key": INFERENCE_API_KEY}
+    payload = {"history_embeddings": history_embeddings, "history_mask": history_mask}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(url, json=payload, headers=headers) # type: ignore
+        resp.raise_for_status()
+        data = resp.json()
+        return data["outputs"]
 
 
 class TwoTowerRanker(Ranker):
@@ -38,6 +70,7 @@ class TwoTowerRanker(Ranker):
     def name(self) -> str:
         return "two_tower"
 
+
     async def predict(
         self, 
         es,
@@ -45,24 +78,65 @@ class TwoTowerRanker(Ranker):
         candidates: list[CandidatePost]
     ) -> RankerResult:
         
-        # Get the embeddings for all the posts
-        candidate_uris = [c.at_uri for c in candidates]
-        input_post_embeddings = await fetch_post_embeddings(es, candidate_uris)
+        ####### USER #######
+        # 1. Get recently liked post URIs
+        user_history_liked_uris = await fetch_recent_liked_post_uris(es, user_did)
+
+        if not user_history_liked_uris:
+            logger.info("No likes found for user %s", user_did)
+            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
+
+        # 2. Fetch embeddings for those posts
+        user_history_vectors = await fetch_post_embeddings(es, user_history_liked_uris)
+
+        if not user_history_vectors:
+            logger.info(
+                "No embeddings found for %d liked posts of user %s",
+                len(user_history_liked_uris),
+                user_did,
+            )
+            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
         
+        # Get padded history and mask. Convert to lists for API call. 
+        # (This function uses numpy arrays because it is faster for training).
+        user_history_padded_np, history_mask_np = get_padded_embedding_history_and_mask(
+            user_history_vectors,
+            max_history_len=INFERENCE_MAX_HISTORY_LEN,
+            embed_dim=INFERENCE_EMBED_DIM,
+        )
+        user_history_padded = user_history_padded_np.tolist()
+        history_mask = history_mask_np.tolist()
+        
+        # Call the inference API for the user tower
+        output_user_embedding_list = await predict_user_tower_single(user_history_padded, history_mask)
+        if len(output_user_embedding_list) != 1:
+            logger.info("Unexpected output length from user tower (expected a single embedding): %s", len(output_user_embedding_list))
+            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
+        output_user_embedding = output_user_embedding_list[0]
+
+        ####### CANDIATE POSTS #######
+        candidate_uris = [c.at_uri for c in candidates if c.at_uri is not None]
+        
+        # Get the embeddings for all the posts
+        input_post_embeddings = await fetch_post_embeddings(es, candidate_uris)
         if not input_post_embeddings:
             logger.info(
                 "No embeddings found for %d liked posts of user %s",
                 len(candidate_uris),
                 user_did,
             )
-            return RankPredictResult(rankings=[])
+            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
 
         # Call the post tower for the whole batch
-        output_post_embeddings = await predict_post_tower(input_post_embeddings)
-        
-        # for now just take the sum, still need to add in user and dot product
-        final_scores = [ sum(pe) for pe in output_post_embeddings ]
+        output_post_embeddings = await predict_post_tower_batch(input_post_embeddings)
 
+        # For each candidate post, take the dot product of its output embedding with the user output embedding
+        final_scores = []
+        for post_embedding in output_post_embeddings:
+            assert len(post_embedding) == len(output_user_embedding)
+            final_scores.append(sum([ u*p for u,p in zip(post_embedding, output_user_embedding)]))
+
+        # Rank by the final scores, breaking ties by original order in candidates list
         candidates_with_scores = zip(candidates, final_scores)
         ranked_candidates = sorted(
             enumerate(candidates_with_scores), # (index, (candidate, score))
@@ -72,6 +146,7 @@ class TwoTowerRanker(Ranker):
             ),
         )
 
+        # Get in correct output format
         rankings: list[RankedCandidate] = []
         for rank_idx, (_, (candidate, score)) in enumerate(ranked_candidates, start=1):
             assert candidate.at_uri is not None

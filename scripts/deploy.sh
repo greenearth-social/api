@@ -15,7 +15,7 @@ REGION="us-east1"
 ENVIRONMENT="stage"
 
 # Elasticsearch configuration
-ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
+GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 
 # Service configuration
 API_INSTANCES_MIN="1"
@@ -80,8 +80,8 @@ get_elasticsearch_internal_lb_ip() {
     log_info "Getting Elasticsearch internal load balancer IP..."
 
     # If user has explicitly set a URL, use it
-    if [ "$ELASTICSEARCH_URL" != "INTERNAL_LB_PLACEHOLDER" ]; then
-        log_info "Using user-provided Elasticsearch URL: $ELASTICSEARCH_URL"
+    if [ "$GE_ELASTICSEARCH_URL" != "INTERNAL_LB_PLACEHOLDER" ]; then
+        log_info "Using user-provided Elasticsearch URL: $GE_ELASTICSEARCH_URL"
         return
     fi
 
@@ -93,8 +93,8 @@ get_elasticsearch_internal_lb_ip() {
 
         if [ -n "$lb_ip" ] && [ "$lb_ip" != "null" ]; then
             # Use the internal load balancer IP
-            ELASTICSEARCH_URL="https://$lb_ip:9200"
-            log_info "Using internal load balancer IP: $ELASTICSEARCH_URL"
+            GE_ELASTICSEARCH_URL="https://$lb_ip:9200"
+            log_info "Using internal load balancer IP: $GE_ELASTICSEARCH_URL"
             log_warn "Note: Certificate verification may fail for IP-based connections"
             log_warn "Services should be configured to skip certificate verification for internal LB"
         else
@@ -210,7 +210,7 @@ deploy_api_service() {
     # Set environment variables
     deploy_cmd="$deploy_cmd --set-env-vars=ENVIRONMENT=$ENVIRONMENT"
     deploy_cmd="$deploy_cmd --set-env-vars=LOG_LEVEL=info"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$ELASTICSEARCH_URL"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$GE_ELASTICSEARCH_URL"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
@@ -338,7 +338,7 @@ main() {
     verify_vpc_connector
 
     # Configure kubectl if needed for ES URL auto-detection
-    if [ "$ELASTICSEARCH_URL" = "INTERNAL_LB_PLACEHOLDER" ]; then
+    if [ "$GE_ELASTICSEARCH_URL" = "INTERNAL_LB_PLACEHOLDER" ]; then
         configure_kubectl
     fi
 
@@ -367,7 +367,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --elasticsearch-url)
-            ELASTICSEARCH_URL="$2"
+            GE_ELASTICSEARCH_URL="$2"
             shift 2
             ;;
         --min-instances)
