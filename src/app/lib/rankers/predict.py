@@ -11,6 +11,7 @@ from .base import RankerError, RankerExecutionError, get_ranker, list_rankers
 from ..candidates.generate import dedup_candidates
 
 DEFAULT_RANK_MODEL = "candidate_score"
+TWO_TOWER_MODEL = "two_tower"
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ async def run_predict(
 
     if any(candidate.at_uri is None for candidate in request.candidates):
         raise RankerError("All candidates must include at_uri")
+
+    if model_name == TWO_TOWER_MODEL and not request.user_did:
+        raise RankerError("user_did is required for two_tower")
 
     deduped_candidates = dedup_candidates(request.candidates)
     try:

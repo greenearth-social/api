@@ -92,3 +92,53 @@ def test_predict_keeps_candidate_uris_aligned_with_embeddings(monkeypatch):
         {"at_uri": "at://post/a", "rank": 1, "rank_score": 1.0},
         {"at_uri": "at://post/b", "rank": 2, "rank_score": 0.0},
     ]
+
+
+def test_predict_raises_when_user_tower_returns_wrong_number_of_embeddings(monkeypatch):
+    monkeypatch.setattr(
+        two_tower_module,
+        "get_inference_settings",
+        lambda: ("https://example.com", "secret", 4, 2),
+    )
+
+    async def fake_fetch_recent_liked_post_uris(es, user_did):
+        return ["at://liked/1"]
+
+    async def fake_fetch_post_embeddings(es, at_uris):
+        if at_uris == ["at://liked/1"]:
+            return [("at://liked/1", [0.5, 0.5])]
+        return [("at://post/a", [1.0, 0.0])]
+
+    class FakeArray:
+        def __init__(self, values):
+            self._values = values
+
+        def tolist(self):
+            return self._values
+
+    async def fake_predict_user_tower_single(history_embeddings, history_mask, *, base_url, api_key):
+        return []
+
+    monkeypatch.setattr(two_tower_module, "fetch_recent_liked_post_uris", fake_fetch_recent_liked_post_uris)
+    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings", fake_fetch_post_embeddings)
+    monkeypatch.setattr(
+        two_tower_module,
+        "get_padded_embedding_history_and_mask",
+        lambda vectors, max_history_len, embed_dim: (
+            FakeArray([[0.0, 0.0]]),
+            FakeArray([True]),
+        ),
+    )
+    monkeypatch.setattr(two_tower_module, "predict_user_tower_single", fake_predict_user_tower_single)
+
+    with pytest.raises(
+        RankerExecutionError,
+        match="user inference returned 0 embeddings; expected 1",
+    ):
+        asyncio.run(
+            TwoTowerRanker().predict(
+                es=None,
+                user_did="did:plc:user1",
+                candidates=[CandidatePost(at_uri="at://post/a")],
+            )
+        )

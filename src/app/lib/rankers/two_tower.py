@@ -161,8 +161,10 @@ class TwoTowerRanker(Ranker):
             api_key=inference_api_key,
         )
         if len(output_user_embedding_list) != 1:
-            logger.info("Unexpected output length from user tower (expected a single embedding): %s", len(output_user_embedding_list))
-            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
+            raise RankerExecutionError(
+                self.name,
+                f"user inference returned {len(output_user_embedding_list)} embeddings; expected 1",
+            )
         output_user_embedding = output_user_embedding_list[0]
 
         ####### CANDIATE POSTS #######
@@ -203,7 +205,11 @@ class TwoTowerRanker(Ranker):
         # For each candidate post, take the dot product of its output embedding with the user output embedding
         final_scores = []
         for post_embedding in output_post_embeddings:
-            assert len(post_embedding) == len(output_user_embedding)
+            if len(post_embedding) != len(output_user_embedding):
+                raise RankerExecutionError(
+                    self.name,
+                    f"embedding dimension mismatch: post={len(post_embedding)} user={len(output_user_embedding)}",
+                )
             final_scores.append(sum([ u*p for u,p in zip(post_embedding, output_user_embedding)]))
 
         # Rank by the final scores, breaking ties by original order in candidates list

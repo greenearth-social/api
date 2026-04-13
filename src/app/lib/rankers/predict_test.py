@@ -6,7 +6,7 @@ import pytest
 
 from ...models import CandidatePost, RankPredictRequest
 from . import predict as predict_module
-from .base import RankerExecutionError
+from .base import RankerError, RankerExecutionError
 
 
 class ExplodingRanker:
@@ -27,6 +27,19 @@ def test_run_predict_wraps_unexpected_ranker_failure(monkeypatch):
                 RankPredictRequest(
                     model="exploding",
                     user_did="did:plc:user1",
+                    candidates=[CandidatePost(at_uri="at://post/1", score=0.5)],
+                ),
+                es=object(),
+            )
+        )
+
+
+def test_run_predict_requires_user_did_for_two_tower():
+    with pytest.raises(RankerError, match="user_did is required for two_tower"):
+        asyncio.run(
+            predict_module.run_predict(
+                RankPredictRequest(
+                    model="two_tower",
                     candidates=[CandidatePost(at_uri="at://post/1", score=0.5)],
                 ),
                 es=object(),
