@@ -40,6 +40,7 @@ def test_list_models(app):
     assert resp.json() == {
         "rankers": [
             "candidate_score",
+            "two_tower",
         ]
     }
 
