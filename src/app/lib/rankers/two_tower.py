@@ -103,7 +103,7 @@ class TwoTowerRanker(Ranker):
     async def predict(
         self, 
         es,
-        user_did: str | None,
+        user_did: str,
         candidates: list[CandidatePost]
     ) -> RankerResult:
         inference_base_url, inference_api_key, inference_max_history_len, inference_embed_dim = (
@@ -111,10 +111,6 @@ class TwoTowerRanker(Ranker):
         )
         
         ####### USER #######
-        if not user_did:
-            logger.info("No user_did passed in - required for two_tower model.")
-            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
-        
         # 1. Get recently liked post URIs
         user_history_liked_uris = await fetch_recent_liked_post_uris(es, user_did)
 

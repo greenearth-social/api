@@ -56,6 +56,7 @@ def test_predict_ranks_candidates_by_score_desc(app):
     resp = client.post(
         "/rank/predict",
         json={
+            "user_did": "did:plc:user1",
             "candidates": [
                 {"at_uri": "at://post/low", "score": 0.1, "generator_name": "random_posts"},
                 {"at_uri": "at://post/high", "score": 0.9, "generator_name": "popularity"},
@@ -91,6 +92,7 @@ def test_predict_keeps_duplicate_candidates_and_stable_tie_order(app):
     resp = client.post(
         "/rank/predict",
         json={
+            "user_did": "did:plc:user1",
             "candidates": [
                 {"at_uri": "at://post/a", "score": 0.5, "content": "first"},
                 {"at_uri": "at://post/a", "score": 0.9, "content": "duplicate"},
@@ -125,6 +127,7 @@ def test_predict_unknown_model_returns_404(app):
         "/rank/predict",
         json={
             "model": "does_not_exist",
+            "user_did": "did:plc:user1",
             "candidates": [{"at_uri": "at://post/1", "score": 0.5}],
         },
     )
@@ -136,18 +139,28 @@ def test_predict_rejects_missing_at_uri(app):
     client = TestClient(app, headers=HEADERS)
     resp = client.post(
         "/rank/predict",
-        json={"candidates": [{"score": 0.5}]},
+        json={"user_did": "did:plc:user1", "candidates": [{"score": 0.5}]},
     )
 
     assert resp.status_code == 400
     assert resp.json() == {"detail": "All candidates must include at_uri"}
 
 
+def test_predict_requires_user_did(app):
+    client = TestClient(app, headers=HEADERS)
+    resp = client.post(
+        "/rank/predict",
+        json={"candidates": [{"at_uri": "at://post/1", "score": 0.5}]},
+    )
+
+    assert resp.status_code == 422
+
+
 def test_predict_requires_auth(app):
     client = TestClient(app)
     resp = client.post(
         "/rank/predict",
-        json={"candidates": [{"at_uri": "at://post/1", "score": 0.5}]},
+        json={"user_did": "did:plc:user1", "candidates": [{"at_uri": "at://post/1", "score": 0.5}]},
     )
 
     assert resp.status_code == 401
@@ -171,17 +184,3 @@ def test_rank_predict_maps_ranker_execution_error_to_502(monkeypatch):
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.detail == "Ranker 'two_tower' failed: downstream boom"
-
-
-def test_rank_predict_rejects_two_tower_without_user_did():
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(es=object())))
-    payload = RankPredictRequest(
-        model="two_tower",
-        candidates=[CandidatePost(at_uri="at://post/1", score=0.5)],
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(rank_module.rank_predict(request, payload))
-
-    assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "user_did is required for two_tower"

@@ -10,7 +10,6 @@ from ...models import RankPredictRequest, RankPredictResult
 from .base import RankerError, RankerExecutionError, get_ranker
 
 DEFAULT_RANK_MODEL = "candidate_score"
-TWO_TOWER_MODEL = "two_tower"
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +34,6 @@ async def run_predict(
 
     if any(candidate.at_uri is None for candidate in request.candidates):
         raise RankerError("All candidates must include at_uri")
-
-    if model_name == TWO_TOWER_MODEL and not request.user_did:
-        raise RankerError("user_did is required for two_tower")
 
     try:
         result = await ranker.predict(es, request.user_did, request.candidates)

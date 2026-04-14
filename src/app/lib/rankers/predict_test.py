@@ -3,10 +3,11 @@
 import asyncio
 
 import pytest
+from pydantic import ValidationError
 
 from ...models import CandidatePost, RankPredictRequest, RankPredictResult, RankedCandidate
 from . import predict as predict_module
-from .base import RankerError, RankerExecutionError
+from .base import RankerExecutionError
 
 
 class EchoRanker:
@@ -65,6 +66,7 @@ def test_run_predict_preserves_duplicate_candidates(monkeypatch):
         predict_module.run_predict(
             RankPredictRequest(
                 model="echo",
+                user_did="did:plc:user1",
                 candidates=[
                     CandidatePost(at_uri="at://post/a", score=0.5),
                     CandidatePost(at_uri="at://post/a", score=0.9),
@@ -82,14 +84,9 @@ def test_run_predict_preserves_duplicate_candidates(monkeypatch):
     ]
 
 
-def test_run_predict_requires_user_did_for_two_tower():
-    with pytest.raises(RankerError, match="user_did is required for two_tower"):
-        asyncio.run(
-            predict_module.run_predict(
-                RankPredictRequest(
-                    model="two_tower",
-                    candidates=[CandidatePost(at_uri="at://post/1", score=0.5)],
-                ),
-                es=object(),
-            )
+def test_rank_predict_request_requires_user_did():
+    with pytest.raises(ValidationError, match="user_did"):
+        RankPredictRequest(
+            model="two_tower",
+            candidates=[CandidatePost(at_uri="at://post/1", score=0.5)],
         )

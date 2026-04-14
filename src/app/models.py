@@ -111,8 +111,8 @@ class RankPredictRequest(BaseModel):
         None,
         description="Optional ranking model identifier. Defaults to the service default.",
     )
-    user_did: str | None = Field(
-        None,
+    user_did: str = Field(
+        ...,
         description="AT Protocol DID of the user being ranked for",
     )
 
