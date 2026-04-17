@@ -37,6 +37,9 @@ shared between training and inference to avoid bugs from duplicated logic.
 The dependency is declared as a git dependency in `Pipfile` and the exact
 commit SHA is pinned in `Pipfile.lock`. You need SSH access to the
 engagement-prediction repo for `pipenv install` to work.
+Keep this dependency non-editable for deployment: Cloud Build installs from
+`requirements.txt` non-interactively, and editable VCS installs can prompt on
+path collisions under `/workspace/src`.
 
 ### Updating to the latest shared code
 
@@ -56,7 +59,7 @@ This might be helpful to, for example, revert to an older version.
 Edit the `ref` in `Pipfile`:
 
 ```toml
-shared = {git = "ssh://git@github.com/greenearth-social/engagement-prediction.git", ref = "<commit-sha-or-branch>", editable = true}
+shared = {git = "ssh://git@github.com/greenearth-social/engagement-prediction.git", ref = "<commit-sha-or-branch>"}
 ```
 
 Then run `pipenv lock && pipenv install`.

@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "b0374cfde8305481511b63ab1b66eee4f021e25b27bb234660489c7a93b62620"
+            "sha256": "9cc8b874c91885739210394cc1f3754284ef17f4b8fbbf17cb6704f219d6a8f2"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -1615,7 +1615,6 @@
             "version": "==2.33.1"
         },
         "shared": {
-            "editable": true,
             "git": "https://github.com/greenearth-social/engagement-prediction.git",
             "markers": "python_version >= '3.5'",
             "ref": "1edc6a70c0986cf45b376b913c1a642c9acd1d7a"
