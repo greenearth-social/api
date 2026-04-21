@@ -18,9 +18,7 @@ ENVIRONMENT="stage"
 GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 
 # Inference configuration
-GE_INFERENCE_BASE_URL="${GE_INFERENCE_BASE_URL:-}"
-GE_INFERENCE_DOMAIN="${GE_INFERENCE_DOMAIN:-}"
-GE_ENABLE_INFERENCE_DOMAIN_MAPPING="${GE_ENABLE_INFERENCE_DOMAIN_MAPPING:-true}"
+GE_INFERENCE_BASE_URL=""
 GE_INFERENCE_MAX_HISTORY_LEN="128"
 
 # Service configuration
@@ -60,21 +58,9 @@ default_inference_domain() {
 }
 
 resolve_inference_base_url() {
-    if [ -n "$GE_INFERENCE_BASE_URL" ]; then
-        log_info "Using explicit inference base URL override: $GE_INFERENCE_BASE_URL"
-        return
-    fi
-
-    if [ "$GE_ENABLE_INFERENCE_DOMAIN_MAPPING" != "true" ]; then
-        log_warn "Inference domain mapping disabled and GE_INFERENCE_BASE_URL is empty"
-        return
-    fi
-
-    if [ -z "$GE_INFERENCE_DOMAIN" ]; then
-        GE_INFERENCE_DOMAIN="$(default_inference_domain)"
-    fi
-
-    GE_INFERENCE_BASE_URL="https://$GE_INFERENCE_DOMAIN"
+    local inference_domain
+    inference_domain="$(default_inference_domain)"
+    GE_INFERENCE_BASE_URL="https://$inference_domain"
     log_info "Using mapped inference URL: $GE_INFERENCE_BASE_URL"
 }
 
@@ -95,10 +81,6 @@ validate_config() {
     fi
 
     resolve_inference_base_url
-
-    if [ -z "$GE_INFERENCE_BASE_URL" ]; then
-        log_warn "GE_INFERENCE_BASE_URL not provided - two_tower ranker will fail if invoked"
-    fi
 
     log_info "Configuration validation complete."
 }
@@ -422,18 +404,6 @@ while [[ $# -gt 0 ]]; do
             GE_ELASTICSEARCH_URL="$2"
             shift 2
             ;;
-        --inference-base-url)
-            GE_INFERENCE_BASE_URL="$2"
-            shift 2
-            ;;
-        --inference-domain)
-            GE_INFERENCE_DOMAIN="$2"
-            shift 2
-            ;;
-        --disable-inference-domain-mapping)
-            GE_ENABLE_INFERENCE_DOMAIN_MAPPING="false"
-            shift
-            ;;
         --inference-max-history-len)
             GE_INFERENCE_MAX_HISTORY_LEN="$2"
             shift 2
@@ -458,11 +428,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --region REGION          GCP region (default: us-east1)"
             echo "  --environment ENV        Environment name (default: stage)"
             echo "  --elasticsearch-url URL  Elasticsearch URL (default: INTERNAL_LB_PLACEHOLDER)"
-            echo "  --inference-base-url URL Inference service base URL (required for two_tower)"
-            echo "  --inference-domain DOMAIN"
-            echo "                           Mapped inference domain (default: env-based)"
-            echo "  --disable-inference-domain-mapping"
-            echo "                           Require explicit --inference-base-url"
             echo "  --inference-max-history-len N"
             echo "                           Inference history length (default: 128)"
             echo "  --min-instances N        Minimum instances (default: 1)"
