@@ -169,6 +169,18 @@ This script will:
 - Configure the Elasticsearch connection using `GE_ELASTICSEARCH_URL` as non-secret config and `GE_ELASTICSEARCH_API_KEY` as a Secret Manager secret
 - Verify VPC connector for internal network access
 
+Before API deployment in stage/prod, run the inference setup script so domain mapping
+and DNS are in place for stable inference hostnames:
+
+```bash
+# stage
+cd ../engagement-prediction/inference_service
+GE_ENVIRONMENT=stage ./gcp_setup.sh
+
+# prod
+GE_ENVIRONMENT=prod ./gcp_setup.sh
+```
+
 > **Note**: The API uses a separate readonly Elasticsearch API key (`elasticsearch-api-key-readonly`)
 > that only has read access. This key is created by running `scripts/k8s_recreate_api_key.sh` in the
 > ingex/ingest directory, which creates both the ingest (read/write) and API (readonly) keys.
@@ -199,6 +211,17 @@ The deployment script will:
 - Build the container using Google Cloud buildpacks
 - Deploy to Cloud Run with proper environment variables and secrets
 
+Inference endpoint resolution order during deploy:
+
+1. Explicit `GE_INFERENCE_BASE_URL` / `--inference-base-url` (best for local overrides)
+2. Mapped domain from `GE_INFERENCE_DOMAIN` (or env default)
+3. If mapping is disabled and no base URL is provided, two_tower calls will fail
+
+Default mapped inference domains:
+
+- stage: `https://inference-stage.greenearth.social`
+- prod: `https://inference.greenearth.social`
+
 ### Configuration Options
 
 You can override deployment defaults using environment variables or command-line flags:
@@ -227,8 +250,17 @@ Available configuration inputs across `gcp_setup.sh` and `deploy.sh`:
 - `ENVIRONMENT` - Environment name (default: stage)
 - `GE_ELASTICSEARCH_URL` - Elasticsearch endpoint (auto-detected by `deploy.sh` if not set)
 - `GE_ELASTICSEARCH_API_KEY` - Elasticsearch readonly API key (accepted by `gcp_setup.sh`, then stored in Secret Manager for deploys)
+- `GE_INFERENCE_BASE_URL` - Explicit inference endpoint override (highest priority)
+- `GE_INFERENCE_DOMAIN` - Domain-mapped inference host used when base URL override is not set
+- `GE_ENABLE_INFERENCE_DOMAIN_MAPPING` - Toggle mapped-domain resolution in `deploy.sh` (default: true)
 - `API_INSTANCES_MIN` - Minimum instances (default: 1)
 - `API_INSTANCES_MAX` - Maximum instances (default: 10)
+
+For occasional local inference development while keeping stage/prod defaults:
+
+```bash
+GE_INFERENCE_BASE_URL="http://127.0.0.1:8001" ./scripts/deploy.sh --environment stage
+```
 
 ### Accessing the Deployed Service
 

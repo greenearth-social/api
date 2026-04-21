@@ -18,7 +18,7 @@ ENVIRONMENT="stage"
 GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 
 # Inference configuration
-GE_INFERENCE_BASE_URL="${GE_INFERENCE_BASE_URL:-}"
+GE_INFERENCE_BASE_URL=""
 GE_INFERENCE_MAX_HISTORY_LEN="128"
 
 # Service configuration
@@ -49,6 +49,21 @@ log_build() {
     echo -e "${BLUE}[BUILD]${NC} $1"
 }
 
+default_inference_domain() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "inference.greenearth.social"
+    else
+        echo "inference-stage.greenearth.social"
+    fi
+}
+
+resolve_inference_base_url() {
+    local inference_domain
+    inference_domain="$(default_inference_domain)"
+    GE_INFERENCE_BASE_URL="https://$inference_domain"
+    log_info "Using mapped inference URL: $GE_INFERENCE_BASE_URL"
+}
+
 validate_config() {
     log_info "Validating configuration..."
 
@@ -65,11 +80,7 @@ validate_config() {
         exit 1
     fi
 
-    if [ -n "$GE_INFERENCE_BASE_URL" ]; then
-        log_info "Using inference base URL: $GE_INFERENCE_BASE_URL"
-    else
-        log_warn "GE_INFERENCE_BASE_URL not provided - two_tower ranker will fail if invoked"
-    fi
+    resolve_inference_base_url
 
     log_info "Configuration validation complete."
 }
@@ -393,10 +404,6 @@ while [[ $# -gt 0 ]]; do
             GE_ELASTICSEARCH_URL="$2"
             shift 2
             ;;
-        --inference-base-url)
-            GE_INFERENCE_BASE_URL="$2"
-            shift 2
-            ;;
         --inference-max-history-len)
             GE_INFERENCE_MAX_HISTORY_LEN="$2"
             shift 2
@@ -421,7 +428,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --region REGION          GCP region (default: us-east1)"
             echo "  --environment ENV        Environment name (default: stage)"
             echo "  --elasticsearch-url URL  Elasticsearch URL (default: INTERNAL_LB_PLACEHOLDER)"
-            echo "  --inference-base-url URL Inference service base URL (required for two_tower)"
             echo "  --inference-max-history-len N"
             echo "                           Inference history length (default: 128)"
             echo "  --min-instances N        Minimum instances (default: 1)"

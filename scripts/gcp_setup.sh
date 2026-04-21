@@ -520,7 +520,9 @@ main() {
     echo ""
     log_info "Next steps:"
     log_info "  1. Review and configure secrets in Secret Manager if needed"
-    log_info "  2. Run ./scripts/deploy.sh to deploy the API to Cloud Run"
+    log_info "  2. Ensure inference domain mapping is set up (inference-stage/inference)"
+    log_info "     via ../engagement-prediction/inference_service/gcp_setup.sh"
+    log_info "  3. Run ./scripts/deploy.sh to deploy the API to Cloud Run"
     echo ""
 }
 
