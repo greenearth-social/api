@@ -8,6 +8,8 @@ Interested in contributing? We'd love to have you!
 
 First, please join our discord and introduce yourself: https://discord.com/invite/8bWEyrkrJC. Unless you've joined the discord and engaged with the community there, all issues/PRs will be auto-closed.
 
+Test
+
 ## Prerequisites
 
 - Python 3.13+
