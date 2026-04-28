@@ -14,8 +14,6 @@ from ...models import RankedCandidate, CandidatePost, RankPredictResult
 from .base import Ranker, RankerExecutionError, RankerResult
 from ..elasticsearch import fetch_post_embeddings, fetch_recent_liked_post_uris
 
-from shared.input_data_helpers import get_padded_embedding_history_and_mask
-
 
 logger = logging.getLogger(__name__)
 TWO_TOWER_MODEL_NAME = "two_tower"
@@ -76,14 +74,13 @@ async def predict_post_tower_batch(
 
 async def predict_user_tower_single(
     history_embeddings: list[list[float]],
-    history_mask: list[bool],
     *,
     base_url: str,
     api_key: str,
 ) -> list[list[float]]:
     url = f"{base_url}/models/user-tower/predict"
     headers = {"X-API-Key": api_key}
-    payload = {"history_embeddings": history_embeddings, "history_mask": history_mask}
+    payload = {"history_embeddings": history_embeddings}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(url, json=payload, headers=headers) # type: ignore
@@ -131,20 +128,9 @@ class TwoTowerRanker(Ranker):
 
         user_history_vectors = [embedding for _, embedding in user_history_embedding_pairs]
         
-        # Get padded history and mask. Convert to lists for API call. 
-        # (This function uses numpy arrays because it is faster for training).
-        user_history_padded_np, history_mask_np = get_padded_embedding_history_and_mask(
-            user_history_vectors,
-            max_history_len=inference_max_history_len,
-            embed_dim=inference_embed_dim,
-        )
-        user_history_padded = user_history_padded_np.tolist()
-        history_mask = history_mask_np.tolist()
-        
         # Call the inference API for the user tower
         output_user_embedding_list = await predict_user_tower_single(
-            user_history_padded,
-            history_mask,
+            user_history_vectors,
             base_url=inference_base_url,
             api_key=inference_api_key,
         )
