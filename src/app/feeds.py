@@ -37,4 +37,15 @@ FEEDS: dict[str, FeedConfig] = {
             video_only=False,
         ),
     ),
+    "followed-users": FeedConfig(
+        display_name="Followd Usrs",
+        description="Development feed - recent posts from followed users.",
+        gen_request_template=CandidateGenerateRequest(
+            generators=[GeneratorSpec(name="followed_users", weight=1.0)],
+            infill=None,
+            user_did="",
+            num_candidates=30,
+            video_only=False,
+        ),
+    ),
 }

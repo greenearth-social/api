@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ..main import app
+from ..feeds import FEEDS
 from ..models import CandidatePost, FeedCursor
 from ..lib.candidates.base import CandidateResult
 from ..lib.feed_cache import FeedCache
@@ -22,6 +23,8 @@ FEED_RKEY = "basic-similarity"
 FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 RANDOM_FEED_RKEY = "random"
 RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
+FOLLOWED_USERS_FEED_RKEY = "followed-users"
+FOLLOWED_USERS_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FOLLOWED_USERS_FEED_RKEY}"
 # The AppView sends the publisher DID in the feed URI, not the service DID.
 FEED_URI_FROM_APPVIEW = f"at://{PUBLISHER_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 TEST_USERNAME = "testuser.bsky.app"
@@ -156,9 +159,14 @@ class TestDescribeFeedGenerator:
         uris = [f["uri"] for f in data["feeds"]]
         assert RANDOM_FEED_URI in uris
 
+    def test_feeds_list_contains_followed_users(self):
+        data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
+        uris = [f["uri"] for f in data["feeds"]]
+        assert FOLLOWED_USERS_FEED_URI in uris
+
     def test_feeds_list_length(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
-        assert len(data["feeds"]) == 2
+        assert len(data["feeds"]) == len(FEEDS)
 
 
 # ---------------------------------------------------------------------------

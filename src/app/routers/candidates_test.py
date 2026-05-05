@@ -120,6 +120,7 @@ def test_list_generators():
     assert "post_similarity" in data["generators"]
     assert "popularity" in data["generators"]
     assert "random_posts" in data["generators"]
+    assert "followed_users" in data["generators"]
 
 
 def test_generate_single_generator():
