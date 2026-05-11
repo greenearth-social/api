@@ -6,6 +6,7 @@ from ..candidates.random_posts import (
     RandomPostsCandidateGenerator,
     random_posts_search,
 )
+from ..embeddings import MINILM_L12_EMBEDDING_KEY
 
 
 @pytest.fixture
@@ -38,7 +39,7 @@ class TestRandomPostsSearch:
                             "_source": {
                                 "at_uri": "at://random/1",
                                 "content": "random post",
-                                "embeddings": {"all_MiniLM_L12_v2": [0.5, 0.6]},
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.6]},
                             },
                         },
                         {
@@ -119,7 +120,7 @@ class TestRandomPostsCandidateGenerator:
                             "_source": {
                                 "at_uri": "at://random/1",
                                 "content": "random post",
-                                "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
                             },
                         },
                     ]

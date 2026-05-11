@@ -6,6 +6,7 @@ from ..candidates.popularity import (
     PopularityCandidateGenerator,
     popularity_search,
 )
+from ..embeddings import MINILM_L12_EMBEDDING_KEY
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ class TestPopularitySearch:
                             "_source": {
                                 "at_uri": "at://popular/1",
                                 "content": "trending post",
-                                "embeddings": {"all_MiniLM_L12_v2": [0.5, 0.6]},
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.6]},
                             },
                         },
                         {
@@ -181,7 +182,7 @@ class TestPopularityCandidateGenerator:
                             "_source": {
                                 "at_uri": "at://popular/1",
                                 "content": "popular post",
-                                "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
                             },
                         },
                     ]

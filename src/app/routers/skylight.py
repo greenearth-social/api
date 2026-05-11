@@ -7,7 +7,13 @@ from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from ..security import verify_api_key
 from pydantic import BaseModel
 from ..models import CandidatePost
-from ..lib.embeddings import encode_float32_b64, decode_float32_b64
+
+from ..lib.embeddings import (
+    MINILM_L12_EMBEDDING_FIELD,
+    MINILM_L12_EMBEDDING_KEY,
+    decode_float32_b64,
+    encode_float32_b64,
+)
 from ..lib.elasticsearch import unwrap_es_response, POSTS_KNN_INDEX
 from ..lib.telemetry import timed
 
@@ -41,7 +47,7 @@ def posts_response_to_results(resp) -> list[CandidatePost]:
         embeddings_obj = src.get("embeddings") or {}
 
         l12 = (
-            embeddings_obj.get("all_MiniLM_L12_v2")
+            embeddings_obj.get(MINILM_L12_EMBEDDING_KEY)
             if isinstance(embeddings_obj, dict)
             else None
         )
@@ -74,8 +80,7 @@ async def skylight_search(
 ) -> SkylightSearchResponse:
     """Search the `posts` index `content` field and return matching posts.
 
-    Returns stored MiniLM vectors (`embeddings.all_MiniLM_L12_v2` and
-    `embeddings.all_MiniLM_L6_v2`) when present.
+    Returns stored MiniLM vectors when present.
     """
     # Only return posts that contain video. Use a boolean query with a
     # `must` for the original query_string and a `filter` for the
@@ -142,7 +147,7 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
             src = hit.get("_source", {}) or {}
             emb = src.get("embeddings", {}) if isinstance(src.get("embeddings"), dict) else None
             if emb:
-                l12 = emb.get("all_MiniLM_L12_v2")
+                l12 = emb.get(MINILM_L12_EMBEDDING_KEY)
                 if l12:
                     vectors.append(l12)
 
@@ -179,7 +184,7 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
         "bool": {
             "must": {
                 "knn": {
-                    "field": "embeddings.all_MiniLM_L12_v2",
+                    "field": MINILM_L12_EMBEDDING_FIELD,
                     "query_vector": avg,
                     "k": payload.size,
                     "num_candidates": max(100, payload.size * 10),

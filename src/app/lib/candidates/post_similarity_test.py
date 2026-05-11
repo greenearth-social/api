@@ -9,6 +9,7 @@ from ..candidates.post_similarity import (
     fetch_recent_liked_post_uris,
     knn_search_posts,
 )
+from ..embeddings import MINILM_L12_EMBEDDING_KEY
 
 
 # ---------------------------------------------------------------------------
@@ -101,13 +102,13 @@ class TestFetchPostEmbeddings:
                         {
                             "_source": {
                                 "at_uri": "at://2",
-                                "embeddings": {"all_MiniLM_L12_v2": [0.3, 0.4]},
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
                             }
                         },
                         {
                             "_source": {
                                 "at_uri": "at://1",
-                                "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
                             }
                         },
                     ]
@@ -136,7 +137,7 @@ class TestFetchPostEmbeddings:
                         {
                             "_source": {
                                 "at_uri": "at://1",
-                                "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
                             }
                         },
                         {
@@ -179,7 +180,7 @@ class TestKnnSearchPosts:
                             "_source": {
                                 "at_uri": "at://post/1",
                                 "content": "hello",
-                                "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
                             },
                         },
                     ]
@@ -205,7 +206,7 @@ class TestKnnSearchPosts:
                             "_source": {
                                 "at_uri": "at://post/1",
                                 "content": "hi",
-                                "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
                             },
                         },
                     ]
@@ -261,25 +262,26 @@ class TestPostSimilarityGenerator:
                         }
                     }
                 if index == "posts":
-                    # Embedding lookup by URI
-                    return {
-                        "hits": {
-                            "hits": [
-                                {
-                                    "_source": {
-                                        "at_uri": "at://post/2",
-                                        "embeddings": {"all_MiniLM_L12_v2": [0.0, 1.0]},
-                                    }
-                                },
-                                {
-                                    "_source": {
-                                        "at_uri": "at://post/1",
-                                        "embeddings": {"all_MiniLM_L12_v2": [1.0, 0.0]},
-                                    }
-                                },
-                            ]
+                    # Check if this is the embedding lookup or the knn search
+                    if isinstance(query, dict) and "terms" in query:
+                        return {
+                            "hits": {
+                                "hits": [
+                                    {
+                                        "_source": {
+                                            "at_uri": "at://post/2",
+                                            "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.0, 1.0]},
+                                        }
+                                    },
+                                    {
+                                        "_source": {
+                                            "at_uri": "at://post/1",
+                                            "embeddings": {MINILM_L12_EMBEDDING_KEY: [1.0, 0.0]},
+                                        }
+                                    },
+                                ]
+                            }
                         }
-                    }
                 if index == "posts_recent":
                     # kNN search
                     return {
@@ -290,7 +292,7 @@ class TestPostSimilarityGenerator:
                                     "_source": {
                                         "at_uri": "at://result/1",
                                         "content": "recommended post",
-                                        "embeddings": {"all_MiniLM_L12_v2": [0.5, 0.5]},
+                                        "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.5]},
                                     },
                                 }
                             ]

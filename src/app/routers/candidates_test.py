@@ -5,6 +5,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
+from ..lib.embeddings import MINILM_L12_EMBEDDING_KEY
 from ..main import app
 
 
@@ -35,41 +36,42 @@ def fake_app_es():
                                 {
                                     "_source": {
                                         "at_uri": "at://post/2",
-                                        "embeddings": {"all_MiniLM_L12_v2": [0.3, 0.4]},
+                                        "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
                                     }
                                 },
                                 {
                                     "_source": {
                                         "at_uri": "at://post/1",
-                                        "embeddings": {"all_MiniLM_L12_v2": [0.1, 0.2]},
+                                        "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
                                     }
                                 },
                             ]
                         }
                     }
-                # function_score (popularity or random_posts)
-                return {
-                    "hits": {
-                        "hits": [
-                            {
-                                "_score": 12.5,
-                                "_source": {
-                                    "at_uri": "at://popular/1",
-                                    "content": "trending post",
-                                    "embeddings": {"all_MiniLM_L12_v2": [0.5, 0.6]},
+                # function_score (popularity) or kNN (post_similarity)
+                if isinstance(query, dict) and "function_score" in query:
+                    return {
+                        "hits": {
+                            "hits": [
+                                {
+                                    "_score": 12.5,
+                                    "_source": {
+                                        "at_uri": "at://popular/1",
+                                        "content": "trending post",
+                                        "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.6]},
+                                    },
                                 },
-                            },
-                            {
-                                "_score": 10.0,
-                                "_source": {
-                                    "at_uri": "at://popular/2",
-                                    "content": "also trending",
-                                    "embeddings": {},
+                                {
+                                    "_score": 10.0,
+                                    "_source": {
+                                        "at_uri": "at://popular/2",
+                                        "content": "also trending",
+                                        "embeddings": {},
+                                    },
                                 },
-                            },
-                        ]
+                            ]
+                        }
                     }
-                }
             if index == "posts_recent":
                 # kNN search result (post_similarity)
                 return {
@@ -80,7 +82,7 @@ def fake_app_es():
                                 "_source": {
                                     "at_uri": "at://result/1",
                                     "content": "a cool post",
-                                    "embeddings": {"all_MiniLM_L12_v2": [0.2, 0.3]},
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.2, 0.3]},
                                 },
                             }
                         ]
@@ -118,6 +120,7 @@ def test_list_generators():
     assert "post_similarity" in data["generators"]
     assert "popularity" in data["generators"]
     assert "random_posts" in data["generators"]
+    assert "followed_users" in data["generators"]
 
 
 def test_generate_single_generator():

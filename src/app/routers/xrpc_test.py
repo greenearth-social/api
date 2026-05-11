@@ -1,12 +1,12 @@
 """Tests for the XRPC feed generator endpoints."""
 
-import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from ..main import app
+from ..feeds import FEEDS
 from ..models import CandidatePost, FeedCursor
 from ..lib.candidates.base import CandidateResult
 from ..lib.feed_cache import FeedCache
@@ -32,6 +32,50 @@ def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[
         CandidatePost(at_uri=f"at://{prefix}/{i}", content=f"post {i}", minilm_l12_embedding=None, score=None, generator_name=generator_name)
         for i in range(n)
     ]
+
+
+def _patch_basic_similarity_generators(
+    post_similarity_candidates,
+    followed_users_candidates=None,
+    infill_candidates=None,
+):
+    """Patch generators used by the basic-similarity feed.
+
+    Most tests care about feed endpoint behavior rather than the exact mix of
+    candidate sources, so followed_users defaults to the same candidates as
+    post_similarity. The pipeline then deduplicates them back to the expected
+    output shape.
+    """
+    post_similarity_gen = AsyncMock()
+    post_similarity_gen.generate.return_value = CandidateResult(
+        generator_name="post_similarity",
+        candidates=post_similarity_candidates,
+    )
+    followed_users_gen = AsyncMock()
+    followed_users_gen.generate.return_value = CandidateResult(
+        generator_name="followed_users",
+        candidates=(
+            post_similarity_candidates
+            if followed_users_candidates is None
+            else followed_users_candidates
+        ),
+    )
+    infill_gen = AsyncMock()
+    infill_gen.generate.return_value = CandidateResult(
+        generator_name="popularity",
+        candidates=infill_candidates or [],
+    )
+
+    def fake_get_generator(name):
+        if name == "post_similarity":
+            return post_similarity_gen
+        if name == "followed_users":
+            return followed_users_gen
+        if name == "popularity":
+            return infill_gen
+        return None
+
+    return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator)
 
 
 class InMemoryFeedCache(FeedCache):
@@ -158,7 +202,7 @@ class TestDescribeFeedGenerator:
 
     def test_feeds_list_length(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
-        assert len(data["feeds"]) == 2
+        assert len(data["feeds"]) == len(FEEDS)
 
 
 # ---------------------------------------------------------------------------
@@ -187,25 +231,10 @@ class TestGetFeedSkeleton:
         ``primary_candidates`` and ``infill_candidates`` are lists of
         ``CandidatePost`` (or ``None`` to simulate an unregistered generator).
         """
-        primary_gen = AsyncMock()
-        primary_gen.generate.return_value = CandidateResult(
-            generator_name="post_similarity",
-            candidates=primary_candidates,
+        return _patch_basic_similarity_generators(
+            primary_candidates,
+            infill_candidates=infill_candidates,
         )
-        infill_gen = AsyncMock()
-        infill_gen.generate.return_value = CandidateResult(
-            generator_name="popularity",
-            candidates=infill_candidates or [],
-        )
-
-        def fake_get_generator(name):
-            if name == "post_similarity":
-                return primary_gen
-            if name == "popularity":
-                return infill_gen
-            return None
-
-        return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator)
 
     # --- basic happy path ---
 
@@ -326,6 +355,24 @@ class TestGetFeedSkeleton:
         infill_gen = mock_get.side_effect("popularity")
         infill_gen.generate.assert_not_called()
 
+    def test_basic_similarity_uses_followed_users_generator(self):
+        similarity = _make_candidates("sim", 3, "post_similarity")
+        followed = _make_candidates("followed", 3, "followed_users")
+
+        with _patch_basic_similarity_generators(
+            similarity,
+            followed_users_candidates=followed,
+        ) as mock_get:
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 6},
+            ).json()
+
+        posts = [item["post"] for item in data["feed"]]
+        assert "at://sim/0" in posts
+        assert "at://followed/0" in posts
+        mock_get.side_effect("followed_users").generate.assert_awaited_once()
+
     # --- primary generator failure ---
 
     def test_primary_failure_falls_back_to_infill(self):
@@ -341,8 +388,18 @@ class TestGetFeedSkeleton:
             candidates=infill,
         )
 
+        followed_users_gen = AsyncMock()
+        followed_users_gen.generate.return_value = CandidateResult(
+            generator_name="followed_users",
+            candidates=[],
+        )
+
         def fake_get(name):
-            return {"post_similarity": primary_gen, "popularity": infill_gen}.get(name)
+            return {
+                "post_similarity": primary_gen,
+                "followed_users": followed_users_gen,
+                "popularity": infill_gen,
+            }.get(name)
 
         with patch("app.lib.candidates.generate.get_generator", side_effect=fake_get):
             data = client.get(
@@ -392,25 +449,10 @@ class TestFeedSkeletonCursor:
             yield
 
     def _patch_generators(self, primary_candidates, infill_candidates=None):
-        primary_gen = AsyncMock()
-        primary_gen.generate.return_value = CandidateResult(
-            generator_name="post_similarity",
-            candidates=primary_candidates,
+        return _patch_basic_similarity_generators(
+            primary_candidates,
+            infill_candidates=infill_candidates,
         )
-        infill_gen = AsyncMock()
-        infill_gen.generate.return_value = CandidateResult(
-            generator_name="popularity",
-            candidates=infill_candidates or [],
-        )
-
-        def fake_get_generator(name):
-            if name == "post_similarity":
-                return primary_gen
-            if name == "popularity":
-                return infill_gen
-            return None
-
-        return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator)
 
     def test_first_page_returns_cursor_when_more_available(self):
         candidates = _make_candidates("p", 10)
@@ -682,9 +724,17 @@ class TestFeedSkeletonCursor:
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[],
         )
+        followed_users_gen = AsyncMock()
+        followed_users_gen.generate.return_value = CandidateResult(
+            generator_name="followed_users", candidates=[],
+        )
 
         def fake_get(name):
-            return {"post_similarity": primary_gen, "popularity": infill_gen}.get(name)
+            return {
+                "post_similarity": primary_gen,
+                "followed_users": followed_users_gen,
+                "popularity": infill_gen,
+            }.get(name)
 
         with patch("app.lib.candidates.generate.get_generator", side_effect=fake_get):
             client.get(
@@ -698,30 +748,16 @@ class TestFeedSkeletonCursor:
         assert call_kwargs.kwargs.get("exclude_uris") == [
             "at://p/0", "at://p/1", "at://p/2", "at://p/3", "at://p/4",
         ]
+        followed_call_kwargs = followed_users_gen.generate.call_args
+        assert followed_call_kwargs.kwargs.get("exclude_uris") == [
+            "at://p/0", "at://p/1", "at://p/2", "at://p/3", "at://p/4",
+        ]
 
 class TestGetFeedSkeletonAuth:
     """Tests that getFeedSkeleton correctly passes through the authenticated DID."""
 
     def _patch_generators(self, primary_candidates):
-        primary_gen = AsyncMock()
-        primary_gen.generate.return_value = CandidateResult(
-            generator_name="post_similarity",
-            candidates=primary_candidates,
-        )
-        infill_gen = AsyncMock()
-        infill_gen.generate.return_value = CandidateResult(
-            generator_name="popularity",
-            candidates=[],
-        )
-
-        def fake_get_generator(name):
-            if name == "post_similarity":
-                return primary_gen
-            if name == "popularity":
-                return infill_gen
-            return None
-
-        return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator)
+        return _patch_basic_similarity_generators(primary_candidates)
 
     @pytest.fixture(autouse=True)
     def _mock_firestore_upsert(self):

@@ -19,7 +19,10 @@ FEEDS: dict[str, FeedConfig] = {
         display_name="Similarity",
         description="Development feed — post-similarity candidates with popularity infill.",
         gen_request_template=CandidateGenerateRequest(
-            generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
+            generators=[
+                GeneratorSpec(name="post_similarity", weight=0.6),
+                GeneratorSpec(name="followed_users", weight=0.4),
+            ],
             infill="popularity",
             user_did="",
             num_candidates=30,

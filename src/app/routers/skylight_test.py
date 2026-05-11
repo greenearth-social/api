@@ -3,7 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ..main import app
-from ..lib.embeddings import encode_float32_b64
+from ..lib.embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ def es_response():
                         "content": "hello world",
                         "contains_video": True,
                         "embeddings": {
-                            "all_MiniLM_L12_v2": [0.1, 0.2],
+                            MINILM_L12_EMBEDDING_KEY: [0.1, 0.2],
                             "all_MiniLM_L6_v2": [0.3, 0.4],
                         },
                     }

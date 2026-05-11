@@ -9,6 +9,8 @@ import logging
 from elastic_transport import ObjectApiResponse
 from fastapi import HTTPException
 
+from .embeddings import MINILM_L12_EMBEDDING_FIELD, MINILM_L12_EMBEDDING_KEY
+
 logger = logging.getLogger(__name__)
 
 # How many recent likes to consider when building the query vector.
@@ -84,7 +86,7 @@ async def fetch_post_embeddings(
         index="posts",
         query=query,
         size=len(at_uris),
-        _source=["at_uri", "embeddings.all_MiniLM_L12_v2"],
+        _source=["at_uri", MINILM_L12_EMBEDDING_FIELD],
     )
 
     data = unwrap_es_response(resp)
@@ -96,7 +98,7 @@ async def fetch_post_embeddings(
             continue
         emb = src.get("embeddings")
         if isinstance(emb, dict):
-            vec = emb.get("all_MiniLM_L12_v2")
+            vec = emb.get(MINILM_L12_EMBEDDING_KEY)
             if vec:
                 embeddings_by_uri[at_uri] = vec
 
