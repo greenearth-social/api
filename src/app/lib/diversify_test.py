@@ -58,6 +58,39 @@ def test_all_different_authors_order_preserved_by_relevance():
     assert uris == ["at://a/1", "at://b/1", "at://c/1", "at://d/1"]
 
 
+def test_mixed_positive_and_negative_scores_ranked_by_relevance():
+    """Scores crossing zero should still rank highest-to-lowest with distinct authors."""
+    posts = [
+        _post("at://a/1", score=0.5, author_did="did:plc:a"),
+        _post("at://b/1", score=0.0, author_did="did:plc:b"),
+        _post("at://c/1", score=-0.5, author_did="did:plc:c"),
+    ]
+    result = mmr_rerank(posts)
+    assert [c.at_uri for c in result] == ["at://a/1", "at://b/1", "at://c/1"]
+
+
+def test_all_negative_scores_ranked_by_relevance():
+    """All-negative scores should still rank highest-to-lowest with distinct authors."""
+    posts = [
+        _post("at://a/1", score=-0.1, author_did="did:plc:a"),
+        _post("at://b/1", score=-0.5, author_did="did:plc:b"),
+        _post("at://c/1", score=-1.0, author_did="did:plc:c"),
+    ]
+    result = mmr_rerank(posts)
+    assert [c.at_uri for c in result] == ["at://a/1", "at://b/1", "at://c/1"]
+
+
+def test_equal_scores_diversity_drives_selection():
+    """When all scores are equal, author diversity should determine ordering."""
+    a1 = _post("at://alice/1", score=1.0, author_did="did:plc:alice")
+    a2 = _post("at://alice/2", score=1.0, author_did="did:plc:alice")
+    b1 = _post("at://bob/1", score=1.0, author_did="did:plc:bob")
+
+    result = mmr_rerank([a1, a2, b1])
+    uris = [c.at_uri for c in result]
+    assert uris.index("at://bob/1") < uris.index("at://alice/2")
+
+
 # ---------------------------------------------------------------------------
 # _cosine_similarity unit tests
 # ---------------------------------------------------------------------------

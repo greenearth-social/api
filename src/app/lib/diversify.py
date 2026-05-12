@@ -14,11 +14,14 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
         return list(candidates)
 
     n = len(candidates)
-    max_score = max((c.score or 0.0) for c in candidates)
+    raw_scores = [c.score or 0.0 for c in candidates]
+    shift = min(0.0, min(raw_scores))
+    shifted_scores = [s - shift for s in raw_scores]
+    shifted_max = max(shifted_scores)
     norm_scores = (
-        [(c.score or 0.0) / max_score for c in candidates]
-        if max_score > 0.0
-        else [0.0] * n
+        [s / shifted_max for s in shifted_scores]
+        if shifted_max > 0.0
+        else [1.0] * n
     )
 
     # Pre-decode embeddings once so the inner loop never repeats base64 work.
@@ -38,7 +41,7 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     # max_sim[i] tracks the highest similarity candidate i has to any selected
     # candidate so far. Updated incrementally — one new comparison per remaining
     # item each round instead of recomputing the full max from scratch.
-    max_sim = [0.0] * n
+    max_sim = [-math.inf] * n
 
     while remaining:
         if not selected:
