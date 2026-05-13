@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "1fdc299dedbf1de69e2a3374d9bd37f3dfcf7ff7a9cf7299f8f49c2cefacf34f"
+            "sha256": "d16b47f1e60a7f6e8979b6cc60d3e388551db5d10397a647c3051bd2e21cfddc"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -202,11 +202,11 @@
         },
         "certifi": {
             "hashes": [
-                "sha256:027692e4402ad994f1c42e52a4997a9763c646b73e4096e4d5d6db8af1d6f0fa",
-                "sha256:e887ab5cee78ea814d3472169153c2d12cd43b14bd03329a39a9c6e2e80bfba7"
+                "sha256:3cb2210c8f88ba2318d29b0388d1023c8492ff72ecdde4ebdaddbb13a31b1c4a",
+                "sha256:8d455352a37b71bf76a79caa83a3d6c25afee4a385d632127b6afb3963f1c580"
             ],
             "markers": "python_version >= '3.7'",
-            "version": "==2026.2.25"
+            "version": "==2026.4.22"
         },
         "cffi": {
             "hashes": [
@@ -506,20 +506,20 @@
         },
         "elastic-transport": {
             "hashes": [
-                "sha256:39e1a25e486af34ce7aa1bc9005d1c736f1b6fb04c9b64ea0604ded5a61fc1d4",
-                "sha256:97d9abd638ba8aa90faa4ca1bf1a18bde0fe2088fbc8757f2eb7b299f205773d"
+                "sha256:2dbb907ededa14e6ff5be058f8737bbba3926bd1b1a40dbc98a471285fa2cb3c",
+                "sha256:4eff263c8011dd950451b72be567a2484b814a89c70081053d6ae6addeab52e2"
             ],
             "markers": "python_version >= '3.10'",
-            "version": "==9.2.1"
+            "version": "==9.4.0"
         },
         "elasticsearch": {
             "hashes": [
-                "sha256:67bd2bb4f0800f58c2847d29cd57d6e7bf5bc273483b4f17421f93e75ba09f39",
-                "sha256:f76e149c0a22d5ccbba58bdc30c9f51cf894231b359ef4fd7e839b558b59f856"
+                "sha256:95e38e130b1d01438b19343dfa0458e1857a7df8e2e30cbf23a72182b03f05ff",
+                "sha256:e20095ba40229f4562f7cc951883c7c62a017435f94dbe0c21526f58ba411885"
             ],
             "index": "pypi",
             "markers": "python_version >= '3.10'",
-            "version": "==9.3.0"
+            "version": "==9.4.0"
         },
         "fastapi": {
             "hashes": [
