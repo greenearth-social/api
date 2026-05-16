@@ -41,9 +41,9 @@ FEEDS: dict[str, FeedConfig] = {
             exclude_uris=[],
         ),
     ),
-    "ranked-similarity": FeedConfig(
+    "ranked": FeedConfig(
         display_name="Ranked",
-        description="Post-similarity candidates ranked by the two-tower model.",
+        description="Current-best ranked feed.",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
             infill="popularity",
@@ -56,3 +56,4 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
 }
+

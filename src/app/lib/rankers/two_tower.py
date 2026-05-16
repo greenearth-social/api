@@ -37,6 +37,9 @@ def get_inference_settings() -> tuple[str, str]:
     return base_url, api_key
 
 
+POST_TOWER_BATCH_SIZE = 32
+
+
 async def predict_post_tower_batch(
     post_embeddings: list[list[float]],
     *,
@@ -45,13 +48,23 @@ async def predict_post_tower_batch(
 ) -> list[list[float]]:
     url = f"{base_url}/models/post-tower/predict"
     headers = {"X-API-Key": api_key}
-    payload = {"post_embeddings": post_embeddings}
 
+    results: list[list[float]] = []
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(url, json=payload, headers=headers) # type: ignore
-        resp.raise_for_status()
-        data = resp.json()
-        return data["outputs"]
+        for i in range(0, len(post_embeddings), POST_TOWER_BATCH_SIZE):
+            chunk = post_embeddings[i : i + POST_TOWER_BATCH_SIZE]
+            payload = {"post_embeddings": chunk}
+            resp = await client.post(url, json=payload, headers=headers) # type: ignore
+            if resp.is_error:
+                logger.error(
+                    "post-tower predict failed status=%s body=%s",
+                    resp.status_code,
+                    resp.text,
+                )
+                resp.raise_for_status()
+            data = resp.json()
+            results.extend(data["outputs"])
+    return results
 
 
 async def predict_user_tower_single(
