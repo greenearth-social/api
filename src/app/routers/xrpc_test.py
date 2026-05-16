@@ -22,7 +22,7 @@ FEED_RKEY = "basic-similarity"
 FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 RANDOM_FEED_RKEY = "random"
 RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
-RANKED_FEED_RKEY = "ranked-similarity"
+RANKED_FEED_RKEY = "ranked"
 RANKED_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANKED_FEED_RKEY}"
 # The AppView sends the publisher DID in the feed URI, not the service DID.
 FEED_URI_FROM_APPVIEW = f"at://{PUBLISHER_DID}/app.bsky.feed.generator/{FEED_RKEY}"
