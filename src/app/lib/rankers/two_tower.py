@@ -91,24 +91,23 @@ class TwoTowerRanker(Ranker):
         
         ####### USER #######
         # 1. Get recently liked post URIs
+        user_history_vectors = []
         user_history_liked_uris = await fetch_recent_liked_post_uris(es, user_did)
 
         if not user_history_liked_uris:
             logger.info("No likes found for user %s", user_did)
-            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
+        else:
+            # 2. Fetch embeddings for those posts
+            user_history_embedding_pairs: list[tuple[str, list[float]]] = await fetch_post_embeddings(es, user_history_liked_uris)
 
-        # 2. Fetch embeddings for those posts
-        user_history_embedding_pairs = await fetch_post_embeddings(es, user_history_liked_uris)
-
-        if not user_history_embedding_pairs:
-            logger.info(
-                "No embeddings found for %d liked posts of user %s",
-                len(user_history_liked_uris),
-                user_did,
-            )
-            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
-
-        user_history_vectors = [embedding for _, embedding in user_history_embedding_pairs]
+            if not user_history_embedding_pairs:
+                logger.info(
+                    "No embeddings found for %d liked posts of user %s",
+                    len(user_history_liked_uris),
+                    user_did,
+                )
+            else:
+                user_history_vectors = [embedding for _, embedding in user_history_embedding_pairs]
         
         # Call the inference API for the user tower
         output_user_embedding_list = await predict_user_tower_single(
@@ -124,6 +123,7 @@ class TwoTowerRanker(Ranker):
         output_user_embedding = output_user_embedding_list[0]
 
         ####### CANDIATE POSTS #######
+        valid_candidates = [candidate for candidate in candidates if candidate.at_uri is not None]
         candidates_by_uri = {candidate.at_uri: candidate for candidate in candidates if candidate.at_uri is not None}
         
         # Get the embeddings for all the posts
@@ -134,7 +134,16 @@ class TwoTowerRanker(Ranker):
                 len(candidates_by_uri),
                 user_did,
             )
-            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
+            rankings = [
+                RankedCandidate(
+                    at_uri=candidate.at_uri,
+                    rank=rank_idx,
+                    rank_score=None,
+                )
+                for rank_idx, candidate in enumerate(valid_candidates, start=1)
+                if candidate.at_uri is not None
+            ]
+            return RankerResult(model=self.name, result=RankPredictResult(rankings=rankings))
 
         ranked_candidates_input = [
             candidates_by_uri[at_uri]
@@ -186,6 +195,18 @@ class TwoTowerRanker(Ranker):
                     at_uri=candidate.at_uri,
                     rank=rank_idx,
                     rank_score=score,
+                )
+            )
+
+        ranked_uris = {ranking.at_uri for ranking in rankings}
+        for candidate in valid_candidates:
+            if candidate.at_uri is None or candidate.at_uri in ranked_uris:
+                continue
+            rankings.append(
+                RankedCandidate(
+                    at_uri=candidate.at_uri,
+                    rank=len(rankings) + 1,
+                    rank_score=None,
                 )
             )
 
