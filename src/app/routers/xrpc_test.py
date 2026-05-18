@@ -24,6 +24,8 @@ RANDOM_FEED_RKEY = "random"
 RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
 RANKED_FEED_RKEY = "ranked"
 RANKED_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANKED_FEED_RKEY}"
+BEST_OF_FRIENDS_FEED_RKEY = "best-of-friends"
+BEST_OF_FRIENDS_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{BEST_OF_FRIENDS_FEED_RKEY}"
 # The AppView sends the publisher DID in the feed URI, not the service DID.
 FEED_URI_FROM_APPVIEW = f"at://{PUBLISHER_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 TEST_USERNAME = "testuser.bsky.app"
@@ -206,6 +208,11 @@ class TestDescribeFeedGenerator:
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         uris = [f["uri"] for f in data["feeds"]]
         assert RANKED_FEED_URI in uris
+
+    def test_feeds_list_contains_best_of_friends(self):
+        data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
+        uris = [f["uri"] for f in data["feeds"]]
+        assert BEST_OF_FRIENDS_FEED_URI in uris
 
     def test_feeds_list_length(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
@@ -1098,6 +1105,72 @@ class TestRankedFeed:
             resp = TestClient(app, raise_server_exceptions=False).get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": RANKED_FEED_URI},
+            )
+
+        assert resp.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# Best-of-friends feed
+# ---------------------------------------------------------------------------
+
+class TestBestOfFriendsFeed:
+    """Tests for the best-of-friends feed (followed_users candidates + two-tower ranking)."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_authenticated_user(self):
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), \
+             patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
+            yield
+
+    def _patch_generators(self, candidates):
+        primary_gen = AsyncMock()
+        primary_gen.generate.return_value = CandidateResult(
+            generator_name="followed_users", candidates=candidates
+        )
+        infill_gen = AsyncMock()
+        infill_gen.generate.return_value = CandidateResult(
+            generator_name="popularity", candidates=[]
+        )
+
+        def fake_get(name):
+            return {"followed_users": primary_gen, "popularity": infill_gen}.get(name)
+
+        return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get)
+
+    def test_ranking_applied_to_candidates(self):
+        """Candidates from followed_users are returned in two-tower ranked order."""
+        candidates = _make_candidates("p", 3)
+        reversed_rankings = [
+            RankedCandidate(at_uri=f"at://p/{i}", rank=r + 1, rank_score=float(3 - r))
+            for r, i in enumerate([2, 1, 0])
+        ]
+        rank_result = RankPredictResult(rankings=reversed_rankings)
+
+        with self._patch_generators(candidates), \
+             patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result):
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": BEST_OF_FRIENDS_FEED_URI},
+            ).json()
+
+        posts = [item["post"] for item in data["feed"]]
+        assert posts == ["at://p/2", "at://p/1", "at://p/0"]
+
+    def test_ranking_failure_returns_500(self):
+        """When the two-tower ranker raises, the feed returns HTTP 500."""
+        candidates = _make_candidates("p", 3)
+
+        with self._patch_generators(candidates), \
+             patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, side_effect=RuntimeError("inference down")):
+            resp = TestClient(app, raise_server_exceptions=False).get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": BEST_OF_FRIENDS_FEED_URI},
             )
 
         assert resp.status_code == 500
