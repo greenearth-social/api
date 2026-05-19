@@ -59,8 +59,8 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
     "best-of-friends": FeedConfig(
-        display_name="Best Friends",
-        description="Posts from followed users, ranked by the two-tower model.",
+        display_name="Best of Friends",
+        description="The best posts from people you follow, curated just for you.",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="followed_users", weight=1.0)],
             infill="popularity",

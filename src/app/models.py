@@ -151,7 +151,7 @@ class FeedConfig(BaseModel):
     generation and optional model ranking.  Defaults to ``True``.
     """
 
-    display_name: str = Field(..., max_length=12)
+    display_name: str = Field(..., max_length=15)
     description: str = ""
     gen_request_template: CandidateGenerateRequest
     rank_request_template: RankPredictRequest | None = Field(
