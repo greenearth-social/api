@@ -10,7 +10,7 @@ POST /candidates/generate
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..models import CandidateGenerateRequest, CandidateGenerateResult
 from ..lib.candidates import (
@@ -33,7 +33,10 @@ logger = logging.getLogger(__name__)
 class GeneratorListResponse(BaseModel):
     """Lists available generator names."""
 
-    generators: list[str]
+    generators: list[str] = Field(
+        default_factory=list,
+        description="Names of all registered candidate generators (use in `GeneratorSpec.name`).",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +49,14 @@ async def candidates_list_generators() -> GeneratorListResponse:
     return GeneratorListResponse(generators=list_generators())
 
 
-@router.post("/candidates/generate", response_model=CandidateGenerateResult)
+@router.post(
+    "/candidates/generate",
+    response_model=CandidateGenerateResult,
+    responses={
+        404: {"description": "A named generator was not found"},
+        502: {"description": "Upstream generator service failed"},
+    },
+)
 async def candidates_generate(
     request: Request,
     payload: CandidateGenerateRequest,
@@ -56,6 +66,12 @@ async def candidates_generate(
     When multiple generators are specified, candidates from each are
     interleaved according to their proportional weights and then
     de-duplicated (first occurrence wins).
+
+    Set `video_only: true` to restrict results to posts that contain video.
+    Use `infill` to name a fallback generator that fills remaining slots when
+    primary generators return fewer candidates than `num_candidates`.
+    Pass previously shown AT URIs in `exclude_uris` to avoid repeating posts
+    across pagination pages.
     """
     try:
         result = await run_generate(payload, request.app.state.es)

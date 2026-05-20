@@ -47,12 +47,26 @@ async def rank_list_models() -> RankModelListResponse:
     return RankModelListResponse(rankers=list_rankers())
 
 
-@router.post("/rank/predict", response_model=RankPredictResult)
+@router.post(
+    "/rank/predict",
+    response_model=RankPredictResult,
+    responses={
+        400: {"description": "Invalid request (e.g. unsupported model configuration)"},
+        404: {"description": "Requested ranking model not found"},
+        502: {"description": "Upstream ranker service failed"},
+    },
+)
 async def rank_predict(
     request: Request,
     payload: RankPredictRequest,
 ) -> RankPredictResult:
-    """Rank the supplied candidate posts."""
+    """Score and order candidate posts using an engagement-prediction model.
+
+    Each candidate is scored by the named model (or the service default when
+    `model` is omitted).  The response lists candidates in descending score
+    order with 1-based `rank` positions.  Pass the output of
+    `/candidates/generate` directly as the request body.
+    """
     try:
         result = await run_predict(payload, request.app.state.es)
     except RankModelNotFoundError as exc:

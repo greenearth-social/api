@@ -54,10 +54,103 @@ async def lifespan(app: FastAPI):
             pass
 
 
+_DESCRIPTION = """\
+The Green Earth API powers Bluesky content recommendation for the
+[Green Earth](https://greenearth.social) feed generator.  External
+Atmosphere Protocol developers can use it as a building block for their
+own content-discovery pipelines.
+
+## Pipeline overview
+
+The core recommendation pipeline has three stages that can be used
+independently or chained together:
+
+1. **Candidates** – retrieve posts from one or more named generators
+   (popularity, similarity, followed users, random …).
+2. **Rank** – score the candidate list with a trained engagement-prediction
+   model and return posts in descending score order.
+3. **Diversify** – rerank the ordered list with Maximal Marginal Relevance
+   (MMR) to reduce topical redundancy while preserving relevance.
+
+A typical integration calls `/candidates/generate`, pipes the result into
+`/rank/predict`, then optionally calls `/diversify` before presenting posts
+to a user.
+
+## Content search
+
+The **Skylight** endpoints (`/skylight/search` and `/skylight/similar`)
+provide standalone full-text and vector-similarity search over the post
+index.  They are independent of the candidate/rank/diversify pipeline and
+can be used on their own.
+
+## Authentication
+
+Most endpoints require an `X-API-Key` header.  Use the **Authorize**
+button above to set your key.
+
+The AT Protocol XRPC endpoints (`/xrpc/…`) use JWT authentication issued
+by the Bluesky AppView and do not require an API key.
+"""
+
+_TAGS = [
+    {
+        "name": "candidates",
+        "description": (
+            "Retrieve candidate posts from registered generators. "
+            "Each generator targets a different content source (popularity, "
+            "post similarity, followed users, random …). Multiple generators "
+            "can be combined with relative weights in a single request."
+        ),
+    },
+    {
+        "name": "rank",
+        "description": (
+            "Score and order candidate posts using trained engagement-prediction "
+            "models. Pass the output of `/candidates/generate` directly as the "
+            "request body and receive candidates back in descending score order."
+        ),
+    },
+    {
+        "name": "diversify",
+        "description": (
+            "Rerank an ordered candidate list using Maximal Marginal Relevance "
+            "(MMR) to reduce topical redundancy while preserving relevance. "
+            "Typically called as the final step after ranking."
+        ),
+    },
+    {
+        "name": "skylight",
+        "description": (
+            "Standalone full-text and vector-similarity search over the post "
+            "index. These endpoints are independent of the candidate/rank/"
+            "diversify pipeline and can be used on their own by applications "
+            "that need direct content search (e.g. the Skylight app)."
+        ),
+    },
+    {
+        "name": "health",
+        "description": "Service liveness check.",
+    },
+    {
+        "name": "xrpc",
+        "description": (
+            "AT Protocol XRPC endpoints that implement the Bluesky feed "
+            "generator specification (`app.bsky.feed.describeFeedGenerator` "
+            "and `app.bsky.feed.getFeedSkeleton`). These endpoints are public "
+            "and use AT Protocol JWT authentication rather than an API key."
+        ),
+    },
+]
+
 app = FastAPI(
     title="Green Earth API",
-    description="An API server for handling bluesky content recommendation requests",
+    description=_DESCRIPTION,
     version="0.1.0",
+    contact={
+        "name": "Green Earth community",
+        "url": "https://discord.com/invite/8bWEyrkrJC",
+    },
+    openapi_tags=_TAGS,
     lifespan=lifespan,
 )
 

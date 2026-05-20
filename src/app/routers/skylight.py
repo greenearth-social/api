@@ -5,7 +5,7 @@ import logging
 # client errors as general exceptions here to avoid import-time issues.
 from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from ..security import verify_api_key
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ..models import CandidatePost
 
 from ..lib.embeddings import (
@@ -24,13 +24,32 @@ logger = logging.getLogger(__name__)
 
 class SkylightSearchResponse(BaseModel):
     """Search response returning a list of post results."""
-    results: list[CandidatePost]
+
+    results: list[CandidatePost] = Field(
+        default_factory=list,
+        description="Matching posts in relevance order.",
+    )
 
 
 class SkylightSimilarRequest(BaseModel):
-    at_uris: list[str] | None = None
-    embeddings: list[str] | None = None
-    size: int = 10
+    """Seeds for a nearest-neighbor similarity search."""
+
+    at_uris: list[str] | None = Field(
+        None,
+        description=(
+            "AT URIs of seed posts. The service fetches their stored MiniLM "
+            "L12 embeddings from the index and averages them into a query vector."
+        ),
+    )
+    embeddings: list[str] | None = Field(
+        None,
+        description=(
+            "Base64-encoded float32 MiniLM L12 embeddings (384-d) to use as "
+            "similarity seeds. Averaged with any embeddings looked up via "
+            "`at_uris`. At least one of `at_uris` or `embeddings` is required."
+        ),
+    )
+    size: int = Field(10, ge=1, le=100, description="Number of nearest-neighbor results to return.")
 
 
 def posts_response_to_results(resp) -> list[CandidatePost]:
@@ -73,15 +92,21 @@ def posts_response_to_results(resp) -> list[CandidatePost]:
     return results
 
 
-@router.get("/skylight/search", response_model=SkylightSearchResponse)
+@router.get(
+    "/skylight/search",
+    response_model=SkylightSearchResponse,
+    responses={502: {"description": "Upstream Elasticsearch request failed"}},
+)
 async def skylight_search(
     request: Request,
-    q: str = Query(..., description="Elasticsearch query string"),
-    size: int = Query(10, ge=1, le=100),
+    q: str = Query(..., description="Elasticsearch query string syntax — supports field qualifiers, wildcards, and boolean operators"),
+    size: int = Query(10, ge=1, le=100, description="Maximum number of results to return (1–100)"),
 ) -> SkylightSearchResponse:
     """Search the `posts` index `content` field and return matching posts.
 
-    Returns stored MiniLM vectors when present.
+    Results are currently scoped to posts that contain video.
+    Stored MiniLM L12 vectors are returned on each result when present,
+    which can be passed directly to `/skylight/similar` as `embeddings`.
     """
     # Only return posts that contain video. Use a boolean query with a
     # `must` for the original query_string and a `filter` for the
@@ -121,13 +146,27 @@ async def skylight_search(
 
 
 
-@router.post("/skylight/similar", response_model=SkylightSearchResponse)
+@router.post(
+    "/skylight/similar",
+    response_model=SkylightSearchResponse,
+    responses={
+        400: {"description": "No embeddings supplied, invalid base64, or dimension mismatch"},
+        404: {"description": "None of the supplied `at_uris` had stored embeddings"},
+        502: {"description": "Upstream Elasticsearch request failed"},
+    },
+)
 async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
-    """Return posts most similar to the average MiniLM L12 embedding for
-    the supplied `at_uris` and/or base64-encoded `embeddings`.
+    """Return posts most similar to the average MiniLM L12 embedding of the seeds.
 
-    If `at_uris` are provided but none of them are found with embeddings,
-    return 404.
+    The service averages the embeddings from `at_uris` (fetched from the index)
+    and/or directly supplied `embeddings` into a single query vector, then runs
+    a k-nearest-neighbor search against the post index.
+
+    Results are currently scoped to posts that contain video.
+
+    At least one of `at_uris` or `embeddings` must be provided.  If `at_uris`
+    are given but none are found in the index with stored embeddings, the
+    endpoint returns 404.
     """
     vectors: list[list[float]] = []
 
