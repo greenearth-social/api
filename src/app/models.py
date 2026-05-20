@@ -99,7 +99,10 @@ class CandidateGenerateRequest(BaseModel):
 class CandidateGenerateResult(BaseModel):
     """The output of a generation pipeline run."""
 
-    candidates: list[CandidatePost]
+    candidates: list[CandidatePost] = Field(
+        default_factory=list,
+        description="De-duplicated candidate posts in interleaved generator order.",
+    )
 
 
 class RankPredictRequest(BaseModel):
