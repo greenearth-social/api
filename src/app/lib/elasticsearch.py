@@ -36,7 +36,7 @@ def unwrap_es_response(resp) -> dict:
 
 async def fetch_recent_liked_post_uris(
     es,
-    user_did: str,
+    user_dids: str | list[str],
     limit: int = DEFAULT_LIKED_POSTS_LIMIT,
 ) -> list[str]:
     """Return the AT URIs of posts the user most recently liked.
@@ -45,9 +45,15 @@ async def fetch_recent_liked_post_uris(
     *user_did*, sorted by ``created_at`` descending, and extracts the
     ``subject_uri`` field from each hit.
     """
+    if isinstance(user_dids, str):
+        user_dids = [user_dids]
+    
+    if not user_dids:
+        return []
+
     query = {
         "bool": {
-            "filter": [{"term": {"author_did": user_did}}],
+            "filter": [{"terms": {"author_did": user_dids}}],
         }
     }
 

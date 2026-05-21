@@ -25,6 +25,7 @@ from .popularity import PopularityCandidateGenerator
 from .post_similarity import PostSimilarityCandidateGenerator
 from .random_posts import RandomPostsCandidateGenerator
 from .followed_users import FollowedUsersCandidateGenerator
+from .network_likes import NetworkLikesCandidateGenerator
 
 # Register built-in generators
 _post_similarity = PostSimilarityCandidateGenerator()
@@ -38,6 +39,9 @@ register_generator(_random_posts)
 
 _followed_users = FollowedUsersCandidateGenerator()
 register_generator(_followed_users)
+
+_network_likes = NetworkLikesCandidateGenerator()
+register_generator(_network_likes)
 
 __all__ = [
     "CandidateGenerator",
@@ -55,4 +59,5 @@ __all__ = [
     "PostSimilarityCandidateGenerator",
     "RandomPostsCandidateGenerator",
     "FollowedUsersCandidateGenerator",
+    "NetworkLikesCandidateGenerator",
 ]

@@ -3,12 +3,14 @@
 import httpx
 import pytest
 
+from .. import bsky as bsky_module
 from ..candidates import followed_users as followed_users_module
 from ..candidates.followed_users import (
     FollowedUsersCandidateGenerator,
     FollowedUsersLookupError,
     followed_users_search,
     get_followed_user_dids,
+    MAX_FOLLOWED_USERS,
 )
 from ..embeddings import MINILM_L12_EMBEDDING_KEY
 
@@ -85,7 +87,7 @@ def fake_http_client(monkeypatch):
     FakeAsyncClient.instances = []
     FakeAsyncClient.response = FakeResponse({"follows": []})
     FakeAsyncClient.responses = []
-    monkeypatch.setattr(followed_users_module.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(bsky_module.httpx, "AsyncClient", FakeAsyncClient)
     return FakeAsyncClient
 
 
@@ -114,7 +116,7 @@ class TestGetFollowedUserDids:
 
         assert dids == ["did:plc:follow1", "did:plc:follow2"]
         client = fake_http_client.instances[0]
-        assert client.kwargs == {"timeout": followed_users_module.FOLLOWS_HTTP_TIMEOUT}
+        assert client.kwargs == {"timeout": bsky_module.FOLLOWS_HTTP_TIMEOUT}
         assert client.closed is True
         assert client.get_calls == [{
             "url": "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows",
@@ -235,7 +237,7 @@ class TestGetFollowedUserDids:
         async def fake_sleep(delay):
             sleeps.append(delay)
 
-        monkeypatch.setattr(followed_users_module.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(bsky_module.asyncio, "sleep", fake_sleep)
         request = httpx.Request("GET", "https://example.test")
         response = httpx.Response(429, request=request)
         fake_http_client.responses = [
@@ -252,7 +254,7 @@ class TestGetFollowedUserDids:
         dids = await get_followed_user_dids("did:plc:user1", limit=100)
 
         assert dids == ["did:plc:follow1"]
-        assert sleeps == [followed_users_module.FOLLOWS_RETRY_BACKOFF_SECONDS]
+        assert sleeps == [bsky_module.FOLLOWS_RETRY_BACKOFF_SECONDS]
         client = fake_http_client.instances[0]
         assert len(client.get_calls) == 2
 
@@ -266,7 +268,7 @@ class TestGetFollowedUserDids:
         async def fake_sleep(delay):
             return None
 
-        monkeypatch.setattr(followed_users_module.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(bsky_module.asyncio, "sleep", fake_sleep)
         request = httpx.Request("GET", "https://example.test")
         response = httpx.Response(503, request=request)
         first_page = [{"did": f"did:plc:follow{i}"} for i in range(100)]
@@ -307,7 +309,7 @@ class TestGetFollowedUserDids:
             async def __aexit__(self, exc_type, exc, tb):
                 raise TimeoutError
 
-        monkeypatch.setattr(followed_users_module.asyncio, "timeout", ExpiringTimeout)
+        monkeypatch.setattr(bsky_module.asyncio, "timeout", ExpiringTimeout)
         fake_http_client.response = FakeResponse({
             "follows": [{"did": "did:plc:follow1"}],
         })
@@ -337,7 +339,7 @@ class TestFollowedUsersSearch:
     async def test_returns_candidates_scored(self, monkeypatch):
         async def fake_get_followed_user_dids(user_did: str, limit: int):
             assert user_did == "did:plc:user1"
-            assert limit == followed_users_module.MAX_FOLLOWED_USERS
+            assert limit == MAX_FOLLOWED_USERS
             return ["did:plc:follow1", "did:plc:follow2"]
 
         monkeypatch.setattr(

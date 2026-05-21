@@ -15,9 +15,8 @@ from .base import CandidateGenerator, CandidateResult
 from ..elasticsearch import unwrap_es_response, fetch_recent_liked_post_uris, fetch_post_embeddings, POSTS_KNN_INDEX
 from ..embeddings import (
     MINILM_L12_EMBEDDING_FIELD,
-    MINILM_L12_EMBEDDING_KEY,
-    encode_float32_b64,
 )
+from .utils import candidate_posts_from_es_response
 from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -75,37 +74,8 @@ async def knn_search_posts(
 
     async with timed(logger, "knn_search_posts", index=POSTS_KNN_INDEX, num_candidates=num_candidates):
         resp = await es.search(index=POSTS_KNN_INDEX, query=knn_query, size=num_candidates, request_timeout=60)
-    data = unwrap_es_response(resp)
 
-    candidates: list[CandidatePost] = []
-    for hit in data.get("hits", {}).get("hits", []):
-        src = hit.get("_source") or {}
-        embeddings_obj = src.get("embeddings") or {}
-
-        l12 = (
-            embeddings_obj.get(MINILM_L12_EMBEDDING_KEY)
-            if isinstance(embeddings_obj, dict)
-            else None
-        )
-
-        encoded = None
-        if l12 is not None:
-            try:
-                encoded = encode_float32_b64(l12)
-            except Exception:
-                encoded = None
-
-        candidates.append(
-            CandidatePost(
-                at_uri=src.get("at_uri"),
-                content=src.get("content"),
-                minilm_l12_embedding=encoded,
-                score=hit.get("_score"),
-                generator_name=generator_name,
-                author_did=src.get("author_did"),
-            )
-        )
-    return candidates
+    return candidate_posts_from_es_response(resp, generator_name=generator_name)
 
 
 class PostSimilarityCandidateGenerator(CandidateGenerator):
