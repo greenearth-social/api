@@ -1,3 +1,4 @@
+# pyright: reportCallIssue=false
 """Feed catalog — the canonical registry of all published feeds.
 
 Each entry maps a short feed name (the AT Protocol rkey) to a ``FeedConfig``
