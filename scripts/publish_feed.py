@@ -59,8 +59,7 @@ DEFAULT_PDS = "https://bsky.social"
 
 ENV_DISPLAY_PREFIX: dict[str, str] = {
     "dev": "GE Dev",
-    "stage": "GE Stg",
-    "prod": "GreenEarth",
+    "stage": "GE",
 }
 
 ENV_ALIASES: dict[str, str] = {

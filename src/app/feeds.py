@@ -13,7 +13,7 @@ pulling in FastAPI.
 
 from .models import CandidateGenerateRequest, FeedConfig, GeneratorSpec, RankPredictRequest
 
-# NOTE: display_name is limited to 24 chars, including the prefix ("GreenEarth, GE Dev, or GE Stg")
+# NOTE: display_name is limited to 24 chars, including the prefix ("GE Dev" or "GE"; prod has no prefix)
 FEEDS: dict[str, FeedConfig] = {
     "basic-similarity": FeedConfig(
         display_name="Similarity",

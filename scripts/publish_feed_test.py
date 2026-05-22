@@ -293,7 +293,7 @@ class TestPublishFeed:
 
         put_call = client.post.call_args_list[1]
         record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
-        assert record["displayName"] == "GE Stg Similarity"
+        assert record["displayName"] == "GE Similarity"
 
 
 # ---------------------------------------------------------------------------
@@ -552,10 +552,10 @@ class TestPrefixedDisplayName:
         assert _prefixed_display_name("My Feed", "dev") == "GE Dev My Feed"
 
     def test_stage_prefix(self):
-        assert _prefixed_display_name("My Feed", "stage") == "GE Stg My Feed"
+        assert _prefixed_display_name("My Feed", "stage") == "GE My Feed"
 
     def test_prod_prefix(self):
-        assert _prefixed_display_name("My Feed", "prod") == "GreenEarth My Feed"
+        assert _prefixed_display_name("My Feed", "prod") == "My Feed"
 
     def test_no_environment(self):
         assert _prefixed_display_name("My Feed", None) == "My Feed"
@@ -565,6 +565,19 @@ class TestPrefixedDisplayName:
 
     def test_alias_environment(self):
         assert _prefixed_display_name("My Feed", "development") == "GE Dev My Feed"
+
+
+BSKY_DISPLAY_NAME_LIMIT = 24
+
+
+class TestBlueskyDisplayNameLimit:
+    def test_all_feeds_fit_bluesky_limit_in_all_environments(self):
+        for env in ("dev", "stage", "prod"):
+            for feed_name, feed_cfg in FEEDS.items():
+                prefixed = _prefixed_display_name(feed_cfg.display_name, env)
+                assert len(prefixed) <= BSKY_DISPLAY_NAME_LIMIT, (
+                    f"'{feed_name}' in env '{env}' is {len(prefixed)} chars: '{prefixed}'"
+                )
 
 
 class TestEnvironmentResolution:
@@ -625,7 +638,7 @@ class TestSyncFeeds:
         captured = capsys.readouterr()
         assert "Published: basic-similarity" in captured.out
         assert "Published: random" in captured.out
-        assert "GreenEarth Similarity" in captured.out
+        assert "Similarity" in captured.out
         assert "Deleted stale: old-feed" in captured.out
         assert "Sync complete:" in captured.out
 
