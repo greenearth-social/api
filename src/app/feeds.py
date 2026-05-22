@@ -17,7 +17,7 @@ from .models import CandidateGenerateRequest, FeedConfig, GeneratorSpec, RankPre
 FEEDS: dict[str, FeedConfig] = {
     "basic-similarity": FeedConfig(
         display_name="Similarity",
-        description="Development feed — post-similarity candidates with popularity infill.\n\nBuilt by GreenEarth Social (https://greenearth.social)",
+        description="Development feed — post-similarity candidates with popularity infill.\n\nBuilt by GreenEarth Social (https://www.greenearth.social)",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="post_similarity", weight=0.5),
@@ -31,7 +31,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "random": FeedConfig(
         display_name="Random",
-        description="Development feed — random posts.\n\nBuilt by GreenEarth Social (https://greenearth.social)",
+        description="Development feed — random posts.\n\nBuilt by GreenEarth Social (https://www.greenearth.social)",
         diversify=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="random_posts", weight=1.0)],
@@ -43,7 +43,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "ranked": FeedConfig(
         display_name="Ranked",
-        description="Current-best ranked feed.\n\nBuilt by GreenEarth Social (https://greenearth.social)",
+        description="Current-best ranked feed.\n\nBuilt by GreenEarth Social (https://www.greenearth.social)",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="post_similarity", weight=0.5),
@@ -60,7 +60,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "best-of-friends": FeedConfig(
         display_name="Best of Friends",
-        description="The best posts from people you follow, curated just for you.\n\nBuilt by GreenEarth Social (https://greenearth.social)",
+        description="The best posts from people you follow, curated just for you.\n\nBuilt by GreenEarth Social (https://www.greenearth.social)",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="followed_users", weight=1.0)],
             infill=None,

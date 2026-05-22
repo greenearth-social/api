@@ -2,7 +2,7 @@
 
 from app.feeds import FEEDS
 
-ATTRIBUTION_LINE = "Built by GreenEarth Social (https://greenearth.social)"
+ATTRIBUTION_LINE = "Built by GreenEarth Social (https://www.greenearth.social)"
 
 
 class TestFeedDescriptions:
