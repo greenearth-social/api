@@ -9,12 +9,11 @@ import asyncio
 import logging
 import os
 
-import httpx
-
 from ...models import RankedCandidate, CandidatePost, RankPredictResult
 from .base import Ranker, RankerExecutionError, RankerResult
 from ..elasticsearch import fetch_post_embeddings, fetch_recent_liked_post_uris
 from ..embeddings import decode_float32_b64
+from ..http_client import get_http_client
 
 
 logger = logging.getLogger(__name__)
@@ -56,22 +55,22 @@ async def predict_post_tower_batch(
         for i in range(0, len(post_embeddings), POST_TOWER_BATCH_SIZE)
     ]
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        async def _call_chunk(chunk: list[list[float]]) -> list[list[float]]:
-            resp = await client.post(  # type: ignore
-                url, json={"post_embeddings": chunk}, headers=headers
+    client = get_http_client()
+
+    async def _call_chunk(chunk: list[list[float]]) -> list[list[float]]:
+        resp = await client.post(
+            url, json={"post_embeddings": chunk}, headers=headers
+        )
+        if resp.is_error:
+            logger.error(
+                "post-tower predict failed status=%s body=%s",
+                resp.status_code,
+                resp.text,
             )
-            if resp.is_error:
-                logger.error(
-                    "post-tower predict failed status=%s body=%s",
-                    resp.status_code,
-                    resp.text,
-                )
-                resp.raise_for_status()
-            return resp.json()["outputs"]
+            resp.raise_for_status()
+        return resp.json()["outputs"]
 
-        chunk_outputs = await asyncio.gather(*(_call_chunk(c) for c in chunks))
-
+    chunk_outputs = await asyncio.gather(*(_call_chunk(c) for c in chunks))
     return [item for chunk_out in chunk_outputs for item in chunk_out]
 
 
@@ -85,11 +84,10 @@ async def predict_user_tower_single(
     headers = {"X-API-Key": api_key}
     payload = {"history_embeddings": history_embeddings}
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(url, json=payload, headers=headers) # type: ignore
-        resp.raise_for_status()
-        data = resp.json()
-        return data["outputs"]
+    client = get_http_client()
+    resp = await client.post(url, json=payload, headers=headers)
+    resp.raise_for_status()
+    return resp.json()["outputs"]
 
 
 class TwoTowerRanker(Ranker):

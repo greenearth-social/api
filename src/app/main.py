@@ -8,6 +8,7 @@ from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
 from .lib.feed_cache import FirestoreFeedCache
 from .lib.firestore import init_firestore_client
+from .lib.http_client import close_http_client, init_http_client
 
 from elasticsearch import AsyncElasticsearch
 
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
     app.state.id_resolver = init_id_resolver()
     app.state.firestore = init_firestore_client()
     app.state.feed_cache = FirestoreFeedCache(app.state.firestore)
+    init_http_client()
     try:
         yield
     finally:
@@ -50,6 +52,10 @@ async def lifespan(app: FastAPI):
             pass
         try:
             app.state.firestore.close()
+        except Exception:
+            pass
+        try:
+            await close_http_client()
         except Exception:
             pass
 
