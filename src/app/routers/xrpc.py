@@ -199,9 +199,8 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
     """Resolve the caller's handle and upsert user + feed-activity docs.
 
     Runs as a background task so the user-facing latency of getFeedSkeleton
-    isn't paying for a DID document fetch plus two Firestore round-trips.
-    Failures are logged but do not surface to the caller — these writes are
-    analytics, not request-critical.
+    isn't paying for firebase roundtrips.
+    Failures are logged but do not surface to the caller.
     """
     try:
         username = await _resolve_username(request, user_did)
@@ -318,11 +317,8 @@ async def get_feed_skeleton(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Record authenticated users in Firestore for backend analytics. The
-    # username resolve and the two upserts are observational only — kick
-    # them off as a background task so they overlap with the pipeline
-    # instead of gating the response on a DID document fetch and two
-    # Firestore round-trips.
+    # Record authenticated users in Firestore for backend analytics. Runs in
+    # the background since this isn't essential for serving.
     db = getattr(request.app.state, "firestore", None)
     if db is None:
         logger.error("Firestore client not initialized")
