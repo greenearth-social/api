@@ -257,6 +257,9 @@ def test_predict_raises_when_user_tower_returns_wrong_number_of_embeddings(monke
     async def fake_predict_user_tower_single(history_embeddings, *, base_url, api_key):
         return []
 
+    async def fake_predict_post_tower_batch(post_embeddings, *, base_url, api_key):
+        return post_embeddings
+
     monkeypatch.setattr(
         two_tower_module,
         "fetch_recent_liked_post_uris",
@@ -268,6 +271,7 @@ def test_predict_raises_when_user_tower_returns_wrong_number_of_embeddings(monke
         "predict_user_tower_single",
         fake_predict_user_tower_single,
     )
+    monkeypatch.setattr(two_tower_module, "predict_post_tower_batch", fake_predict_post_tower_batch)
 
     with pytest.raises(
         RankerExecutionError,
