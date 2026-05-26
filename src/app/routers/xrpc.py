@@ -11,6 +11,7 @@ Implements the two endpoints required by the AT Protocol Feed Generator spec:
 See: https://docs.bsky.app/docs/starter-templates/custom-feeds
 """
 
+import asyncio
 import logging
 import os
 import uuid
@@ -181,6 +182,46 @@ def _get_feed_cache(request: Request) -> FeedCache:
     return cache
 
 
+# Fire-and-forget background tasks (Firestore session writes, …). Keeping a
+# strong reference here prevents the event loop from garbage-collecting them
+# mid-flight; the done callback removes them once they complete.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+async def _record_session(request: Request, user_did: str, feed_name: str, db) -> None:
+    """Resolve the caller's handle and upsert user + feed-activity docs.
+
+    Runs as a background task so the user-facing latency of getFeedSkeleton
+    isn't paying for a DID document fetch plus two Firestore round-trips.
+    Failures are logged but do not surface to the caller — these writes are
+    analytics, not request-critical.
+    """
+    try:
+        username = await _resolve_username(request, user_did)
+    except Exception:
+        logger.exception("Failed to resolve username for %s in background", user_did)
+        return
+
+    try:
+        await upsert_user(db, user_did, username)
+    except Exception:
+        logger.exception("Failed to upsert user '%s' in Firestore", user_did)
+
+    try:
+        await upsert_feed_activity(db, user_did, feed_name)
+    except Exception:
+        logger.exception(
+            "Failed to record feed activity for user '%s', feed '%s'", user_did, feed_name
+        )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -277,26 +318,17 @@ async def get_feed_skeleton(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    username = await _resolve_username(request, user_did)
-
-    # Record authenticated users in Firestore for backend analytics/state.
-    # Firestore persistence is required and failures are treated as fatal.
+    # Record authenticated users in Firestore for backend analytics. The
+    # username resolve and the two upserts are observational only — kick
+    # them off as a background task so they overlap with the pipeline
+    # instead of gating the response on a DID document fetch and two
+    # Firestore round-trips.
     db = getattr(request.app.state, "firestore", None)
     if db is None:
         logger.error("Firestore client not initialized")
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
-    try:
-        await upsert_user(db, user_did, username)
-    except Exception:
-        logger.exception("Failed to upsert user '%s' in Firestore", user_did)
-        raise HTTPException(status_code=500, detail="Firestore write failed")
-
-    try:
-        await upsert_feed_activity(db, user_did, feed_name)
-    except Exception:
-        logger.exception("Failed to record feed activity for user '%s', feed '%s'", user_did, feed_name)
-        raise HTTPException(status_code=500, detail="Firestore write failed")
+    _spawn_background(_record_session(request, user_did, feed_name, db))
 
     feed_cache = _get_feed_cache(request)
 
