@@ -291,8 +291,14 @@ async def get_feed_skeleton(
         rkey = ""
         collection = ""
 
-    if collection == "app.bsky.feed.generator" and rkey in FEEDS:
-        feed_name = rkey
+    if collection == "app.bsky.feed.generator":
+        if rkey in FEEDS:
+            feed_name = rkey
+        else:
+            for key, cfg in FEEDS.items():
+                if cfg.internal_rkey == rkey:
+                    feed_name = key
+                    break
 
     if feed_name is None:
         raise HTTPException(

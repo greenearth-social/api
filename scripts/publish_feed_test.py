@@ -10,9 +10,6 @@ import pytest
 from publish_feed import (
     ENV_DISPLAY_PREFIX,
     FEEDS,
-    _acronym,
-    _caterpie_display_name,
-    _caterpie_rkey,
     _create_session,
     _delete_record,
     _list_records,
@@ -21,7 +18,6 @@ from publish_feed import (
     _put_record,
     _resolve_environment,
     _resolve_feed_publish_params,
-    _stable_hash,
     delete_all_feeds,
     delete_feed,
     list_feeds,
@@ -661,61 +657,6 @@ class TestSyncFeeds:
 
 
 # ---------------------------------------------------------------------------
-# Caterpie helpers
-# ---------------------------------------------------------------------------
-
-
-class TestAcronym:
-    def test_best_of_friends(self):
-        assert _acronym("Best of Friends") == "BOF"
-
-    def test_your_feed(self):
-        assert _acronym("Your Feed") == "YF"
-
-    def test_random(self):
-        assert _acronym("Random") == "R"
-
-    def test_similarity(self):
-        assert _acronym("Similarity") == "S"
-
-
-class TestStableHash:
-    def test_returns_two_hex_chars(self):
-        h = _stable_hash("Best of Friends")
-        assert len(h) == 2
-        assert all(c in "0123456789abcdef" for c in h)
-
-    def test_is_deterministic(self):
-        assert _stable_hash("Best of Friends") == _stable_hash("Best of Friends")
-
-    def test_different_inputs_differ(self):
-        assert _stable_hash("Random") != _stable_hash("Similarity")
-
-
-class TestCaterpieHelpers:
-    def test_display_name_format(self):
-        name = _caterpie_display_name("Best of Friends")
-        h = _stable_hash("Best of Friends")
-        assert name == f"{h} BOF"
-
-    def test_rkey_format_lowercase(self):
-        rkey = _caterpie_rkey("Best of Friends")
-        h = _stable_hash("Best of Friends")
-        assert rkey == f"{h}-bof"
-
-    def test_rkey_valid_at_chars(self):
-        for display_name in [cfg.display_name for cfg in FEEDS.values()]:
-            rkey = _caterpie_rkey(display_name)
-            assert all(c.isalnum() or c == "-" for c in rkey)
-
-
-class TestCaterpieRkeyUniqueness:
-    def test_all_feeds_produce_unique_caterpie_rkeys(self):
-        rkeys = [_caterpie_rkey(cfg.display_name) for cfg in FEEDS.values()]
-        assert len(rkeys) == len(set(rkeys)), f"Caterpie rkey collision: {rkeys}"
-
-
-# ---------------------------------------------------------------------------
 # _resolve_feed_publish_params
 # ---------------------------------------------------------------------------
 
@@ -737,21 +678,21 @@ class TestResolveFeedPublishParams:
     def test_prod_internal_uses_caterpie_path(self):
         feed = self._internal_feed()
         rkey, name, desc = _resolve_feed_publish_params("basic-similarity", feed, "prod")
-        assert rkey == _caterpie_rkey(feed.display_name)
-        assert name == _caterpie_display_name(feed.display_name)
+        assert rkey == feed.internal_rkey
+        assert name == feed.internal_display_name
         assert desc == "Built by Caterpie"
 
     def test_dev_any_uses_caterpie_with_ge_prefix(self):
         feed = self._public_feed()
         rkey, name, desc = _resolve_feed_publish_params("best-of-friends", feed, "dev")
-        assert rkey == _caterpie_rkey(feed.display_name)
+        assert rkey == feed.internal_rkey
         assert name.startswith("GE ")
         assert desc == "Built by Caterpie"
 
     def test_stage_any_uses_caterpie_with_ge_prefix(self):
         feed = self._internal_feed()
         rkey, name, desc = _resolve_feed_publish_params("basic-similarity", feed, "stage")
-        assert rkey == _caterpie_rkey(feed.display_name)
+        assert rkey == feed.internal_rkey
         assert name.startswith("GE ")
         assert desc == "Built by Caterpie"
 

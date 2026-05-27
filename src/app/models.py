@@ -157,6 +157,8 @@ class FeedConfig(BaseModel):
     display_name: str = Field(..., max_length=19)
     description: str = ""
     public: bool = Field(False)
+    internal_rkey: str | None = Field(None)
+    internal_display_name: str | None = Field(None)
     gen_request_template: CandidateGenerateRequest
     rank_request_template: RankPredictRequest | None = Field(
         None,

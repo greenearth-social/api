@@ -30,3 +30,19 @@ class TestFeedConfig:
     def test_accepts_display_name_of_exactly_19_chars(self):
         cfg = FeedConfig(display_name="A" * 19, gen_request_template=_minimal_gen_request())
         assert len(cfg.display_name) == 19
+
+    def test_internal_rkey_defaults_to_none(self):
+        cfg = FeedConfig(display_name="Test", gen_request_template=_minimal_gen_request())
+        assert cfg.internal_rkey is None
+
+    def test_internal_display_name_defaults_to_none(self):
+        cfg = FeedConfig(display_name="Test", gen_request_template=_minimal_gen_request())
+        assert cfg.internal_display_name is None
+
+    def test_internal_rkey_can_be_set(self):
+        cfg = FeedConfig(display_name="Test", internal_rkey="e2-s", gen_request_template=_minimal_gen_request())
+        assert cfg.internal_rkey == "e2-s"
+
+    def test_internal_display_name_can_be_set(self):
+        cfg = FeedConfig(display_name="Test", internal_display_name="e2 S", gen_request_template=_minimal_gen_request())
+        assert cfg.internal_display_name == "e2 S"

@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import hashlib
 import os
 import sys
 from typing import Literal
@@ -73,22 +72,6 @@ ENV_ALIASES: dict[str, str] = {
     "prod": "prod",
     "production": "prod",
 }
-
-
-def _acronym(display_name: str) -> str:
-    return "".join(word[0].upper() for word in display_name.split())
-
-
-def _stable_hash(s: str) -> str:
-    return hashlib.sha256(s.encode()).hexdigest()[:2]
-
-
-def _caterpie_display_name(display_name: str) -> str:
-    return f"{_stable_hash(display_name)} {_acronym(display_name)}"
-
-
-def _caterpie_rkey(display_name: str) -> str:
-    return f"{_stable_hash(display_name)}-{_acronym(display_name).lower()}"
 
 
 def _normalize_environment(environment: str | None) -> str | None:
@@ -388,12 +371,12 @@ def _resolve_feed_publish_params(
     is_greenearth = normalized_env == "prod" and feed_cfg.public
     if is_greenearth:
         return rkey, feed_cfg.display_name, f"{feed_cfg.description}\nBuilt by GreenEarth (https://www.greenearth.social)."
-    caterpie_name = _caterpie_display_name(feed_cfg.display_name)
-    published_rkey = _caterpie_rkey(feed_cfg.display_name)
+    published_rkey = feed_cfg.internal_rkey or rkey
+    base_display_name = feed_cfg.internal_display_name or feed_cfg.display_name
     if normalized_env in ("dev", "stage"):
-        published_display_name = f"GE {caterpie_name}"
+        published_display_name = f"GE {base_display_name}"
     else:
-        published_display_name = caterpie_name
+        published_display_name = base_display_name
     return published_rkey, published_display_name, "Built by Caterpie"
 
 

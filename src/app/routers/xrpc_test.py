@@ -275,6 +275,18 @@ class TestGetFeedSkeleton:
         assert resp.status_code == 200
         assert len(resp.json()["feed"]) == 2
 
+    def test_matches_feed_by_internal_rkey(self):
+        """Feeds published under their Caterpie internal_rkey are still served."""
+        feed_cfg = FEEDS["basic-similarity"]
+        internal_uri = f"at://{SERVICE_DID}/app.bsky.feed.generator/{feed_cfg.internal_rkey}"
+        with self._patch_generators(_make_candidates("p", 2)):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": internal_uri},
+            )
+        assert resp.status_code == 200
+        assert len(resp.json()["feed"]) == 2
+
     # --- unknown feed ---
 
     def test_unknown_feed_returns_400(self):
