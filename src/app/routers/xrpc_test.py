@@ -22,7 +22,7 @@ FEED_RKEY = "basic-similarity"
 FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 RANDOM_FEED_RKEY = "random"
 RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
-RANKED_FEED_RKEY = "ranked"
+RANKED_FEED_RKEY = "your-feed"
 RANKED_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANKED_FEED_RKEY}"
 BEST_OF_FRIENDS_FEED_RKEY = "best-of-friends"
 BEST_OF_FRIENDS_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{BEST_OF_FRIENDS_FEED_RKEY}"
@@ -204,7 +204,7 @@ class TestDescribeFeedGenerator:
         uris = [f["uri"] for f in data["feeds"]]
         assert RANDOM_FEED_URI in uris
 
-    def test_feeds_list_contains_ranked_similarity(self):
+    def test_feeds_list_contains_your_feed(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         uris = [f["uri"] for f in data["feeds"]]
         assert RANKED_FEED_URI in uris
@@ -271,6 +271,18 @@ class TestGetFeedSkeleton:
             resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": FEED_URI_FROM_APPVIEW},
+            )
+        assert resp.status_code == 200
+        assert len(resp.json()["feed"]) == 2
+
+    def test_matches_feed_by_internal_rkey(self):
+        """Feeds published under their Caterpie internal_rkey are still served."""
+        feed_cfg = FEEDS["basic-similarity"]
+        internal_uri = f"at://{SERVICE_DID}/app.bsky.feed.generator/{feed_cfg.internal_rkey}"
+        with self._patch_generators(_make_candidates("p", 2)):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": internal_uri},
             )
         assert resp.status_code == 200
         assert len(resp.json()["feed"]) == 2

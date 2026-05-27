@@ -19,6 +19,8 @@ FEEDS: dict[str, FeedConfig] = {
     "basic-similarity": FeedConfig(
         display_name="Similarity",
         description="Development feed — post-similarity candidates with popularity infill.",
+        internal_rkey="e2-s",
+        internal_display_name="e2 S",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="post_similarity", weight=0.5),
@@ -32,7 +34,10 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "random": FeedConfig(
         display_name="Random",
-        description="Development feed — random posts.",
+        description="A random selection of recent posts from the community.",
+        public=True,
+        internal_rkey="67-r",
+        internal_display_name="67 R",
         diversify=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="random_posts", weight=1.0)],
@@ -42,9 +47,12 @@ FEEDS: dict[str, FeedConfig] = {
             exclude_uris=[],
         ),
     ),
-    "ranked": FeedConfig(
-        display_name="Ranked",
-        description="Current-best ranked feed.",
+    "your-feed": FeedConfig(
+        display_name="Your Feed",
+        description="Posts ranked and personalized just for you.",
+        public=True,
+        internal_rkey="a0-yf",
+        internal_display_name="a0 YF",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="post_similarity", weight=0.5),
@@ -62,6 +70,9 @@ FEEDS: dict[str, FeedConfig] = {
     "best-of-friends": FeedConfig(
         display_name="Best of Friends",
         description="The best posts from people you follow, curated just for you.",
+        public=True,
+        internal_rkey="fd-bof",
+        internal_display_name="fd BOF",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="followed_users", weight=1.0)],
             infill=None,
