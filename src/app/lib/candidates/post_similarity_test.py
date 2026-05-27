@@ -278,6 +278,35 @@ class TestKnnSearchPosts:
         assert candidates[0].generator_name is None
 
     @pytest.mark.asyncio
+    async def test_drops_candidates_without_embeddings(self):
+        es = FakeEs(responses={
+            "posts_recent": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_score": 0.95,
+                            "_source": {
+                                "at_uri": "at://post/1",
+                                "content": "hello",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            },
+                        },
+                        {
+                            "_score": 0.8,
+                            "_source": {
+                                "at_uri": "at://post/2",
+                                "content": "missing embedding",
+                            },
+                        },
+                    ]
+                }
+            }
+        })
+        candidates = await knn_search_posts(es, [0.1, 0.2], num_candidates=10)
+        assert len(candidates) == 1
+        assert candidates[0].at_uri == "at://post/1"
+
+    @pytest.mark.asyncio
     async def test_passes_generator_name(self):
         es = FakeEs(responses={
             "posts_recent": {

@@ -111,8 +111,17 @@ async def knn_search_posts(
         candidates.append(candidate_post_from_hit(hit, generator_name=generator_name))
         if len(candidates) >= num_candidates:
             break
-
-    return candidates
+    
+    # drop candidates without embeddings
+    candidates_with_embeddings = [
+        candidate for candidate in candidates if candidate.minilm_l12_embedding
+    ]
+    if len(candidates_with_embeddings) < len(candidates):
+        logger.info(
+            "Dropped %d post-similarity candidates without embeddings",
+            len(candidates) - len(candidates_with_embeddings),
+        )
+    return candidates_with_embeddings
 
 
 class PostSimilarityCandidateGenerator(CandidateGenerator):
