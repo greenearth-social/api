@@ -387,7 +387,7 @@ def _resolve_feed_publish_params(
     """Return (published_rkey, display_name, description) for a feed based on routing rules."""
     is_greenearth = normalized_env == "prod" and feed_cfg.public
     if is_greenearth:
-        return rkey, feed_cfg.display_name, f"{feed_cfg.description} | GreenEarth"
+        return rkey, feed_cfg.display_name, f"{feed_cfg.description}\nBuilt by GreenEarth (https://www.greenearth.social)."
     caterpie_name = _caterpie_display_name(feed_cfg.display_name)
     published_rkey = _caterpie_rkey(feed_cfg.display_name)
     if normalized_env in ("dev", "stage"):
