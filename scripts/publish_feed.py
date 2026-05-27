@@ -371,8 +371,8 @@ def _resolve_feed_publish_params(
     is_greenearth = normalized_env == "prod" and feed_cfg.public
     if is_greenearth:
         return rkey, feed_cfg.display_name, f"{feed_cfg.description}\nBuilt by GreenEarth (https://www.greenearth.social)."
-    published_rkey = feed_cfg.internal_rkey or rkey
-    base_display_name = feed_cfg.internal_display_name or feed_cfg.display_name
+    published_rkey = feed_cfg.internal_rkey
+    base_display_name = feed_cfg.internal_display_name
     if normalized_env in ("dev", "stage"):
         published_display_name = f"GE {base_display_name}"
     else:
