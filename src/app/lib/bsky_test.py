@@ -24,40 +24,26 @@ class FakeResponse:
 
 
 class FakeAsyncClient:
-    instances: list["FakeAsyncClient"] = []
-    response = FakeResponse({"follows": []})
-    responses: list[FakeResponse | Exception] = []
-
-    def __init__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
+    def __init__(self):
         self.get_calls: list[dict] = []
-        self.closed = False
-        FakeAsyncClient.instances.append(self)
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self.closed = True
+        self.response: FakeResponse = FakeResponse({"follows": []})
+        self.responses: list[FakeResponse | Exception] = []
 
     async def get(self, url, *, params=None, **kwargs):
         self.get_calls.append({"url": url, "params": params, "kwargs": kwargs})
-        if FakeAsyncClient.responses:
-            response = FakeAsyncClient.responses.pop(0)
+        if self.responses:
+            response = self.responses.pop(0)
             if isinstance(response, Exception):
                 raise response
             return response
-        return FakeAsyncClient.response
+        return self.response
 
 
 @pytest.fixture
 def fake_http_client(monkeypatch):
-    FakeAsyncClient.instances = []
-    FakeAsyncClient.response = FakeResponse({"follows": []})
-    FakeAsyncClient.responses = []
-    monkeypatch.setattr(bsky_module.httpx, "AsyncClient", FakeAsyncClient)
-    return FakeAsyncClient
+    client = FakeAsyncClient()
+    monkeypatch.setattr(bsky_module, "get_http_client", lambda: client)
+    return client
 
 
 class TestGetFollowedUserDids:
@@ -73,13 +59,10 @@ class TestGetFollowedUserDids:
         dids = await get_followed_user_dids("did:plc:user1", limit=50)
 
         assert dids == ["did:plc:follow1", "did:plc:follow2"]
-        client = fake_http_client.instances[0]
-        assert client.kwargs == {"timeout": bsky_module.FOLLOWS_HTTP_TIMEOUT}
-        assert client.closed is True
-        assert client.get_calls == [{
+        assert fake_http_client.get_calls == [{
             "url": "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows",
             "params": {"actor": "did:plc:user1", "limit": 50},
-            "kwargs": {},
+            "kwargs": {"timeout": bsky_module.FOLLOWS_HTTP_TIMEOUT},
         }]
 
     @pytest.mark.asyncio
@@ -98,12 +81,11 @@ class TestGetFollowedUserDids:
         dids = await get_followed_user_dids("did:plc:user1", limit=103)
 
         assert dids == [f"did:plc:follow{i}" for i in range(103)]
-        client = fake_http_client.instances[0]
-        assert client.get_calls == [
+        assert fake_http_client.get_calls == [
             {
                 "url": "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows",
                 "params": {"actor": "did:plc:user1", "limit": 100},
-                "kwargs": {},
+                "kwargs": {"timeout": bsky_module.FOLLOWS_HTTP_TIMEOUT},
             },
             {
                 "url": "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows",
@@ -112,7 +94,7 @@ class TestGetFollowedUserDids:
                     "limit": 3,
                     "cursor": "next-page",
                 },
-                "kwargs": {},
+                "kwargs": {"timeout": bsky_module.FOLLOWS_HTTP_TIMEOUT},
             },
         ]
 
@@ -131,15 +113,14 @@ class TestGetFollowedUserDids:
         dids = await get_followed_user_dids("did:plc:user1", limit=1)
 
         assert dids == ["did:plc:follow1"]
-        client = fake_http_client.instances[0]
-        assert client.get_calls[0]["params"] == {"actor": "did:plc:user1", "limit": 1}
+        assert fake_http_client.get_calls[0]["params"] == {"actor": "did:plc:user1", "limit": 1}
 
     @pytest.mark.asyncio
     async def test_non_positive_limit_skips_http_request(self, fake_http_client):
         dids = await get_followed_user_dids("did:plc:user1", limit=0)
 
         assert dids == []
-        assert fake_http_client.instances == []
+        assert fake_http_client.get_calls == []
 
     @pytest.mark.asyncio
     async def test_skips_malformed_follow_entries(self, fake_http_client):
@@ -181,8 +162,7 @@ class TestGetFollowedUserDids:
         with pytest.raises(FollowedUsersLookupError, match="Failed to fetch"):
             await get_followed_user_dids("did:plc:user1", limit=100)
 
-        client = fake_http_client.instances[0]
-        assert len(client.get_calls) == 2
+        assert len(fake_http_client.get_calls) == 2
 
     @pytest.mark.asyncio
     async def test_retries_transient_http_error_once(
@@ -213,8 +193,7 @@ class TestGetFollowedUserDids:
 
         assert dids == ["did:plc:follow1"]
         assert sleeps == [bsky_module.FOLLOWS_RETRY_BACKOFF_SECONDS]
-        client = fake_http_client.instances[0]
-        assert len(client.get_calls) == 2
+        assert len(fake_http_client.get_calls) == 2
 
     @pytest.mark.asyncio
     async def test_returns_partial_dids_when_later_page_fails(
@@ -247,8 +226,7 @@ class TestGetFollowedUserDids:
 
         assert dids == [f"did:plc:follow{i}" for i in range(100)]
         assert "partial followed users" in caplog.text
-        client = fake_http_client.instances[0]
-        assert len(client.get_calls) == 3
+        assert len(fake_http_client.get_calls) == 3
 
     @pytest.mark.asyncio
     async def test_returns_partial_dids_when_total_lookup_budget_expires(

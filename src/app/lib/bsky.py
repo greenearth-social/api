@@ -5,6 +5,8 @@ import logging
 
 import httpx
 
+from .http_client import get_http_client
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -49,7 +51,7 @@ async def _get_follows_page(
 ) -> dict:
     for attempt in range(FOLLOWS_MAX_RETRIES + 1):
         try:
-            resp = await client.get(base_url, params=params)
+            resp = await client.get(base_url, params=params, timeout=FOLLOWS_HTTP_TIMEOUT)
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPError as exc:
@@ -71,53 +73,54 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
     if limit <= 0:
         return followed_dids
 
+    client = get_http_client()
+
     try:
-        async with httpx.AsyncClient(timeout=FOLLOWS_HTTP_TIMEOUT) as client:
-            async with asyncio.timeout(FOLLOWS_LOOKUP_TIMEOUT_SECONDS):
-                while len(followed_dids) < limit:
-                    page_limit = min(FOLLOWS_PAGE_LIMIT, limit - len(followed_dids))
-                    params = {"actor": user_did, "limit": page_limit}
-                    if cursor:
-                        params["cursor"] = cursor
+        async with asyncio.timeout(FOLLOWS_LOOKUP_TIMEOUT_SECONDS):
+            while len(followed_dids) < limit:
+                page_limit = min(FOLLOWS_PAGE_LIMIT, limit - len(followed_dids))
+                params = {"actor": user_did, "limit": page_limit}
+                if cursor:
+                    params["cursor"] = cursor
 
-                    try:
-                        data = await _get_follows_page(client, base_url, params)
-                        if not isinstance(data, dict):
-                            raise FollowedUsersLookupError(
-                                f"Unexpected follows response for {user_did}"
-                            )
+                try:
+                    data = await _get_follows_page(client, base_url, params)
+                    if not isinstance(data, dict):
+                        raise FollowedUsersLookupError(
+                            f"Unexpected follows response for {user_did}"
+                        )
 
-                        follows = data.get("follows", [])
-                        if not isinstance(follows, list):
-                            raise FollowedUsersLookupError(
-                                f"Unexpected follows response for {user_did}"
-                            )
-                    except (
-                        httpx.HTTPError,
-                        ValueError,
-                        FollowedUsersLookupError,
-                    ) as exc:
-                        if followed_dids:
-                            logger.warning(
-                                "Returning %s partial followed users for %s after "
-                                "follow lookup page failed: %s",
-                                len(followed_dids),
-                                user_did,
-                                exc,
-                            )
-                            return followed_dids[:limit]
-                        raise
+                    follows = data.get("follows", [])
+                    if not isinstance(follows, list):
+                        raise FollowedUsersLookupError(
+                            f"Unexpected follows response for {user_did}"
+                        )
+                except (
+                    httpx.HTTPError,
+                    ValueError,
+                    FollowedUsersLookupError,
+                ) as exc:
+                    if followed_dids:
+                        logger.warning(
+                            "Returning %s partial followed users for %s after "
+                            "follow lookup page failed: %s",
+                            len(followed_dids),
+                            user_did,
+                            exc,
+                        )
+                        return followed_dids[:limit]
+                    raise
 
-                    followed_dids.extend(
-                        follow["did"]
-                        for follow in follows
-                        if isinstance(follow, dict)
-                        and isinstance(follow.get("did"), str)
-                    )
+                followed_dids.extend(
+                    follow["did"]
+                    for follow in follows
+                    if isinstance(follow, dict)
+                    and isinstance(follow.get("did"), str)
+                )
 
-                    cursor = data.get("cursor")
-                    if not isinstance(cursor, str) or not cursor:
-                        break
+                cursor = data.get("cursor")
+                if not isinstance(cursor, str) or not cursor:
+                    break
     except TimeoutError as exc:
         if followed_dids:
             logger.warning(

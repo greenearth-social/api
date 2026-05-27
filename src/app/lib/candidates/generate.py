@@ -6,6 +6,7 @@ a fallback generator.  This module is used by both the ``/candidates``
 REST API and the XRPC feed-skeleton endpoint.
 """
 
+import asyncio
 import logging
 import math
 
@@ -15,7 +16,7 @@ from ...models import (
     CandidatePost,
     GeneratorSpec,
 )
-from .base import CandidateResult, get_generator
+from .base import CandidateGenerator, CandidateResult, get_generator
 
 logger = logging.getLogger(__name__)
 
@@ -104,18 +105,22 @@ async def run_generate(
     """
     counts = allocate_counts(request.generators, request.num_candidates)
 
-    all_candidates: list[CandidatePost] = []
-
+    # Resolve generators up front so missing-name errors raise deterministically
+    # before any network work begins.
+    active: list[tuple[GeneratorSpec, int, CandidateGenerator]] = []
     for spec, count in zip(request.generators, counts):
         if count <= 0:
             continue
-
         gen = get_generator(spec.name)
         if gen is None:
             raise GeneratorNotFoundError(spec.name)
+        active.append((spec, count, gen))
 
+    async def _run_one(
+        spec: GeneratorSpec, count: int, gen: CandidateGenerator
+    ) -> CandidateResult | None:
         try:
-            result = await gen.generate(
+            return await gen.generate(
                 es=es,
                 user_did=request.user_did,
                 num_candidates=count,
@@ -125,9 +130,17 @@ async def run_generate(
         except Exception as exc:
             logger.exception("Candidate generator '%s' failed", spec.name)
             if swallow_errors:
-                continue
+                return None
             raise GeneratorError(spec.name, exc) from exc
 
+    results = await asyncio.gather(
+        *(_run_one(spec, count, gen) for spec, count, gen in active)
+    )
+
+    all_candidates: list[CandidatePost] = []
+    for result in results:
+        if result is None:
+            continue
         all_candidates.extend(result.candidates)
 
     deduped = dedup_candidates(all_candidates)

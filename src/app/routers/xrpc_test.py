@@ -875,8 +875,9 @@ class TestGetFeedSkeletonAuth:
             TEST_USERNAME,
         )
 
-    def test_username_resolution_failure_is_fatal(self):
-        """Username resolution failures should fail the request."""
+    def test_username_resolution_failure_is_logged_but_non_fatal(self, caplog):
+        """Username resolution runs in a background task; failures are logged
+        but don't block the response."""
         from unittest.mock import MagicMock
 
         mock_payload = MagicMock()
@@ -897,11 +898,12 @@ class TestGetFeedSkeletonAuth:
                 headers={"Authorization": "Bearer valid.jwt.token"},
             )
 
-        assert resp.status_code == 500
-        assert resp.json()["detail"] == "Username resolution failed"
+        assert resp.status_code == 200
+        assert "Failed to resolve username" in caplog.text
 
-    def test_firestore_upsert_failure_is_fatal(self):
-        """Firestore write errors should fail the request."""
+    def test_firestore_upsert_failure_is_logged_but_non_fatal(self, caplog):
+        """Firestore user upserts run in a background task; failures are
+        logged but don't block the response."""
         from unittest.mock import MagicMock
 
         mock_payload = MagicMock()
@@ -926,8 +928,8 @@ class TestGetFeedSkeletonAuth:
                 headers={"Authorization": "Bearer valid.jwt.token"},
             )
 
-        assert resp.status_code == 500
-        assert resp.json()["detail"] == "Firestore write failed"
+        assert resp.status_code == 200
+        assert "Failed to upsert user" in caplog.text
 
     def test_missing_firestore_client_is_fatal(self):
         """Missing Firestore client should fail the request."""
@@ -991,8 +993,9 @@ class TestGetFeedSkeletonAuth:
         assert resp.status_code == 200
         mock_activity.assert_awaited_once_with(app.state.firestore, "did:plc:autheduser", FEED_RKEY)
 
-    def test_feed_activity_failure_is_fatal(self):
-        """Feed activity write errors should fail the request."""
+    def test_feed_activity_failure_is_logged_but_non_fatal(self, caplog):
+        """Feed-activity upserts run in a background task; failures are
+        logged but don't block the response."""
         mock_payload = MagicMock()
         mock_payload.iss = "did:plc:autheduser"
 
@@ -1015,8 +1018,8 @@ class TestGetFeedSkeletonAuth:
                 headers={"Authorization": "Bearer valid.jwt.token"},
             )
 
-        assert resp.status_code == 500
-        assert resp.json()["detail"] == "Firestore write failed"
+        assert resp.status_code == 200
+        assert "Failed to record feed activity" in caplog.text
 
 
 # ---------------------------------------------------------------------------
