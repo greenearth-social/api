@@ -1,6 +1,22 @@
 from ...models import CandidatePost
 from ..elasticsearch import unwrap_es_response
-from ..embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
+from ..embeddings import MINILM_L12_EMBEDDING_FIELD, MINILM_L12_EMBEDDING_KEY, encode_float32_b64
+
+
+# Fields every candidate generator should pull from ES via `_source`.
+# Posts in the index carry ~13 fields and TWO 384-dim embedding arrays
+# (L12 + L6); fetching the default _source costs ~5-15 KB per hit on the
+# wire, vs <1 KB without embeddings, and the wire bytes dominate
+# end-to-end latency over slow links. Generators that fetch posts should
+# pass ``_source=CANDIDATE_SOURCE_FIELDS`` to keep responses lean.
+CANDIDATE_SOURCE_FIELDS = [
+    "at_uri",
+    "author_did",
+    "content",
+    "thread_parent_post",   # used for Python-side reply filtering
+    "contains_video",       # used for video_only filtering
+    MINILM_L12_EMBEDDING_FIELD,
+]
 
 
 def candidate_posts_from_es_response(

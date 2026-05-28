@@ -16,7 +16,7 @@ from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings,
 from ..embeddings import (
     MINILM_L12_EMBEDDING_FIELD,
 )
-from .utils import candidate_post_from_hit
+from .utils import CANDIDATE_SOURCE_FIELDS, candidate_post_from_hit
 from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,7 @@ async def knn_search_posts(
             index=POSTS_KNN_INDEX,
             knn=knn_clause,
             size=fetch_size,
+            _source=CANDIDATE_SOURCE_FIELDS,
             request_timeout=60,
         )
 

@@ -20,7 +20,7 @@ import logging
 
 from ...models import CandidatePost
 from .base import CandidateGenerator, CandidateResult
-from .utils import candidate_posts_from_es_response
+from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,12 @@ async def popularity_search(
     }
 
     async with timed(logger, "es_popularity", num_candidates=num_candidates):
-        resp = await es.search(index="posts", query=query, size=num_candidates)
+        resp = await es.search(
+            index="posts",
+            query=query,
+            size=num_candidates,
+            _source=CANDIDATE_SOURCE_FIELDS,
+        )
     return candidate_posts_from_es_response(resp, generator_name=generator_name)
 
 
