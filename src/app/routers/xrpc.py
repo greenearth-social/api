@@ -166,7 +166,7 @@ class Interaction(BaseModel):
     event: str | None = Field(default=None, description="Interaction event type (app.bsky.feed.defs#...)")
     feed_context: str | None = Field(
         default=None,
-        alias="feedContext",
+        validation_alias="feedContext",
         description="The signed token we attached to the feed item",
     )
 

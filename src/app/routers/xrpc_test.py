@@ -297,7 +297,9 @@ class TestGetFeedSkeleton:
                 "/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI}
             ).json()
 
-        rids = {decode_feed_context(i["feedContext"]).rid for i in data["feed"]}
+        payloads = [decode_feed_context(i["feedContext"]) for i in data["feed"]]
+        assert all(p is not None for p in payloads)
+        rids = {p.rid for p in payloads if p is not None}
         assert len(rids) == 1
 
     # --- rkey matching ---
