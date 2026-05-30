@@ -121,7 +121,7 @@ async def run_generate(
         spec: GeneratorSpec, count: int, gen: CandidateGenerator
     ) -> CandidateResult | None:
         try:
-            async with timed(logger, "generator", name=spec.name, count=count):
+            async with timed(logger, "generator", metric_name="candidates.generate.duration_ms", generator_name=spec.name, count=count):
                 return await gen.generate(
                     es=es,
                     user_did=request.user_did,
