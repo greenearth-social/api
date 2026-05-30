@@ -55,9 +55,9 @@ async def lifespan(app: FastAPI):
 
     metrics = MetricCollector(
         service_name=os.environ.get("GE_SERVICE_NAME", "greenearth-api"),
-        env=os.environ.get("GE_ENV", "production"),
-        project_id=os.environ.get("GE_GCP_PROJECT_ID", ""),
-        region=os.environ.get("GE_GCP_REGION", "us-central1"),
+        env=os.environ.get("ENVIRONMENT", "local"),
+        project_id=os.environ.get("PROJECT_ID", ""),
+        region=os.environ.get("REGION", "us-east1"),
         export_interval_sec=int(os.environ.get("GE_METRICS_EXPORT_INTERVAL_SEC", "60")),
     )
     set_metric_collector(metrics)
