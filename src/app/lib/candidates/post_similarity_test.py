@@ -33,10 +33,11 @@ class FakeEs:
         self._default = {"hits": {"hits": []}}
         self.calls: list[dict] = []
 
-    async def search(self, *, index=None, query=None, size=None, sort=None, _source=None, **kwargs):
+    async def search(self, *, index=None, query=None, knn=None, size=None, sort=None, _source=None, **kwargs):
         self.calls.append({
             "index": index,
             "query": query,
+            "knn": knn,
             "size": size,
             "sort": sort,
             "_source": _source,
@@ -219,22 +220,104 @@ class TestKnnSearchPosts:
         assert candidates[0].generator_name == "post_similarity"
 
     @pytest.mark.asyncio
-    async def test_video_only_true_includes_filter(self):
-        es = FakeEs(responses={
-            "posts_recent": {"hits": {"hits": []}}
-        })
-        await knn_search_posts(es, [0.1, 0.2], num_candidates=5, video_only=True)
-        query = es.calls[0]["query"]
-        assert {"term": {"contains_video": True}} in query["bool"]["filter"]
+    async def test_no_reply_filter_in_es_query(self):
+        """Reply exclusion is intentionally NOT sent to ES — it would force
+        a brute-force fallback (~10x slower). We filter replies in Python."""
+        es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
+        await knn_search_posts(es, [0.1, 0.2], num_candidates=5)
+        knn = es.calls[0]["knn"]
+        assert es.calls[0]["query"] is None
+        # No filter at all when there are no exclude_uris.
+        assert "filter" not in knn
 
     @pytest.mark.asyncio
-    async def test_video_only_false_omits_filter(self):
+    async def test_exclude_uris_is_an_es_filter(self):
+        """exclude_uris is bitmap-friendly and small, so it stays in ES."""
+        es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
+        await knn_search_posts(
+            es, [0.1, 0.2], num_candidates=5, exclude_uris=["at://a", "at://b"]
+        )
+        knn = es.calls[0]["knn"]
+        assert {"terms": {"at_uri": ["at://a", "at://b"]}} in knn["filter"]["bool"]["must_not"]
+
+    @pytest.mark.asyncio
+    async def test_replies_are_filtered_out_in_python(self):
+        """Hits with thread_parent_post set are dropped from the returned set."""
         es = FakeEs(responses={
-            "posts_recent": {"hits": {"hits": []}}
+            "posts_recent": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_score": 0.95,
+                            "_source": {
+                                "at_uri": "at://post/1",
+                                "content": "original",
+                            },
+                        },
+                        {
+                            "_score": 0.94,
+                            "_source": {
+                                "at_uri": "at://post/2",
+                                "content": "reply",
+                                "thread_parent_post": "at://parent/x",
+                            },
+                        },
+                        {
+                            "_score": 0.93,
+                            "_source": {
+                                "at_uri": "at://post/3",
+                                "content": "another original",
+                            },
+                        },
+                    ]
+                }
+            }
         })
-        await knn_search_posts(es, [0.1, 0.2], num_candidates=5, video_only=False)
-        query = es.calls[0]["query"]
-        assert query["bool"]["filter"] == []
+        candidates = await knn_search_posts(es, [0.1, 0.2], num_candidates=10)
+        assert [c.at_uri for c in candidates] == ["at://post/1", "at://post/3"]
+
+    @pytest.mark.asyncio
+    async def test_video_only_filters_in_python(self):
+        es = FakeEs(responses={
+            "posts_recent": {
+                "hits": {
+                    "hits": [
+                        {"_score": 0.9, "_source": {"at_uri": "at://a", "contains_video": True}},
+                        {"_score": 0.8, "_source": {"at_uri": "at://b"}},
+                        {"_score": 0.7, "_source": {"at_uri": "at://c", "contains_video": True}},
+                    ]
+                }
+            }
+        })
+        candidates = await knn_search_posts(es, [0.1, 0.2], num_candidates=10, video_only=True)
+        assert [c.at_uri for c in candidates] == ["at://a", "at://c"]
+
+    @pytest.mark.asyncio
+    async def test_overfetches_to_compensate_for_python_filter(self):
+        """We ask ES for several times num_candidates so Python-side
+        reply/video filtering still leaves enough results."""
+        es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
+        await knn_search_posts(es, [0.1, 0.2], num_candidates=10)
+        call = es.calls[0]
+        # OVERFETCH_MULTIPLIER * num_candidates with a floor of MIN_OVERFETCH.
+        assert call["size"] >= 50
+        assert call["knn"]["k"] == call["size"]
+
+    @pytest.mark.asyncio
+    async def test_caps_returned_candidates_at_num_candidates(self):
+        es = FakeEs(responses={
+            "posts_recent": {
+                "hits": {
+                    "hits": [
+                        {"_score": 1.0 - i / 100, "_source": {"at_uri": f"at://p/{i}"}}
+                        for i in range(20)
+                    ]
+                }
+            }
+        })
+        candidates = await knn_search_posts(es, [0.1, 0.2], num_candidates=5)
+        assert len(candidates) == 5
+        assert [c.at_uri for c in candidates] == [f"at://p/{i}" for i in range(5)]
 
 
 # ---------------------------------------------------------------------------
