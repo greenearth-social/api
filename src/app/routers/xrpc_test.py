@@ -107,10 +107,20 @@ class InMemoryFeedCache(FeedCache):
 # Fixtures
 # ---------------------------------------------------------------------------
 
+FEED_CONTEXT_SECRET = "test-feed-context-secret"
+
+
 @pytest.fixture(autouse=True)
 def set_feed_generator_did(monkeypatch):
     """Ensure a deterministic service DID for all tests."""
     monkeypatch.setenv("GE_FEED_GENERATOR_DID", SERVICE_DID)
+
+
+@pytest.fixture(autouse=True)
+def set_feed_context_secret(monkeypatch):
+    """getFeedSkeleton now signs a feedContext on every item, so the signing
+    secret must be present for the endpoint to serve a response."""
+    monkeypatch.setenv("GE_FEED_CONTEXT_SECRET", FEED_CONTEXT_SECRET)
 
 
 @pytest.fixture(autouse=True)
@@ -262,6 +272,35 @@ class TestGetFeedSkeleton:
             data = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI}).json()
         assert len(data["feed"]) == 3
         assert data["feed"][0]["post"] == "at://p/0"
+
+    # --- feedContext ---
+
+    def test_items_carry_signed_feed_context(self):
+        from app.lib.feed_context import decode_feed_context
+
+        with self._patch_generators(_make_candidates("p", 3)):
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI}
+            ).json()
+
+        for item in data["feed"]:
+            payload = decode_feed_context(item["feedContext"])
+            assert payload is not None
+            assert payload.did == "did:plc:testuser"
+            assert payload.feed == FEED_RKEY
+
+    def test_all_items_share_one_request_id(self):
+        from app.lib.feed_context import decode_feed_context
+
+        with self._patch_generators(_make_candidates("p", 3)):
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI}
+            ).json()
+
+        payloads = [decode_feed_context(i["feedContext"]) for i in data["feed"]]
+        assert all(p is not None for p in payloads)
+        rids = {p.rid for p in payloads if p is not None}
+        assert len(rids) == 1
 
     # --- rkey matching ---
 
@@ -1224,3 +1263,139 @@ class TestBestOfFriendsFeed:
             )
 
         assert resp.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# /xrpc/app.bsky.feed.sendInteractions
+# ---------------------------------------------------------------------------
+
+
+def _make_token(did="did:plc:interactor", feed="your-feed", rid="req-1", iat=1730000000):
+    from app.lib.feed_context import FeedContextPayload, encode_feed_context
+
+    return encode_feed_context(FeedContextPayload(did=did, feed=feed, rid=rid, iat=iat))
+
+
+class TestShortEvent:
+    def test_strips_defs_prefix(self):
+        from app.routers.xrpc import _short_event
+
+        assert _short_event("app.bsky.feed.defs#interactionLike") == "interactionLike"
+
+    def test_passes_through_unprefixed(self):
+        from app.routers.xrpc import _short_event
+
+        assert _short_event("interactionLike") == "interactionLike"
+
+    def test_falls_back_to_original_when_suffix_empty(self):
+        from app.routers.xrpc import _short_event
+
+        assert _short_event("app.bsky.feed.defs#") == "app.bsky.feed.defs#"
+
+    def test_empty_input_returns_empty(self):
+        from app.routers.xrpc import _short_event
+
+        assert _short_event(None) == ""
+        assert _short_event("") == ""
+
+
+class TestSendInteractions:
+    def test_returns_empty_object(self):
+        resp = client.post(
+            "/xrpc/app.bsky.feed.sendInteractions", json={"interactions": []}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {}
+
+    def test_accepts_well_formed_payload(self):
+        # Patch the background recorder so the endpoint wiring is tested without
+        # touching the (mock) Firestore client. The coroutine is created
+        # synchronously when the endpoint calls it, so the call is recorded
+        # before the request returns.
+        with patch("app.routers.xrpc._record_interactions", new_callable=AsyncMock) as rec:
+            resp = client.post(
+                "/xrpc/app.bsky.feed.sendInteractions",
+                json={
+                    "interactions": [
+                        {
+                            "item": "at://post/1",
+                            "event": "app.bsky.feed.defs#interactionLike",
+                            "feedContext": _make_token(),
+                        }
+                    ]
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {}
+        rec.assert_called_once()
+        interactions = rec.call_args[0][1]
+        assert len(interactions) == 1
+        assert interactions[0].item == "at://post/1"
+
+    @pytest.mark.asyncio
+    async def test_records_valid_interaction(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        ix = Interaction(
+            item="at://post/1",
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context=_make_token(did="did:plc:u", feed="your-feed", rid="r1"),
+        )
+        db = MagicMock()
+        with patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec:
+            await _record_interactions(db, [ix])
+
+        rec.assert_called_once()
+        doc = rec.call_args[0][1]
+        assert doc.user_did == "did:plc:u"
+        assert doc.feed_name == "your-feed"
+        assert doc.request_id == "r1"
+        assert doc.item_uri == "at://post/1"
+        # The app.bsky.feed.defs# prefix is stripped before storage.
+        assert doc.event == "interactionLike"
+        assert doc.feed_generated_at is not None
+
+    @pytest.mark.asyncio
+    async def test_drops_forged_token(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        ix = Interaction(
+            item="at://post/1",
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context="forged.token",
+        )
+        db = MagicMock()
+        with patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec:
+            await _record_interactions(db, [ix])
+
+        rec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_drops_missing_token(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        ix = Interaction(item="at://post/1", event="app.bsky.feed.defs#interactionLike")
+        db = MagicMock()
+        with patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec:
+            await _record_interactions(db, [ix])
+
+        rec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_records_only_valid_interactions_in_mixed_batch(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        like = "app.bsky.feed.defs#interactionLike"
+        repost = "app.bsky.feed.defs#interactionRepost"
+        less = "app.bsky.feed.defs#requestLess"
+        interactions = [
+            Interaction(item="at://post/1", event=like, feed_context=_make_token()),
+            Interaction(item="at://post/2", event=repost, feed_context="bad"),
+            Interaction(item="at://post/3", event=less, feed_context=_make_token()),
+        ]
+        db = MagicMock()
+        with patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec:
+            await _record_interactions(db, interactions)
+
+        assert rec.call_count == 2

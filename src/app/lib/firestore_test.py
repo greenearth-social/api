@@ -7,12 +7,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ..documents import UserDocument
+from ..documents import InteractionDocument, UserDocument
 from ..lib.firestore import (
+    INTERACTIONS_COLLECTION,
     USERS_COLLECTION,
     get_feed_activity,
     get_user,
     init_firestore_client,
+    record_interaction,
     upsert_feed_activity,
     upsert_user,
 )
@@ -309,3 +311,37 @@ class TestUpsertFeedActivity:
         activity = await upsert_feed_activity(db, USER_DID, FEED_NAME)
 
         assert activity.first_seen_at == original_time
+
+
+# ---------------------------------------------------------------------------
+# record_interaction
+# ---------------------------------------------------------------------------
+
+
+class TestRecordInteraction:
+    @pytest.mark.asyncio
+    async def test_adds_auto_id_doc_to_interactions_collection(self):
+        db = MagicMock()
+        collection_ref = MagicMock()
+        collection_ref.add = AsyncMock()
+        db.collection.return_value = collection_ref
+
+        doc = InteractionDocument(
+            user_did=USER_DID,
+            item_uri="at://post/1",
+            event="interactionLike",
+            feed_name=FEED_NAME,
+            request_id="req-1",
+        )
+
+        await record_interaction(db, doc)
+
+        db.collection.assert_called_once_with(INTERACTIONS_COLLECTION)
+        collection_ref.add.assert_called_once()
+        written = collection_ref.add.call_args[0][0]
+        assert written["user_did"] == USER_DID
+        assert written["item_uri"] == "at://post/1"
+        assert written["event"] == "interactionLike"
+        assert written["feed_name"] == FEED_NAME
+        assert written["request_id"] == "req-1"
+        assert "created_at" in written

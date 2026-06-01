@@ -18,6 +18,7 @@ pytest-asyncio = "*"
 httpx = "*"
 ruff = "*"
 pyinstrument = "*"
+pyright = "*"
 
 [requires]
 python_version = "3.13"

@@ -13,12 +13,13 @@ from datetime import datetime, timezone
 
 from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
 
-from ..documents import FeedActivityDocument, UserDocument
+from ..documents import FeedActivityDocument, InteractionDocument, UserDocument
 
 logger = logging.getLogger(__name__)
 
 USERS_COLLECTION = "users"
 FEED_ACTIVITY_COLLECTION = "feed_activity"
+INTERACTIONS_COLLECTION = "interactions"
 
 
 def init_firestore_client() -> AsyncClient:
@@ -160,3 +161,17 @@ async def upsert_feed_activity(db: AsyncClient, user_did: str, feed_name: str) -
     )
     await ref.set(activity.model_dump())
     return activity
+
+
+# ---------------------------------------------------------------------------
+# Interactions
+# ---------------------------------------------------------------------------
+
+
+async def record_interaction(db: AsyncClient, interaction: InteractionDocument) -> None:
+    """Append an interaction event as a new auto-ID document.
+
+    Each interaction is its own document in the top-level ``interactions``
+    collection so the data is easy to query and export (e.g. to Elasticsearch).
+    """
+    await db.collection(INTERACTIONS_COLLECTION).add(interaction.model_dump())

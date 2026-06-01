@@ -229,9 +229,9 @@ deploy_api_service() {
         deploy_cmd="$deploy_cmd --vpc-egress=private-ranges-only"
     fi
 
-    # Set environment variables
+    # Set environment variables. The app derives its default log level from
+    # ENVIRONMENT (stage/prod -> WARNING, else INFO). Override with GE_LOG_LEVEL.
     deploy_cmd="$deploy_cmd --set-env-vars=ENVIRONMENT=$ENVIRONMENT"
-    deploy_cmd="$deploy_cmd --set-env-vars=LOG_LEVEL=info"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$GE_ELASTICSEARCH_URL"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"

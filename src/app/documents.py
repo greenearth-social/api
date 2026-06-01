@@ -51,3 +51,22 @@ class FeedActivityDocument(BaseModel):
     feed_name: str = Field(..., description="AT Protocol rkey of the feed (also the document ID)")
     first_seen_at: datetime = Field(default_factory=_utcnow, description="When the user first loaded this feed")
     last_seen_at: datetime = Field(default_factory=_utcnow, description="Most recent time the user loaded this feed")
+
+
+class InteractionDocument(BaseModel):
+    """A single user interaction reported via ``app.bsky.feed.sendInteractions``.
+
+    Stored as an auto-ID document in the top-level ``interactions`` collection —
+    one document per interaction event.  ``created_at`` is the server receive
+    time and is the anchor for any future TTL/expiry policy.
+    """
+
+    user_did: str = Field(..., description="AT Protocol DID of the user (from the signed feedContext)")
+    item_uri: str | None = Field(default=None, description="AT URI of the post the interaction relates to")
+    event: str = Field(..., description="Interaction event name, e.g. 'interactionLike' (defs# prefix stripped)")
+    feed_name: str = Field(..., description="Feed rkey the interaction originated from")
+    request_id: str = Field(..., description="Request id of the feed response (also the feed-cache key)")
+    feed_generated_at: datetime | None = Field(
+        default=None, description="When the feed response was served (from the feedContext iat)"
+    )
+    created_at: datetime = Field(default_factory=_utcnow, description="When the interaction was received")

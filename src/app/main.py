@@ -5,12 +5,25 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 
-# Configure the root logger so app modules' INFO+ messages reach stderr.
-# Uvicorn only configures handlers on its own loggers (uvicorn.error,
-# uvicorn.access) — without this, our `timed()` spans and `profile_written`
-# lines are silently dropped. Level is configurable via GE_LOG_LEVEL.
+# Configure the root logger so app modules' messages reach stderr. Uvicorn only
+# configures handlers on its own loggers (uvicorn.error, uvicorn.access), so
+# without this our `timed()` spans and `profile_written` lines are silently
+# dropped. Uvicorn's access logging is independent and keeps emitting per-request
+# lines at its own level regardless of the root level set here.
+def _default_log_level() -> str:
+    """Pick a default level based on the deployment environment.
+
+    Stage and prod default to WARNING so INFO spam (timed spans, HTTP client
+    INFO, ES transport INFO) is suppressed in deployed services while warnings
+    and errors still surface. Local dev and tests default to INFO.
+    ``GE_LOG_LEVEL`` overrides this when set.
+    """
+    env = (os.environ.get("ENVIRONMENT") or os.environ.get("GE_ENVIRONMENT") or "").strip().lower()
+    return "WARNING" if env in ("prod", "production", "stage", "staging") else "INFO"
+
+
 logging.basicConfig(
-    level=os.environ.get("GE_LOG_LEVEL", "INFO").upper(),
+    level=os.environ.get("GE_LOG_LEVEL", _default_log_level()).upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     force=True,
 )
@@ -36,6 +49,9 @@ async def lifespan(app: FastAPI):
     """
     if not os.environ.get("GE_ELASTICSEARCH_API_KEY"):
         raise RuntimeError("GE_ELASTICSEARCH_API_KEY environment variable is required")
+
+    if not os.environ.get("GE_FEED_CONTEXT_SECRET"):
+        raise RuntimeError("GE_FEED_CONTEXT_SECRET environment variable is required")
 
     es_url = os.environ.get("GE_ELASTICSEARCH_URL", "https://localhost:9200")
     es_api_key = os.environ.get("GE_ELASTICSEARCH_API_KEY")
