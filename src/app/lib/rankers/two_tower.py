@@ -11,7 +11,7 @@ import os
 
 from ...models import RankedCandidate, CandidatePost, RankPredictResult
 from .base import Ranker, RankerExecutionError, RankerResult
-from ..elasticsearch import fetch_post_embeddings, fetch_recent_liked_post_uris
+from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings_and_authors
 from ..embeddings import decode_float32_b64
 from ..http_client import get_http_client
 from ..request_context import get_request_id
@@ -56,8 +56,19 @@ def _build_inference_headers(api_key: str) -> dict[str, str]:
     return headers
 
 
+def _raise_inference_response_error(model_type: str, status_code: int, body: str) -> None:
+    body = body.strip()
+    if len(body) > 2000:
+        body = f"{body[:2000]}..."
+    raise RankerExecutionError(
+        TWO_TOWER_MODEL_NAME,
+        f"{model_type} inference failed status={status_code} body={body}",
+    )
+
+
 async def predict_post_tower_batch(
     post_embeddings: list[list[float]],
+    author_dids: list[str],
     *,
     base_url: str,
     api_key: str,
@@ -65,16 +76,28 @@ async def predict_post_tower_batch(
     url = f"{base_url}/models/post-tower/predict"
     headers = _build_inference_headers(api_key)
 
+    if len(post_embeddings) != len(author_dids):
+        raise RankerExecutionError(
+            TWO_TOWER_MODEL_NAME,
+            f"number of post embeddings {len(post_embeddings)} does not match number of author DIDs {len(author_dids)}",
+        )
+
+    embeddings_and_authors = list(zip(post_embeddings, author_dids))
     chunks = [
-        post_embeddings[i : i + POST_TOWER_BATCH_SIZE]
+        embeddings_and_authors[i : i + POST_TOWER_BATCH_SIZE]
         for i in range(0, len(post_embeddings), POST_TOWER_BATCH_SIZE)
     ]
 
     client = get_http_client()
 
-    async def _call_chunk(chunk: list[list[float]]) -> list[list[float]]:
+    async def _call_chunk(chunk: list[tuple[list[float], str]]) -> list[list[float]]:
         resp = await client.post(
-            url, json={"post_embeddings": chunk}, headers=headers
+            url, 
+            json={
+                "post_embeddings": [emb for emb, _ in chunk],
+                "target_author_dids": [author_did for _, author_did in chunk]
+            },
+            headers=headers,
         )
         if resp.is_error:
             logger.error(
@@ -82,7 +105,7 @@ async def predict_post_tower_batch(
                 resp.status_code,
                 resp.text,
             )
-            resp.raise_for_status()
+            _raise_inference_response_error("post-tower", resp.status_code, resp.text)
         return resp.json()["outputs"]
 
     async with timed(
@@ -94,18 +117,28 @@ async def predict_post_tower_batch(
 
 async def predict_user_tower_single(
     history_embeddings: list[list[float]],
+    history_author_dids: list[str],
     *,
     base_url: str,
     api_key: str,
 ) -> list[list[float]]:
     url = f"{base_url}/models/user-tower/predict"
     headers = _build_inference_headers(api_key)
-    payload = {"history_embeddings": history_embeddings}
+    payload = {
+        "history_embeddings": history_embeddings,
+        "history_author_dids": history_author_dids,
+    }
 
     client = get_http_client()
     async with timed(logger, "user_tower_http", n_history=len(history_embeddings)):
         resp = await client.post(url, json=payload, headers=headers)
-    resp.raise_for_status()
+    if resp.is_error:
+        logger.error(
+            "user-tower predict failed status=%s body=%s",
+            resp.status_code,
+            resp.text,
+        )
+        _raise_inference_response_error("user-tower", resp.status_code, resp.text)
     return resp.json()["outputs"]
 
 
@@ -133,13 +166,14 @@ class TwoTowerRanker(Ranker):
         async def _compute_user_embedding() -> list[float]:
             async with timed(logger, "two_tower_user_side", user_did=user_did):
                 user_history_vectors: list[list[float]] = []
+                history_author_dids: list[str] = []
                 user_history_liked_uris = await fetch_recent_liked_post_uris(es, user_did)
 
                 if not user_history_liked_uris:
                     logger.info("No likes found for user %s", user_did)
                 else:
-                    user_history_embedding_pairs: list[tuple[str, list[float]]] = await fetch_post_embeddings(
-                        es, user_history_liked_uris
+                    user_history_embedding_pairs: list[tuple[str, list[float], str]] = await fetch_post_embeddings_and_authors(
+                        es, user_history_liked_uris,
                     )
                     if not user_history_embedding_pairs:
                         logger.info(
@@ -148,10 +182,12 @@ class TwoTowerRanker(Ranker):
                             user_did,
                         )
                     else:
-                        user_history_vectors = [embedding for _, embedding in user_history_embedding_pairs]
+                        user_history_vectors = [embedding for _, embedding, _ in user_history_embedding_pairs]
+                        history_author_dids = [author_did for _, _, author_did in user_history_embedding_pairs]
 
                 output_user_embedding_list = await predict_user_tower_single(
                     user_history_vectors,
+                    history_author_dids,
                     base_url=inference_base_url,
                     api_key=inference_api_key,
                 )
@@ -169,36 +205,40 @@ class TwoTowerRanker(Ranker):
                 logger, "two_tower_post_side", n_candidates=len(candidates_by_uri)
             ):
                 # Use embeddings already carried on CandidatePost when available (avoids an ES round-trip).
-                candidate_embedding_pairs: list[tuple[str, list[float]]] = []
+                uris_embs_authors: list[tuple[str, list[float], str]] = []
                 missing_uris: list[str] = []
                 for uri, candidate in candidates_by_uri.items():
-                    if candidate.minilm_l12_embedding:
+                    if candidate.minilm_l12_embedding and candidate.author_did:
                         try:
                             vec = decode_float32_b64(candidate.minilm_l12_embedding)
-                            candidate_embedding_pairs.append((uri, vec))
+                            uris_embs_authors.append((uri, vec, candidate.author_did))
                             continue
                         except Exception:
                             pass
                     missing_uris.append(uri)
 
                 if missing_uris:
-                    fetched = await fetch_post_embeddings(es, missing_uris)
-                    candidate_embedding_pairs.extend(fetched)
+                    fetched = await fetch_post_embeddings_and_authors(es, missing_uris)
+                    uris_embs_authors.extend(fetched)
 
-                if not candidate_embedding_pairs:
+                if not uris_embs_authors:
                     return None
 
                 ranked_candidates_input = [
                     candidates_by_uri[at_uri]
-                    for at_uri, _ in candidate_embedding_pairs
+                    for at_uri, _, _ in uris_embs_authors
                     if at_uri in candidates_by_uri
                 ]
                 input_post_embeddings = [
-                    embedding for _, embedding in candidate_embedding_pairs
+                    embedding for _, embedding, _ in uris_embs_authors
+                ]
+                author_dids = [
+                    author_did for _, _, author_did in uris_embs_authors
                 ]
 
                 output_post_embeddings = await predict_post_tower_batch(
                     input_post_embeddings,
+                    author_dids,
                     base_url=inference_base_url,
                     api_key=inference_api_key,
                 )

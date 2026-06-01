@@ -9,7 +9,8 @@ from ..candidates.post_similarity import (
     fetch_recent_liked_post_uris,
     knn_search_posts,
 )
-from ..embeddings import MINILM_L12_EMBEDDING_KEY
+from ..elasticsearch import fetch_post_embeddings_and_authors
+from ..embeddings import MINILM_L12_EMBEDDING_FIELD, MINILM_L12_EMBEDDING_KEY
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +155,86 @@ class TestFetchPostEmbeddings:
         })
         vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
         assert vecs == [("at://1", [0.1, 0.2])]
+
+
+class TestFetchPostEmbeddingsAndAuthors:
+    @pytest.mark.asyncio
+    async def test_returns_embeddings_and_authors_in_requested_uri_order(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "at_uri": "at://2",
+                                "author_did": "did:plc:two",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://1",
+                                "author_did": "did:plc:one",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            }
+                        },
+                    ]
+                }
+            }
+        })
+        vecs = await fetch_post_embeddings_and_authors(es, ["at://1", "at://2"])
+        assert vecs == [
+            ("at://1", [0.1, 0.2], "did:plc:one"),
+            ("at://2", [0.3, 0.4], "did:plc:two"),
+        ]
+        assert es.calls[0]["_source"] == [
+            "at_uri",
+            MINILM_L12_EMBEDDING_FIELD,
+            "author_did",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_keeps_posts_with_missing_author_dids(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "at_uri": "at://1",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://2",
+                                "author_did": 123,
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://3",
+                                "author_did": "did:plc:three",
+                                "embeddings": {},
+                            }
+                        },
+                    ]
+                }
+            }
+        })
+        vecs = await fetch_post_embeddings_and_authors(es, ["at://1", "at://2", "at://3"])
+        assert vecs == [
+            ("at://1", [0.1, 0.2], ""),
+            ("at://2", [0.3, 0.4], ""),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_for_empty_input(self):
+        es = FakeEs()
+        vecs = await fetch_post_embeddings_and_authors(es, [])
+        assert vecs == []
+        assert len(es.calls) == 0
 
 
 class TestAverageVectors:

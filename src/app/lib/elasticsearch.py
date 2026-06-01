@@ -141,3 +141,62 @@ async def fetch_post_embeddings(
         return await _fetch()
     key = ("fetch_post_embeddings", tuple(at_uris))
     return await cache.get_or_compute(key, _fetch)
+
+
+async def fetch_post_embeddings_and_authors(
+    es,
+    at_uris: list[str],
+) -> list[tuple[str, list[float], str]]:
+    """Fetch MiniLM L12 embeddings for a list of post AT URIs, as well as their author DIDs.
+
+    Returns ``(at_uri, embedding, author_did)`` triples in the same order as ``at_uris``.
+    Posts without embeddings are silently skipped.
+    Posts without author DIDs are kept, with an empty string ("") author_did.
+
+    When a request cache is active the result is memoized so repeat
+    calls within the same request share a single ES round-trip.
+    """
+    if not at_uris:
+        return []
+
+    async def _fetch() -> list[tuple[str, list[float], str]]:
+        async with timed(logger, "es_post_embeddings", n_uris=len(at_uris)):
+            query = {"terms": {"at_uri": at_uris}}
+
+            resp = await es.search(
+                index="posts",
+                query=query,
+                size=len(at_uris),
+                _source=["at_uri", MINILM_L12_EMBEDDING_FIELD, "author_did"],
+            )
+
+            data = unwrap_es_response(resp)
+            embeddings_by_uri: dict[str, list[float]] = {}
+            author_dids_by_uri: dict[str, str] = {}
+            for hit in data.get("hits", {}).get("hits", []):
+                src = hit.get("_source") or {}
+                at_uri = src.get("at_uri")
+                if not at_uri:
+                    continue
+                emb = src.get("embeddings")
+                if isinstance(emb, dict):
+                    vec = emb.get(MINILM_L12_EMBEDDING_KEY)
+                    if vec:
+                        embeddings_by_uri[at_uri] = vec
+                author_did = src.get("author_did")
+                if isinstance(author_did, str):
+                    author_dids_by_uri[at_uri] = author_did
+
+            ordered_embeddings: list[tuple[str, list[float], str]] = []
+            for at_uri in at_uris:
+                vec = embeddings_by_uri.get(at_uri)
+                author_did = author_dids_by_uri.get(at_uri, "")
+                if vec:
+                    ordered_embeddings.append((at_uri, vec, author_did))
+            return ordered_embeddings
+
+    cache = get_request_cache()
+    if cache is None:
+        return await _fetch()
+    key = ("fetch_post_embeddings_and_authors", tuple(at_uris))
+    return await cache.get_or_compute(key, _fetch)
