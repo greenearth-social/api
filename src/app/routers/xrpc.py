@@ -25,10 +25,14 @@ from pydantic import BaseModel, Field
 from ..documents import InteractionDocument
 from ..lib.candidates import run_generate
 from ..lib.diversify import mmr_rerank
+
+from ..lib.elasticsearch import fetch_post_embeddings
+from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import FeedCache, DEFAULT_TTL_SECONDS
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.rankers import run_predict
-from ..models import CandidateGenerateRequest, FeedConfig, FeedCursor
+from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
+
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.firestore import record_interaction, upsert_feed_activity, upsert_user
 from ..lib.request_cache import request_cache_scope
@@ -184,6 +188,52 @@ class SendInteractionsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+async def _hydrate_embeddings(
+    es, candidates: list[CandidatePost]
+) -> list[CandidatePost]:
+    """Fetch missing L12 embeddings in a single batched ES call.
+
+    Candidate generators skip the embedding when reading from ES — the
+    array is ~4-5 KB per doc and dominates response size for kNN
+    searches. We refetch embeddings here, after dedup, against just
+    the candidates that survived. The per-request cache means later
+    callers (e.g. the two-tower ranker re-asking for the same URIs)
+    pay no additional ES cost.
+    """
+    missing = [
+        c.at_uri for c in candidates if c.at_uri and not c.minilm_l12_embedding
+    ]
+    if not missing:
+        return candidates
+
+    try:
+        async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
+            pairs = await fetch_post_embeddings(es, missing)
+    except Exception:
+        # If the refetch fails, MMR falls back to author-only similarity
+        # and the two-tower ranker has its own refetch path. Don't fail
+        # the request over a hydration hiccup.
+        logger.exception("Embedding hydration failed; continuing without")
+        return candidates
+
+    encoded: dict[str, str] = {}
+    for uri, vec in pairs:
+        try:
+            encoded[uri] = encode_float32_b64(vec)
+        except Exception:
+            continue
+
+    if not encoded:
+        return candidates
+
+    return [
+        c.model_copy(update={"minilm_l12_embedding": encoded[c.at_uri]})
+        if c.at_uri and not c.minilm_l12_embedding and c.at_uri in encoded
+        else c
+        for c in candidates
+    ]
+
+
 async def _run_ranking_pipeline(
     feed_cfg: FeedConfig,
     gen_request: CandidateGenerateRequest,
@@ -208,6 +258,11 @@ async def _run_ranking_pipeline(
 
         if not candidates:
             return []
+
+        # Generators fetch lightweight candidates (no embedding); ranker and
+        # MMR need embeddings, so backfill in one batched ES call now that
+        # the candidate set has been deduped down to the working size.
+        candidates = await _hydrate_embeddings(es, candidates)
 
         if feed_cfg.rank_request_template is not None:
             rank_req = feed_cfg.rank_request_template.model_copy(

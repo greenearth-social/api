@@ -31,6 +31,7 @@ logging.basicConfig(
 from .routers import candidates, diversify, health, rank, skylight, xrpc
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
+from .lib.es_client import SlowQueryLoggingES
 from .lib.feed_cache import FirestoreFeedCache
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
@@ -76,7 +77,7 @@ async def lifespan(app: FastAPI):
     )
     set_metric_collector(metrics)
 
-    app.state.es = es
+    app.state.es = SlowQueryLoggingES(es)
     app.state.id_resolver = init_id_resolver()
     app.state.firestore = init_firestore_client()
     app.state.feed_cache = FirestoreFeedCache(app.state.firestore)
