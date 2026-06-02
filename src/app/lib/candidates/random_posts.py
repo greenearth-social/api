@@ -6,7 +6,7 @@ Useful as a simple baseline generator and as a low-correlation fallback.
 
 from ...models import CandidatePost
 from .base import CandidateGenerator, CandidateResult
-from .utils import candidate_posts_from_es_response
+from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 
 
 async def random_posts_search(
@@ -39,7 +39,12 @@ async def random_posts_search(
         }
     }
 
-    resp = await es.search(index="posts", query=query, size=num_candidates)
+    resp = await es.search(
+        index="posts",
+        query=query,
+        size=num_candidates,
+        _source=CANDIDATE_SOURCE_FIELDS,
+    )
     return candidate_posts_from_es_response(resp, generator_name=generator_name)
 
 

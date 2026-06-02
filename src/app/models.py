@@ -39,19 +39,19 @@ class CandidatePost(BaseModel):
     """A post returned by search or candidate generation."""
 
     at_uri: str | None = Field(
-        None, description="The AT URI of the post (e.g. at://...)")
-    content: str | None = Field(None, description="The post text content")
+        default=None, description="The AT URI of the post (e.g. at://...)")
+    content: str | None = Field(default=None, description="The post text content")
     minilm_l12_embedding: str | None = Field(
-        None, description="Base64-encoded float32 MiniLM L12 embedding (384-d)"
+        default=None, description="Base64-encoded float32 MiniLM L12 embedding (384-d)"
     )
     score: float | None = Field(
-        None, description="Relevance score (e.g. from ES or a model)"
+        default=None, description="Relevance score (e.g. from ES or a model)"
     )
     generator_name: str | None = Field(
-        None, description="Name of the candidate generator that produced this post"
+        default=None, description="Name of the candidate generator that produced this post"
     )
     author_did: str | None = Field(
-        None, description="AT Protocol DID of the post author"
+        default=None, description="AT Protocol DID of the post author"
     )
 
 
@@ -154,11 +154,19 @@ class FeedConfig(BaseModel):
     generation and optional model ranking.  Defaults to ``True``.
     """
 
-    display_name: str = Field(..., max_length=15)
+    display_name: str = Field(..., max_length=19)
     description: str = ""
+    public: bool = Field(False)
+    internal_rkey: str
+    internal_display_name: str
     gen_request_template: CandidateGenerateRequest
     rank_request_template: RankPredictRequest | None = Field(
         None,
         description="When set, candidates are ranked by this model before being returned.",
     )
     diversify: bool = Field(True, description="When False, MMR reranking is skipped.")
+    accepts_interactions: bool = Field(
+        True,
+        description="When True, the published record declares acceptsInteractions so the "
+        "AppView forwards interaction signals to sendInteractions.",
+    )

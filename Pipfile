@@ -7,16 +7,21 @@ name = "pypi"
 fastapi = "*"
 uvicorn = {extras = ["standard"], version = "*"}
 python-dotenv = "*"
-elasticsearch = "==9.4.0"
+elasticsearch = "==9.4.1"
 aiohttp = "*"
 atproto = "*"
 google-cloud-firestore = "*"
+opentelemetry-api = "*"
+opentelemetry-sdk = "*"
+opentelemetry-exporter-gcp-monitoring = "*"
 
 [dev-packages]
 pytest = "*"
 pytest-asyncio = "*"
 httpx = "*"
 ruff = "*"
+pyinstrument = "*"
+pyright = "*"
 
 [requires]
 python_version = "3.13"

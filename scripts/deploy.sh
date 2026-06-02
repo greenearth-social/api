@@ -207,11 +207,13 @@ deploy_api_service() {
     local es_api_key_secret="elasticsearch-api-key-readonly"
     local inference_api_key_secret="inference-api-key-stage"
     local firestore_api_key_secret="firestore-api-key-stage"
+    local feed_context_secret="feed-context-secret-stage"
     local firestore_database="greenearth-stage"
     if [ "$ENVIRONMENT" = "prod" ]; then
         es_api_key_secret="elasticsearch-api-key-readonly-prod"
         inference_api_key_secret="inference-api-key-prod"
         firestore_api_key_secret="firestore-api-key-prod"
+        feed_context_secret="feed-context-secret-prod"
         firestore_database="greenearth-prod"
     fi
 
@@ -227,9 +229,9 @@ deploy_api_service() {
         deploy_cmd="$deploy_cmd --vpc-egress=private-ranges-only"
     fi
 
-    # Set environment variables
+    # Set environment variables. The app derives its default log level from
+    # ENVIRONMENT (stage/prod -> WARNING, else INFO). Override with GE_LOG_LEVEL.
     deploy_cmd="$deploy_cmd --set-env-vars=ENVIRONMENT=$ENVIRONMENT"
-    deploy_cmd="$deploy_cmd --set-env-vars=LOG_LEVEL=info"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$GE_ELASTICSEARCH_URL"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
@@ -243,6 +245,7 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-secrets=GE_ELASTICSEARCH_API_KEY=$es_api_key_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_INFERENCE_API_KEY=$inference_api_key_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_FIRESTORE_API_KEY=$firestore_api_key_secret:latest"
+    deploy_cmd="$deploy_cmd --set-secrets=GE_FEED_CONTEXT_SECRET=$feed_context_secret:latest"
 
     # Resource and scaling configuration
     deploy_cmd="$deploy_cmd --min-instances=$API_INSTANCES_MIN"
@@ -305,29 +308,38 @@ resolve_generator_did() {
     echo "did:web:$service_host"
 }
 
-sync_feeds() {
-    log_info "Syncing feed generator records for $ENVIRONMENT..."
+_sync_feeds_to_account() {
+    local account_label="$1"
+    local bsky_handle="$2"
+    local bsky_secret="$3"
+    local generator_did="$4"
+    local visibility_flag="$5"   # "--public-only", "--internal-only", or ""
 
-    # Determine Bluesky handle and secret name for this environment
-    local bsky_handle
-    local bsky_secret
-    if [ "$ENVIRONMENT" = "prod" ]; then
-        bsky_handle="greenearth-social.bsky.social"
-        bsky_secret="bsky-app-password-prod"
-    else
-        bsky_handle="ge-stage.bsky.social"
-        bsky_secret="bsky-app-password"
-    fi
-
-    # Fetch app password from Secret Manager
     local bsky_password
     bsky_password=$(gcloud secrets versions access latest --secret="$bsky_secret" --project="$PROJECT_ID" 2>/dev/null)
     if [ -z "$bsky_password" ]; then
-        log_warn "Could not fetch Bluesky app password from secret '$bsky_secret'"
-        log_warn "Skipping feed sync. Store the password with:"
+        log_warn "Could not fetch $account_label app password from secret '$bsky_secret'"
+        log_warn "Skipping $account_label feed sync. Store the password with:"
         log_warn "  echo -n '<password>' | gcloud secrets create $bsky_secret --data-file=- --project=$PROJECT_ID"
         return 0
     fi
+
+    log_info "Syncing feeds → $account_label ($bsky_handle)..."
+
+    # shellcheck disable=SC2086
+    pipenv run python scripts/publish_feed.py \
+        --handle "$bsky_handle" \
+        --app-password "$bsky_password" \
+        --generator-did "$generator_did" \
+        --environment "$ENVIRONMENT" \
+        --sync \
+        $visibility_flag \
+    && log_info "$account_label feed sync complete" \
+    || log_warn "$account_label feed sync failed — feeds may be out of date"
+}
+
+sync_feeds() {
+    log_info "Syncing feed generator records for $ENVIRONMENT..."
 
     local generator_did
     if ! generator_did=$(resolve_generator_did); then
@@ -335,20 +347,33 @@ sync_feeds() {
         return 0
     fi
 
-    log_info "Handle:        $bsky_handle"
     log_info "Generator DID: $generator_did"
 
-    pipenv run python scripts/publish_feed.py \
-        --handle "$bsky_handle" \
-        --app-password "$bsky_password" \
-        --generator-did "$generator_did" \
-        --environment "$ENVIRONMENT" \
-        --sync
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        # Prod: two-pass sync
+        #   Pass 1 — public feeds → GreenEarth account (original names, "| GreenEarth" descriptions)
+        #   Pass 2 — internal feeds → Caterpie account (obfuscated names, "Built by Caterpie")
+        _sync_feeds_to_account \
+            "GreenEarth" \
+            "greenearth-social.bsky.social" \
+            "bsky-app-password-prod" \
+            "$generator_did" \
+            "--public-only"
 
-    if [ $? -eq 0 ]; then
-        log_info "Feed records synced successfully"
+        _sync_feeds_to_account \
+            "Caterpie" \
+            "caterpie-internal.bsky.social" \
+            "bsky-app-password-caterpie-prod" \
+            "$generator_did" \
+            "--internal-only"
     else
-        log_warn "Feed sync failed — feeds may be out of date"
+        # Stage/dev: all feeds go to Caterpie (display names get "GE " prefix)
+        _sync_feeds_to_account \
+            "Caterpie" \
+            "caterpie-internal.bsky.social" \
+            "bsky-app-password-caterpie" \
+            "$generator_did" \
+            ""
     fi
 }
 
