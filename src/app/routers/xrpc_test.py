@@ -787,15 +787,10 @@ class TestFeedSkeletonCursor:
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[],
         )
-        followed_users_gen = AsyncMock()
-        followed_users_gen.generate.return_value = CandidateResult(
-            generator_name="followed_users", candidates=[],
-        )
 
         def fake_get(name):
             return {
                 "post_similarity": primary_gen,
-                "followed_users": followed_users_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -809,10 +804,6 @@ class TestFeedSkeletonCursor:
         # containing the 5 initial URIs.
         call_kwargs = primary_gen.generate.call_args
         assert call_kwargs.kwargs.get("exclude_uris") == [
-            "at://p/0", "at://p/1", "at://p/2", "at://p/3", "at://p/4",
-        ]
-        followed_call_kwargs = followed_users_gen.generate.call_args
-        assert followed_call_kwargs.kwargs.get("exclude_uris") == [
             "at://p/0", "at://p/1", "at://p/2", "at://p/3", "at://p/4",
         ]
 
