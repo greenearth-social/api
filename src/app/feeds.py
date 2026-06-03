@@ -16,14 +16,15 @@ from .models import CandidateGenerateRequest, FeedConfig, GeneratorSpec, RankPre
 
 # NOTE: display_name is limited to 24 chars, including the prefix ("GreenEarth, GE Dev, or GE Stg")
 FEEDS: dict[str, FeedConfig] = {
-    "basic-similarity": FeedConfig(
-        display_name="Similarity",
-        description="Development feed — post-similarity candidates with popularity infill.",
-        internal_rkey="e2-s",
-        internal_display_name="e2 S",
+    "unranked-your-feed": FeedConfig(
+        display_name="Unranked Your Feed",
+        description="Development feed — post similarity and followed users candidate generation with popularity infill. No ranking.",
+        internal_rkey="e2-uyf",
+        internal_display_name="e2 UYF",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="post_similarity", weight=1.0),
+                GeneratorSpec(name="post_similarity", weight=0.5),
+                GeneratorSpec(name="followed_users", weight=0.5),
             ],
             infill="popularity",
             num_candidates=30,

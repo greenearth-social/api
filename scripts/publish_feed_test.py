@@ -36,7 +36,7 @@ PDS = "https://pds.example.com"
 REPO_DID = "did:plc:alice123"
 ACCESS_JWT = "fake-jwt-token"
 GENERATOR_DID = "did:web:feed.example.com"
-FEED_NAME = "basic-similarity"
+FEED_NAME = "unranked-your-feed"
 
 SESSION_RESPONSE = {"did": REPO_DID, "accessJwt": ACCESS_JWT}
 
@@ -214,7 +214,7 @@ class TestPublishFeed:
         record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
         assert record["$type"] == "app.bsky.feed.generator"
         assert record["did"] == GENERATOR_DID
-        assert record["displayName"] == "Similarity"  # from FEEDS config
+        assert record["displayName"] == "Unranked Your Feed"  # from FEEDS config
 
         captured = capsys.readouterr()
         assert "Published feed record:" in captured.out
@@ -294,7 +294,7 @@ class TestPublishFeed:
 
         put_call = client.post.call_args_list[1]
         record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
-        assert record["displayName"] == "GE Stg Similarity"
+        assert record["displayName"] == "GE Stg Unranked Your Feed"
 
 
 # ---------------------------------------------------------------------------
@@ -624,7 +624,7 @@ class TestSyncFeeds:
         )
 
         captured = capsys.readouterr()
-        assert "Published: basic-similarity" in captured.out
+        assert "Published: unranked-your-feed" in captured.out
         assert "Published: random" in captured.out
         assert "Best of Friends" in captured.out
         assert "Deleted stale: old-feed" in captured.out
@@ -705,7 +705,7 @@ class TestResolveFeedPublishParams:
         return FEEDS["best-of-friends"]
 
     def _internal_feed(self):
-        return FEEDS["basic-similarity"]
+        return FEEDS["unranked-your-feed"]
 
     def test_prod_public_uses_greenearth_path(self):
         feed = self._public_feed()
@@ -716,7 +716,7 @@ class TestResolveFeedPublishParams:
 
     def test_prod_internal_uses_caterpie_path(self):
         feed = self._internal_feed()
-        rkey, name, desc = _resolve_feed_publish_params("basic-similarity", feed, "prod")
+        rkey, name, desc = _resolve_feed_publish_params("unranked-your-feed", feed, "prod")
         assert rkey == feed.internal_rkey
         assert name == feed.internal_display_name
         assert desc == "Built by Caterpie"
@@ -730,7 +730,7 @@ class TestResolveFeedPublishParams:
 
     def test_stage_any_uses_caterpie_with_ge_prefix(self):
         feed = self._internal_feed()
-        rkey, name, desc = _resolve_feed_publish_params("basic-similarity", feed, "stage")
+        rkey, name, desc = _resolve_feed_publish_params("unranked-your-feed", feed, "stage")
         assert rkey == feed.internal_rkey
         assert name.startswith("GE ")
         assert desc == "Built by Caterpie"
@@ -749,8 +749,8 @@ class TestSearchability:
         assert "greenearth" in desc.lower()
 
     def test_caterpie_display_name_excludes_original(self):
-        feed = FEEDS["basic-similarity"]
-        _, name, desc = _resolve_feed_publish_params("basic-similarity", feed, "prod")
+        feed = FEEDS["unranked-your-feed"]
+        _, name, desc = _resolve_feed_publish_params("unranked-your-feed", feed, "prod")
         assert feed.display_name not in name
         assert desc == "Built by Caterpie"
 

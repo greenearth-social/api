@@ -18,7 +18,7 @@ from ..lib.feed_cache import FeedCache
 
 SERVICE_DID = "did:web:test.example.com"
 PUBLISHER_DID = "did:plc:publisherabc123"
-FEED_RKEY = "basic-similarity"
+FEED_RKEY = "unranked-your-feed"
 FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 RANDOM_FEED_RKEY = "random"
 RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
@@ -328,7 +328,7 @@ class TestGetFeedSkeleton:
 
     def test_matches_feed_by_internal_rkey(self):
         """Feeds published under their Caterpie internal_rkey are still served."""
-        feed_cfg = FEEDS["basic-similarity"]
+        feed_cfg = FEEDS["unranked-your-feed"]
         internal_uri = f"at://{SERVICE_DID}/app.bsky.feed.generator/{feed_cfg.internal_rkey}"
         with self._patch_generators(_make_candidates("p", 2)):
             resp = client.get(
@@ -431,6 +431,24 @@ class TestGetFeedSkeleton:
         # Infill generator's generate method should not have been called
         infill_gen = mock_get.side_effect("popularity")
         infill_gen.generate.assert_not_called()
+
+    def test_basic_similarity_uses_followed_users_generator(self):
+        similarity = _make_candidates("sim", 3, "post_similarity")
+        followed = _make_candidates("followed", 3, "followed_users")
+
+        with _patch_basic_similarity_generators(
+            similarity,
+            followed_users_candidates=followed,
+        ) as mock_get:
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 6},
+            ).json()
+
+        posts = [item["post"] for item in data["feed"]]
+        assert "at://sim/0" in posts
+        assert "at://followed/0" in posts
+        mock_get.side_effect("followed_users").generate.assert_awaited_once()
 
     # --- primary generator failure ---
 
@@ -858,10 +876,15 @@ class TestFeedSkeletonCursor:
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[],
         )
+        followed_users_gen = AsyncMock()
+        followed_users_gen.generate.return_value = CandidateResult(
+            generator_name="followed_users", candidates=[],
+        )
 
         def fake_get(name):
             return {
                 "post_similarity": primary_gen,
+                "followed_users": followed_users_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -875,6 +898,10 @@ class TestFeedSkeletonCursor:
         # containing the 5 initial URIs.
         call_kwargs = primary_gen.generate.call_args
         assert call_kwargs.kwargs.get("exclude_uris") == [
+            "at://p/0", "at://p/1", "at://p/2", "at://p/3", "at://p/4",
+        ]
+        followed_call_kwargs = followed_users_gen.generate.call_args
+        assert followed_call_kwargs.kwargs.get("exclude_uris") == [
             "at://p/0", "at://p/1", "at://p/2", "at://p/3", "at://p/4",
         ]
 
