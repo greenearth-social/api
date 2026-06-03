@@ -44,12 +44,12 @@ def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[
     ]
 
 
-def _patch_basic_similarity_generators(
+def _patch_unranked_your_feed_generators(
     post_similarity_candidates,
     followed_users_candidates=None,
     infill_candidates=None,
 ):
-    """Patch generators used by the basic-similarity feed.
+    """Patch generators used by the unranked-your-feed feed.
 
     Most tests care about feed endpoint behavior rather than the exact mix of
     candidate sources, so followed_users defaults to the same candidates as
@@ -210,7 +210,7 @@ class TestDescribeFeedGenerator:
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         assert data["did"] == SERVICE_DID
 
-    def test_feeds_list_contains_basic_similarity(self):
+    def test_feeds_list_contains_unranked_your_feed(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         uris = [f["uri"] for f in data["feeds"]]
         assert FEED_URI in uris
@@ -267,7 +267,7 @@ class TestGetFeedSkeleton:
         ``primary_candidates`` and ``infill_candidates`` are lists of
         ``CandidatePost`` (or ``None`` to simulate an unregistered generator).
         """
-        return _patch_basic_similarity_generators(
+        return _patch_unranked_your_feed_generators(
             primary_candidates,
             infill_candidates=infill_candidates,
         )
@@ -432,11 +432,11 @@ class TestGetFeedSkeleton:
         infill_gen = mock_get.side_effect("popularity")
         infill_gen.generate.assert_not_called()
 
-    def test_basic_similarity_uses_followed_users_generator(self):
+    def test_unranked_your_feed_uses_followed_users_generator(self):
         similarity = _make_candidates("sim", 3, "post_similarity")
         followed = _make_candidates("followed", 3, "followed_users")
 
-        with _patch_basic_similarity_generators(
+        with _patch_unranked_your_feed_generators(
             similarity,
             followed_users_candidates=followed,
         ) as mock_get:
@@ -601,7 +601,7 @@ class TestFeedSkeletonCursor:
             yield
 
     def _patch_generators(self, primary_candidates, infill_candidates=None):
-        return _patch_basic_similarity_generators(
+        return _patch_unranked_your_feed_generators(
             primary_candidates,
             infill_candidates=infill_candidates,
         )
@@ -909,7 +909,7 @@ class TestGetFeedSkeletonAuth:
     """Tests that getFeedSkeleton correctly passes through the authenticated DID."""
 
     def _patch_generators(self, primary_candidates):
-        return _patch_basic_similarity_generators(primary_candidates)
+        return _patch_unranked_your_feed_generators(primary_candidates)
 
     @pytest.fixture(autouse=True)
     def _mock_firestore_upsert(self):
