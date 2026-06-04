@@ -142,6 +142,17 @@ def fake_app_es():
         pass
 
 
+@pytest.fixture(autouse=True)
+def _stub_perspective_rerank():
+    """Stub perspective_rerank to a passthrough for tests that don't test it.
+
+    Tests in TestPerspectiveRerank patch the same name explicitly; those inner
+    patches shadow this one via normal unittest.mock stacking.
+    """
+    with patch("app.routers.xrpc.perspective_rerank", new_callable=AsyncMock, side_effect=lambda c: c):
+        yield
+
+
 client = TestClient(app)
 
 
