@@ -19,8 +19,8 @@ FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(
         display_name="Unranked YF",
         description="Development feed — post-similarity and followed-users candidate with popularity infill. No ranking.",
-        internal_rkey="e2-uyf",
-        internal_display_name="e2 UYF",
+        internal_rkey="e2-s",
+        internal_display_name="e2 S",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="post_similarity", weight=0.5),
