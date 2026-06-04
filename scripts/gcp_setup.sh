@@ -144,6 +144,14 @@ get_inference_api_key_secret() {
     fi
 }
 
+get_feed_context_secret() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "feed-context-secret-prod"
+    else
+        echo "feed-context-secret-stage"
+    fi
+}
+
 ensure_firestore_database() {
     local firestore_db
     firestore_db="$(get_firestore_database)"
@@ -273,6 +281,32 @@ ensure_inference_api_key_secret_access() {
         --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $inference_secret"
 }
 
+ensure_feed_context_secret() {
+    # The feed context secret signs the feedContext tokens we embed in feed
+    # skeletons and verify when interactions come back via sendInteractions.
+    # If the secret already exists we leave its value alone -- rotating it would
+    # invalidate any in-flight tokens already in client apps.
+    local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
+    local key_secret
+    key_secret="$(get_feed_context_secret)"
+
+    log_info "Ensuring feed context secret exists: $key_secret"
+
+    if ! gcloud secrets describe "$key_secret" > /dev/null 2>&1; then
+        local value
+        value=$(openssl rand -hex 32)
+        echo -n "$value" | gcloud secrets create "$key_secret" --data-file=-
+        log_info "Feed context secret created: $key_secret"
+    else
+        log_info "Feed context secret already exists: $key_secret (preserving value)"
+    fi
+
+    gcloud secrets add-iam-policy-binding "$key_secret" \
+        --member="serviceAccount:$sa_email" \
+        --role="roles/secretmanager.secretAccessor" \
+        --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $key_secret"
+}
+
 create_service_account() {
     log_info "Creating service account for API..."
 
@@ -318,6 +352,12 @@ create_service_account() {
     gcloud projects add-iam-policy-binding "$PROJECT_ID" \
         --member="serviceAccount:$sa_email" \
         --role="roles/datastore.user" \
+        --condition=None
+
+    # Cloud Monitoring metric writer - for custom metrics export via OTel
+    gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+        --member="serviceAccount:$sa_email" \
+        --role="roles/monitoring.metricWriter" \
         --condition=None
 
     log_info "IAM roles granted successfully"
@@ -501,6 +541,7 @@ main() {
     ensure_feed_cache_ttl_policy
     ensure_firestore_api_key_secret
     ensure_inference_api_key_secret_access
+    ensure_feed_context_secret
 
     # Fetch ES API key from K8s unless disabled or already provided
     if [ "$FETCH_ES_KEY" = true ] && [ -z "$GE_ELASTICSEARCH_API_KEY" ]; then

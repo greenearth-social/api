@@ -18,7 +18,7 @@ from ..lib.feed_cache import FeedCache
 
 SERVICE_DID = "did:web:test.example.com"
 PUBLISHER_DID = "did:plc:publisherabc123"
-FEED_RKEY = "basic-similarity"
+FEED_RKEY = "unranked-your-feed"
 FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 RANDOM_FEED_RKEY = "random"
 RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
@@ -29,6 +29,12 @@ BEST_OF_FRIENDS_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{BEST_OF
 # The AppView sends the publisher DID in the feed URI, not the service DID.
 FEED_URI_FROM_APPVIEW = f"at://{PUBLISHER_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 TEST_USERNAME = "testuser.bsky.app"
+CANDIDATE_ONLY_FEEDS = (
+    ("post-similarity", "post_similarity"),
+    ("followed-users", "followed_users"),
+    ("network-likes", "network_likes"),
+    ("popularity", "popularity"),
+)
 
 
 def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[CandidatePost]:
@@ -38,12 +44,12 @@ def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[
     ]
 
 
-def _patch_basic_similarity_generators(
+def _patch_unranked_your_feed_generators(
     post_similarity_candidates,
     followed_users_candidates=None,
     infill_candidates=None,
 ):
-    """Patch generators used by the basic-similarity feed.
+    """Patch generators used by the unranked-your-feed feed.
 
     Most tests care about feed endpoint behavior rather than the exact mix of
     candidate sources, so followed_users defaults to the same candidates as
@@ -107,10 +113,20 @@ class InMemoryFeedCache(FeedCache):
 # Fixtures
 # ---------------------------------------------------------------------------
 
+FEED_CONTEXT_SECRET = "test-feed-context-secret"
+
+
 @pytest.fixture(autouse=True)
 def set_feed_generator_did(monkeypatch):
     """Ensure a deterministic service DID for all tests."""
     monkeypatch.setenv("GE_FEED_GENERATOR_DID", SERVICE_DID)
+
+
+@pytest.fixture(autouse=True)
+def set_feed_context_secret(monkeypatch):
+    """getFeedSkeleton now signs a feedContext on every item, so the signing
+    secret must be present for the endpoint to serve a response."""
+    monkeypatch.setenv("GE_FEED_CONTEXT_SECRET", FEED_CONTEXT_SECRET)
 
 
 @pytest.fixture(autouse=True)
@@ -205,7 +221,7 @@ class TestDescribeFeedGenerator:
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         assert data["did"] == SERVICE_DID
 
-    def test_feeds_list_contains_basic_similarity(self):
+    def test_feeds_list_contains_unranked_your_feed(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         uris = [f["uri"] for f in data["feeds"]]
         assert FEED_URI in uris
@@ -224,6 +240,12 @@ class TestDescribeFeedGenerator:
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         uris = [f["uri"] for f in data["feeds"]]
         assert BEST_OF_FRIENDS_FEED_URI in uris
+
+    @pytest.mark.parametrize("feed_name", [feed_name for feed_name, _ in CANDIDATE_ONLY_FEEDS])
+    def test_feeds_list_contains_candidate_only_feed(self, feed_name):
+        data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
+        uris = [f["uri"] for f in data["feeds"]]
+        assert f"at://{SERVICE_DID}/app.bsky.feed.generator/{feed_name}" in uris
 
     def test_feeds_list_length(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
@@ -256,7 +278,7 @@ class TestGetFeedSkeleton:
         ``primary_candidates`` and ``infill_candidates`` are lists of
         ``CandidatePost`` (or ``None`` to simulate an unregistered generator).
         """
-        return _patch_basic_similarity_generators(
+        return _patch_unranked_your_feed_generators(
             primary_candidates,
             infill_candidates=infill_candidates,
         )
@@ -274,6 +296,35 @@ class TestGetFeedSkeleton:
         assert len(data["feed"]) == 3
         assert data["feed"][0]["post"] == "at://p/0"
 
+    # --- feedContext ---
+
+    def test_items_carry_signed_feed_context(self):
+        from app.lib.feed_context import decode_feed_context
+
+        with self._patch_generators(_make_candidates("p", 3)):
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI}
+            ).json()
+
+        for item in data["feed"]:
+            payload = decode_feed_context(item["feedContext"])
+            assert payload is not None
+            assert payload.did == "did:plc:testuser"
+            assert payload.feed == FEED_RKEY
+
+    def test_all_items_share_one_request_id(self):
+        from app.lib.feed_context import decode_feed_context
+
+        with self._patch_generators(_make_candidates("p", 3)):
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI}
+            ).json()
+
+        payloads = [decode_feed_context(i["feedContext"]) for i in data["feed"]]
+        assert all(p is not None for p in payloads)
+        rids = {p.rid for p in payloads if p is not None}
+        assert len(rids) == 1
+
     # --- rkey matching ---
 
     def test_matches_feed_by_rkey_regardless_of_did(self):
@@ -288,7 +339,7 @@ class TestGetFeedSkeleton:
 
     def test_matches_feed_by_internal_rkey(self):
         """Feeds published under their Caterpie internal_rkey are still served."""
-        feed_cfg = FEEDS["basic-similarity"]
+        feed_cfg = FEEDS["unranked-your-feed"]
         internal_uri = f"at://{SERVICE_DID}/app.bsky.feed.generator/{feed_cfg.internal_rkey}"
         with self._patch_generators(_make_candidates("p", 2)):
             resp = client.get(
@@ -392,11 +443,11 @@ class TestGetFeedSkeleton:
         infill_gen = mock_get.side_effect("popularity")
         infill_gen.generate.assert_not_called()
 
-    def test_basic_similarity_uses_followed_users_generator(self):
+    def test_unranked_your_feed_uses_followed_users_generator(self):
         similarity = _make_candidates("sim", 3, "post_similarity")
         followed = _make_candidates("followed", 3, "followed_users")
 
-        with _patch_basic_similarity_generators(
+        with _patch_unranked_your_feed_generators(
             similarity,
             followed_users_candidates=followed,
         ) as mock_get:
@@ -484,6 +535,65 @@ class TestGetFeedSkeleton:
 
 
 # ---------------------------------------------------------------------------
+# Candidate-generator-only feeds
+# ---------------------------------------------------------------------------
+
+class TestCandidateGeneratorOnlyFeeds:
+    """Tests for private feeds that expose one candidate generator directly."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_authenticated_user(self):
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), \
+             patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
+            yield
+
+    @pytest.mark.parametrize("feed_name,expected_generator", CANDIDATE_ONLY_FEEDS)
+    def test_routes_to_expected_generator(self, feed_name, expected_generator):
+        generator_mocks = {}
+        for _, generator_name in CANDIDATE_ONLY_FEEDS:
+            gen = AsyncMock()
+            gen.generate.return_value = CandidateResult(
+                generator_name=generator_name,
+                candidates=[
+                    CandidatePost(
+                        at_uri=f"at://{generator_name}/{i}",
+                        content=f"post {i}",
+                        minilm_l12_embedding="fake-embedding",
+                        score=None,
+                        generator_name=generator_name,
+                    )
+                    for i in range(2)
+                ],
+            )
+            generator_mocks[generator_name] = gen
+
+        with patch(
+            "app.lib.candidates.generate.get_generator",
+            side_effect=lambda name: generator_mocks.get(name),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={
+                    "feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/{feed_name}",
+                    "limit": 3,
+                },
+            )
+
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert posts == [f"at://{expected_generator}/0", f"at://{expected_generator}/1"]
+        generator_mocks[expected_generator].generate.assert_awaited_once()
+        for generator_name, gen in generator_mocks.items():
+            if generator_name != expected_generator:
+                gen.generate.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Cursor / pagination
 # ---------------------------------------------------------------------------
 
@@ -502,7 +612,7 @@ class TestFeedSkeletonCursor:
             yield
 
     def _patch_generators(self, primary_candidates, infill_candidates=None):
-        return _patch_basic_similarity_generators(
+        return _patch_unranked_your_feed_generators(
             primary_candidates,
             infill_candidates=infill_candidates,
         )
@@ -810,7 +920,7 @@ class TestGetFeedSkeletonAuth:
     """Tests that getFeedSkeleton correctly passes through the authenticated DID."""
 
     def _patch_generators(self, primary_candidates):
-        return _patch_basic_similarity_generators(primary_candidates)
+        return _patch_unranked_your_feed_generators(primary_candidates)
 
     @pytest.fixture(autouse=True)
     def _mock_firestore_upsert(self):
@@ -1258,7 +1368,7 @@ class TestPerspectiveRerank:
     def test_perspective_rerank_called_when_enabled(self):
         """perspective_rerank is called for feeds with use_perspective=True."""
         candidates = _make_candidates("p", 3)
-        with _patch_basic_similarity_generators(candidates), \
+        with _patch_unranked_your_feed_generators(candidates), \
              patch("app.routers.xrpc.perspective_rerank", new_callable=AsyncMock, return_value=candidates) as mock_pr:
             client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
         mock_pr.assert_awaited_once()
@@ -1279,3 +1389,139 @@ class TestPerspectiveRerank:
              patch("app.routers.xrpc.perspective_rerank", new_callable=AsyncMock) as mock_pr:
             client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": RANDOM_FEED_URI})
         mock_pr.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# /xrpc/app.bsky.feed.sendInteractions
+# ---------------------------------------------------------------------------
+
+
+def _make_token(did="did:plc:interactor", feed="your-feed", rid="req-1", iat=1730000000):
+    from app.lib.feed_context import FeedContextPayload, encode_feed_context
+
+    return encode_feed_context(FeedContextPayload(did=did, feed=feed, rid=rid, iat=iat))
+
+
+class TestShortEvent:
+    def test_strips_defs_prefix(self):
+        from app.routers.xrpc import _short_event
+
+        assert _short_event("app.bsky.feed.defs#interactionLike") == "interactionLike"
+
+    def test_passes_through_unprefixed(self):
+        from app.routers.xrpc import _short_event
+
+        assert _short_event("interactionLike") == "interactionLike"
+
+    def test_falls_back_to_original_when_suffix_empty(self):
+        from app.routers.xrpc import _short_event
+
+        assert _short_event("app.bsky.feed.defs#") == "app.bsky.feed.defs#"
+
+    def test_empty_input_returns_empty(self):
+        from app.routers.xrpc import _short_event
+
+        assert _short_event(None) == ""
+        assert _short_event("") == ""
+
+
+class TestSendInteractions:
+    def test_returns_empty_object(self):
+        resp = client.post(
+            "/xrpc/app.bsky.feed.sendInteractions", json={"interactions": []}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {}
+
+    def test_accepts_well_formed_payload(self):
+        # Patch the background recorder so the endpoint wiring is tested without
+        # touching the (mock) Firestore client. The coroutine is created
+        # synchronously when the endpoint calls it, so the call is recorded
+        # before the request returns.
+        with patch("app.routers.xrpc._record_interactions", new_callable=AsyncMock) as rec:
+            resp = client.post(
+                "/xrpc/app.bsky.feed.sendInteractions",
+                json={
+                    "interactions": [
+                        {
+                            "item": "at://post/1",
+                            "event": "app.bsky.feed.defs#interactionLike",
+                            "feedContext": _make_token(),
+                        }
+                    ]
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json() == {}
+        rec.assert_called_once()
+        interactions = rec.call_args[0][1]
+        assert len(interactions) == 1
+        assert interactions[0].item == "at://post/1"
+
+    @pytest.mark.asyncio
+    async def test_records_valid_interaction(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        ix = Interaction(
+            item="at://post/1",
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context=_make_token(did="did:plc:u", feed="your-feed", rid="r1"),
+        )
+        db = MagicMock()
+        with patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec:
+            await _record_interactions(db, [ix])
+
+        rec.assert_called_once()
+        doc = rec.call_args[0][1]
+        assert doc.user_did == "did:plc:u"
+        assert doc.feed_name == "your-feed"
+        assert doc.request_id == "r1"
+        assert doc.item_uri == "at://post/1"
+        # The app.bsky.feed.defs# prefix is stripped before storage.
+        assert doc.event == "interactionLike"
+        assert doc.feed_generated_at is not None
+
+    @pytest.mark.asyncio
+    async def test_drops_forged_token(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        ix = Interaction(
+            item="at://post/1",
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context="forged.token",
+        )
+        db = MagicMock()
+        with patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec:
+            await _record_interactions(db, [ix])
+
+        rec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_drops_missing_token(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        ix = Interaction(item="at://post/1", event="app.bsky.feed.defs#interactionLike")
+        db = MagicMock()
+        with patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec:
+            await _record_interactions(db, [ix])
+
+        rec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_records_only_valid_interactions_in_mixed_batch(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        like = "app.bsky.feed.defs#interactionLike"
+        repost = "app.bsky.feed.defs#interactionRepost"
+        less = "app.bsky.feed.defs#requestLess"
+        interactions = [
+            Interaction(item="at://post/1", event=like, feed_context=_make_token()),
+            Interaction(item="at://post/2", event=repost, feed_context="bad"),
+            Interaction(item="at://post/3", event=less, feed_context=_make_token()),
+        ]
+        db = MagicMock()
+        with patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec:
+            await _record_interactions(db, interactions)
+
+        assert rec.call_count == 2

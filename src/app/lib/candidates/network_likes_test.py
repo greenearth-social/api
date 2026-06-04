@@ -91,6 +91,7 @@ class FakeEs:
             return likes_response([])
 
         if index == "posts":
+            assert query is not None
             requested_uris = post_terms_from_query(query)
             return_order = self.posts_return_order or requested_uris
             hits = [

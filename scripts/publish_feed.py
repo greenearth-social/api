@@ -244,6 +244,7 @@ def publish_feed(
             "did": generator_did,
             "displayName": display_name,
             "description": description,
+            "acceptsInteractions": True,
             "createdAt": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -429,6 +430,7 @@ def sync_feeds(
                 "did": generator_did,
                 "displayName": display_name,
                 "description": description,
+                "acceptsInteractions": True,
                 "createdAt": datetime.now(timezone.utc).isoformat(),
             }
             _put_record(client, pds, access_jwt, repo_did, published_rkey, record)

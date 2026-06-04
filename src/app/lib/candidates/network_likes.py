@@ -20,7 +20,7 @@ from ...models import CandidatePost
 from ..bsky import FollowedUsersLookupError, get_followed_user_dids
 from ..elasticsearch import unwrap_es_response
 from .base import CandidateGenerator, CandidateResult
-from .utils import candidate_posts_from_es_response
+from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +131,7 @@ async def fetch_posts_by_uris(
         index="posts",
         query=posts_query,
         size=len(at_uris),
+        _source=CANDIDATE_SOURCE_FIELDS,
     )
 
     candidates_by_uri: dict[str, CandidatePost] = {}

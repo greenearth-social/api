@@ -26,5 +26,8 @@ jobs:
     - name: Install dependencies
       run: pipenv install --dev
 
+    - name: Type check (pyright)
+      run: pipenv run pyright
+
     - name: Run tests
       run: pipenv run pytest -v

@@ -14,20 +14,27 @@ See: https://docs.bsky.app/docs/starter-templates/custom-feeds
 import asyncio
 import logging
 import os
+import time
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ..documents import InteractionDocument
 from ..lib.candidates import run_generate
 from ..lib.diversify import mmr_rerank
+from ..lib.elasticsearch import fetch_post_embeddings
+from ..lib.embeddings import encode_float32_b64
+from ..lib.feed_cache import FeedCache, DEFAULT_TTL_SECONDS
+from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.perspective import perspective_rerank
-from ..lib.feed_cache import FeedCache, FirestoreFeedCache, DEFAULT_TTL_SECONDS
 from ..lib.rankers import run_predict
-from ..models import CandidateGenerateRequest, FeedConfig, FeedCursor, GeneratorSpec, RankPredictRequest
+from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
+
 from ..lib.atproto_auth import verify_auth_header
-from ..lib.firestore import upsert_feed_activity, upsert_user
+from ..lib.firestore import record_interaction, upsert_feed_activity, upsert_user
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
 from ..feeds import FEEDS
@@ -104,6 +111,11 @@ class DescribeFeedGeneratorResponse(BaseModel):
 
 class SkeletonItem(BaseModel):
     post: str = Field(..., description="AT URI of a post")
+    feed_context: str | None = Field(
+        default=None,
+        serialization_alias="feedContext",
+        description="Signed token echoed back by sendInteractions (max 2000 chars)",
+    )
 
 
 class FeedSkeletonResponse(BaseModel):
@@ -118,9 +130,108 @@ class FeedSkeletonResponse(BaseModel):
     cursor: str | None = Field(default=None, description="Pagination cursor")
 
 
+# Recognised interaction event names, stored without their
+# ``app.bsky.feed.defs#`` lexicon prefix. Unknown events are still stored — this
+# set is for reference and lightweight logging only.
+INTERACTION_EVENTS = frozenset(
+    {
+        "requestLess",
+        "requestMore",
+        "clickthroughItem",
+        "clickthroughAuthor",
+        "clickthroughEmbed",
+        "interactionSeen",
+        "interactionLike",
+        "interactionRepost",
+        "interactionReply",
+        "interactionQuote",
+        "interactionShare",
+    }
+)
+
+
+def _short_event(event: str | None) -> str:
+    """Strip the ``app.bsky.feed.defs#`` lexicon prefix, keeping the event name.
+
+    Falls back to the original value when stripping would leave nothing (e.g. a
+    value ending in ``#``), so a non-empty event is never replaced with "".
+    """
+    if not event:
+        return ""
+    return event.rsplit("#", 1)[-1] or event
+
+
+class Interaction(BaseModel):
+    """A single interaction entry in a sendInteractions request."""
+
+    model_config = {"populate_by_name": True}
+
+    item: str | None = Field(default=None, description="AT URI of the post interacted with")
+    event: str | None = Field(default=None, description="Interaction event type (app.bsky.feed.defs#...)")
+    feed_context: str | None = Field(
+        default=None,
+        validation_alias="feedContext",
+        description="The signed token we attached to the feed item",
+    )
+
+
+class SendInteractionsRequest(BaseModel):
+    interactions: list[Interaction] = Field(default_factory=list)
+
+
+class SendInteractionsResponse(BaseModel):
+    """Empty response body, per the app.bsky.feed.sendInteractions lexicon."""
+
+
 # ---------------------------------------------------------------------------
 # Feed pipeline
 # ---------------------------------------------------------------------------
+
+
+async def _hydrate_embeddings(
+    es, candidates: list[CandidatePost]
+) -> list[CandidatePost]:
+    """Fetch missing L12 embeddings in a single batched ES call.
+
+    Candidate generators skip the embedding when reading from ES — the
+    array is ~4-5 KB per doc and dominates response size for kNN
+    searches. We refetch embeddings here, after dedup, against just
+    the candidates that survived. The per-request cache means later
+    callers (e.g. the two-tower ranker re-asking for the same URIs)
+    pay no additional ES cost.
+    """
+    missing = [
+        c.at_uri for c in candidates if c.at_uri and not c.minilm_l12_embedding
+    ]
+    if not missing:
+        return candidates
+
+    try:
+        async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
+            pairs = await fetch_post_embeddings(es, missing)
+    except Exception:
+        # If the refetch fails, MMR falls back to author-only similarity
+        # and the two-tower ranker has its own refetch path. Don't fail
+        # the request over a hydration hiccup.
+        logger.exception("Embedding hydration failed; continuing without")
+        return candidates
+
+    encoded: dict[str, str] = {}
+    for uri, vec in pairs:
+        try:
+            encoded[uri] = encode_float32_b64(vec)
+        except Exception:
+            continue
+
+    if not encoded:
+        return candidates
+
+    return [
+        c.model_copy(update={"minilm_l12_embedding": encoded[c.at_uri]})
+        if c.at_uri and not c.minilm_l12_embedding and c.at_uri in encoded
+        else c
+        for c in candidates
+    ]
 
 
 async def _run_ranking_pipeline(
@@ -147,6 +258,11 @@ async def _run_ranking_pipeline(
 
         if not candidates:
             return []
+
+        # Generators fetch lightweight candidates (no embedding); ranker and
+        # MMR need embeddings, so backfill in one batched ES call now that
+        # the candidate set has been deduped down to the working size.
+        candidates = await _hydrate_embeddings(es, candidates)
 
         if feed_cfg.rank_request_template is not None:
             rank_req = feed_cfg.rank_request_template.model_copy(
@@ -200,6 +316,31 @@ def _get_feed_cache(request: Request) -> FeedCache:
     return cache
 
 
+# ---------------------------------------------------------------------------
+# feedContext helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_feed_context(user_did: str, feed_name: str, request_id: str) -> str:
+    """Build the signed feedContext token shared by every item in a response.
+
+    ``request_id`` doubles as the feed-cache key, so the served item order can be
+    recovered from the cache during its TTL window.
+    """
+    return encode_feed_context(
+        FeedContextPayload(
+            did=user_did,
+            feed=feed_name,
+            rid=request_id,
+            iat=int(time.time()),
+        )
+    )
+
+
+def _skeleton_items(uris: list[str], feed_context: str) -> list[SkeletonItem]:
+    return [SkeletonItem(post=uri, feed_context=feed_context) for uri in uris]
+
+
 # Fire-and-forget background tasks (Firestore session writes, …). Keeping a
 # strong reference here prevents the event loop from garbage-collecting them
 # mid-flight; the done callback removes them once they complete.
@@ -237,6 +378,37 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
         logger.exception(
             "Failed to record feed activity for user '%s', feed '%s'", user_did, feed_name
         )
+
+
+async def _record_interactions(db, interactions: list["Interaction"]) -> None:
+    """Verify each interaction's feedContext and persist the valid ones.
+
+    The signed feedContext is the trust anchor: interactions with a missing or
+    forged token are dropped (and logged) rather than written, so the public
+    endpoint can't be used to poison the data. Runs as a background task.
+    """
+    for ix in interactions:
+        payload = decode_feed_context(ix.feed_context or "")
+        if payload is None:
+            logger.warning("Dropping interaction with missing/invalid feedContext")
+            continue
+
+        event = _short_event(ix.event)
+        if event and event not in INTERACTION_EVENTS:
+            logger.warning("Recording interaction with unrecognized event: %s", event)
+
+        doc = InteractionDocument(
+            user_did=payload.did,
+            item_uri=ix.item,
+            event=event,
+            feed_name=payload.feed,
+            request_id=payload.rid,
+            feed_generated_at=datetime.fromtimestamp(payload.iat, tz=timezone.utc),
+        )
+        try:
+            await record_interaction(db, doc)
+        except Exception:
+            logger.exception("Failed to record interaction for user '%s'", payload.did)
 
 
 # ---------------------------------------------------------------------------
@@ -352,86 +524,125 @@ async def get_feed_skeleton(
 
     feed_cache = _get_feed_cache(request)
 
-    # ------------------------------------------------------------------
-    # If the client sent a cursor, try to serve the next page from cache.
-    # ------------------------------------------------------------------
-    if cursor is not None:
-        try:
-            parsed = FeedCursor.decode(cursor)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid cursor")
+    async with timed(
+        logger,
+        "feed.render.duration_ms",
+        record_metric=True,
+        metric_attrs={"feed_name": feed_name},
+    ):
+        # ------------------------------------------------------------------
+        # If the client sent a cursor, try to serve the next page from cache.
+        # ------------------------------------------------------------------
+        if cursor is not None:
+            try:
+                parsed = FeedCursor.decode(cursor)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid cursor")
 
-        async with timed(logger, "feedcache_retrieve", cache_id=parsed.id):
-            cached_uris = await feed_cache.retrieve(parsed.id)
-        if cached_uris is not None:
-            if parsed.offset < len(cached_uris):
-                # Serve from the existing cached batch.
-                page = cached_uris[parsed.offset : parsed.offset + limit]
-                next_offset = parsed.offset + len(page)
-                next_cursor: str | None = None
-                if page:
-                    # Always return a cursor when there are results.
-                    # When next_offset reaches the end of the cache the
-                    # next request will fall into the regeneration branch
-                    # below, which fetches fresh candidates.
-                    next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
-                return FeedSkeletonResponse(
-                    feed=[SkeletonItem(post=uri) for uri in page],
-                    cursor=next_cursor,
-                )
-
-            # Offset is at or past the end — regenerate with exclusions.
-            batch = _batch_size(limit)
-            gen_request = feed_cfg.gen_request_template.model_copy(
-                update={
-                    "user_did": user_did,
-                    "num_candidates": batch,
-                    "exclude_uris": cached_uris,
-                }
-            )
-
-            new_uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
-            if new_uris:
-                async with timed(logger, "feedcache_append", cache_id=parsed.id):
-                    updated = await feed_cache.append(parsed.id, new_uris)
-                if updated is not None:
-                    page = new_uris[:limit]
+            async with timed(logger, "feedcache_retrieve", cache_id=parsed.id):
+                cached_uris = await feed_cache.retrieve(parsed.id)
+            if cached_uris is not None:
+                if parsed.offset < len(cached_uris):
+                    # Serve from the existing cached batch.
+                    page = cached_uris[parsed.offset : parsed.offset + limit]
                     next_offset = parsed.offset + len(page)
-                    next_cursor = None
-                    if len(page) == limit:
+                    next_cursor: str | None = None
+                    if page:
+                        # Always return a cursor when there are results.
+                        # When next_offset reaches the end of the cache the
+                        # next request will fall into the regeneration branch
+                        # below, which fetches fresh candidates.
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                    feed_context = _make_feed_context(user_did, feed_name, parsed.id)
                     return FeedSkeletonResponse(
-                        feed=[SkeletonItem(post=uri) for uri in page],
+                        feed=_skeleton_items(page, feed_context),
                         cursor=next_cursor,
                     )
 
-            # Append failed or nothing new — end of feed.
-            return FeedSkeletonResponse(feed=[])
+                # Offset is at or past the end — regenerate with exclusions.
+                batch = _batch_size(limit)
+                gen_request = feed_cfg.gen_request_template.model_copy(
+                    update={
+                        "user_did": user_did,
+                        "num_candidates": batch,
+                        "exclude_uris": cached_uris,
+                    }
+                )
 
-        # Cache miss (expired / evicted) — fall through to generate fresh.
+                new_uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
+                if new_uris:
+                    async with timed(logger, "feedcache_append", cache_id=parsed.id):
+                        updated = await feed_cache.append(parsed.id, new_uris)
+                    if updated is not None:
+                        page = new_uris[:limit]
+                        next_offset = parsed.offset + len(page)
+                        next_cursor = None
+                        if len(page) == limit:
+                            next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                        feed_context = _make_feed_context(user_did, feed_name, parsed.id)
+                        return FeedSkeletonResponse(
+                            feed=_skeleton_items(page, feed_context),
+                            cursor=next_cursor,
+                        )
 
-    # ------------------------------------------------------------------
-    # No cursor or cache miss — generate a fresh batch.
-    # ------------------------------------------------------------------
-    batch = _batch_size(limit)
-    gen_request = feed_cfg.gen_request_template.model_copy(
-        update={"user_did": user_did, "num_candidates": batch}
-    )
+                # Append failed or nothing new — end of feed.
+                return FeedSkeletonResponse(feed=[])
 
-    all_uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
+            # Cache miss (expired / evicted) — fall through to generate fresh.
 
-    # First page to return immediately.
-    page = all_uris[:limit]
+        # ------------------------------------------------------------------
+        # No cursor or cache miss — generate a fresh batch.
+        # ------------------------------------------------------------------
+        batch = _batch_size(limit)
+        gen_request = feed_cfg.gen_request_template.model_copy(
+            update={"user_did": user_did, "num_candidates": batch}
+        )
 
-    # Store the full batch and issue a cursor only when there are more pages.
-    next_cursor = None
-    if len(all_uris) > limit:
-        cache_key = uuid.uuid4().hex
-        async with timed(logger, "feedcache_store", cache_id=cache_key):
-            await feed_cache.store(cache_key, all_uris)
-        next_cursor = FeedCursor(id=cache_key, offset=limit).encode()
+        all_uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
 
-    return FeedSkeletonResponse(
-        feed=[SkeletonItem(post=uri) for uri in page],
-        cursor=next_cursor,
-    )
+        # First page to return immediately.
+        page = all_uris[:limit]
+
+        # Store the full batch and issue a cursor only when there are more pages.
+        # The request id identifies this response; when we cache a batch it doubles
+        # as the cache key so the served order can be recovered from interactions.
+        next_cursor = None
+        if len(all_uris) > limit:
+            request_id = uuid.uuid4().hex
+            async with timed(logger, "feedcache_store", cache_id=request_id):
+                await feed_cache.store(request_id, all_uris)
+            next_cursor = FeedCursor(id=request_id, offset=limit).encode()
+        else:
+            request_id = uuid.uuid4().hex
+
+        feed_context = _make_feed_context(user_did, feed_name, request_id)
+        return FeedSkeletonResponse(
+            feed=_skeleton_items(page, feed_context),
+            cursor=next_cursor,
+        )
+
+
+@router.post(
+    "/xrpc/app.bsky.feed.sendInteractions",
+    response_model=SendInteractionsResponse,
+)
+async def send_interactions(
+    request: Request,
+    body: SendInteractionsRequest,
+) -> SendInteractionsResponse:
+    """Receive user interaction signals forwarded by the AppView.
+
+    This endpoint is public: the user's identity comes from the signed
+    ``feedContext`` we issued in getFeedSkeleton, not from request auth. Each
+    interaction is verified and persisted in the background; forged or
+    unverifiable ones are dropped. Always returns an empty object per the
+    lexicon.
+    """
+    db = getattr(request.app.state, "firestore", None)
+    if db is None:
+        logger.error("Firestore client not initialized")
+        raise HTTPException(status_code=500, detail="Firestore unavailable")
+
+    _spawn_background(_record_interactions(db, body.interactions))
+
+    return SendInteractionsResponse()

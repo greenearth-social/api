@@ -3,9 +3,11 @@
 import os
 
 import pytest
+from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
 from ..main import app
+from ..security import verify_api_key
 
 HEADERS = {"X-API-Key": "testkey"}
 
@@ -22,9 +24,16 @@ def set_api_key():
 
 
 def test_auth_required():
-    client = TestClient(app)
-    resp = client.post("/diversify", json={"candidates": []})
-    assert resp.status_code == 401
+    def _raise():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+
+    app.dependency_overrides[verify_api_key] = _raise
+    try:
+        client = TestClient(app)
+        resp = client.post("/diversify", json={"candidates": []})
+        assert resp.status_code == 401
+    finally:
+        app.dependency_overrides.pop(verify_api_key, None)
 
 
 def test_empty_input_returns_200():

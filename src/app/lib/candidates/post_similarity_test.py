@@ -9,7 +9,9 @@ from ..candidates.post_similarity import (
     fetch_recent_liked_post_uris,
     knn_search_posts,
 )
-from ..embeddings import MINILM_L12_EMBEDDING_KEY
+from ..candidates.utils import candidate_post_from_hit
+from ..elasticsearch import fetch_post_embeddings_and_authors
+from ..embeddings import MINILM_L12_EMBEDDING_FIELD, MINILM_L12_EMBEDDING_KEY
 
 
 # ---------------------------------------------------------------------------
@@ -33,10 +35,11 @@ class FakeEs:
         self._default = {"hits": {"hits": []}}
         self.calls: list[dict] = []
 
-    async def search(self, *, index=None, query=None, size=None, sort=None, _source=None, **kwargs):
+    async def search(self, *, index=None, query=None, knn=None, size=None, sort=None, _source=None, **kwargs):
         self.calls.append({
             "index": index,
             "query": query,
+            "knn": knn,
             "size": size,
             "sort": sort,
             "_source": _source,
@@ -102,12 +105,14 @@ class TestFetchPostEmbeddings:
                         {
                             "_source": {
                                 "at_uri": "at://2",
+                                "content": "two",
                                 "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
                             }
                         },
                         {
                             "_source": {
                                 "at_uri": "at://1",
+                                "content": "one",
                                 "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
                             }
                         },
@@ -119,6 +124,11 @@ class TestFetchPostEmbeddings:
         assert vecs == [
             ("at://1", [0.1, 0.2]),
             ("at://2", [0.3, 0.4]),
+        ]
+        assert es.calls[0]["_source"] == [
+            "at_uri",
+            MINILM_L12_EMBEDDING_FIELD,
+            "content",
         ]
 
     @pytest.mark.asyncio
@@ -137,6 +147,7 @@ class TestFetchPostEmbeddings:
                         {
                             "_source": {
                                 "at_uri": "at://1",
+                                "content": "one",
                                 "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
                             }
                         },
@@ -153,6 +164,177 @@ class TestFetchPostEmbeddings:
         })
         vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
         assert vecs == [("at://1", [0.1, 0.2])]
+
+    @pytest.mark.asyncio
+    async def test_skips_embeddings_without_source_text(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "at_uri": "at://1",
+                                "content": "one",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://2",
+                                "content": "   ",
+                                "media": [{"alt_text": ""}],
+                                "video_transcript": None,
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
+                            }
+                        },
+                    ]
+                }
+            }
+        })
+        vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
+        assert vecs == [
+            ("at://1", [0.1, 0.2]),
+        ]
+
+
+class TestFetchPostEmbeddingsAndAuthors:
+    @pytest.mark.asyncio
+    async def test_returns_embeddings_and_authors_in_requested_uri_order(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "at_uri": "at://2",
+                                "author_did": "did:plc:two",
+                                "content": "two",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://1",
+                                "author_did": "did:plc:one",
+                                "content": "one",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            }
+                        },
+                    ]
+                }
+            }
+        })
+        vecs = await fetch_post_embeddings_and_authors(es, ["at://1", "at://2"])
+        assert vecs == [
+            ("at://1", [0.1, 0.2], "did:plc:one"),
+            ("at://2", [0.3, 0.4], "did:plc:two"),
+        ]
+        assert es.calls[0]["_source"] == [
+            "at_uri",
+            MINILM_L12_EMBEDDING_FIELD,
+            "author_did",
+            "content",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_keeps_posts_with_missing_author_dids(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "at_uri": "at://1",
+                                "content": "one",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://2",
+                                "author_did": 123,
+                                "content": "two",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://3",
+                                "author_did": "did:plc:three",
+                                "embeddings": {},
+                            }
+                        },
+                    ]
+                }
+            }
+        })
+        vecs = await fetch_post_embeddings_and_authors(es, ["at://1", "at://2", "at://3"])
+        assert vecs == [
+            ("at://1", [0.1, 0.2], ""),
+            ("at://2", [0.3, 0.4], ""),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_skips_embeddings_without_source_text_even_with_author_did(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "at_uri": "at://1",
+                                "author_did": "did:plc:one",
+                                "content": "some content",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://2",
+                                "author_did": "did:plc:two",
+                                "content": "",
+                                "media": [{"alt_text": "   "}],
+                                "video_transcript": "",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
+                            }
+                        },
+                    ]
+                }
+            }
+        })
+        vecs = await fetch_post_embeddings_and_authors(es, ["at://1", "at://2"])
+        assert vecs == [("at://1", [0.1, 0.2], "did:plc:one")]
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_for_empty_input(self):
+        es = FakeEs()
+        vecs = await fetch_post_embeddings_and_authors(es, [])
+        assert vecs == []
+        assert len(es.calls) == 0
+
+
+class TestCandidatePostFromHit:
+    def test_keeps_embedding_with_content_source(self):
+        candidate = candidate_post_from_hit({
+            "_source": {
+                "at_uri": "at://post/1",
+                "content": "hello",
+                "embeddings": {MINILM_L12_EMBEDDING_KEY: SAMPLE_EMBEDDING},
+            }
+        })
+        assert candidate.minilm_l12_embedding is not None
+
+    def test_strips_embedding_without_nonblank_source_text(self):
+        candidate = candidate_post_from_hit({
+            "_source": {
+                "at_uri": "at://post/1",
+                "content": "   ",
+                "media": [{"alt_text": ""}, {"alt_text": "  "}, "bad"],
+                "video_transcript": 123,
+                "embeddings": {MINILM_L12_EMBEDDING_KEY: SAMPLE_EMBEDDING},
+            }
+        })
+        assert candidate.minilm_l12_embedding is None
 
 
 class TestAverageVectors:
@@ -196,6 +378,35 @@ class TestKnnSearchPosts:
         assert candidates[0].generator_name is None
 
     @pytest.mark.asyncio
+    async def test_drops_candidates_without_embeddings(self):
+        es = FakeEs(responses={
+            "posts_recent": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_score": 0.95,
+                            "_source": {
+                                "at_uri": "at://post/1",
+                                "content": "hello",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            },
+                        },
+                        {
+                            "_score": 0.8,
+                            "_source": {
+                                "at_uri": "at://post/2",
+                                "content": "missing embedding",
+                            },
+                        },
+                    ]
+                }
+            }
+        })
+        candidates = await knn_search_posts(es, [0.1, 0.2], num_candidates=10)
+        assert len(candidates) == 1
+        assert candidates[0].at_uri == "at://post/1"
+
+    @pytest.mark.asyncio
     async def test_passes_generator_name(self):
         es = FakeEs(responses={
             "posts_recent": {
@@ -219,22 +430,137 @@ class TestKnnSearchPosts:
         assert candidates[0].generator_name == "post_similarity"
 
     @pytest.mark.asyncio
-    async def test_video_only_true_includes_filter(self):
-        es = FakeEs(responses={
-            "posts_recent": {"hits": {"hits": []}}
-        })
-        await knn_search_posts(es, [0.1, 0.2], num_candidates=5, video_only=True)
-        query = es.calls[0]["query"]
-        assert {"term": {"contains_video": True}} in query["bool"]["filter"]
+    async def test_no_reply_filter_in_es_query(self):
+        """Reply exclusion is intentionally NOT sent to ES — it would force
+        a brute-force fallback (~10x slower). We filter replies in Python."""
+        es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
+        await knn_search_posts(es, [0.1, 0.2], num_candidates=5)
+        knn = es.calls[0]["knn"]
+        assert es.calls[0]["query"] is None
+        # No filter at all when there are no exclude_uris.
+        assert "filter" not in knn
 
     @pytest.mark.asyncio
-    async def test_video_only_false_omits_filter(self):
+    async def test_exclude_uris_is_an_es_filter(self):
+        """exclude_uris is bitmap-friendly and small, so it stays in ES."""
+        es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
+        await knn_search_posts(
+            es, [0.1, 0.2], num_candidates=5, exclude_uris=["at://a", "at://b"]
+        )
+        knn = es.calls[0]["knn"]
+        assert {"terms": {"at_uri": ["at://a", "at://b"]}} in knn["filter"]["bool"]["must_not"]
+
+    @pytest.mark.asyncio
+    async def test_replies_are_filtered_out_in_python(self):
+        """Hits with thread_parent_post set are dropped from the returned set."""
         es = FakeEs(responses={
-            "posts_recent": {"hits": {"hits": []}}
+            "posts_recent": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_score": 0.95,
+                            "_source": {
+                                "at_uri": "at://post/1",
+                                "content": "original",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.0, 1.0]},
+                            },
+                        },
+                        {
+                            "_score": 0.94,
+                            "_source": {
+                                "at_uri": "at://post/2",
+                                "content": "reply",
+                                "thread_parent_post": "at://parent/x",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.0, 1.0]},
+                            },
+                        },
+                        {
+                            "_score": 0.93,
+                            "_source": {
+                                "at_uri": "at://post/3",
+                                "content": "another original",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.0, 1.0]},
+                            },
+                        },
+                    ]
+                }
+            }
         })
-        await knn_search_posts(es, [0.1, 0.2], num_candidates=5, video_only=False)
-        query = es.calls[0]["query"]
-        assert query["bool"]["filter"] == []
+        candidates = await knn_search_posts(es, [0.1, 0.2], num_candidates=10)
+        assert [c.at_uri for c in candidates] == ["at://post/1", "at://post/3"]
+
+    @pytest.mark.asyncio
+    async def test_video_only_filters_in_python(self):
+        es = FakeEs(responses={
+            "posts_recent": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_score": 0.9,
+                            "_source": {
+                                "at_uri": "at://a",
+                                "content": "some content",
+                                "contains_video": True,
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            }
+                        },
+                        {
+                            "_score": 0.8,
+                            "_source": {
+                                "at_uri": "at://b",
+                                "content": "some content",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            }
+                        },
+                        {
+                            "_score": 0.7,
+                            "_source": {
+                                "at_uri": "at://c",
+                                "content": "some content",
+                                "contains_video": True,
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                            }
+                        },
+                    ]
+                }
+            }
+        })
+        candidates = await knn_search_posts(es, [0.1, 0.2], num_candidates=10, video_only=True)
+        assert [c.at_uri for c in candidates] == ["at://a", "at://c"]
+
+    @pytest.mark.asyncio
+    async def test_overfetches_to_compensate_for_python_filter(self):
+        """We ask ES for several times num_candidates so Python-side
+        reply/video filtering still leaves enough results."""
+        es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
+        await knn_search_posts(es, [0.1, 0.2], num_candidates=10)
+        call = es.calls[0]
+        # OVERFETCH_MULTIPLIER * num_candidates with a floor of MIN_OVERFETCH.
+        assert call["size"] >= 50
+        assert call["knn"]["k"] == call["size"]
+
+    @pytest.mark.asyncio
+    async def test_caps_returned_candidates_at_num_candidates(self):
+        es = FakeEs(responses={
+            "posts_recent": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_score": 1.0 - i / 100,
+                            "_source": {
+                                "at_uri": f"at://p/{i}",
+                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                                "content": "some content",
+                            }
+                        }
+                        for i in range(20)
+                    ]
+                }
+            }
+        })
+        candidates = await knn_search_posts(es, [0.1, 0.2], num_candidates=5)
+        assert len(candidates) == 5
+        assert [c.at_uri for c in candidates] == [f"at://p/{i}" for i in range(5)]
 
 
 # ---------------------------------------------------------------------------
@@ -270,12 +596,14 @@ class TestPostSimilarityGenerator:
                                     {
                                         "_source": {
                                             "at_uri": "at://post/2",
+                                            "content": "liked post two",
                                             "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.0, 1.0]},
                                         }
                                     },
                                     {
                                         "_source": {
                                             "at_uri": "at://post/1",
+                                            "content": "liked post one",
                                             "embeddings": {MINILM_L12_EMBEDDING_KEY: [1.0, 0.0]},
                                         }
                                     },

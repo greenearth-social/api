@@ -86,7 +86,7 @@ def test_run_predict_preserves_duplicate_candidates(monkeypatch):
 
 def test_rank_predict_request_requires_user_did():
     with pytest.raises(ValidationError, match="user_did"):
-        RankPredictRequest(
+        RankPredictRequest(  # pyright: ignore[reportCallIssue]
             model="two_tower",
             candidates=[CandidatePost(at_uri="at://post/1", score=0.5)],
         )

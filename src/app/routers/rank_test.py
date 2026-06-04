@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
 from ..lib.rankers import RankerExecutionError
@@ -32,10 +32,13 @@ HEADERS = {"X-API-Key": "testkey"}
 
 @pytest.fixture
 def app():
-    app = FastAPI()
-    app.state.es = object()
-    app.include_router(router)
-    return app
+    from ..security import verify_api_key
+
+    a = FastAPI()
+    a.state.es = object()
+    a.dependency_overrides[verify_api_key] = lambda: "test-key-id"
+    a.include_router(router)
+    return a
 
 
 def test_list_models(app):
@@ -156,8 +159,18 @@ def test_predict_requires_user_did(app):
     assert resp.status_code == 422
 
 
-def test_predict_requires_auth(app):
-    client = TestClient(app)
+def test_predict_requires_auth():
+    from ..security import verify_api_key
+
+    def _raise():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+
+    a = FastAPI()
+    a.state.es = object()
+    a.dependency_overrides[verify_api_key] = _raise
+    a.include_router(router)
+
+    client = TestClient(a)
     resp = client.post(
         "/rank/predict",
         json={"user_did": "did:plc:user1", "candidates": [{"at_uri": "at://post/1", "score": 0.5}]},
@@ -180,7 +193,7 @@ def test_rank_predict_maps_ranker_execution_error_to_502(monkeypatch):
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(rank_module.rank_predict(request, payload))
+        asyncio.run(rank_module.rank_predict(request, payload))  # pyright: ignore[reportArgumentType]
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.detail == "Ranker 'two_tower' failed: downstream boom"

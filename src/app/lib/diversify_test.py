@@ -219,9 +219,12 @@ def test_raw_similarity_agrees_with_similarity_for_same_inputs():
     vec_b = [4.0, 3.0]
     a = _post_with_embed("at://a/1", 1.0, "did:plc:alice", vec_a)
     b = _post_with_embed("at://b/1", 0.9, "did:plc:bob", vec_b)
+    a_emb = a.minilm_l12_embedding
+    b_emb = b.minilm_l12_embedding
+    assert a_emb is not None and b_emb is not None
     from .embeddings import decode_float32_b64
     assert _raw_similarity(
         a.author_did, b.author_did,
-        decode_float32_b64(a.minilm_l12_embedding),
-        decode_float32_b64(b.minilm_l12_embedding),
+        decode_float32_b64(a_emb),
+        decode_float32_b64(b_emb),
     ) == pytest.approx(_similarity(a, b), rel=1e-6)
