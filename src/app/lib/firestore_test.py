@@ -26,7 +26,7 @@ from ..lib.firestore import (
 
 USER_DID = "did:plc:testuser123"
 USERNAME = "testuser.bsky.app"
-FEED_NAME = "basic-similarity"
+FEED_NAME = "unranked-your-feed"
 
 
 def _mock_feed_activity_client():

@@ -18,7 +18,7 @@ from ..lib.feed_cache import FeedCache
 
 SERVICE_DID = "did:web:test.example.com"
 PUBLISHER_DID = "did:plc:publisherabc123"
-FEED_RKEY = "basic-similarity"
+FEED_RKEY = "unranked-your-feed"
 FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 RANDOM_FEED_RKEY = "random"
 RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
@@ -29,6 +29,12 @@ BEST_OF_FRIENDS_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{BEST_OF
 # The AppView sends the publisher DID in the feed URI, not the service DID.
 FEED_URI_FROM_APPVIEW = f"at://{PUBLISHER_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 TEST_USERNAME = "testuser.bsky.app"
+CANDIDATE_ONLY_FEEDS = (
+    ("post-similarity", "post_similarity"),
+    ("followed-users", "followed_users"),
+    ("network-likes", "network_likes"),
+    ("popularity", "popularity"),
+)
 
 
 def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[CandidatePost]:
@@ -38,12 +44,12 @@ def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[
     ]
 
 
-def _patch_basic_similarity_generators(
+def _patch_unranked_your_feed_generators(
     post_similarity_candidates,
     followed_users_candidates=None,
     infill_candidates=None,
 ):
-    """Patch generators used by the basic-similarity feed.
+    """Patch generators used by the unranked-your-feed feed.
 
     Most tests care about feed endpoint behavior rather than the exact mix of
     candidate sources, so followed_users defaults to the same candidates as
@@ -204,7 +210,7 @@ class TestDescribeFeedGenerator:
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         assert data["did"] == SERVICE_DID
 
-    def test_feeds_list_contains_basic_similarity(self):
+    def test_feeds_list_contains_unranked_your_feed(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         uris = [f["uri"] for f in data["feeds"]]
         assert FEED_URI in uris
@@ -223,6 +229,12 @@ class TestDescribeFeedGenerator:
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
         uris = [f["uri"] for f in data["feeds"]]
         assert BEST_OF_FRIENDS_FEED_URI in uris
+
+    @pytest.mark.parametrize("feed_name", [feed_name for feed_name, _ in CANDIDATE_ONLY_FEEDS])
+    def test_feeds_list_contains_candidate_only_feed(self, feed_name):
+        data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
+        uris = [f["uri"] for f in data["feeds"]]
+        assert f"at://{SERVICE_DID}/app.bsky.feed.generator/{feed_name}" in uris
 
     def test_feeds_list_length(self):
         data = client.get("/xrpc/app.bsky.feed.describeFeedGenerator").json()
@@ -255,7 +267,7 @@ class TestGetFeedSkeleton:
         ``primary_candidates`` and ``infill_candidates`` are lists of
         ``CandidatePost`` (or ``None`` to simulate an unregistered generator).
         """
-        return _patch_basic_similarity_generators(
+        return _patch_unranked_your_feed_generators(
             primary_candidates,
             infill_candidates=infill_candidates,
         )
@@ -316,7 +328,7 @@ class TestGetFeedSkeleton:
 
     def test_matches_feed_by_internal_rkey(self):
         """Feeds published under their Caterpie internal_rkey are still served."""
-        feed_cfg = FEEDS["basic-similarity"]
+        feed_cfg = FEEDS["unranked-your-feed"]
         internal_uri = f"at://{SERVICE_DID}/app.bsky.feed.generator/{feed_cfg.internal_rkey}"
         with self._patch_generators(_make_candidates("p", 2)):
             resp = client.get(
@@ -420,11 +432,11 @@ class TestGetFeedSkeleton:
         infill_gen = mock_get.side_effect("popularity")
         infill_gen.generate.assert_not_called()
 
-    def test_basic_similarity_uses_followed_users_generator(self):
+    def test_unranked_your_feed_uses_followed_users_generator(self):
         similarity = _make_candidates("sim", 3, "post_similarity")
         followed = _make_candidates("followed", 3, "followed_users")
 
-        with _patch_basic_similarity_generators(
+        with _patch_unranked_your_feed_generators(
             similarity,
             followed_users_candidates=followed,
         ) as mock_get:
@@ -512,6 +524,65 @@ class TestGetFeedSkeleton:
 
 
 # ---------------------------------------------------------------------------
+# Candidate-generator-only feeds
+# ---------------------------------------------------------------------------
+
+class TestCandidateGeneratorOnlyFeeds:
+    """Tests for private feeds that expose one candidate generator directly."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_authenticated_user(self):
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), \
+             patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
+            yield
+
+    @pytest.mark.parametrize("feed_name,expected_generator", CANDIDATE_ONLY_FEEDS)
+    def test_routes_to_expected_generator(self, feed_name, expected_generator):
+        generator_mocks = {}
+        for _, generator_name in CANDIDATE_ONLY_FEEDS:
+            gen = AsyncMock()
+            gen.generate.return_value = CandidateResult(
+                generator_name=generator_name,
+                candidates=[
+                    CandidatePost(
+                        at_uri=f"at://{generator_name}/{i}",
+                        content=f"post {i}",
+                        minilm_l12_embedding="fake-embedding",
+                        score=None,
+                        generator_name=generator_name,
+                    )
+                    for i in range(2)
+                ],
+            )
+            generator_mocks[generator_name] = gen
+
+        with patch(
+            "app.lib.candidates.generate.get_generator",
+            side_effect=lambda name: generator_mocks.get(name),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={
+                    "feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/{feed_name}",
+                    "limit": 3,
+                },
+            )
+
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert posts == [f"at://{expected_generator}/0", f"at://{expected_generator}/1"]
+        generator_mocks[expected_generator].generate.assert_awaited_once()
+        for generator_name, gen in generator_mocks.items():
+            if generator_name != expected_generator:
+                gen.generate.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Cursor / pagination
 # ---------------------------------------------------------------------------
 
@@ -530,7 +601,7 @@ class TestFeedSkeletonCursor:
             yield
 
     def _patch_generators(self, primary_candidates, infill_candidates=None):
-        return _patch_basic_similarity_generators(
+        return _patch_unranked_your_feed_generators(
             primary_candidates,
             infill_candidates=infill_candidates,
         )
@@ -838,7 +909,7 @@ class TestGetFeedSkeletonAuth:
     """Tests that getFeedSkeleton correctly passes through the authenticated DID."""
 
     def _patch_generators(self, primary_candidates):
-        return _patch_basic_similarity_generators(primary_candidates)
+        return _patch_unranked_your_feed_generators(primary_candidates)
 
     @pytest.fixture(autouse=True)
     def _mock_firestore_upsert(self):

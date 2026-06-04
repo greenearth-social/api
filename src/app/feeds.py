@@ -16,9 +16,9 @@ from .models import CandidateGenerateRequest, FeedConfig, GeneratorSpec, RankPre
 
 # NOTE: display_name is limited to 24 chars, including the prefix ("GreenEarth, GE Dev, or GE Stg")
 FEEDS: dict[str, FeedConfig] = {
-    "basic-similarity": FeedConfig(
-        display_name="Similarity",
-        description="Development feed — post-similarity candidates with popularity infill.",
+    "unranked-your-feed": FeedConfig(
+        display_name="Unranked YF",
+        description="Development feed — post-similarity and followed-users candidate with popularity infill. No ranking.",
         internal_rkey="e2-s",
         internal_display_name="e2 S",
         gen_request_template=CandidateGenerateRequest.model_construct(
@@ -82,6 +82,68 @@ FEEDS: dict[str, FeedConfig] = {
         ),
         rank_request_template=RankPredictRequest.model_construct(
             model="two_tower",
+        ),
+    ),
+
+    ### (Private) Pure Candidate Generator Feeds, mostly for testing and debugging ###
+    "post-similarity": FeedConfig(
+        display_name="Post Similarity",
+        description="Development feed — post-similarity candidates only.",
+        internal_rkey="gh-ps",
+        internal_display_name="gh PS",
+        diversify=False,
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[
+                GeneratorSpec(name="post_similarity", weight=1.0),
+            ],
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
+        ),
+    ),
+    "followed-users": FeedConfig(
+        display_name="Followed Users",
+        description="Development feed — followed-users candidates only.",
+        internal_rkey="ij-fu",
+        internal_display_name="ij FU",
+        diversify=False,
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[
+                GeneratorSpec(name="followed_users", weight=1.0),
+            ],
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
+        ),
+    ),
+    "network-likes": FeedConfig(
+        display_name="Network Likes",
+        description="Development feed — network-likes candidates only.",
+        internal_rkey="kl-nl",
+        internal_display_name="kl NL",
+        diversify=False,
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[
+                GeneratorSpec(name="network_likes", weight=1.0),
+            ],
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
+        ),
+    ),
+    "popularity": FeedConfig(
+        display_name="Popularity",
+        description="Development feed — popularity candidates only.",
+        internal_rkey="mn-p",
+        internal_display_name="mn P",
+        diversify=False,
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[
+                GeneratorSpec(name="popularity", weight=1.0),
+            ],
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
         ),
     ),
 }
