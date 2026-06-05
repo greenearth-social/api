@@ -16,7 +16,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from ..documents import InteractionDocument
 from ..lib.candidates import run_generate
 from ..lib.diversify import mmr_rerank
+from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
 
 from ..lib.elasticsearch import fetch_post_embeddings
 from ..lib.embeddings import encode_float32_b64
@@ -35,11 +36,14 @@ from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCu
 
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.firestore import (
+    FEED_DEBUG_RETENTION_DAYS,
     get_recent_seen_uris,
+    get_user,
     record_interaction,
     record_seen_posts,
     upsert_feed_activity,
     upsert_user,
+    write_feed_debug,
 )
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
@@ -252,6 +256,13 @@ async def _run_ranking_pipeline(
     both ``post_similarity`` and the two-tower ranker) collapse to a
     single round-trip.
     """
+    rec = current_recorder()
+    if rec is not None:
+        rec.set_generate_request(gen_request)
+        rec.diversify = feed_cfg.diversify
+        if feed_cfg.rank_request_template is not None:
+            rec.ranker_model = feed_cfg.rank_request_template.model
+
     async with request_cache_scope():
         async with timed(
             logger,
@@ -281,6 +292,8 @@ async def _run_ranking_pipeline(
                 model=rank_req.model,
             ):
                 rank_result = await run_predict(rank_req, es)
+            if rec is not None:
+                rec.record_ranking(rank_result)
             # Reorder CandidatePosts by model rank and stamp rank_score onto each
             # so MMR uses the model's relevance scores, not the generator scores.
             by_uri = {c.at_uri: c for c in candidates if c.at_uri}
@@ -292,8 +305,46 @@ async def _run_ranking_pipeline(
         else:
             ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
 
+        if rec is not None:
+            rec.record_order_after_rank([c.at_uri for c in ordered if c.at_uri])
+
         final = mmr_rerank(ordered) if feed_cfg.diversify else ordered
-        return [c.at_uri for c in final if c.at_uri]
+        final_uris = [c.at_uri for c in final if c.at_uri]
+        if rec is not None:
+            rec.record_final_order(final_uris)
+        return final_uris
+
+
+async def _run_pipeline_capturing(
+    request: Request,
+    db,
+    feed_cfg: FeedConfig,
+    gen_request: CandidateGenerateRequest,
+    *,
+    feed_name: str,
+    user_did: str,
+    request_id: str,
+    regenerated: bool,
+    debug_enabled: bool,
+) -> list[str]:
+    """Run the ranking pipeline, optionally capturing debug info for this user.
+
+    When ``debug_enabled``, a :class:`FeedDebugRecorder` is installed for the
+    duration of the pipeline and a background task persists the assembled
+    document afterwards (handle resolution + the Firestore write stay off the
+    hot path).
+    """
+    if not debug_enabled:
+        return await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
+
+    recorder = FeedDebugRecorder(feed_name=feed_name, regenerated=regenerated)
+    generated_at = datetime.now(timezone.utc)
+    with feed_debug_scope(recorder):
+        uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
+    _spawn_background(
+        _write_feed_debug(request, db, recorder, request_id, user_did, generated_at)
+    )
+    return uris
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +448,58 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
         logger.exception(
             "Failed to record feed activity for user '%s', feed '%s'", user_did, feed_name
         )
+
+
+async def _resolve_handles(request: Request, dids: set[str]) -> dict[str, str]:
+    """Best-effort batch DID→handle resolution; failures are skipped.
+
+    Used for feed-debug capture only, so a DID that fails to resolve is simply
+    omitted from the result rather than raising.
+    """
+    resolver = getattr(request.app.state, "id_resolver", None)
+    if resolver is None or not dids:
+        return {}
+
+    did_list = list(dids)
+
+    async def _one(did: str) -> str | None:
+        try:
+            did_doc = await resolver.did.resolve(did)
+            return did_doc.get_handle() if did_doc is not None else None
+        except Exception:
+            return None
+
+    handles = await asyncio.gather(*(_one(did) for did in did_list))
+    return {did: handle for did, handle in zip(did_list, handles) if handle}
+
+
+async def _write_feed_debug(
+    request: Request,
+    db,
+    recorder: FeedDebugRecorder,
+    request_id: str,
+    user_did: str,
+    generated_at: datetime,
+) -> None:
+    """Resolve author handles, assemble the debug document, and persist it.
+
+    Runs as a background task so handle resolution and the Firestore write stay
+    off the feed-serving hot path. Failures are logged, never surfaced.
+    """
+    try:
+        author_usernames = await _resolve_handles(request, recorder.author_dids())
+        username = author_usernames.get(user_did)
+        expires_at = generated_at + timedelta(days=FEED_DEBUG_RETENTION_DAYS)
+        doc = recorder.build_document(
+            request_id=request_id,
+            username=username,
+            generated_at=generated_at,
+            expires_at=expires_at,
+            author_usernames=author_usernames,
+        )
+        await write_feed_debug(db, doc)
+    except Exception:
+        logger.exception("Failed to write feed debug record for user '%s'", user_did)
 
 
 async def _record_interactions(db, interactions: list["Interaction"]) -> None:
@@ -565,6 +668,16 @@ async def get_feed_skeleton(
 
     _spawn_background(_record_session(request, user_did, feed_name, db))
 
+    # Per-user opt-in: capture pipeline debugging info for this feed load. This
+    # costs one extra Firestore read per request; fail-soft so a hiccup degrades
+    # to no-debug rather than breaking feed serving.
+    debug_enabled = False
+    try:
+        user_doc = await get_user(db, user_did)
+        debug_enabled = bool(user_doc and user_doc.debug_feeds)
+    except Exception:
+        logger.exception("Failed to read debug flag for user '%s'", user_did)
+
     feed_cache = _get_feed_cache(request)
 
     async with timed(
@@ -616,7 +729,17 @@ async def get_feed_skeleton(
                     }
                 )
 
-                new_uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
+                new_uris = await _run_pipeline_capturing(
+                    request,
+                    db,
+                    feed_cfg,
+                    gen_request,
+                    feed_name=feed_name,
+                    user_did=user_did,
+                    request_id=parsed.id,
+                    regenerated=True,
+                    debug_enabled=debug_enabled,
+                )
                 if new_uris:
                     async with timed(logger, "feedcache_append", cache_id=parsed.id):
                         updated = await feed_cache.append(parsed.id, new_uris)
@@ -646,22 +769,32 @@ async def get_feed_skeleton(
             update={"user_did": user_did, "num_candidates": batch, "exclude_uris": seen_uris}
         )
 
-        all_uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
+        # The request id identifies this response; when we cache a batch it doubles
+        # as the cache key so the served order can be recovered from interactions.
+        # Generated up front so it can key the debug record too.
+        request_id = uuid.uuid4().hex
+
+        all_uris = await _run_pipeline_capturing(
+            request,
+            db,
+            feed_cfg,
+            gen_request,
+            feed_name=feed_name,
+            user_did=user_did,
+            request_id=request_id,
+            regenerated=False,
+            debug_enabled=debug_enabled,
+        )
 
         # First page to return immediately.
         page = all_uris[:limit]
 
         # Store the full batch and issue a cursor only when there are more pages.
-        # The request id identifies this response; when we cache a batch it doubles
-        # as the cache key so the served order can be recovered from interactions.
         next_cursor = None
         if len(all_uris) > limit:
-            request_id = uuid.uuid4().hex
             async with timed(logger, "feedcache_store", cache_id=request_id):
                 await feed_cache.store(request_id, all_uris)
             next_cursor = FeedCursor(id=request_id, offset=limit).encode()
-        else:
-            request_id = uuid.uuid4().hex
 
         feed_context = _make_feed_context(user_did, feed_name, request_id)
         return FeedSkeletonResponse(

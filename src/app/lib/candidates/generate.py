@@ -17,6 +17,7 @@ from ...models import (
     GeneratorSpec,
 )
 from .base import CandidateGenerator, CandidateResult, get_generator
+from ..feed_debug import current_recorder
 from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -139,10 +140,14 @@ async def run_generate(
         *(_run_one(spec, count, gen) for spec, count, gen in active)
     )
 
+    rec = current_recorder()
+
     all_candidates: list[CandidatePost] = []
     for result in results:
         if result is None:
             continue
+        if rec is not None:
+            rec.record_generator_output(result)
         all_candidates.extend(result.candidates)
 
     deduped = dedup_candidates(all_candidates)
@@ -170,6 +175,11 @@ async def run_generate(
             else:
                 raise GeneratorError(request.infill, exc, is_infill=True) from exc
 
+        if rec is not None:
+            rec.record_generator_output(infill_result)
         deduped = dedup_candidates(deduped + infill_result.candidates)
 
-    return CandidateGenerateResult(candidates=deduped[:request.num_candidates])
+    final = deduped[:request.num_candidates]
+    if rec is not None:
+        rec.record_final_candidates(final)
+    return CandidateGenerateResult(candidates=final)

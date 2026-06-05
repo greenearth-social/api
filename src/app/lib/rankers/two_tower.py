@@ -13,6 +13,7 @@ from ...models import RankedCandidate, CandidatePost, RankPredictResult
 from .base import Ranker, RankerExecutionError, RankerResult
 from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings_and_authors
 from ..embeddings import decode_float32_b64
+from ..feed_debug import current_recorder
 from ..http_client import get_http_client
 from ..request_context import get_request_id
 from ..telemetry import timed
@@ -169,12 +170,20 @@ class TwoTowerRanker(Ranker):
                 history_author_dids: list[str] = []
                 user_history_liked_uris = await fetch_recent_liked_post_uris(es, user_did)
 
+                rec = current_recorder()
+
                 if not user_history_liked_uris:
                     logger.info("No likes found for user %s", user_did)
+                    if rec is not None:
+                        rec.record_user_features(self.name, [], 0)
                 else:
                     user_history_embedding_pairs: list[tuple[str, list[float], str]] = await fetch_post_embeddings_and_authors(
                         es, user_history_liked_uris,
                     )
+                    if rec is not None:
+                        rec.record_user_features(
+                            self.name, user_history_liked_uris, len(user_history_embedding_pairs)
+                        )
                     if not user_history_embedding_pairs:
                         logger.info(
                             "No embeddings found for %d liked posts of user %s",

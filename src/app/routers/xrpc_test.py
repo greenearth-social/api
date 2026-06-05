@@ -1,5 +1,6 @@
 """Tests for the XRPC feed generator endpoints."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1603,3 +1604,82 @@ class TestSendInteractions:
 
         rec.assert_called_once()  # raw interaction is still stored
         seen_rec.assert_not_called()  # but not denormalized
+
+
+# ---------------------------------------------------------------------------
+# Feed debug capture
+# ---------------------------------------------------------------------------
+
+class TestFeedDebugCapture:
+    """getFeedSkeleton captures debug info only for flagged users."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_auth_and_session(self):
+        with (
+            patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"),
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock),
+            patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock),
+        ):
+            yield
+
+    def _patch_generators(self, candidates):
+        return _patch_unranked_your_feed_generators(candidates)
+
+    def _user_doc(self, debug_feeds):
+        from ..documents import UserDocument
+
+        return UserDocument(user_did="did:plc:testuser", username=TEST_USERNAME, debug_feeds=debug_feeds)
+
+    @staticmethod
+    async def _drain(coros):
+        for coro in coros:
+            await coro
+
+    def test_writes_debug_record_when_enabled(self):
+        spawned: list = []
+        with (
+            self._patch_generators(_make_candidates("p", 3)),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=self._user_doc(True)),
+            patch("app.routers.xrpc._spawn_background", side_effect=lambda coro: spawned.append(coro)),
+            patch("app.routers.xrpc.write_feed_debug", new_callable=AsyncMock) as mock_write,
+        ):
+            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
+            assert resp.status_code == 200
+            asyncio.run(self._drain(spawned))
+
+        mock_write.assert_awaited_once()
+        doc = mock_write.call_args[0][1]
+        assert doc.user_did == "did:plc:testuser"
+        assert doc.feed_name == FEED_RKEY
+        assert doc.final_order == ["at://p/0", "at://p/1", "at://p/2"]
+        # Generator output was captured under the active recorder scope.
+        assert any(r.generator_name == "post_similarity" for r in doc.generator_outputs)
+
+    def test_no_debug_record_when_disabled(self):
+        spawned: list = []
+        with (
+            self._patch_generators(_make_candidates("p", 3)),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=self._user_doc(False)),
+            patch("app.routers.xrpc._spawn_background", side_effect=lambda coro: spawned.append(coro)),
+            patch("app.routers.xrpc.write_feed_debug", new_callable=AsyncMock) as mock_write,
+        ):
+            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
+            assert resp.status_code == 200
+            asyncio.run(self._drain(spawned))
+
+        mock_write.assert_not_awaited()
+
+    def test_flag_read_failure_is_non_fatal(self, caplog):
+        spawned: list = []
+        with (
+            self._patch_generators(_make_candidates("p", 2)),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
+            patch("app.routers.xrpc._spawn_background", side_effect=lambda coro: spawned.append(coro)),
+            patch("app.routers.xrpc.write_feed_debug", new_callable=AsyncMock) as mock_write,
+        ):
+            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
+            assert resp.status_code == 200
+            asyncio.run(self._drain(spawned))
+
+        mock_write.assert_not_awaited()
+        assert "Failed to read debug flag" in caplog.text

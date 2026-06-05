@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
+from .lib.candidates.base import CandidateResult
+from .models import CandidateGenerateRequest, CandidatePost, RankPredictResult
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -35,6 +38,11 @@ class UserDocument(BaseModel):
     created_at: datetime = Field(default_factory=_utcnow, description="When the user was first seen")
     updated_at: datetime = Field(default_factory=_utcnow, description="Last time the document was modified")
     last_seen_at: datetime = Field(default_factory=_utcnow, description="Most recent feed request from this user")
+    debug_feeds: bool = Field(
+        default=False,
+        description="When True, feed loads for this user capture pipeline debugging "
+        "information into the feed_debug subcollection (has a perf cost).",
+    )
 
 
 class FeedCacheDocument(BaseModel):
@@ -97,3 +105,72 @@ class InteractionDocument(BaseModel):
         default=None, description="When the feed response was served (from the feedContext iat)"
     )
     created_at: datetime = Field(default_factory=_utcnow, description="When the interaction was received")
+
+
+class FeedDebugUserFeatures(BaseModel):
+    """Inputs used to assemble a user-side representation during a feed load.
+
+    Captured per pipeline stage that builds user features (e.g. the
+    ``post_similarity`` search vector and the two-tower user embedding) so we
+    can see which liked posts drove the result.
+    """
+
+    source: str = Field(..., description="Pipeline stage that built these features, e.g. 'two_tower'")
+    liked_post_uris: list[str] = Field(
+        default_factory=list, description="Liked-post AT URIs used as user history"
+    )
+    num_embeddings: int = Field(
+        default=0, description="How many of the liked posts had usable embeddings"
+    )
+
+
+class FeedDebugDocument(BaseModel):
+    """Captured debugging information for a single feed load.
+
+    Stored at ``users/{user_did}/feed_debug/{request_id}``.  This is a thin
+    container around the real pipeline objects (``CandidateGenerateRequest``,
+    ``CandidateResult``, ``RankPredictResult``, ``CandidatePost``) so it keeps
+    capturing new fields as the ranking pipeline evolves.  Embeddings are
+    stripped and post content is truncated before storage.
+
+    The per-item "why this item?" view is assembled at display time by joining
+    ``generator_outputs``, ``ranking``, and ``final_order`` on ``at_uri``.
+    """
+
+    request_id: str = Field(..., description="Feed-cache key / feedContext id (also the document ID)")
+    user_did: str = Field(..., description="AT Protocol DID of the user the feed was served to")
+    username: str | None = Field(default=None, description="Resolved handle of the user")
+    feed_name: str = Field(..., description="Feed rkey that was loaded")
+    regenerated: bool = Field(
+        default=False,
+        description="True when this capture came from the cursor-regeneration path rather than a fresh load",
+    )
+
+    # Inputs
+    generate_request: CandidateGenerateRequest = Field(..., description="The candidate-generation request used")
+    ranker_model: str | None = Field(default=None, description="Ranking model applied, if any")
+    diversify: bool = Field(default=False, description="Whether MMR diversification was applied")
+    user_features: list[FeedDebugUserFeatures] = Field(
+        default_factory=list, description="User-side feature inputs captured per stage"
+    )
+
+    # Stage outputs (reused pipeline types)
+    generator_outputs: list[CandidateResult] = Field(
+        default_factory=list, description="Raw per-generator output (embeddings stripped, content truncated)"
+    )
+    final_candidates: list[CandidatePost] = Field(
+        default_factory=list, description="Deduped candidate set that entered ranking (embeddings stripped)"
+    )
+    ranking: RankPredictResult | None = Field(
+        default=None, description="Ranker output, when a ranker ran"
+    )
+    order_after_rank: list[str] = Field(
+        default_factory=list, description="AT URIs in order after ranking, before diversification"
+    )
+    final_order: list[str] = Field(
+        default_factory=list, description="AT URIs in final served order, after diversification"
+    )
+
+    created_at: datetime = Field(default_factory=_utcnow, description="When this debug record was written")
+    generated_at: datetime = Field(default_factory=_utcnow, description="When the feed was served")
+    expires_at: datetime = Field(..., description="UTC expiration timestamp; drives native TTL")

@@ -80,6 +80,12 @@ def test_search_returns_embedding():
                 "score": 1.5,
                 "generator_name": None,
                 "author_did": None,
+                "author_username": None,
+                "contains_images": None,
+                "contains_video": None,
+                "image_count": None,
+                "video_count": None,
+                "external_uri": None,
             }
         ]
     }
@@ -100,6 +106,12 @@ def test_similar_with_at_uris():
                 "score": 1.5,
                 "generator_name": None,
                 "author_did": None,
+                "author_username": None,
+                "contains_images": None,
+                "contains_video": None,
+                "image_count": None,
+                "video_count": None,
+                "external_uri": None,
             }
         ]
     }
@@ -120,6 +132,12 @@ def test_similar_with_embeddings():
                 "score": 1.5,
                 "generator_name": None,
                 "author_did": None,
+                "author_username": None,
+                "contains_images": None,
+                "contains_video": None,
+                "image_count": None,
+                "video_count": None,
+                "external_uri": None,
             }
         ]
     }

@@ -11,9 +11,14 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from google.cloud.firestore import ArrayUnion, AsyncClient  # type: ignore[import-untyped]
+from google.cloud.firestore import ArrayUnion, AsyncClient, Query  # type: ignore[import-untyped]
 
-from ..documents import FeedActivityDocument, InteractionDocument, UserDocument
+from ..documents import (
+    FeedActivityDocument,
+    FeedDebugDocument,
+    InteractionDocument,
+    UserDocument,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +26,13 @@ USERS_COLLECTION = "users"
 FEED_ACTIVITY_COLLECTION = "feed_activity"
 INTERACTIONS_COLLECTION = "interactions"
 SEEN_POSTS_COLLECTION = "seen_posts"
+FEED_DEBUG_COLLECTION = "feed_debug"
 
 # How long a seen-posts bucket lives before native Firestore TTL deletes it.
 SEEN_POSTS_RETENTION_DAYS = 5
+
+# How long a feed-debug record lives before native Firestore TTL deletes it.
+FEED_DEBUG_RETENTION_DAYS = 7
 
 
 def init_firestore_client() -> AsyncClient:
@@ -107,6 +116,33 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str) -> UserDocu
     )
     await ref.set(user.model_dump())
     return user
+
+
+async def get_user_by_username(db: AsyncClient, username: str) -> UserDocument | None:
+    """Fetch a user document by handle, or return ``None`` if not found.
+
+    Usernames are not guaranteed unique over time (handles can be reused), so
+    this returns the first match.
+    """
+    query = db.collection(USERS_COLLECTION).where("username", "==", username).limit(1)
+    async for doc in query.stream():
+        data = doc.to_dict()
+        if data is not None:
+            return UserDocument.model_validate(data)
+    return None
+
+
+async def set_user_debug_flag(db: AsyncClient, user_did: str, enabled: bool) -> None:
+    """Set the ``debug_feeds`` flag on a user document.
+
+    The user document must already exist (users are created on their first feed
+    request); raises ``ValueError`` otherwise so the CLI can report it clearly.
+    """
+    ref = db.collection(USERS_COLLECTION).document(user_did)
+    doc = await ref.get()
+    if not doc.exists:
+        raise ValueError(f"No user document for {user_did}")
+    await ref.update({"debug_feeds": enabled, "updated_at": datetime.now(timezone.utc)})
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +285,61 @@ async def get_recent_seen_uris(
             if len(result) >= max_uris:
                 return result
     return result
+
+
+# ---------------------------------------------------------------------------
+# Feed debug
+# ---------------------------------------------------------------------------
+
+
+async def write_feed_debug(db: AsyncClient, doc: FeedDebugDocument) -> None:
+    """Persist a feed-debug record under ``users/{user_did}/feed_debug/{request_id}``.
+
+    ``expires_at`` on the document drives the native Firestore TTL so records
+    self-delete ~``FEED_DEBUG_RETENTION_DAYS`` days after the feed was served.
+    """
+    ref = (
+        db.collection(USERS_COLLECTION)
+        .document(doc.user_did)
+        .collection(FEED_DEBUG_COLLECTION)
+        .document(doc.request_id)
+    )
+    await ref.set(doc.model_dump())
+
+
+async def get_recent_feed_debug(
+    db: AsyncClient, user_did: str, *, limit: int = 20
+) -> list[FeedDebugDocument]:
+    """Return a user's most recent feed-debug records, newest first."""
+    query = (
+        db.collection(USERS_COLLECTION)
+        .document(user_did)
+        .collection(FEED_DEBUG_COLLECTION)
+        .order_by("generated_at", direction=Query.DESCENDING)
+        .limit(limit)
+    )
+    docs: list[FeedDebugDocument] = []
+    async for doc in query.stream():
+        data = doc.to_dict()
+        if data is not None:
+            docs.append(FeedDebugDocument.model_validate(data))
+    return docs
+
+
+async def get_feed_debug(
+    db: AsyncClient, user_did: str, request_id: str
+) -> FeedDebugDocument | None:
+    """Fetch a single feed-debug record, or ``None`` if not found."""
+    doc = await (
+        db.collection(USERS_COLLECTION)
+        .document(user_did)
+        .collection(FEED_DEBUG_COLLECTION)
+        .document(request_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    data = doc.to_dict()
+    if data is None:
+        return None
+    return FeedDebugDocument.model_validate(data)

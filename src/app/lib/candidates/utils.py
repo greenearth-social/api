@@ -16,6 +16,10 @@ CANDIDATE_SOURCE_FIELDS = [
     "content",
     "thread_parent_post",   # used for Python-side reply filtering
     "contains_video",       # used for video_only filtering
+    "contains_images",      # media metadata (feed debugging)
+    "image_count",          # media metadata (feed debugging)
+    "video_count",          # media metadata (feed debugging)
+    "external_embed",       # link embed metadata (feed debugging)
 ]
 
 
@@ -50,6 +54,11 @@ def candidate_post_from_hit(
         except Exception:
             encoded = None
 
+    external_embed = src.get("external_embed")
+    external_uri = (
+        external_embed.get("uri") if isinstance(external_embed, dict) else None
+    )
+
     return CandidatePost(
         author_did=src.get("author_did"),
         at_uri=src.get("at_uri"),
@@ -57,4 +66,9 @@ def candidate_post_from_hit(
         minilm_l12_embedding=encoded,
         score=hit.get("_score"),
         generator_name=generator_name,
+        contains_images=src.get("contains_images"),
+        contains_video=src.get("contains_video"),
+        image_count=src.get("image_count"),
+        video_count=src.get("video_count"),
+        external_uri=external_uri,
     )
