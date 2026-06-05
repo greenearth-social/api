@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 _PERSPECTIVE_URL = "https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze"
 
 _REQUESTED_ATTRIBUTES = {
+    "COMPASSION_EXPERIMENTAL": {},
+    "CURIOSITY_EXPERIMENTAL": {},
+    "NUANCE_EXPERIMENTAL": {},
+    "REASONING_EXPERIMENTAL": {},
     "TOXICITY": {},
     "SEVERE_TOXICITY": {},
     "IDENTITY_ATTACK": {},
@@ -22,18 +26,28 @@ _REQUESTED_ATTRIBUTES = {
 
 
 def _prc_score(attr: dict[str, float]) -> float:
-    """Score a post for re-ranking using public Perspective API attributes.
+    """Score a post using a public-API approximation of the PRC paper formula.
 
-    The PRC paper formula requires internal Jigsaw attributes (COMPASSION,
-    CURIOSITY, REASONING, etc.) that are not available via the public API.
-    This implementation uses only public production attributes to downrank
-    toxic content: score = -avg(TOXICITY, SEVERE_TOXICITY, IDENTITY_ATTACK, INSULT).
+    The paper's "Uprank Bridging, Downrank Toxic" condition was the only one
+    to reach statistical significance (p<0.05). The paper's negative attributes
+    (MORAL_OUTRAGE, SCAPEGOATING, ALIENATION, PERSUASION) are not in the public
+    API; they were grouped together due to strong mutual correlation, so
+    TOXICITY/SEVERE_TOXICITY serve as equivalent proxies.
+
+    Formula: bridging - 0.5 * toxicity
+        bridging = avg(COMPASSION_EXPERIMENTAL, CURIOSITY_EXPERIMENTAL,
+                       NUANCE_EXPERIMENTAL, REASONING_EXPERIMENTAL)
+        toxicity = avg(TOXICITY, SEVERE_TOXICITY, IDENTITY_ATTACK, INSULT)
     """
+    bridging = (
+        attr["COMPASSION_EXPERIMENTAL"] + attr["CURIOSITY_EXPERIMENTAL"]
+        + attr["NUANCE_EXPERIMENTAL"] + attr["REASONING_EXPERIMENTAL"]
+    ) / 4.0
     toxicity = (
         attr["TOXICITY"] + attr["SEVERE_TOXICITY"]
         + attr["IDENTITY_ATTACK"] + attr["INSULT"]
     ) / 4.0
-    return -toxicity
+    return bridging - 0.5 * toxicity
 
 
 class PerspectiveClient:

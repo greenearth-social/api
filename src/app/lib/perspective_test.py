@@ -22,25 +22,51 @@ def _make_candidate(uri: str, content: str | None = "text", score: float = 1.0) 
 # _prc_score arithmetic
 # ---------------------------------------------------------------------------
 
+def _zero_attr() -> dict[str, float]:
+    return {
+        "COMPASSION_EXPERIMENTAL": 0.0,
+        "CURIOSITY_EXPERIMENTAL": 0.0,
+        "NUANCE_EXPERIMENTAL": 0.0,
+        "REASONING_EXPERIMENTAL": 0.0,
+        "TOXICITY": 0.0,
+        "SEVERE_TOXICITY": 0.0,
+        "IDENTITY_ATTACK": 0.0,
+        "INSULT": 0.0,
+    }
+
+
 class TestPrcScore:
     def test_all_zeros_returns_zero(self):
-        attr = {"TOXICITY": 0.0, "SEVERE_TOXICITY": 0.0, "IDENTITY_ATTACK": 0.0, "INSULT": 0.0}
-        assert _prc_score(attr) == pytest.approx(0.0)
+        assert _prc_score(_zero_attr()) == pytest.approx(0.0)
 
-    def test_full_toxicity_returns_negative_one(self):
-        attr = {"TOXICITY": 1.0, "SEVERE_TOXICITY": 1.0, "IDENTITY_ATTACK": 1.0, "INSULT": 1.0}
-        # avg=1.0 → score = -1.0
-        assert _prc_score(attr) == pytest.approx(-1.0)
+    def test_pure_bridging_returns_positive(self):
+        attr = {**_zero_attr(),
+                "COMPASSION_EXPERIMENTAL": 1.0, "CURIOSITY_EXPERIMENTAL": 1.0,
+                "NUANCE_EXPERIMENTAL": 1.0, "REASONING_EXPERIMENTAL": 1.0}
+        # bridging=1.0, toxicity=0.0 → score=1.0
+        assert _prc_score(attr) == pytest.approx(1.0)
 
-    def test_partial_toxicity_proportional(self):
-        attr = {"TOXICITY": 0.8, "SEVERE_TOXICITY": 0.0, "IDENTITY_ATTACK": 0.0, "INSULT": 0.0}
-        # avg = 0.8/4 = 0.2 → score = -0.2
-        assert _prc_score(attr) == pytest.approx(-0.2)
+    def test_pure_toxicity_returns_negative(self):
+        attr = {**_zero_attr(),
+                "TOXICITY": 1.0, "SEVERE_TOXICITY": 1.0,
+                "IDENTITY_ATTACK": 1.0, "INSULT": 1.0}
+        # bridging=0.0, toxicity=1.0 → score = -0.5
+        assert _prc_score(attr) == pytest.approx(-0.5)
 
     def test_known_mixed_inputs(self):
-        attr = {"TOXICITY": 0.4, "SEVERE_TOXICITY": 0.2, "IDENTITY_ATTACK": 0.6, "INSULT": 0.8}
-        expected = -((0.4 + 0.2 + 0.6 + 0.8) / 4.0)
-        assert _prc_score(attr) == pytest.approx(expected)
+        attr = {
+            "COMPASSION_EXPERIMENTAL": 0.6,
+            "CURIOSITY_EXPERIMENTAL": 0.4,
+            "NUANCE_EXPERIMENTAL": 0.8,
+            "REASONING_EXPERIMENTAL": 0.6,
+            "TOXICITY": 0.3,
+            "SEVERE_TOXICITY": 0.1,
+            "IDENTITY_ATTACK": 0.2,
+            "INSULT": 0.4,
+        }
+        bridging = (0.6 + 0.4 + 0.8 + 0.6) / 4.0
+        toxicity = (0.3 + 0.1 + 0.2 + 0.4) / 4.0
+        assert _prc_score(attr) == pytest.approx(bridging - 0.5 * toxicity)
 
 
 # ---------------------------------------------------------------------------
