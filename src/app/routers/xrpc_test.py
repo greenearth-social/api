@@ -325,6 +325,44 @@ class TestGetFeedSkeleton:
             "at://seen/2",
         ]
 
+    def test_seen_not_excluded_when_feed_disables_it(self, monkeypatch):
+        """A feed with exclude_seen_posts off neither fetches nor excludes seen posts."""
+        monkeypatch.setattr(FEEDS[FEED_RKEY], "exclude_seen_posts", False)
+
+        primary_gen = AsyncMock()
+        primary_gen.generate.return_value = CandidateResult(
+            generator_name="post_similarity", candidates=_make_candidates("p", 2),
+        )
+        followed_gen = AsyncMock()
+        followed_gen.generate.return_value = CandidateResult(
+            generator_name="followed_users", candidates=[],
+        )
+        infill_gen = AsyncMock()
+        infill_gen.generate.return_value = CandidateResult(
+            generator_name="popularity", candidates=[],
+        )
+
+        def fake_get(name):
+            return {
+                "post_similarity": primary_gen,
+                "followed_users": followed_gen,
+                "popularity": infill_gen,
+            }.get(name)
+
+        with (
+            patch("app.lib.candidates.generate.get_generator", side_effect=fake_get),
+            patch(
+                "app.routers.xrpc.get_recent_seen_uris", new_callable=AsyncMock
+            ) as seen_fetch,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI}
+            )
+
+        assert resp.status_code == 200
+        seen_fetch.assert_not_called()
+        assert not primary_gen.generate.call_args.kwargs.get("exclude_uris")
+
     # --- feedContext ---
 
     def test_items_carry_signed_feed_context(self):
@@ -1543,3 +1581,25 @@ class TestSendInteractions:
             await _record_interactions(db, [ix])
 
         seen_rec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_seen_not_denormalized_when_feed_disables_it(self, monkeypatch):
+        """A feed with exclude_seen_posts off still stores the interaction but
+        does not denormalize seen posts onto the user record."""
+        from app.feeds import FEEDS
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        monkeypatch.setattr(FEEDS["your-feed"], "exclude_seen_posts", False)
+        seen = "app.bsky.feed.defs#interactionSeen"
+        ix = Interaction(
+            item="at://post/1", event=seen, feed_context=_make_token(feed="your-feed"),
+        )
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
+            patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
+        ):
+            await _record_interactions(db, [ix])
+
+        rec.assert_called_once()  # raw interaction is still stored
+        seen_rec.assert_not_called()  # but not denormalized

@@ -356,12 +356,16 @@ def _spawn_background(coro) -> asyncio.Task:
     return task
 
 
-async def _seen_exclusions(db, user_did: str) -> list[str]:
+async def _seen_exclusions(db, user_did: str, feed_cfg: FeedConfig) -> list[str]:
     """Fetch the user's recently-seen post URIs to exclude from generation.
 
-    Fail-soft: a Firestore hiccup should degrade the feature (possible repeats)
-    rather than break feed serving, so errors are logged and yield an empty list.
+    Returns an empty list for feeds with ``exclude_seen_posts`` disabled.
+    Fail-soft otherwise: a Firestore hiccup should degrade the feature (possible
+    repeats) rather than break feed serving, so errors are logged and yield an
+    empty list.
     """
+    if not feed_cfg.exclude_seen_posts:
+        return []
     try:
         return await get_recent_seen_uris(db, user_did)
     except Exception:
@@ -403,7 +407,9 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
     endpoint can't be used to poison the data. Runs as a background task.
 
     ``interactionSeen`` items are additionally appended to the user's seen-posts
-    buckets so they can be excluded from future feed generations.
+    buckets so they can be excluded from future feed generations -- but only for
+    feeds whose config has ``exclude_seen_posts`` enabled. The raw interaction is
+    always stored regardless.
     """
     # Seen URIs collected per user so we can record them with a single write
     # per user after the per-interaction loop.
@@ -419,7 +425,13 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
         if event and event not in INTERACTION_EVENTS:
             logger.warning("Recording interaction with unrecognized event: %s", event)
 
-        if event == "interactionSeen" and ix.item:
+        feed_cfg = FEEDS.get(payload.feed)
+        if (
+            event == "interactionSeen"
+            and ix.item
+            and feed_cfg is not None
+            and feed_cfg.exclude_seen_posts
+        ):
             seen_by_user.setdefault(payload.did, []).append(ix.item)
 
         doc = InteractionDocument(
@@ -592,7 +604,7 @@ async def get_feed_skeleton(
 
                 # Offset is at or past the end — regenerate with exclusions.
                 batch = _batch_size(limit)
-                seen_uris = await _seen_exclusions(db, user_did)
+                seen_uris = await _seen_exclusions(db, user_did, feed_cfg)
                 # Dedup while preserving order; the cached batch and seen posts
                 # can overlap.
                 exclude_uris = list(dict.fromkeys(cached_uris + seen_uris))
@@ -629,7 +641,7 @@ async def get_feed_skeleton(
         # No cursor or cache miss — generate a fresh batch.
         # ------------------------------------------------------------------
         batch = _batch_size(limit)
-        seen_uris = await _seen_exclusions(db, user_did)
+        seen_uris = await _seen_exclusions(db, user_did, feed_cfg)
         gen_request = feed_cfg.gen_request_template.model_copy(
             update={"user_did": user_did, "num_candidates": batch, "exclude_uris": seen_uris}
         )

@@ -170,3 +170,10 @@ class FeedConfig(BaseModel):
         description="When True, the published record declares acceptsInteractions so the "
         "AppView forwards interaction signals to sendInteractions.",
     )
+    exclude_seen_posts: bool = Field(
+        True,
+        description="When True, posts the user has already seen (reported via "
+        "interactionSeen) are excluded from generation, and seen post URIs are "
+        "denormalized onto the user record. When False, neither happens (the raw "
+        "interactions are still stored).",
+    )
