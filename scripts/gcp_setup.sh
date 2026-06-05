@@ -184,6 +184,21 @@ ensure_feed_cache_ttl_policy() {
         || log_warn "TTL policy may already exist or could not be updated (non-fatal)"
 }
 
+ensure_seen_posts_ttl_policy() {
+    local firestore_db
+    firestore_db="$(get_firestore_database)"
+
+    log_info "Ensuring TTL policy on seen_posts.expires_at..."
+    gcloud firestore fields ttls update expires_at \
+        --collection-group=seen_posts \
+        --database="$firestore_db" \
+        --project="$PROJECT_ID" \
+        --enable-ttl \
+        --quiet 2>/dev/null \
+        && log_info "TTL policy enabled on seen_posts.expires_at" \
+        || log_warn "TTL policy may already exist or could not be updated (non-fatal)"
+}
+
 ensure_firestore_api_key_secret() {
     local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
     local key_display_name
@@ -539,6 +554,7 @@ main() {
     create_service_account
     ensure_firestore_database
     ensure_feed_cache_ttl_policy
+    ensure_seen_posts_ttl_policy
     ensure_firestore_api_key_secret
     ensure_inference_api_key_secret_access
     ensure_feed_context_secret

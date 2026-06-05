@@ -285,6 +285,46 @@ class TestGetFeedSkeleton:
         assert len(data["feed"]) == 3
         assert data["feed"][0]["post"] == "at://p/0"
 
+    def test_seen_uris_excluded_on_fresh_request(self):
+        """A fresh feed load excludes the user's recently-seen posts."""
+        primary_gen = AsyncMock()
+        primary_gen.generate.return_value = CandidateResult(
+            generator_name="post_similarity", candidates=_make_candidates("p", 2),
+        )
+        followed_gen = AsyncMock()
+        followed_gen.generate.return_value = CandidateResult(
+            generator_name="followed_users", candidates=[],
+        )
+        infill_gen = AsyncMock()
+        infill_gen.generate.return_value = CandidateResult(
+            generator_name="popularity", candidates=[],
+        )
+
+        def fake_get(name):
+            return {
+                "post_similarity": primary_gen,
+                "followed_users": followed_gen,
+                "popularity": infill_gen,
+            }.get(name)
+
+        with (
+            patch("app.lib.candidates.generate.get_generator", side_effect=fake_get),
+            patch(
+                "app.routers.xrpc.get_recent_seen_uris",
+                new_callable=AsyncMock,
+                return_value=["at://seen/1", "at://seen/2"],
+            ),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI}
+            )
+
+        assert resp.status_code == 200
+        assert primary_gen.generate.call_args.kwargs.get("exclude_uris") == [
+            "at://seen/1",
+            "at://seen/2",
+        ]
+
     # --- feedContext ---
 
     def test_items_carry_signed_feed_context(self):
@@ -1470,3 +1510,36 @@ class TestSendInteractions:
             await _record_interactions(db, interactions)
 
         assert rec.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_seen_event_records_seen_posts(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        seen = "app.bsky.feed.defs#interactionSeen"
+        interactions = [
+            Interaction(item="at://post/1", event=seen, feed_context=_make_token(did="did:plc:u")),
+            Interaction(item="at://post/2", event=seen, feed_context=_make_token(did="did:plc:u")),
+        ]
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
+        ):
+            await _record_interactions(db, interactions)
+
+        seen_rec.assert_called_once_with(db, "did:plc:u", ["at://post/1", "at://post/2"])
+
+    @pytest.mark.asyncio
+    async def test_non_seen_events_do_not_record_seen_posts(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        like = "app.bsky.feed.defs#interactionLike"
+        ix = Interaction(item="at://post/1", event=like, feed_context=_make_token())
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
+        ):
+            await _record_interactions(db, [ix])
+
+        seen_rec.assert_not_called()

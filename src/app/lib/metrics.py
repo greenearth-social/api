@@ -2,7 +2,9 @@
 
 When ``ENVIRONMENT`` is ``stage`` or ``prod``, metrics are exported to GCP
 Cloud Monitoring under the prefix ``custom.googleapis.com/greenearth-api/``.
-Otherwise the stdout exporter is used for local development.
+In local/dev environments metrics are still recorded but not exported anywhere
+-- the console exporter dumps a large ``resource_metrics`` JSON blob on every
+interval, which is just noise during local development.
 
 Instrument type is inferred from the metric name suffix:
   - ``_count`` → Int64Counter  (cumulative sum)
@@ -16,10 +18,7 @@ import asyncio
 from typing import Any
 
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import (
-    ConsoleMetricExporter,
-    PeriodicExportingMetricReader,
-)
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 
 _metric_collector: "MetricCollector | None" = None
@@ -54,13 +53,16 @@ class MetricCollector:
             exporter = CloudMonitoringMetricsExporter(
                 prefix="custom.googleapis.com/greenearth-api",
             )
+            reader: Any | None = PeriodicExportingMetricReader(
+                exporter,
+                export_interval_millis=export_interval_sec * 1000,
+            )
         else:
-            exporter = ConsoleMetricExporter()
+            # Local/dev: record metrics but don't export them. A console
+            # exporter would print a big resource_metrics JSON blob each
+            # interval, which is just noise locally.
+            reader = None
 
-        reader = PeriodicExportingMetricReader(
-            exporter,
-            export_interval_millis=export_interval_sec * 1000,
-        )
         self._init(reader, service_name, env)
 
     @classmethod
@@ -74,7 +76,7 @@ class MetricCollector:
         instance._init(reader, service_name, env)
         return instance
 
-    def _init(self, reader: Any, service_name: str, env: str) -> None:
+    def _init(self, reader: Any | None, service_name: str, env: str) -> None:
         resource = Resource.create(
             {
                 "service.name": service_name,
@@ -83,7 +85,7 @@ class MetricCollector:
         )
         self._provider = MeterProvider(
             resource=resource,
-            metric_readers=[reader],
+            metric_readers=[reader] if reader is not None else [],
         )
         self._meter = self._provider.get_meter("greenearth/api")
         self._histograms: dict[str, Any] = {}

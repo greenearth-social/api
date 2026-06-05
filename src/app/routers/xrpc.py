@@ -34,7 +34,13 @@ from ..lib.rankers import run_predict
 from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
 
 from ..lib.atproto_auth import verify_auth_header
-from ..lib.firestore import record_interaction, upsert_feed_activity, upsert_user
+from ..lib.firestore import (
+    get_recent_seen_uris,
+    record_interaction,
+    record_seen_posts,
+    upsert_feed_activity,
+    upsert_user,
+)
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
 from ..feeds import FEEDS
@@ -350,6 +356,19 @@ def _spawn_background(coro) -> asyncio.Task:
     return task
 
 
+async def _seen_exclusions(db, user_did: str) -> list[str]:
+    """Fetch the user's recently-seen post URIs to exclude from generation.
+
+    Fail-soft: a Firestore hiccup should degrade the feature (possible repeats)
+    rather than break feed serving, so errors are logged and yield an empty list.
+    """
+    try:
+        return await get_recent_seen_uris(db, user_did)
+    except Exception:
+        logger.exception("Failed to fetch seen posts for user '%s'", user_did)
+        return []
+
+
 async def _record_session(request: Request, user_did: str, feed_name: str, db) -> None:
     """Resolve the caller's handle and upsert user + feed-activity docs.
 
@@ -382,7 +401,14 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
     The signed feedContext is the trust anchor: interactions with a missing or
     forged token are dropped (and logged) rather than written, so the public
     endpoint can't be used to poison the data. Runs as a background task.
+
+    ``interactionSeen`` items are additionally appended to the user's seen-posts
+    buckets so they can be excluded from future feed generations.
     """
+    # Seen URIs collected per user so we can record them with a single write
+    # per user after the per-interaction loop.
+    seen_by_user: dict[str, list[str]] = {}
+
     for ix in interactions:
         payload = decode_feed_context(ix.feed_context or "")
         if payload is None:
@@ -392,6 +418,9 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
         event = _short_event(ix.event)
         if event and event not in INTERACTION_EVENTS:
             logger.warning("Recording interaction with unrecognized event: %s", event)
+
+        if event == "interactionSeen" and ix.item:
+            seen_by_user.setdefault(payload.did, []).append(ix.item)
 
         doc = InteractionDocument(
             user_did=payload.did,
@@ -405,6 +434,12 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
             await record_interaction(db, doc)
         except Exception:
             logger.exception("Failed to record interaction for user '%s'", payload.did)
+
+    for did, uris in seen_by_user.items():
+        try:
+            await record_seen_posts(db, did, uris)
+        except Exception:
+            logger.exception("Failed to record seen posts for user '%s'", did)
 
 
 # ---------------------------------------------------------------------------
@@ -557,11 +592,15 @@ async def get_feed_skeleton(
 
                 # Offset is at or past the end — regenerate with exclusions.
                 batch = _batch_size(limit)
+                seen_uris = await _seen_exclusions(db, user_did)
+                # Dedup while preserving order; the cached batch and seen posts
+                # can overlap.
+                exclude_uris = list(dict.fromkeys(cached_uris + seen_uris))
                 gen_request = feed_cfg.gen_request_template.model_copy(
                     update={
                         "user_did": user_did,
                         "num_candidates": batch,
-                        "exclude_uris": cached_uris,
+                        "exclude_uris": exclude_uris,
                     }
                 )
 
@@ -590,8 +629,9 @@ async def get_feed_skeleton(
         # No cursor or cache miss — generate a fresh batch.
         # ------------------------------------------------------------------
         batch = _batch_size(limit)
+        seen_uris = await _seen_exclusions(db, user_did)
         gen_request = feed_cfg.gen_request_template.model_copy(
-            update={"user_did": user_did, "num_candidates": batch}
+            update={"user_did": user_did, "num_candidates": batch, "exclude_uris": seen_uris}
         )
 
         all_uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
