@@ -6,7 +6,18 @@ import httpx
 import pytest
 
 from ..models import CandidatePost
+from . import perspective as perspective_module
 from .perspective import _prc_score, perspective_rerank
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Reset module-level rate limiter state between tests."""
+    perspective_module._rate_bucket_minute = -1
+    perspective_module._rate_count = 0
+    yield
+    perspective_module._rate_bucket_minute = -1
+    perspective_module._rate_count = 0
 
 
 def _make_candidate(uri: str, content: str | None = "text", score: float = 1.0) -> CandidatePost:
@@ -153,6 +164,20 @@ class TestPerspectiveRerank:
         # at://a/1 rate limited → 0.0, at://a/2 → 0.7 → a/2 first
         assert result[0].at_uri == "at://a/2"
         assert result[1].at_uri == "at://a/1"
+
+    def test_minute_quota_exhausted_returns_neutral_without_api_call(self):
+        candidates = [_make_candidate("at://a/1", content="text")]
+        fake = _fake_client([0.9])
+
+        perspective_module._rate_bucket_minute = int(__import__("time").time()) // 60
+        perspective_module._rate_count = perspective_module._QUOTA_RPM  # bucket full
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
+            import asyncio
+            result = asyncio.run(perspective_rerank(candidates))
+
+        fake.score.assert_not_called()
+        assert result[0].at_uri == "at://a/1"
 
     def test_all_candidates_returned_none_dropped(self):
         candidates = [_make_candidate(f"at://a/{i}", content="text") for i in range(5)]

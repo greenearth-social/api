@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 
 import httpx
 
@@ -93,8 +94,28 @@ class PerspectiveClient:
         return _prc_score(attr_scores)
 
 
-# Limit concurrent Perspective API calls to stay well under the 600 QPS quota.
-_SEMAPHORE = asyncio.Semaphore(50)
+# Client-side rate limiter tracking usage within the current calendar-minute
+# bucket, matching how the Perspective API measures its 600 QPS quota.
+# Set to 500 QPS (30 000 RPM) to keep a safety margin.
+_QUOTA_QPS = 500
+_QUOTA_RPM = _QUOTA_QPS * 60
+_rate_lock = asyncio.Lock()
+_rate_bucket_minute: int = -1
+_rate_count: int = 0
+
+
+async def _rate_limit_acquire() -> bool:
+    """Return True if a request is allowed, False if the minute quota is exhausted."""
+    global _rate_bucket_minute, _rate_count
+    async with _rate_lock:
+        current_minute = int(time.time()) // 60
+        if current_minute != _rate_bucket_minute:
+            _rate_bucket_minute = current_minute
+            _rate_count = 0
+        if _rate_count >= _QUOTA_RPM:
+            return False
+        _rate_count += 1
+        return True
 
 _client: PerspectiveClient | None = None
 
@@ -120,9 +141,11 @@ async def perspective_rerank(candidates: list[CandidatePost]) -> list[CandidateP
     async def _score_one(c: CandidatePost) -> float:
         if not c.content or not c.content.strip():
             return 0.0
+        if not await _rate_limit_acquire():
+            logger.warning("Perspective API minute quota exhausted; using neutral score for post %s", c.at_uri)
+            return 0.0
         try:
-            async with _SEMAPHORE:
-                return await client.score(c.content)
+            return await client.score(c.content)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
                 logger.warning("Perspective API rate limited for post %s; using neutral score", c.at_uri)
