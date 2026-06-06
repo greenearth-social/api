@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
+from google.cloud.firestore import ArrayUnion, AsyncClient  # type: ignore[import-untyped]
 
 from ..documents import FeedActivityDocument, InteractionDocument, UserDocument
 
@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 USERS_COLLECTION = "users"
 FEED_ACTIVITY_COLLECTION = "feed_activity"
 INTERACTIONS_COLLECTION = "interactions"
+SEEN_POSTS_COLLECTION = "seen_posts"
+
+# How long a seen-posts bucket lives before native Firestore TTL deletes it.
+SEEN_POSTS_RETENTION_DAYS = 5
 
 
 def init_firestore_client() -> AsyncClient:
@@ -175,3 +179,73 @@ async def record_interaction(db: AsyncClient, interaction: InteractionDocument) 
     collection so the data is easy to query and export (e.g. to Elasticsearch).
     """
     await db.collection(INTERACTIONS_COLLECTION).add(interaction.model_dump())
+
+
+# ---------------------------------------------------------------------------
+# Seen posts
+# ---------------------------------------------------------------------------
+
+
+async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+    """Append seen post URIs to the user's bucket for the current UTC day.
+
+    Buckets are keyed by ``YYYY-MM-DD`` under the user's ``seen_posts``
+    subcollection.  ``ArrayUnion`` appends without duplicating within the bucket,
+    and ``expires_at`` (re-stamped on each write) drives the native Firestore TTL
+    so the bucket self-deletes ~``SEEN_POSTS_RETENTION_DAYS`` days after its last
+    update.  No-op when there is nothing to record.
+    """
+    if not post_uris:
+        return
+
+    now = datetime.now(timezone.utc)
+    bucket_id = now.strftime("%Y-%m-%d")
+    expires_at = now + timedelta(days=SEEN_POSTS_RETENTION_DAYS)
+
+    ref = (
+        db.collection(USERS_COLLECTION)
+        .document(user_did)
+        .collection(SEEN_POSTS_COLLECTION)
+        .document(bucket_id)
+    )
+    await ref.set(
+        {"post_uris": ArrayUnion(post_uris), "expires_at": expires_at},
+        merge=True,
+    )
+
+
+async def get_recent_seen_uris(
+    db: AsyncClient, user_did: str, *, max_uris: int = 1000
+) -> list[str]:
+    """Return the user's most-recently-seen post URIs, de-duped and capped.
+
+    Reads the non-expired daily buckets (filtering on ``expires_at`` so buckets
+    not yet reaped by TTL are still excluded once stale) and walks them
+    newest-first, collecting URIs until ``max_uris`` is reached.  Within a day
+    ``ArrayUnion`` preserves append order, so the result is roughly the most
+    recent URIs.
+    """
+    now = datetime.now(timezone.utc)
+    query = (
+        db.collection(USERS_COLLECTION)
+        .document(user_did)
+        .collection(SEEN_POSTS_COLLECTION)
+        .where("expires_at", ">", now)
+    )
+
+    buckets = [doc async for doc in query.stream()]
+    # Doc IDs are YYYY-MM-DD, so lexical sort == chronological; newest first.
+    buckets.sort(key=lambda doc: doc.id, reverse=True)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for doc in buckets:
+        data = doc.to_dict() or {}
+        for uri in data.get("post_uris", []):
+            if uri in seen:
+                continue
+            seen.add(uri)
+            result.append(uri)
+            if len(result) >= max_uris:
+                return result
+    return result

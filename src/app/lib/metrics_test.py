@@ -129,18 +129,24 @@ def test_same_instrument_reused_across_calls():
 
 
 # ---------------------------------------------------------------------------
-# Stdout fallback (non-deployed environment)
+# Local/dev (non-deployed environment)
 # ---------------------------------------------------------------------------
 
-def test_stdout_fallback_for_local_env(capsys):
-    """Non-stage/prod environments should construct without error using stdout exporter."""
+@pytest.mark.asyncio
+async def test_local_env_records_without_exporting(capsys):
+    """Local/dev should record metrics without printing a resource_metrics blob."""
     collector = MetricCollector(
         service_name="test-svc",
         env="local",
         export_interval_sec=60,
     )
     collector.record("some.metric_ms", 1.0)
-    # No exception means stdout fallback worked
+    # Force a flush; nothing should be written to stdout/stderr in dev.
+    await collector.shutdown()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "resource_metrics" not in captured.out
 
 
 # ---------------------------------------------------------------------------

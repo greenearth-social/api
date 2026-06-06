@@ -40,6 +40,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="67 R",
         diversify=False,
         use_perspective=False,
+        exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="random_posts", weight=1.0)],
             infill=None,
@@ -93,6 +94,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="gh-ps",
         internal_display_name="gh PS",
         diversify=False,
+        exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="post_similarity", weight=1.0),
@@ -108,6 +110,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="ij-fu",
         internal_display_name="ij FU",
         diversify=False,
+        exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="followed_users", weight=1.0),
@@ -123,6 +126,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="kl-nl",
         internal_display_name="kl NL",
         diversify=False,
+        exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="network_likes", weight=1.0),
@@ -138,6 +142,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="mn-p",
         internal_display_name="mn P",
         diversify=False,
+        exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="popularity", weight=1.0),

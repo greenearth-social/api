@@ -7,14 +7,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from google.cloud.firestore import ArrayUnion
+
 from ..documents import InteractionDocument, UserDocument
 from ..lib.firestore import (
     INTERACTIONS_COLLECTION,
+    SEEN_POSTS_COLLECTION,
     USERS_COLLECTION,
     get_feed_activity,
+    get_recent_seen_uris,
     get_user,
     init_firestore_client,
     record_interaction,
+    record_seen_posts,
     upsert_feed_activity,
     upsert_user,
 )
@@ -34,6 +39,38 @@ def _mock_feed_activity_client():
     doc_ref = AsyncMock()
     db.collection.return_value.document.return_value.collection.return_value.document.return_value = doc_ref
     return db, doc_ref
+
+
+def _mock_seen_posts_write_client():
+    """Mock the users/{did}/seen_posts/{bucket} document-write chain."""
+    db = MagicMock()
+    doc_ref = AsyncMock()
+    db.collection.return_value.document.return_value.collection.return_value.document.return_value = doc_ref
+    return db, doc_ref
+
+
+def _async_iter(items):
+    async def _gen():
+        for item in items:
+            yield item
+
+    return _gen()
+
+
+def _mock_seen_posts_query_client(buckets):
+    """Mock the seen_posts subcollection query chain; ``buckets`` stream out."""
+    db = MagicMock()
+    query = MagicMock()
+    query.stream.return_value = _async_iter(buckets)
+    db.collection.return_value.document.return_value.collection.return_value.where.return_value = query
+    return db, query
+
+
+def _mock_bucket(doc_id: str, post_uris: list[str]) -> MagicMock:
+    snap = MagicMock()
+    snap.id = doc_id
+    snap.to_dict.return_value = {"post_uris": post_uris}
+    return snap
 
 
 def _mock_doc_snapshot(exists: bool, data: dict | None = None) -> MagicMock:
@@ -345,3 +382,79 @@ class TestRecordInteraction:
         assert written["feed_name"] == FEED_NAME
         assert written["request_id"] == "req-1"
         assert "created_at" in written
+
+
+# ---------------------------------------------------------------------------
+# record_seen_posts
+# ---------------------------------------------------------------------------
+
+
+class TestRecordSeenPosts:
+    @pytest.mark.asyncio
+    async def test_writes_today_bucket_with_array_union_and_expiry(self):
+        db, doc_ref = _mock_seen_posts_write_client()
+
+        await record_seen_posts(db, USER_DID, ["at://post/1", "at://post/2"])
+
+        # Subcollection is keyed under the user document.
+        db.collection.assert_called_with(USERS_COLLECTION)
+        db.collection.return_value.document.return_value.collection.assert_called_with(
+            SEEN_POSTS_COLLECTION
+        )
+        # Bucket id is the current UTC date.
+        bucket_id = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        db.collection.return_value.document.return_value.collection.return_value.document.assert_called_with(
+            bucket_id
+        )
+
+        doc_ref.set.assert_called_once()
+        written, kwargs = doc_ref.set.call_args
+        payload = written[0]
+        assert kwargs == {"merge": True}
+        assert isinstance(payload["post_uris"], ArrayUnion)
+        assert payload["post_uris"].values == ["at://post/1", "at://post/2"]
+        assert payload["expires_at"] > datetime.now(timezone.utc)
+
+    @pytest.mark.asyncio
+    async def test_noop_on_empty(self):
+        db, doc_ref = _mock_seen_posts_write_client()
+
+        await record_seen_posts(db, USER_DID, [])
+
+        doc_ref.set.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# get_recent_seen_uris
+# ---------------------------------------------------------------------------
+
+
+class TestGetRecentSeenUris:
+    @pytest.mark.asyncio
+    async def test_unions_buckets_newest_first_and_dedups(self):
+        buckets = [
+            _mock_bucket("2026-06-01", ["at://a", "at://b"]),
+            _mock_bucket("2026-06-02", ["at://b", "at://c"]),
+        ]
+        db, query = _mock_seen_posts_query_client(buckets)
+
+        uris = await get_recent_seen_uris(db, USER_DID)
+
+        # Newest bucket first, duplicate "at://b" collapsed.
+        assert uris == ["at://b", "at://c", "at://a"]
+        # Query filters on a future expiry.
+        where_args = db.collection.return_value.document.return_value.collection.return_value.where.call_args[0]
+        assert where_args[0] == "expires_at"
+        assert where_args[1] == ">"
+
+    @pytest.mark.asyncio
+    async def test_caps_at_max_uris(self):
+        many = [f"at://post/{i}" for i in range(1500)]
+        buckets = [_mock_bucket("2026-06-02", many)]
+        db, _ = _mock_seen_posts_query_client(buckets)
+
+        uris = await get_recent_seen_uris(db, USER_DID, max_uris=1000)
+
+        assert len(uris) == 1000
+        assert uris[0] == "at://post/0"
+        assert uris[-1] == "at://post/999"

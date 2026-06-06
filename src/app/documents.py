@@ -47,6 +47,18 @@ class FeedCacheDocument(BaseModel):
     expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")
 
 
+class SeenPostsDocument(BaseModel):
+    """Post URIs a user has seen on a given UTC day.
+
+    One document per user per day under the ``seen_posts`` subcollection; the
+    document ID is the ``YYYY-MM-DD`` date.  ``expires_at`` anchors the native
+    Firestore TTL policy so buckets self-delete ~5 days after the day they cover.
+    """
+
+    post_uris: list[str] = Field(default_factory=list, description="Seen post AT URIs for this day")
+    expires_at: datetime = Field(..., description="UTC expiration timestamp; drives native TTL")
+
+
 class FeedActivityDocument(BaseModel):
     feed_name: str = Field(..., description="AT Protocol rkey of the feed (also the document ID)")
     first_seen_at: datetime = Field(default_factory=_utcnow, description="When the user first loaded this feed")
