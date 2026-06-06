@@ -6,6 +6,8 @@ import asyncio
 import logging
 import os
 
+import httpx
+
 from ..models import CandidatePost
 from .http_client import get_http_client
 
@@ -91,6 +93,9 @@ class PerspectiveClient:
         return _prc_score(attr_scores)
 
 
+# Limit concurrent Perspective API calls to stay well under the 600 QPS quota.
+_SEMAPHORE = asyncio.Semaphore(50)
+
 _client: PerspectiveClient | None = None
 
 
@@ -116,7 +121,14 @@ async def perspective_rerank(candidates: list[CandidatePost]) -> list[CandidateP
         if not c.content or not c.content.strip():
             return 0.0
         try:
-            return await client.score(c.content)
+            async with _SEMAPHORE:
+                return await client.score(c.content)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                logger.warning("Perspective API rate limited for post %s; using neutral score", c.at_uri)
+            else:
+                logger.exception("Perspective API scoring failed for post %s", c.at_uri)
+            return 0.0
         except Exception:
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)
             return 0.0

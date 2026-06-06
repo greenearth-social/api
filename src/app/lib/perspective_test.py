@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from ..models import CandidatePost
@@ -131,6 +132,25 @@ class TestPerspectiveRerank:
             result = asyncio.run(perspective_rerank(candidates))
 
         # at://a/1 fails → 0.0, at://a/2 → 0.7 → a/2 first
+        assert result[0].at_uri == "at://a/2"
+        assert result[1].at_uri == "at://a/1"
+
+    def test_rate_limit_gets_neutral_score(self):
+        candidates = [
+            _make_candidate("at://a/1", content="some content"),
+            _make_candidate("at://a/2", content="other content"),
+        ]
+        rate_limit_response = MagicMock()
+        rate_limit_response.status_code = 429
+        rate_limit_exc = httpx.HTTPStatusError("429", request=MagicMock(), response=rate_limit_response)
+        fake = MagicMock()
+        fake.score = AsyncMock(side_effect=[rate_limit_exc, 0.7])
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
+            import asyncio
+            result = asyncio.run(perspective_rerank(candidates))
+
+        # at://a/1 rate limited → 0.0, at://a/2 → 0.7 → a/2 first
         assert result[0].at_uri == "at://a/2"
         assert result[1].at_uri == "at://a/1"
 
