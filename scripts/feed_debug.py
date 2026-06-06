@@ -43,6 +43,7 @@ from app.documents import FeedDebugDocument
 from app.lib.firestore import (
     get_feed_debug,
     get_recent_feed_debug,
+    get_user,
     get_user_by_username,
     init_firestore_client,
     set_user_debug_flag,
@@ -163,6 +164,15 @@ async def cmd_list(user: str, limit: int) -> None:
     user_did = await _resolve_user_did(db, user)
     if user_did is None:
         _die(f"No user found for '{user}'.")
+
+    # Surface the current flag state, but still list any existing records.
+    user_doc = await get_user(db, user_did)
+    if user_doc is None or not user_doc.debug_feeds:
+        console.print(
+            "[yellow]Feed debugging is not currently enabled for this user; "
+            "no new records will be captured (enable with --enable).[/yellow]"
+        )
+
     docs = await get_recent_feed_debug(db, user_did, limit=limit)
     if not docs:
         console.print(f"[yellow]No feed-debug records for {user_did}.[/yellow]")
@@ -312,7 +322,7 @@ def _item_panel(
 
     return Panel(
         Group(*group_items),
-        title=f"[dim]{pos}/{total - 1}[/dim]  [dim cyan]{uri}[/dim cyan]",
+        title=f"[grey23]{pos}/{total - 1}[/grey23]  [dim cyan]{uri}[/dim cyan]",
         title_align="left",
         box=box.ROUNDED,
         border_style="grey23",
