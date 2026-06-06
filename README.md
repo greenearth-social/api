@@ -336,24 +336,21 @@ to expose the local server at a stable public URL.
 ```bash
 PROJECT_ID="greenearth-471522"
 
-GE_ELASTICSEARCH_API_KEY=$(gcloud secrets versions access latest \
-  --secret="elasticsearch-api-key-readonly-prod" --project="$PROJECT_ID")
-GE_INFERENCE_API_KEY=$(gcloud secrets versions access latest \
-  --secret="inference-api-key-prod" --project="$PROJECT_ID")
-GE_FEED_CONTEXT_SECRET=$(gcloud secrets versions access latest \
-  --secret="feed-context-secret-prod" --project="$PROJECT_ID")
-GE_PERSPECTIVE_API_KEY=$(gcloud secrets versions access latest \
-  --secret="perspective-api-key-prod" --project="$PROJECT_ID")
-
+# NOTE: Get these secrets from GCP.
 cp .env.example .env
+
 cat >> .env <<EOF
-export GE_ELASTICSEARCH_URL="https://localhost:9200"
 export GE_ELASTICSEARCH_API_KEY="$GE_ELASTICSEARCH_API_KEY"
-export GE_ELASTICSEARCH_VERIFY_SSL="false"
-export GE_INFERENCE_BASE_URL="https://inference.greenearth.social"
 export GE_INFERENCE_API_KEY="$GE_INFERENCE_API_KEY"
 export GE_FEED_CONTEXT_SECRET="$GE_FEED_CONTEXT_SECRET"
 export GE_PERSPECTIVE_API_KEY="$GE_PERSPECTIVE_API_KEY"
+EOF
+source .env
+
+cat >> .env <<EOF
+export GE_ELASTICSEARCH_URL="https://localhost:9200"
+export GE_ELASTICSEARCH_VERIFY_SSL="false"
+export GE_INFERENCE_BASE_URL="https://inference.greenearth.social"
 export GE_FIRESTORE_EMULATOR_HOST="127.0.0.1:8080"
 export GE_FIRESTORE_PROJECT="demo-no-project"
 export GE_BSKY_APP_PASSWORD="<your-dev-account-app-password>"
