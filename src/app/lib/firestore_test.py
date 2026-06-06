@@ -2,26 +2,33 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from google.cloud.firestore import ArrayUnion
 
-from ..documents import InteractionDocument, UserDocument
+from ..documents import FeedDebugDocument, InteractionDocument, UserDocument
+from ..models import CandidateGenerateRequest, GeneratorSpec
 from ..lib.firestore import (
+    FEED_DEBUG_COLLECTION,
     INTERACTIONS_COLLECTION,
     SEEN_POSTS_COLLECTION,
     USERS_COLLECTION,
     get_feed_activity,
+    get_feed_debug,
+    get_recent_feed_debug,
     get_recent_seen_uris,
     get_user,
+    get_user_by_username,
     init_firestore_client,
     record_interaction,
     record_seen_posts,
+    set_user_debug_flag,
     upsert_feed_activity,
     upsert_user,
+    write_feed_debug,
 )
 
 
@@ -458,3 +465,135 @@ class TestGetRecentSeenUris:
         assert len(uris) == 1000
         assert uris[0] == "at://post/0"
         assert uris[-1] == "at://post/999"
+
+
+# ---------------------------------------------------------------------------
+# Feed debug flag + records
+# ---------------------------------------------------------------------------
+
+REQUEST_ID = "req-abc123"
+
+
+def _feed_debug_doc() -> FeedDebugDocument:
+    now = datetime.now(timezone.utc)
+    return FeedDebugDocument(
+        request_id=REQUEST_ID,
+        user_did=USER_DID,
+        username=USERNAME,
+        feed_name=FEED_NAME,
+        generate_request=CandidateGenerateRequest(
+            generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
+            user_did=USER_DID,
+            num_candidates=10,
+            video_only=False,
+            infill=None,
+        ),
+        final_order=["at://p/1", "at://p/2"],
+        generated_at=now,
+        expires_at=now + timedelta(days=7),
+    )
+
+
+class TestGetUserByUsername:
+    @pytest.mark.asyncio
+    async def test_returns_first_match(self):
+        now = datetime.now(timezone.utc)
+        snap = _mock_doc_snapshot(True, {
+            "user_did": USER_DID,
+            "username": USERNAME,
+            "created_at": now,
+            "updated_at": now,
+            "last_seen_at": now,
+        })
+        db = MagicMock()
+        query = MagicMock()
+        query.stream.return_value = _async_iter([snap])
+        db.collection.return_value.where.return_value.limit.return_value = query
+
+        user = await get_user_by_username(db, USERNAME)
+
+        assert user is not None
+        assert user.user_did == USER_DID
+        db.collection.assert_called_with(USERS_COLLECTION)
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_missing(self):
+        db = MagicMock()
+        query = MagicMock()
+        query.stream.return_value = _async_iter([])
+        db.collection.return_value.where.return_value.limit.return_value = query
+
+        assert await get_user_by_username(db, USERNAME) is None
+
+
+class TestSetUserDebugFlag:
+    @pytest.mark.asyncio
+    async def test_updates_flag(self):
+        db, _, doc_ref = _mock_firestore_client()
+        doc_ref.get.return_value = _mock_doc_snapshot(True, {"user_did": USER_DID})
+
+        await set_user_debug_flag(db, USER_DID, True)
+
+        doc_ref.update.assert_called_once()
+        written = doc_ref.update.call_args[0][0]
+        assert written["debug_feeds"] is True
+        assert "updated_at" in written
+
+    @pytest.mark.asyncio
+    async def test_raises_when_user_missing(self):
+        db, _, doc_ref = _mock_firestore_client()
+        doc_ref.get.return_value = _mock_doc_snapshot(False)
+
+        with pytest.raises(ValueError):
+            await set_user_debug_flag(db, USER_DID, True)
+
+
+class TestWriteFeedDebug:
+    @pytest.mark.asyncio
+    async def test_writes_to_subcollection(self):
+        db, doc_ref = _mock_feed_activity_client()
+
+        await write_feed_debug(db, _feed_debug_doc())
+
+        doc_ref.set.assert_called_once()
+        written = doc_ref.set.call_args[0][0]
+        assert written["request_id"] == REQUEST_ID
+        assert written["final_order"] == ["at://p/1", "at://p/2"]
+
+
+class TestGetRecentFeedDebug:
+    @pytest.mark.asyncio
+    async def test_returns_records(self):
+        doc = _feed_debug_doc()
+        snap = _mock_doc_snapshot(True, doc.model_dump())
+        db = MagicMock()
+        query = MagicMock()
+        query.stream.return_value = _async_iter([snap])
+        (
+            db.collection.return_value.document.return_value.collection.return_value.order_by.return_value.limit.return_value
+        ) = query
+
+        docs = await get_recent_feed_debug(db, USER_DID, limit=5)
+
+        assert len(docs) == 1
+        assert docs[0].request_id == REQUEST_ID
+
+
+class TestGetFeedDebug:
+    @pytest.mark.asyncio
+    async def test_returns_record(self):
+        doc = _feed_debug_doc()
+        db, doc_ref = _mock_feed_activity_client()
+        doc_ref.get.return_value = _mock_doc_snapshot(True, doc.model_dump())
+
+        result = await get_feed_debug(db, USER_DID, REQUEST_ID)
+
+        assert result is not None
+        assert result.request_id == REQUEST_ID
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_missing(self):
+        db, doc_ref = _mock_feed_activity_client()
+        doc_ref.get.return_value = _mock_doc_snapshot(False)
+
+        assert await get_feed_debug(db, USER_DID, REQUEST_ID) is None

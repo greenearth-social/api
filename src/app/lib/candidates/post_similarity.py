@@ -13,6 +13,7 @@ import logging
 from ...models import CandidatePost
 from .base import CandidateGenerator, CandidateResult
 from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings, POSTS_KNN_INDEX, unwrap_es_response
+from ..feed_debug import current_recorder
 from ..embeddings import (
     MINILM_L12_EMBEDDING_FIELD,
 )
@@ -143,15 +144,22 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
         video_only: bool = False,
         exclude_uris: list[str] | None = None,
     ) -> CandidateResult:
+        rec = current_recorder()
+
         # 1. Get recently liked post URIs
         liked_uris = await fetch_recent_liked_post_uris(es, user_did)
 
         if not liked_uris:
             logger.info("No likes found for user %s", user_did)
+            if rec is not None:
+                rec.record_user_features(self.name, [], 0)
             return CandidateResult(generator_name=self.name, candidates=[])
 
         # 2. Fetch embeddings for those posts
         embedding_pairs = await fetch_post_embeddings(es, liked_uris)
+
+        if rec is not None:
+            rec.record_user_features(self.name, liked_uris, len(embedding_pairs))
 
         if not embedding_pairs:
             logger.info(

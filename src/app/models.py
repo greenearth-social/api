@@ -53,6 +53,26 @@ class CandidatePost(BaseModel):
     author_did: str | None = Field(
         default=None, description="AT Protocol DID of the post author"
     )
+    author_username: str | None = Field(
+        default=None,
+        description="AT Protocol handle of the post author (resolved from author_did; "
+        "not stored in Elasticsearch, populated lazily where needed)",
+    )
+    contains_images: bool | None = Field(
+        default=None, description="Whether the post embeds one or more images"
+    )
+    contains_video: bool | None = Field(
+        default=None, description="Whether the post embeds video"
+    )
+    image_count: int | None = Field(
+        default=None, description="Number of images embedded in the post"
+    )
+    video_count: int | None = Field(
+        default=None, description="Number of videos embedded in the post"
+    )
+    external_uri: str | None = Field(
+        default=None, description="URI of an external link embed, when present"
+    )
 
 
 class GeneratorSpec(BaseModel):
