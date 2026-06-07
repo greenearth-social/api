@@ -159,17 +159,6 @@ def fake_app_es():
         pass
 
 
-@pytest.fixture(autouse=True)
-def _stub_perspective_rerank():
-    """Stub perspective_rerank to a passthrough for tests that don't test it.
-
-    Tests in TestPerspectiveRerank patch the same name explicitly; those inner
-    patches shadow this one via normal unittest.mock stacking.
-    """
-    with patch("app.routers.xrpc.perspective_rerank", new_callable=AsyncMock, side_effect=lambda c: c):
-        yield
-
-
 client = TestClient(app)
 
 
@@ -1424,50 +1413,6 @@ class TestBestOfFriendsFeed:
             )
 
         assert resp.status_code == 500
-
-
-# ---------------------------------------------------------------------------
-# Perspective reranking gate
-# ---------------------------------------------------------------------------
-
-class TestPerspectiveRerank:
-    """Tests that perspective_rerank is called or skipped based on use_perspective."""
-
-    @pytest.fixture(autouse=True)
-    def _mock_authenticated_user(self):
-        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"):
-            yield
-
-    @pytest.fixture(autouse=True)
-    def _mock_firestore_upsert(self):
-        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), \
-             patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
-            yield
-
-    def test_perspective_rerank_called_when_enabled(self):
-        """perspective_rerank is called for feeds with use_perspective=True."""
-        candidates = _make_candidates("p", 3)
-        with _patch_unranked_your_feed_generators(candidates), \
-             patch("app.routers.xrpc.perspective_rerank", new_callable=AsyncMock, return_value=candidates) as mock_pr:
-            client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
-        mock_pr.assert_awaited_once()
-
-    def test_perspective_rerank_skipped_when_disabled(self):
-        """perspective_rerank is not called for feeds with use_perspective=False."""
-        random_gen = AsyncMock()
-        from ..lib.candidates.base import CandidateResult
-        random_gen.generate.return_value = CandidateResult(
-            generator_name="random_posts",
-            candidates=_make_candidates("p", 3),
-        )
-
-        def fake_get(name):
-            return {"random_posts": random_gen}.get(name)
-
-        with patch("app.lib.candidates.generate.get_generator", side_effect=fake_get), \
-             patch("app.routers.xrpc.perspective_rerank", new_callable=AsyncMock) as mock_pr:
-            client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": RANDOM_FEED_URI})
-        mock_pr.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

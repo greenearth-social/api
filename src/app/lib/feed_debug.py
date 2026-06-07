@@ -59,6 +59,9 @@ class FeedDebugRecorder:
         self.final_candidates: list["CandidatePost"] = []
         self.user_features: list[tuple[str, list[str], int]] = []
         self.ranking: "RankPredictResult | None" = None
+        # (model_name, weight, {at_uri: normalized_score}) per configured rank
+        # model, in the order they were run; populated only when ranking runs.
+        self.model_scores: list[tuple[str, float, dict[str, float]]] = []
         self.order_after_rank: list[str] = []
         self.final_order: list[str] = []
         # (at_uri, relevance, score, author_penalty, content_penalty) in final
@@ -83,6 +86,15 @@ class FeedDebugRecorder:
 
     def record_ranking(self, ranking: "RankPredictResult") -> None:
         self.ranking = ranking
+
+    def record_model_scores(self, model_name: str, weight: float, scores: dict[str, float]) -> None:
+        """Record one rank model's normalized per-candidate scores and weight.
+
+        Captures the score *after* normalization to [-1, 1] (the form the
+        scores are in when combined), not the model's raw output — and not
+        the final combined score, which is already captured via `ranking`.
+        """
+        self.model_scores.append((model_name, weight, dict(scores)))
 
     def record_order_after_rank(self, uris: list[str]) -> None:
         self.order_after_rank = list(uris)
@@ -114,6 +126,8 @@ class FeedDebugRecorder:
         from ..documents import (
             FeedDebugDiversificationEntry,
             FeedDebugDocument,
+            FeedDebugModelScoreEntry,
+            FeedDebugScoreEntry,
             FeedDebugUserFeatures,
         )
         from .candidates.base import CandidateResult
@@ -150,6 +164,17 @@ class FeedDebugRecorder:
             FeedDebugUserFeatures(source=source, liked_post_uris=uris, num_embeddings=n)
             for source, uris, n in self.user_features
         ]
+        model_scores = [
+            FeedDebugModelScoreEntry(
+                model_name=model_name,
+                weight=weight,
+                scores=[
+                    FeedDebugScoreEntry(at_uri=at_uri, score=score)
+                    for at_uri, score in scores.items()
+                ],
+            )
+            for model_name, weight, scores in self.model_scores
+        ]
         diversification = [
             FeedDebugDiversificationEntry(
                 at_uri=at_uri,
@@ -174,6 +199,7 @@ class FeedDebugRecorder:
             generator_outputs=generator_outputs,
             final_candidates=final_candidates,
             ranking=self.ranking,
+            model_scores=model_scores,
             order_after_rank=self.order_after_rank,
             final_order=self.final_order,
             diversification=diversification,

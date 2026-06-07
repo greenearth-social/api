@@ -12,7 +12,13 @@ the codebase (e.g.  the ``publish_feed.py`` script) can import it without
 pulling in FastAPI.
 """
 
-from .models import CandidateGenerateRequest, FeedConfig, GeneratorSpec, RankPredictRequest
+from .models import (
+    CandidateGenerateRequest,
+    FeedConfig,
+    GeneratorSpec,
+    RankModelSpec,
+    RankPredictRequest,
+)
 
 # NOTE: display_name is limited to 24 chars, including the prefix ("GreenEarth, GE Dev, or GE Stg")
 FEEDS: dict[str, FeedConfig] = {
@@ -39,7 +45,6 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="67-r",
         internal_display_name="67 R",
         diversify=False,
-        use_perspective=False,
         exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="random_posts", weight=1.0)],
@@ -66,7 +71,10 @@ FEEDS: dict[str, FeedConfig] = {
             exclude_uris=[],
         ),
         rank_request_template=RankPredictRequest.model_construct(
-            model="two_tower",
+            models=[
+                RankModelSpec(name="two_tower", weight=1.0),
+                RankModelSpec(name="perspective", weight=1.0),
+            ],
         ),
     ),
     "best-of-friends": FeedConfig(
@@ -83,7 +91,10 @@ FEEDS: dict[str, FeedConfig] = {
             exclude_uris=[],
         ),
         rank_request_template=RankPredictRequest.model_construct(
-            model="two_tower",
+            models=[
+                RankModelSpec(name="two_tower", weight=1.0),
+                RankModelSpec(name="perspective", weight=1.0),
+            ],
         ),
     ),
 

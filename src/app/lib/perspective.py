@@ -17,41 +17,62 @@ logger = logging.getLogger(__name__)
 
 _PERSPECTIVE_URL = "https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze"
 
-_REQUESTED_ATTRIBUTES = {
-    "COMPASSION_EXPERIMENTAL": {},
-    "CURIOSITY_EXPERIMENTAL": {},
-    "NUANCE_EXPERIMENTAL": {},
-    "REASONING_EXPERIMENTAL": {},
-    "TOXICITY": {},
-    "SEVERE_TOXICITY": {},
-    "IDENTITY_ATTACK": {},
-    "INSULT": {},
+# `perspective_baseline_minus_outrage_toxic` from the PRC reference
+# implementation (PRC paper's "Uprank Bridging, Downrank Toxic" condition —
+# the only one to reach statistical significance, p<0.05):
+# https://github.com/HumanCompatibleAI/ranking-challenge-perspective/blob/main/perspective_ranker.py#L163-L179
+#
+# Verified via direct calls to the live Perspective API that every attribute
+# referenced below is available (none 400). Note `SEVERE_TOXICITY` is *not*
+# part of this reference formula and is intentionally omitted.
+#
+# Each attribute score from the Perspective API is in [0, 1], so for any
+# weighted sum of attributes the theoretical score bounds are
+# (sum of negative weights, sum of positive weights) — see
+# `_weighted_score_bounds`. This formula's positive weights sum to 1.0
+# (6 * 1/6) and negative weights sum to -1.0 (2*(-1/6) + 3*(-1/18) +
+# 4*(-1/8)), giving bounds of exactly (-1.0, 1.0) — no rescaling needed
+# beyond the float-precision clamp `_weighted_score_bounds` already performs
+# implicitly via `_normalize`'s clamping in the rank-model pipeline.
+_PRC_WEIGHTS: dict[str, float] = {
+    "REASONING_EXPERIMENTAL": 1 / 6,
+    "PERSONAL_STORY_EXPERIMENTAL": 1 / 6,
+    "AFFINITY_EXPERIMENTAL": 1 / 6,
+    "COMPASSION_EXPERIMENTAL": 1 / 6,
+    "RESPECT_EXPERIMENTAL": 1 / 6,
+    "CURIOSITY_EXPERIMENTAL": 1 / 6,
+    "FEARMONGERING_EXPERIMENTAL": -1 / 6,
+    "GENERALIZATION_EXPERIMENTAL": -1 / 6,
+    "SCAPEGOATING_EXPERIMENTAL": -1 / 18,
+    "MORAL_OUTRAGE_EXPERIMENTAL": -1 / 18,
+    "ALIENATION_EXPERIMENTAL": -1 / 18,
+    "TOXICITY": -1 / 8,
+    "IDENTITY_ATTACK": -1 / 8,
+    "INSULT": -1 / 8,
+    "THREAT": -1 / 8,
 }
 
+_REQUESTED_ATTRIBUTES = {name: {} for name in _PRC_WEIGHTS}
 
-def _prc_score(attr: dict[str, float]) -> float:
-    """Score a post using a public-API approximation of the PRC paper formula.
 
-    The paper's "Uprank Bridging, Downrank Toxic" condition was the only one
-    to reach statistical significance (p<0.05). The paper's negative attributes
-    (MORAL_OUTRAGE, SCAPEGOATING, ALIENATION, PERSUASION) are not in the public
-    API; they were grouped together due to strong mutual correlation, so
-    TOXICITY/SEVERE_TOXICITY serve as equivalent proxies.
+def _weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]:
+    """Theoretical (min, max) bounds for a weighted sum of Perspective attributes.
 
-    Formula: bridging - 0.5 * toxicity
-        bridging = avg(COMPASSION_EXPERIMENTAL, CURIOSITY_EXPERIMENTAL,
-                       NUANCE_EXPERIMENTAL, REASONING_EXPERIMENTAL)
-        toxicity = avg(TOXICITY, SEVERE_TOXICITY, IDENTITY_ATTACK, INSULT)
+    Each Perspective API attribute score is in [0, 1]. For a weighted sum
+    `score = sum(weight[attr] * value[attr])`, the minimum is achieved when
+    every negatively-weighted attribute is at its max (1.0) and every
+    positively-weighted attribute is at its min (0.0) — i.e. the sum of the
+    negative weights — and the maximum is the mirror image — the sum of the
+    positive weights.
     """
-    bridging = (
-        attr["COMPASSION_EXPERIMENTAL"] + attr["CURIOSITY_EXPERIMENTAL"]
-        + attr["NUANCE_EXPERIMENTAL"] + attr["REASONING_EXPERIMENTAL"]
-    ) / 4.0
-    toxicity = (
-        attr["TOXICITY"] + attr["SEVERE_TOXICITY"]
-        + attr["IDENTITY_ATTACK"] + attr["INSULT"]
-    ) / 4.0
-    return bridging - 0.5 * toxicity
+    lo = sum(w for w in weights.values() if w < 0)
+    hi = sum(w for w in weights.values() if w > 0)
+    return (lo, hi)
+
+
+def _prc_score(attr: dict[str, float], weights: dict[str, float] = _PRC_WEIGHTS) -> float:
+    """Score a post as a weighted sum of its Perspective attribute scores."""
+    return sum(weight * attr[name] for name, weight in weights.items())
 
 
 class PerspectiveClient:
@@ -129,14 +150,15 @@ def _get_client() -> PerspectiveClient:
     return _client
 
 
-async def perspective_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
-    """Re-rank candidates by PRC score (descending).
+async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float]:
+    """Return PRC scores for *candidates*, keyed by ``at_uri``.
 
-    Posts with content=None or where the API call fails receive a neutral score
-    of 0.0.  All candidates are returned — none are dropped.
+    Posts with content=None, where the minute quota is exhausted, or where the
+    API call fails receive a neutral score of 0.0. Every candidate with an
+    ``at_uri`` is scored — none are dropped.
     """
     if not candidates:
-        return []
+        return {}
 
     client = _get_client()
 
@@ -158,6 +180,6 @@ async def perspective_rerank(candidates: list[CandidatePost]) -> list[CandidateP
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)
             return 0.0
 
-    scores = await asyncio.gather(*(_score_one(c) for c in candidates))
-    paired = sorted(zip(scores, candidates, strict=True), key=lambda x: x[0], reverse=True)
-    return [c for _, c in paired]
+    scorable = [c for c in candidates if c.at_uri]
+    scores = await asyncio.gather(*(_score_one(c) for c in scorable))
+    return {c.at_uri: score for c, score in zip(scorable, scores, strict=True)}

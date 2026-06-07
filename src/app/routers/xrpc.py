@@ -30,7 +30,6 @@ from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import FeedCache, DEFAULT_TTL_SECONDS
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
-from ..lib.perspective import perspective_rerank
 from ..lib.rankers import run_predict
 from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
 
@@ -262,7 +261,9 @@ async def _run_ranking_pipeline(
         rec.set_generate_request(gen_request)
         rec.diversify = feed_cfg.diversify
         if feed_cfg.rank_request_template is not None:
-            rec.ranker_model = feed_cfg.rank_request_template.model
+            rec.ranker_model = ", ".join(
+                spec.name for spec in feed_cfg.rank_request_template.models
+            )
 
     async with request_cache_scope():
         async with timed(
@@ -290,7 +291,7 @@ async def _run_ranking_pipeline(
                 logger,
                 "run_predict",
                 n_candidates=len(candidates),
-                model=rank_req.model,
+                n_models=len(rank_req.models),
             ):
                 rank_result = await run_predict(rank_req, es)
             if rec is not None:
@@ -308,15 +309,6 @@ async def _run_ranking_pipeline(
 
         if rec is not None:
             rec.record_order_after_rank([c.at_uri for c in ordered if c.at_uri])
-
-        if feed_cfg.use_perspective:
-            async with timed(
-                logger,
-                "perspective.rerank.duration_ms",
-                record_metric=True,
-                n_candidates=len(ordered),
-            ):
-                ordered = await perspective_rerank(ordered)
 
         final = mmr_rerank(ordered) if feed_cfg.diversify else ordered
         final_uris = [c.at_uri for c in final if c.at_uri]

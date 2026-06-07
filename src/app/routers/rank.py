@@ -60,11 +60,13 @@ async def rank_predict(
     request: Request,
     payload: RankPredictRequest,
 ) -> RankPredictResult:
-    """Score and order candidate posts using an engagement-prediction model.
+    """Score and order candidate posts by combining one or more rank models.
 
-    Each candidate is scored by the named model (or the service default when
-    `model` is omitted).  The response lists candidates in descending score
-    order with 1-based `rank` positions.  Pass the output of
+    Each model in `models` is run in parallel; its raw scores are normalized
+    into [-1, 1] using the model's theoretical score bounds, then combined
+    into a single score per candidate via a weighted average using each
+    model's relative `weight`.  The response lists candidates in descending
+    combined-score order with 1-based `rank` positions.  Pass the output of
     `/candidates/generate` directly as the request body.
     """
     try:

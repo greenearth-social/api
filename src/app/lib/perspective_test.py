@@ -1,4 +1,4 @@
-"""Tests for PRC scoring and perspective_rerank."""
+"""Tests for PRC scoring and Perspective API candidate scoring."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -7,7 +7,7 @@ import pytest
 
 from ..models import CandidatePost
 from . import perspective as perspective_module
-from .perspective import _prc_score, perspective_rerank
+from .perspective import _prc_score, score_candidates
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +20,78 @@ def _reset_rate_limiter():
     perspective_module._rate_count = 0
 
 
+# ---------------------------------------------------------------------------
+# _prc_score arithmetic
+#
+# Mirrors the `perspective_baseline_minus_outrage_toxic` weight groups from
+# the PRC reference implementation: 6 positively-weighted "bridging"
+# attributes at +1/6 each, and 9 negatively-weighted attributes split into
+# three groups — 2 "outrage" attrs at -1/6, 3 "outrage" attrs at -1/18, and
+# 4 "toxic" attrs at -1/8 — summing to weights of (-1.0, +1.0).
+# ---------------------------------------------------------------------------
+
+_BRIDGING_ATTRS = [
+    "REASONING_EXPERIMENTAL",
+    "PERSONAL_STORY_EXPERIMENTAL",
+    "AFFINITY_EXPERIMENTAL",
+    "COMPASSION_EXPERIMENTAL",
+    "RESPECT_EXPERIMENTAL",
+    "CURIOSITY_EXPERIMENTAL",
+]
+_OUTRAGE_SIXTH_ATTRS = ["FEARMONGERING_EXPERIMENTAL", "GENERALIZATION_EXPERIMENTAL"]
+_OUTRAGE_EIGHTEENTH_ATTRS = [
+    "SCAPEGOATING_EXPERIMENTAL",
+    "MORAL_OUTRAGE_EXPERIMENTAL",
+    "ALIENATION_EXPERIMENTAL",
+]
+_TOXIC_EIGHTH_ATTRS = ["TOXICITY", "IDENTITY_ATTACK", "INSULT", "THREAT"]
+_ALL_PRC_ATTRS = _BRIDGING_ATTRS + _OUTRAGE_SIXTH_ATTRS + _OUTRAGE_EIGHTEENTH_ATTRS + _TOXIC_EIGHTH_ATTRS
+
+
+def _zero_attr() -> dict[str, float]:
+    return dict.fromkeys(_ALL_PRC_ATTRS, 0.0)
+
+
+class TestPrcScore:
+    def test_all_zeros_returns_zero(self):
+        assert _prc_score(_zero_attr()) == pytest.approx(0.0)
+
+    def test_pure_bridging_returns_positive(self):
+        attr = {**_zero_attr(), **dict.fromkeys(_BRIDGING_ATTRS, 1.0)}
+        # 6 attrs at weight 1/6 each, all at 1.0 -> score = 1.0
+        assert _prc_score(attr) == pytest.approx(1.0)
+
+    def test_pure_negative_returns_negative(self):
+        attr = {
+            **_zero_attr(),
+            **dict.fromkeys(_OUTRAGE_SIXTH_ATTRS, 1.0),
+            **dict.fromkeys(_OUTRAGE_EIGHTEENTH_ATTRS, 1.0),
+            **dict.fromkeys(_TOXIC_EIGHTH_ATTRS, 1.0),
+        }
+        # negative weights sum to -1.0 (2*(-1/6) + 3*(-1/18) + 4*(-1/8)),
+        # all at 1.0 -> score = -1.0
+        assert _prc_score(attr) == pytest.approx(-1.0)
+
+    def test_known_mixed_inputs(self):
+        attr = {
+            **dict.fromkeys(_BRIDGING_ATTRS, 0.6),
+            **dict.fromkeys(_OUTRAGE_SIXTH_ATTRS, 0.3),
+            **dict.fromkeys(_OUTRAGE_EIGHTEENTH_ATTRS, 0.9),
+            **dict.fromkeys(_TOXIC_EIGHTH_ATTRS, 0.4),
+        }
+        expected = (
+            len(_BRIDGING_ATTRS) * (1 / 6) * 0.6
+            + len(_OUTRAGE_SIXTH_ATTRS) * (-1 / 6) * 0.3
+            + len(_OUTRAGE_EIGHTEENTH_ATTRS) * (-1 / 18) * 0.9
+            + len(_TOXIC_EIGHTH_ATTRS) * (-1 / 8) * 0.4
+        )
+        assert _prc_score(attr) == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# score_candidates
+# ---------------------------------------------------------------------------
+
 def _make_candidate(uri: str, content: str | None = "text", score: float = 1.0) -> CandidatePost:
     return CandidatePost(
         at_uri=uri,
@@ -30,61 +102,6 @@ def _make_candidate(uri: str, content: str | None = "text", score: float = 1.0) 
     )
 
 
-# ---------------------------------------------------------------------------
-# _prc_score arithmetic
-# ---------------------------------------------------------------------------
-
-def _zero_attr() -> dict[str, float]:
-    return {
-        "COMPASSION_EXPERIMENTAL": 0.0,
-        "CURIOSITY_EXPERIMENTAL": 0.0,
-        "NUANCE_EXPERIMENTAL": 0.0,
-        "REASONING_EXPERIMENTAL": 0.0,
-        "TOXICITY": 0.0,
-        "SEVERE_TOXICITY": 0.0,
-        "IDENTITY_ATTACK": 0.0,
-        "INSULT": 0.0,
-    }
-
-
-class TestPrcScore:
-    def test_all_zeros_returns_zero(self):
-        assert _prc_score(_zero_attr()) == pytest.approx(0.0)
-
-    def test_pure_bridging_returns_positive(self):
-        attr = {**_zero_attr(),
-                "COMPASSION_EXPERIMENTAL": 1.0, "CURIOSITY_EXPERIMENTAL": 1.0,
-                "NUANCE_EXPERIMENTAL": 1.0, "REASONING_EXPERIMENTAL": 1.0}
-        # bridging=1.0, toxicity=0.0 → score=1.0
-        assert _prc_score(attr) == pytest.approx(1.0)
-
-    def test_pure_toxicity_returns_negative(self):
-        attr = {**_zero_attr(),
-                "TOXICITY": 1.0, "SEVERE_TOXICITY": 1.0,
-                "IDENTITY_ATTACK": 1.0, "INSULT": 1.0}
-        # bridging=0.0, toxicity=1.0 → score = -0.5
-        assert _prc_score(attr) == pytest.approx(-0.5)
-
-    def test_known_mixed_inputs(self):
-        attr = {
-            "COMPASSION_EXPERIMENTAL": 0.6,
-            "CURIOSITY_EXPERIMENTAL": 0.4,
-            "NUANCE_EXPERIMENTAL": 0.8,
-            "REASONING_EXPERIMENTAL": 0.6,
-            "TOXICITY": 0.3,
-            "SEVERE_TOXICITY": 0.1,
-            "IDENTITY_ATTACK": 0.2,
-            "INSULT": 0.4,
-        }
-        bridging = (0.6 + 0.4 + 0.8 + 0.6) / 4.0
-        toxicity = (0.3 + 0.1 + 0.2 + 0.4) / 4.0
-        assert _prc_score(attr) == pytest.approx(bridging - 0.5 * toxicity)
-
-
-# ---------------------------------------------------------------------------
-# perspective_rerank
-# ---------------------------------------------------------------------------
-
 def _fake_client(scores: list[float]) -> MagicMock:
     """Build a mock PerspectiveClient whose score() yields values in order."""
     client = MagicMock()
@@ -92,15 +109,15 @@ def _fake_client(scores: list[float]) -> MagicMock:
     return client
 
 
-class TestPerspectiveRerank:
+class TestScoreCandidates:
     def test_empty_list_returns_empty(self):
         with patch("app.lib.perspective._get_client") as mock_get:
             import asyncio
-            result = asyncio.run(perspective_rerank([]))
+            result = asyncio.run(score_candidates([]))
         mock_get.assert_not_called()
-        assert result == []
+        assert result == {}
 
-    def test_sorts_by_prc_score_descending(self):
+    def test_returns_raw_scores_keyed_by_at_uri(self):
         candidates = [
             _make_candidate("at://a/1", content="low quality"),
             _make_candidate("at://a/2", content="medium quality"),
@@ -110,10 +127,9 @@ class TestPerspectiveRerank:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
-            result = asyncio.run(perspective_rerank(candidates))
+            result = asyncio.run(score_candidates(candidates))
 
-        uris = [c.at_uri for c in result]
-        assert uris == ["at://a/3", "at://a/2", "at://a/1"]
+        assert result == {"at://a/1": 0.1, "at://a/2": 0.5, "at://a/3": 0.9}
 
     def test_none_content_gets_neutral_score(self):
         candidates = [
@@ -124,11 +140,9 @@ class TestPerspectiveRerank:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
-            result = asyncio.run(perspective_rerank(candidates))
+            result = asyncio.run(score_candidates(candidates))
 
-        # at://a/2 scores 0.8, at://a/1 scores 0.0 (neutral) → a/2 first
-        assert result[0].at_uri == "at://a/2"
-        assert result[1].at_uri == "at://a/1"
+        assert result == {"at://a/1": 0.0, "at://a/2": 0.8}
 
     def test_api_failure_gets_neutral_score(self):
         candidates = [
@@ -140,11 +154,9 @@ class TestPerspectiveRerank:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
-            result = asyncio.run(perspective_rerank(candidates))
+            result = asyncio.run(score_candidates(candidates))
 
-        # at://a/1 fails → 0.0, at://a/2 → 0.7 → a/2 first
-        assert result[0].at_uri == "at://a/2"
-        assert result[1].at_uri == "at://a/1"
+        assert result == {"at://a/1": 0.0, "at://a/2": 0.7}
 
     def test_rate_limit_gets_neutral_score(self):
         candidates = [
@@ -159,11 +171,9 @@ class TestPerspectiveRerank:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
-            result = asyncio.run(perspective_rerank(candidates))
+            result = asyncio.run(score_candidates(candidates))
 
-        # at://a/1 rate limited → 0.0, at://a/2 → 0.7 → a/2 first
-        assert result[0].at_uri == "at://a/2"
-        assert result[1].at_uri == "at://a/1"
+        assert result == {"at://a/1": 0.0, "at://a/2": 0.7}
 
     def test_minute_quota_exhausted_returns_neutral_without_api_call(self):
         candidates = [_make_candidate("at://a/1", content="text")]
@@ -174,17 +184,17 @@ class TestPerspectiveRerank:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
-            result = asyncio.run(perspective_rerank(candidates))
+            result = asyncio.run(score_candidates(candidates))
 
         fake.score.assert_not_called()
-        assert result[0].at_uri == "at://a/1"
+        assert result == {"at://a/1": 0.0}
 
-    def test_all_candidates_returned_none_dropped(self):
+    def test_all_candidates_scored_none_dropped(self):
         candidates = [_make_candidate(f"at://a/{i}", content="text") for i in range(5)]
         fake = _fake_client([0.5] * 5)
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
-            result = asyncio.run(perspective_rerank(candidates))
+            result = asyncio.run(score_candidates(candidates))
 
         assert len(result) == 5
