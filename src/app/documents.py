@@ -154,6 +154,30 @@ class FeedDebugUserFeatures(BaseModel):
     )
 
 
+class FeedDebugScoreEntry(BaseModel):
+    """A single candidate's score, keyed by AT URI."""
+
+    at_uri: str = Field(..., description="AT URI of the post")
+    score: float = Field(..., description="Score for this post")
+
+
+class FeedDebugModelScoreEntry(BaseModel):
+    """One rank model's contribution to the combined ranking.
+
+    Captures the model's normalized (to [-1, 1]) per-candidate scores and its
+    configured relative weight — i.e. the inputs to the weighted-average
+    combination — so the combined score in ``ranking`` can be explained.
+    The final combined score is intentionally *not* duplicated here.
+    """
+
+    model_name: str = Field(..., description="Name of the rank model, e.g. 'two_tower'")
+    weight: float = Field(..., description="Configured relative weight for this model")
+    scores: list[FeedDebugScoreEntry] = Field(
+        default_factory=list,
+        description="Per-candidate scores after normalization to [-1, 1]",
+    )
+
+
 class FeedDebugDiversificationEntry(BaseModel):
     """Per-item diversification breakdown, in final selection order.
 
@@ -223,6 +247,11 @@ class FeedDebugDocument(BaseModel):
     )
     ranking: RankPredictResult | None = Field(
         default=None, description="Ranker output, when a ranker ran"
+    )
+    model_scores: list[FeedDebugModelScoreEntry] = Field(
+        default_factory=list,
+        description="Per-model normalized ([-1, 1]) scores and configured weight, "
+        "in the order rank models ran (empty when no ranking ran)",
     )
     order_after_rank: list[str] = Field(
         default_factory=list, description="AT URIs in order after ranking, before diversification"

@@ -27,6 +27,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     force=True,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from .routers import candidates, diversify, health, rank, skylight, xrpc
 from .security import RequireApiKey

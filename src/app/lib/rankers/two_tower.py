@@ -150,6 +150,12 @@ class TwoTowerRanker(Ranker):
     def name(self) -> str:
         return TWO_TOWER_MODEL_NAME
 
+    @property
+    def score_bounds(self) -> tuple[float, float]:
+        # User tower and post tower each L2-normalize the output embeddings 
+        # (they sum to 1), so the dot product is in the range [-1,1]. 
+        # Said another way, the two tower performs cosine similarity.
+        return (-1.0, 1.0)
 
     async def predict(
         self,

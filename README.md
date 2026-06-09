@@ -327,126 +327,147 @@ See `src/app/feeds.py`
 ### Testing Feeds in Development
 
 Bluesky's AppView needs to reach your feed generator over the public internet.
-The simplest way to do this during development is with [ngrok](https://ngrok.com/).
+Use [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) or
+[NGrok](https://ngrok.com/docs/guides/share-localhost/quickstart#4-put-your-app-online) 
+to expose the local server at a stable public URL.
 
-#### 1. Start the API server
+#### 1. Pull secrets and configure `.env`
 
 ```bash
+PROJECT_ID="greenearth-471522"
+
+# NOTE: Get these secrets from GCP.
+cp .env.example .env
+
+cat >> .env <<EOF
+export GE_ELASTICSEARCH_API_KEY="$GE_ELASTICSEARCH_API_KEY"
+export GE_INFERENCE_API_KEY="$GE_INFERENCE_API_KEY"
+export GE_FEED_CONTEXT_SECRET="$GE_FEED_CONTEXT_SECRET"
+export GE_PERSPECTIVE_API_KEY="$GE_PERSPECTIVE_API_KEY"
+EOF
+source .env
+
+cat >> .env <<EOF
+export GE_ELASTICSEARCH_URL="https://localhost:9200"
+export GE_ELASTICSEARCH_VERIFY_SSL="false"
+export GE_INFERENCE_BASE_URL="https://inference.greenearth.social"
+export GE_FIRESTORE_EMULATOR_HOST="127.0.0.1:8080"
+export GE_FIRESTORE_PROJECT="demo-no-project"
+export GE_BSKY_APP_PASSWORD="<your-dev-account-app-password>"
+EOF
+source .env
+```
+
+#### 2. Start supporting services (separate terminals)
+
+**Firestore emulator** (requires Java — install with `brew install --cask temurin`):
+
+```bash
+firebase emulators:start --only firestore
+```
+
+**Elasticsearch port-forward** (prod ES runs on a private VPC):
+
+```bash
+gcloud container clusters get-credentials greenearth-prod-cluster \
+  --region=us-east1 --project=greenearth-471522
+kubectl port-forward svc/greenearth-es-internal-lb 9200:9200 -n greenearth-prod
+```
+
+#### 3. Expose the API via Tailscale Funnel (or ngrok)
+
+```bash
+# If you see a "shields-up" error, run this first:
+sudo tailscale set --shields-up=false
+
+tailscale funnel 8000
+# prints your stable URL, e.g. https://your-machine.tail1234.ts.net
+```
+
+Alternatively, use [ngrok](https://ngrok.com/) — paid accounts get a stable
+URL, free accounts get a random URL that changes on each restart (requiring a
+re-run of `publish_feed.py`):
+
+```bash
+ngrok http --url your-subdomain.ngrok.dev 8000  # paid, stable
+ngrok http 8000                                  # free, random URL
+```
+
+#### 4. Start the API
+
+```bash
+export GE_FEED_GENERATOR_DID="did:web:your-machine.tail1234.ts.net"
 pipenv run uvicorn src.app.main:app --reload --port 8000
 ```
 
-#### 2. Start an ngrok tunnel
-
-If you have a paid ngrok account with a custom domain, use `--url` for a
-stable hostname that persists across restarts:
+Verify it's reachable:
 
 ```bash
-ngrok http --url your-subdomain.ngrok.dev 8000
+curl https://your-machine.tail1234.ts.net/.well-known/did.json
 ```
 
-With a free ngrok account you'll get a random hostname instead:
+#### 5. Publish feeds to your dev Bluesky account
+
+Use a dedicated dev Bluesky account (e.g. `caterpie-internal.bsky.social`).
+Get an [App Password](https://bsky.app/settings/app-passwords) for it and set
+`GE_BSKY_APP_PASSWORD` in `.env`. The `--handle` must include the full domain.
 
 ```bash
-ngrok http 8000
+# Publish a single feed
+pipenv run python scripts/publish_feed.py \
+  --handle caterpie-internal.bsky.social \
+  --feed-name unranked-your-feed \
+  --environment dev \
+  --app-password $GE_BSKY_APP_PASSWORD
+
+# Or publish all feeds at once
+pipenv run python scripts/publish_feed.py \
+  --handle caterpie-internal.bsky.social \
+  --all \
+  --environment dev \
+  --app-password $GE_BSKY_APP_PASSWORD
 ```
 
-ngrok will print a forwarding URL like `https://your-subdomain.ngrok.dev`
-(paid) or `https://xxxx-xxx-xxx.ngrok-free.app` (free).
+Because Tailscale Funnel gives you a stable hostname, you only need to publish
+once — the URL doesn't change between sessions.
 
-#### 3. Set your service DID
+Other useful `publish_feed.py` flags:
 
-The feed generator identifies itself with a `did:web` DID derived from the
-ngrok hostname. Set the environment variable before starting the server
-(or export it in your shell):
-
-```bash
-export GE_FEED_GENERATOR_DID="did:web:your-subdomain.ngrok.dev"
-```
-
-Then restart the API server so the new DID takes effect.
-
-#### 4. Publish the feed generator record
-
-Use the included `publish_feed.py` script to create (or update) the feed
-generator record in your Bluesky account's repo.  You'll need a
-[Bluesky App Password](https://bsky.app/settings/app-passwords). You can
-store it in the environment (see `.env.example`).
-
-It is recommended that you create a new bluesky account for publishing your
-development feeds, rather than using your personal account. Something like
-`greenearth-[username]-dev.bsky.app` is good.
-
-```bash
-python scripts/publish_feed.py \
-  --handle your-handle.bsky.social \
-  --feed-name greenearth-dev
-```
-
-The script will read `GE_FEED_GENERATOR_DID` from your `.env` file (or you can
-override it with `--generator-did`). This is convenient since the API server
-uses the same environment variable.
-
-> **Note**: The `--handle` must be the full handle including the domain suffix
-> (e.g. `alice.bsky.social`, not just `alice`).
-
-You'll be prompted for your app password, or you can set `GE_BSKY_APP_PASSWORD`
-in the environment.
-
-The script calls `com.atproto.repo.putRecord`, so re-running it with the same
-`--feed-name` will update the existing record (e.g. to point at a new ngrok
-hostname).
-
-Optional flags:
-
-- `--generator-did` — override the `GE_FEED_GENERATOR_DID` environment variable
-- `--display-name` — override the default display name
-- `--description` — override the default description
+- `--delete` / `--delete-all` — remove feed records
+- `--list` — list all published feeds under the handle
+- `--generator-did` — override `GE_FEED_GENERATOR_DID`
 - `--pds` — use a different PDS (default: `https://bsky.social`)
-- `--all` — publish all feeds defined in the `FEEDS` config
 
-**Deleting feeds:**
+#### 6. View the feed in Bluesky
 
-To delete a specific feed:
+Open [bsky.app](https://bsky.app), log in as the dev account, and navigate to
+the Feeds tab to find and open the published feed.
 
-```bash
-python scripts/publish_feed.py \
-  --handle your-handle.bsky.social \
-  --feed-name greenearth-dev \
-  --delete
-```
+### Debugging Feeds
 
-To delete all feeds published under your handle:
+Turn it on for your account like so:
 
 ```bash
-python scripts/publish_feed.py \
-  --handle your-handle.bsky.social \
-  --delete-all
+pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --enable
 ```
 
-**Listing feeds:**
-
-To list all feeds published under your handle:
+To see your pageloads:
 
 ```bash
-python scripts/publish_feed.py \
-  --handle your-handle.bsky.social \
-  --list
+pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --list
 ```
 
-#### 5. Verify it works
+To look at one:
 
 ```bash
-# describeFeedGenerator
-curl https://your-subdomain.ngrok.dev/xrpc/app.bsky.feed.describeFeedGenerator
-
-# getFeedSkeleton
-curl "https://your-subdomain.ngrok.dev/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://did:web:your-subdomain.ngrok.dev/app.bsky.feed.generator/greenearth-dev"
+pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --show [id]
 ```
 
-> **Note**: Free ngrok URLs change every time you restart the tunnel, so you'll
-> need to update `GE_FEED_GENERATOR_DID` and re-run `publish_feed.py` each
-> session. A paid ngrok plan with `--url` gives you a stable domain so you
-> only need to publish once.
+Please disable it when you're done, since it stores a bunch of data for you and it's a waste if you're not looking at it:
+
+```bash
+pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --disable
+```
 
 ## Project Structure
 

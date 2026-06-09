@@ -135,6 +135,30 @@ class TestBuildDocument:
         )
         assert all(c.author_username == "alice.bsky.app" for c in doc.final_candidates)
 
+    def test_includes_model_scores(self):
+        rec = self._recorder()
+        rec.record_model_scores("two_tower", 1.0, {"at://p/1": 0.8, "at://p/2": -0.2})
+        rec.record_model_scores("perspective", 2.0, {"at://p/1": -0.5, "at://p/2": 0.1})
+        doc = self._build(rec)
+
+        assert [e.model_name for e in doc.model_scores] == ["two_tower", "perspective"]
+        assert doc.model_scores[0].weight == 1.0
+        assert {s.at_uri: s.score for s in doc.model_scores[0].scores} == {
+            "at://p/1": 0.8,
+            "at://p/2": -0.2,
+        }
+        assert doc.model_scores[1].weight == 2.0
+        assert {s.at_uri: s.score for s in doc.model_scores[1].scores} == {
+            "at://p/1": -0.5,
+            "at://p/2": 0.1,
+        }
+
+    def test_model_scores_empty_when_no_ranking(self):
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        rec.set_generate_request(_request())
+        doc = self._build(rec)
+        assert doc.model_scores == []
+
     def test_includes_diversification(self):
         rec = self._recorder()
         rec.record_diversification(
@@ -156,6 +180,33 @@ class TestBuildDocument:
         )
         rec.record_final_candidates([_candidate("at://p/2", author="did:plc:b")])
         assert rec.author_dids() == {"did:plc:a", "did:plc:b"}
+
+
+class TestModelScoreCapture:
+    """`record_model_scores` accumulates one entry per rank model, in call order."""
+
+    def test_records_one_entry_per_model_in_order(self):
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        rec.record_model_scores("two_tower", 1.0, {"at://p/1": 0.8})
+        rec.record_model_scores("perspective", 2.0, {"at://p/1": -0.5})
+
+        assert rec.model_scores == [
+            ("two_tower", 1.0, {"at://p/1": 0.8}),
+            ("perspective", 2.0, {"at://p/1": -0.5}),
+        ]
+
+    def test_copies_scores_dict_defensively(self):
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        scores = {"at://p/1": 0.8}
+        rec.record_model_scores("two_tower", 1.0, scores)
+        scores["at://p/1"] = 0.0
+        scores["at://p/2"] = 1.0
+
+        assert rec.model_scores[0][2] == {"at://p/1": 0.8}
+
+    def test_empty_when_not_recorded(self):
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        assert rec.model_scores == []
 
 
 class TestDiversificationCapture:

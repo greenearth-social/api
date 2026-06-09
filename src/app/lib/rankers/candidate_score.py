@@ -15,6 +15,10 @@ class CandidateScoreRanker(Ranker):
     def name(self) -> str:
         return "candidate_score"
 
+    @property
+    def score_bounds(self) -> tuple[float, float]:
+        return (0.0, 1.0)
+
     async def predict(
         self, 
         es,

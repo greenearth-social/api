@@ -15,11 +15,11 @@ from .base import (
     register_ranker,
 )
 from .predict import (
-    DEFAULT_RANK_MODEL,
     RankModelNotFoundError,
     run_predict,
 )
 from .candidate_score import CandidateScoreRanker
+from .perspective import PerspectiveRanker
 from .two_tower import TwoTowerRanker
 
 _candidate_score = CandidateScoreRanker()
@@ -28,9 +28,12 @@ register_ranker(_candidate_score)
 _two_tower = TwoTowerRanker()
 register_ranker(_two_tower)
 
+_perspective = PerspectiveRanker()
+register_ranker(_perspective)
+
 __all__ = [
-    "DEFAULT_RANK_MODEL",
     "CandidateScoreRanker",
+    "PerspectiveRanker",
     "TwoTowerRanker",
     "Ranker",
     "RankerError",

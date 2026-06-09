@@ -22,6 +22,9 @@ API_KEY=""
 # Bluesky app password for feed publishing
 BSKY_APP_PASSWORD=""
 
+# Perspective API key for post-ranking
+GE_PERSPECTIVE_API_KEY=""
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -90,6 +93,12 @@ validate_config() {
     else
         log_warn "Bluesky app password not provided - skipping secret creation (assuming it already exists)"
     fi
+
+    if [ -n "$GE_PERSPECTIVE_API_KEY" ]; then
+        log_info "Perspective API key provided - will be stored/updated in Secret Manager"
+    else
+        log_warn "Perspective API key not provided - skipping secret creation (assuming it already exists)"
+    fi
 }
 
 setup_gcp_project() {
@@ -149,6 +158,14 @@ get_feed_context_secret() {
         echo "feed-context-secret-prod"
     else
         echo "feed-context-secret-stage"
+    fi
+}
+
+get_perspective_api_key_secret() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "perspective-api-key-prod"
+    else
+        echo "perspective-api-key-stage"
     fi
 }
 
@@ -463,6 +480,39 @@ setup_secrets() {
     log_info "Secret setup complete"
 }
 
+setup_perspective_secret() {
+    log_info "Setting up Perspective API key secret..."
+
+    local perspective_secret
+    perspective_secret="$(get_perspective_api_key_secret)"
+    local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
+
+    if [ -n "$GE_PERSPECTIVE_API_KEY" ]; then
+        if ! gcloud secrets describe "$perspective_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            echo -n "$GE_PERSPECTIVE_API_KEY" | gcloud secrets create "$perspective_secret" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "Perspective API key secret created: $perspective_secret"
+        else
+            echo -n "$GE_PERSPECTIVE_API_KEY" | gcloud secrets versions add "$perspective_secret" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "Perspective API key secret updated: $perspective_secret"
+        fi
+    else
+        if gcloud secrets describe "$perspective_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            log_info "Perspective API key secret already exists: $perspective_secret"
+        else
+            log_warn "Perspective API key not provided and secret does not exist: $perspective_secret"
+            log_warn "Run with --perspective-api-key '<key>' to create it, or create manually:"
+            log_warn "  echo -n '<key>' | gcloud secrets create $perspective_secret --data-file=- --project=$PROJECT_ID"
+        fi
+    fi
+
+    gcloud secrets add-iam-policy-binding "$perspective_secret" \
+        --member="serviceAccount:$sa_email" \
+        --role="roles/secretmanager.secretAccessor" \
+        --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $perspective_secret"
+}
+
 setup_bsky_secret() {
     log_info "Setting up Bluesky app password secret..."
 
@@ -568,6 +618,7 @@ main() {
 
     setup_secrets
     setup_bsky_secret
+    setup_perspective_secret
     check_vpc_connector
 
     echo ""
@@ -617,6 +668,10 @@ while [[ $# -gt 0 ]]; do
             BSKY_APP_PASSWORD="$2"
             shift 2
             ;;
+        --perspective-api-key)
+            GE_PERSPECTIVE_API_KEY="$2"
+            shift 2
+            ;;
         --no-fetch-es-key)
             FETCH_ES_KEY=false
             shift
@@ -634,6 +689,8 @@ while [[ $# -gt 0 ]]; do
             echo "                           Elasticsearch API key (skips K8s fetch if provided)"
             echo "  --api-key KEY            API key for authentication (stored in Secret Manager)"
             echo "  --bsky-app-password PWD  Bluesky app password (stored in Secret Manager)"
+            echo "  --perspective-api-key KEY"
+            echo "                           Perspective API key (stored in Secret Manager)"
             echo "  --no-fetch-es-key        Skip fetching ES API key from K8s"
             echo ""
             echo "Existing inference secrets:"

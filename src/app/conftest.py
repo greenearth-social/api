@@ -15,3 +15,8 @@ def _default_api_key_override():
     app.dependency_overrides.setdefault(verify_api_key, lambda: "test-key-id")
     yield
     app.dependency_overrides.pop(verify_api_key, None)
+
+
+@pytest.fixture(autouse=True)
+def _set_perspective_api_key(monkeypatch):
+    monkeypatch.setenv("GE_PERSPECTIVE_API_KEY", "test-dummy-key")

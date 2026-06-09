@@ -117,6 +117,17 @@ def _fmt_score(score: float | None) -> str:
     return f"{score:.4f}" if score is not None else "—"
 
 
+def _model_specs_str(doc: FeedDebugDocument) -> str:
+    """Configured rank models with weights, e.g. 'two_tower(1), perspective(1)'.
+
+    Prefers ``model_scores`` (captures the weight alongside each model name);
+    falls back to the plain ``ranker_model`` name string for older records.
+    """
+    if doc.model_scores:
+        return ", ".join(f"{m.model_name}({m.weight:g})" for m in doc.model_scores)
+    return doc.ranker_model or "(none)"
+
+
 def _media_summary(c) -> Text | None:
     """Yellow media badges for a candidate, or None when it has no media."""
     parts = []
@@ -216,7 +227,7 @@ def _header_panel(doc: FeedDebugDocument) -> Panel:
         body.append("   (regenerated)", style="dim yellow")
     body.append("\n")
     body.append("ranker      ", style="dim")
-    body.append(f"{doc.ranker_model or '(none)'}", style="white")
+    body.append(f"{_model_specs_str(doc)}", style="white")
     body.append("   diversify=", style="dim")
     body.append(f"{doc.diversify}\n", style="white")
     body.append("generators  ", style="dim")
@@ -257,6 +268,7 @@ def _item_panel(
     generators_by_uri: dict,
     rank_by_uri: dict,
     after_rank_pos: dict,
+    model_scores_by_uri: dict,
     div_by_uri: dict,
     meta: dict,
 ) -> Panel:
@@ -296,6 +308,18 @@ def _item_panel(
     journey.append("  →  final ", style="dim")
     journey.append(f"#{pos}", style="bold green")
 
+    # --- per-model normalized score breakdown (only when multiple rank
+    # models combined to produce the model score above) ---
+    model_breakdown = model_scores_by_uri.get(uri)
+    breakdown_line = None
+    if model_breakdown:
+        breakdown_line = Text()
+        breakdown_line.append("model scores ", style="dim")
+        parts = []
+        for name, weight, score in model_breakdown:
+            parts.append(f"{name} {_fmt_score(score)} (w={weight:g})")
+        breakdown_line.append("   ".join(parts), style="white")
+
     # --- diversification breakdown (only when diversification ran) ---
     div = div_by_uri.get(uri)
     diversify_line = None
@@ -314,6 +338,8 @@ def _item_panel(
     content = (getattr(c, "content", None) or "").replace("\n", " ") if c else ""
 
     group_items = [journey]
+    if breakdown_line is not None:
+        group_items.append(breakdown_line)
     if diversify_line is not None:
         group_items.append(diversify_line)
     group_items.append(author_line)
@@ -357,6 +383,12 @@ def _render_show(doc: FeedDebugDocument) -> None:
     rank_by_uri = {
         r.at_uri: (r.rank, r.rank_score) for r in (doc.ranking.rankings if doc.ranking else [])
     }
+    model_scores_by_uri: dict[str, list[tuple[str, float, float]]] = {}
+    for entry in doc.model_scores:
+        for s in entry.scores:
+            model_scores_by_uri.setdefault(s.at_uri, []).append(
+                (entry.model_name, entry.weight, s.score)
+            )
     after_rank_pos = {uri: i for i, uri in enumerate(doc.order_after_rank)}
     final_pos = {uri: i for i, uri in enumerate(doc.final_order)}
     div_by_uri = {e.at_uri: e for e in doc.diversification}
@@ -381,11 +413,26 @@ def _render_show(doc: FeedDebugDocument) -> None:
         if doc.ranking
         else "by score # = generator-score order (pre-diversification); final # = served position"
     )
-    console.print(f"[dim]journey: retrieved by generator (gen score) → {legend}[/dim]\n")
+    console.print(f"[dim]journey: retrieved by generator (gen score) → {legend}[/dim]")
+    if doc.model_scores:
+        console.print(
+            "[dim]model scores = each rank model's per-candidate score normalized to "
+            "[-1, 1], with its configured weight — the inputs to the combined "
+            "(model) score above[/dim]"
+        )
+    console.print()
     for pos, uri in enumerate(doc.final_order):
         console.print(
             _item_panel(
-                uri, pos, total, generators_by_uri, rank_by_uri, after_rank_pos, div_by_uri, meta
+                uri,
+                pos,
+                total,
+                generators_by_uri,
+                rank_by_uri,
+                after_rank_pos,
+                model_scores_by_uri,
+                div_by_uri,
+                meta,
             )
         )
 

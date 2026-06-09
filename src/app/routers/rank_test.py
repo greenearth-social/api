@@ -10,7 +10,7 @@ from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
 from ..lib.rankers import RankerExecutionError
-from ..models import CandidatePost, RankPredictRequest
+from ..models import CandidatePost, RankModelSpec, RankPredictRequest
 from . import rank as rank_module
 from .rank import router
 
@@ -50,6 +50,7 @@ def test_list_models(app):
         "rankers": [
             "candidate_score",
             "two_tower",
+            "perspective",
         ]
     }
 
@@ -60,6 +61,7 @@ def test_predict_ranks_candidates_by_score_desc(app):
         "/rank/predict",
         json={
             "user_did": "did:plc:user1",
+            "models": [{"name": "candidate_score", "weight": 1.0}],
             "candidates": [
                 {"at_uri": "at://post/low", "score": 0.1, "generator_name": "random_posts"},
                 {"at_uri": "at://post/high", "score": 0.9, "generator_name": "popularity"},
@@ -68,38 +70,45 @@ def test_predict_ranks_candidates_by_score_desc(app):
         },
     )
 
+    # candidate_score's bounds are [0, 1]; run_predict normalizes raw scores
+    # into [-1, 1] (rank_score = 2*raw - 1) before combining/ranking.
     assert resp.status_code == 200
     assert resp.json() == {
         "rankings": [
             {
                 "at_uri": "at://post/high",
                 "rank": 1,
-                "rank_score": 0.9,
+                "rank_score": pytest.approx(0.8),
             },
             {
                 "at_uri": "at://post/mid",
                 "rank": 2,
-                "rank_score": 0.4,
+                "rank_score": pytest.approx(-0.2),
             },
             {
                 "at_uri": "at://post/low",
                 "rank": 3,
-                "rank_score": 0.1,
+                "rank_score": pytest.approx(-0.8),
             },
         ],
     }
 
 
-def test_predict_keeps_duplicate_candidates_and_stable_tie_order(app):
+def test_predict_keeps_duplicate_candidate_count_and_collapses_scores_by_uri(app):
+    """Combination is keyed by `at_uri`, so duplicate-uri candidates collapse to
+    a single (last-write-wins) raw score per uri before normalization — but the
+    output still contains one ranking per input candidate, with ties among
+    same-uri duplicates broken by original candidate order."""
     client = TestClient(app, headers=HEADERS)
     resp = client.post(
         "/rank/predict",
         json={
             "user_did": "did:plc:user1",
+            "models": [{"name": "candidate_score", "weight": 1.0}],
             "candidates": [
-                {"at_uri": "at://post/a", "score": 0.5, "content": "first"},
-                {"at_uri": "at://post/a", "score": 0.9, "content": "duplicate"},
-                {"at_uri": "at://post/b", "score": 0.5, "content": "second"},
+                {"at_uri": "at://post/a", "score": 0.9, "content": "first"},
+                {"at_uri": "at://post/a", "score": 0.5, "content": "duplicate"},
+                {"at_uri": "at://post/b", "score": 0.7, "content": "second"},
             ]
         },
     )
@@ -107,19 +116,19 @@ def test_predict_keeps_duplicate_candidates_and_stable_tie_order(app):
     assert resp.status_code == 200
     assert resp.json()["rankings"] == [
         {
-            "at_uri": "at://post/a",
+            "at_uri": "at://post/b",
             "rank": 1,
-            "rank_score": 0.9,
+            "rank_score": pytest.approx(0.4),
         },
         {
             "at_uri": "at://post/a",
             "rank": 2,
-            "rank_score": 0.5,
+            "rank_score": pytest.approx(0.0),
         },
         {
-            "at_uri": "at://post/b",
+            "at_uri": "at://post/a",
             "rank": 3,
-            "rank_score": 0.5,
+            "rank_score": pytest.approx(0.0),
         },
     ]
 
@@ -129,7 +138,7 @@ def test_predict_unknown_model_returns_404(app):
     resp = client.post(
         "/rank/predict",
         json={
-            "model": "does_not_exist",
+            "models": [{"name": "does_not_exist", "weight": 1.0}],
             "user_did": "did:plc:user1",
             "candidates": [{"at_uri": "at://post/1", "score": 0.5}],
         },
@@ -142,7 +151,11 @@ def test_predict_rejects_missing_at_uri(app):
     client = TestClient(app, headers=HEADERS)
     resp = client.post(
         "/rank/predict",
-        json={"user_did": "did:plc:user1", "candidates": [{"score": 0.5}]},
+        json={
+            "user_did": "did:plc:user1",
+            "models": [{"name": "candidate_score", "weight": 1.0}],
+            "candidates": [{"score": 0.5}],
+        },
     )
 
     assert resp.status_code == 400
@@ -153,7 +166,10 @@ def test_predict_requires_user_did(app):
     client = TestClient(app, headers=HEADERS)
     resp = client.post(
         "/rank/predict",
-        json={"candidates": [{"at_uri": "at://post/1", "score": 0.5}]},
+        json={
+            "models": [{"name": "candidate_score", "weight": 1.0}],
+            "candidates": [{"at_uri": "at://post/1", "score": 0.5}],
+        },
     )
 
     assert resp.status_code == 422
@@ -173,7 +189,11 @@ def test_predict_requires_auth():
     client = TestClient(a)
     resp = client.post(
         "/rank/predict",
-        json={"user_did": "did:plc:user1", "candidates": [{"at_uri": "at://post/1", "score": 0.5}]},
+        json={
+            "user_did": "did:plc:user1",
+            "models": [{"name": "candidate_score", "weight": 1.0}],
+            "candidates": [{"at_uri": "at://post/1", "score": 0.5}],
+        },
     )
 
     assert resp.status_code == 401
@@ -187,7 +207,7 @@ def test_rank_predict_maps_ranker_execution_error_to_502(monkeypatch):
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(es=object())))
     payload = RankPredictRequest(
-        model="two_tower",
+        models=[RankModelSpec(name="two_tower", weight=1.0)],
         user_did="did:plc:user1",
         candidates=[CandidatePost(at_uri="at://post/1", score=0.5)],
     )

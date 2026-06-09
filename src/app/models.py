@@ -125,6 +125,15 @@ class CandidateGenerateResult(BaseModel):
     )
 
 
+class RankModelSpec(BaseModel):
+    """Specifies a rank model and its relative weight in score combination."""
+
+    name: str = Field(..., description="Name of the registered ranker")
+    weight: float = Field(
+        1.0, gt=0, description="Relative weight — proportional influence on the combined score"
+    )
+
+
 class RankPredictRequest(BaseModel):
     """Describes a ranking job over a set of candidate posts."""
 
@@ -132,9 +141,14 @@ class RankPredictRequest(BaseModel):
         ...,
         description="Candidates to rank in the same shape returned by /candidates/generate",
     )
-    model: str | None = Field(
-        None,
-        description="Optional ranking model identifier. Defaults to the service default.",
+    models: list[RankModelSpec] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Rank models to run and combine. Each model's scores are normalized "
+            "to [-1, 1] using its theoretical bounds, then combined via a "
+            "weighted average using the configured relative weights."
+        ),
     )
     user_did: str = Field(
         ...,
@@ -167,7 +181,10 @@ class FeedConfig(BaseModel):
     (``user_did``, ``num_candidates``) are filled in at request time.
 
     ``rank_request_template`` optionally holds a ranking spec.  When set,
-    candidates are ranked by the named model before URIs are returned.
+    candidates are ranked by the configured ``models`` (each normalized and
+    combined via weighted average) before URIs are returned.  Whether
+    Perspective API scoring participates is controlled by including a
+    ``perspective`` entry in ``models`` — there is no separate toggle.
     Runtime fields (``candidates``, ``user_did``) are filled via ``model_copy``.
 
     ``diversify`` controls whether MMR reranking is applied after candidate
