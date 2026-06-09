@@ -17,6 +17,20 @@ logger = logging.getLogger(__name__)
 
 _PERSPECTIVE_URL = "https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze"
 
+
+class PerspectiveLanguageNotSupportedError(Exception):
+    """Raised when the Perspective API rejects a request because the detected
+    language is not supported by one or more requested attributes.
+
+    This is expected for non-English content and should be handled gracefully
+    by callers (e.g. assign a neutral score rather than logging an error).
+    """
+
+    def __init__(self, language: str | None = None) -> None:
+        self.language = language
+        msg = f"language not supported: {language}" if language else "language not supported"
+        super().__init__(msg)
+
 # `perspective_baseline_minus_outrage_toxic` from the PRC reference
 # implementation (PRC paper's "Uprank Bridging, Downrank Toxic" condition —
 # the only one to reach statistical significance, p<0.05):
@@ -102,6 +116,17 @@ class PerspectiveClient:
                 json=payload,
             )
         if not response.is_success:
+            if response.status_code == 400:
+                try:
+                    details = response.json().get("error", {}).get("details", [])
+                    if details and details[0].get("errorType") == "LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE":
+                        lang_error = details[0].get("languageNotSupportedByAttributeError", {})
+                        detected = (lang_error.get("detectedLanguages") or [None])[0]
+                        raise PerspectiveLanguageNotSupportedError(detected)
+                except PerspectiveLanguageNotSupportedError:
+                    raise
+                except Exception:
+                    pass
             logger.warning(
                 "Perspective API %s for content %.80r: %s",
                 response.status_code,
@@ -170,6 +195,13 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float]:
             return 0.0
         try:
             return await client.score(c.content)
+        except PerspectiveLanguageNotSupportedError as exc:
+            logger.debug(
+                "Perspective API: language not supported (%s) for post %s; using neutral score",
+                exc.language,
+                c.at_uri,
+            )
+            return 0.0
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
                 logger.warning("Perspective API rate limited for post %s; using neutral score", c.at_uri)

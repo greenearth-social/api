@@ -7,7 +7,7 @@ import pytest
 
 from ..models import CandidatePost
 from . import perspective as perspective_module
-from .perspective import _prc_score, score_candidates
+from .perspective import PerspectiveLanguageNotSupportedError, _prc_score, score_candidates
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +109,61 @@ def _fake_client(scores: list[float]) -> MagicMock:
     return client
 
 
+class TestPerspectiveClientScore:
+    def test_language_not_supported_raises_specific_error(self):
+        """A 400 LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE response should raise
+        PerspectiveLanguageNotSupportedError, not a generic HTTPStatusError,
+        so callers can handle it gracefully without treating it as an API bug."""
+        import asyncio
+        import json
+
+        from .perspective import PerspectiveClient
+
+        body = json.dumps({"error": {"code": 400, "details": [{"errorType": "LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE"}]}})
+        mock_response = MagicMock()
+        mock_response.is_success = False
+        mock_response.status_code = 400
+        mock_response.text = body
+        mock_response.json.return_value = json.loads(body)
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError("400", request=MagicMock(), response=mock_response)
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with (
+            patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}),
+            patch("app.lib.perspective.get_http_client", return_value=mock_client),
+        ):
+            with pytest.raises(PerspectiveLanguageNotSupportedError):
+                asyncio.run(PerspectiveClient().score("にじほ"))
+
+    def test_other_400_still_raises_http_error(self):
+        """Non-language 400s should still propagate as HTTPStatusError."""
+        import asyncio
+        import json
+
+        from .perspective import PerspectiveClient
+
+        body = json.dumps({"error": {"code": 400, "details": [{"errorType": "SOME_OTHER_ERROR"}]}})
+        mock_response = MagicMock()
+        mock_response.is_success = False
+        mock_response.status_code = 400
+        mock_response.text = body
+        mock_response.json.return_value = json.loads(body)
+        exc = httpx.HTTPStatusError("400", request=MagicMock(), response=mock_response)
+        mock_response.raise_for_status.side_effect = exc
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        with (
+            patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}),
+            patch("app.lib.perspective.get_http_client", return_value=mock_client),
+        ):
+            with pytest.raises(httpx.HTTPStatusError):
+                asyncio.run(PerspectiveClient().score("bad request"))
+
+
 class TestScoreCandidates:
     def test_empty_list_returns_empty(self):
         with patch("app.lib.perspective._get_client") as mock_get:
@@ -154,6 +209,23 @@ class TestScoreCandidates:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
+            result = asyncio.run(score_candidates(candidates))
+
+        assert result == {"at://a/1": 0.0, "at://a/2": 0.7}
+
+    def test_language_not_supported_gets_neutral_score(self):
+        """A LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE 400 should return 0.0 without
+        logging at ERROR level — it's expected for non-English content."""
+        import asyncio
+
+        candidates = [
+            _make_candidate("at://a/1", content="にじほ"),
+            _make_candidate("at://a/2", content="english content"),
+        ]
+        fake = MagicMock()
+        fake.score = AsyncMock(side_effect=[PerspectiveLanguageNotSupportedError("ja"), 0.7])
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
             result = asyncio.run(score_candidates(candidates))
 
         assert result == {"at://a/1": 0.0, "at://a/2": 0.7}
