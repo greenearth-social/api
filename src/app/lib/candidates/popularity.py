@@ -108,7 +108,7 @@ async def popularity_search(
                 },
             ],
             "score_mode": "multiply",
-            "boost_mode": "multiply",
+            "boost_mode": "replace",
         }
     }
 

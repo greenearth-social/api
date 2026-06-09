@@ -96,6 +96,8 @@ class TestPopularitySearch:
         script_source = script_func["script"]["source"]
         assert "Math.max(likes, 0.0)" in script_source
         assert "Math.log1p(likes)" in script_source
+        assert query["function_score"]["score_mode"] == "multiply"
+        assert query["function_score"]["boost_mode"] == "replace"
 
     @pytest.mark.asyncio
     async def test_video_only_true_includes_filter(self):
