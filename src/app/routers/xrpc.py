@@ -284,6 +284,10 @@ async def _run_ranking_pipeline(
         candidates = await _hydrate_embeddings(es, candidates)
 
         if feed_cfg.rank_request_template is not None:
+            candidates = [c for c in candidates if c.minilm_l12_embedding]
+            if not candidates:
+                return []
+
             rank_req = feed_cfg.rank_request_template.model_copy(
                 update={"candidates": candidates, "user_did": gen_request.user_did}
             )

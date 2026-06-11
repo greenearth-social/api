@@ -10,6 +10,7 @@ from ..main import app
 from ..feeds import FEEDS
 from ..models import CandidatePost, FeedCursor, RankedCandidate, RankPredictResult
 from ..lib.candidates.base import CandidateResult
+from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import FeedCache
 
 
@@ -36,11 +37,13 @@ CANDIDATE_ONLY_FEEDS = (
     ("network-likes", "network_likes"),
     ("popularity", "popularity"),
 )
+TEST_EMBEDDING = encode_float32_b64([1.0, 0.0, 0.0])
 
 
-def _make_candidates(prefix: str, n: int, generator_name: str = "test") -> list[CandidatePost]:
+def _make_candidates(prefix: str, n: int, generator_name: str = "test", with_embedding: bool = False) -> list[CandidatePost]:
+    embedding = TEST_EMBEDDING if with_embedding else None
     return [
-        CandidatePost(at_uri=f"at://{prefix}/{i}", content=f"post {i}", minilm_l12_embedding=None, score=None, generator_name=generator_name)
+        CandidatePost(at_uri=f"at://{prefix}/{i}", content=f"post {i}", minilm_l12_embedding=embedding, score=None, generator_name=generator_name)
         for i in range(n)
     ]
 
@@ -1290,7 +1293,7 @@ class TestRankedFeed:
 
     def test_ranking_applied_to_candidates(self):
         """When ranking succeeds, posts are returned in ranked order."""
-        candidates = _make_candidates("p", 3)
+        candidates = _make_candidates("p", 3, with_embedding=True)
         # Ranker reverses the order: p/2, p/1, p/0
         reversed_rankings = [
             RankedCandidate(at_uri=f"at://p/{i}", rank=r + 1, rank_score=float(3 - r))
@@ -1308,18 +1311,41 @@ class TestRankedFeed:
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
+    def test_drops_candidates_missing_embeddings_before_ranking(self):
+        """Candidates still missing embeddings after hydration are not sent to ranking."""
+        candidates = [
+            CandidatePost(at_uri="at://p/0", content=None, minilm_l12_embedding=TEST_EMBEDDING, score=None, generator_name="g"),
+            CandidatePost(at_uri="at://p/1", content=None, minilm_l12_embedding=None, score=None, generator_name="g"),
+        ]
+        rank_result = RankPredictResult(rankings=[
+            RankedCandidate(at_uri="at://p/0", rank=1, rank_score=1.0),
+            RankedCandidate(at_uri="at://p/1", rank=2, rank_score=0.5),
+        ])
+
+        with self._patch_generators(candidates), \
+             patch("app.routers.xrpc._hydrate_embeddings", new_callable=AsyncMock, return_value=candidates), \
+             patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result) as mock_run:
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            ).json()
+
+        rank_req = mock_run.await_args.args[0]
+        assert [c.at_uri for c in rank_req.candidates] == ["at://p/0"]
+        assert [item["post"] for item in data["feed"]] == ["at://p/0"]
+
     def test_mmr_uses_rank_score_not_generator_score(self):
         """MMR should weight by the model's rank_score, not the generator's ES score.
 
         Candidates are given generator scores that disagree with the ranker's
-        ordering.  With no embeddings, MMR picks purely by relevance score, so
+        ordering.  With identical embeddings, MMR's content penalty is tied, so
         the output order reveals which score is used.
         """
         # Generator scores: p/0 highest, p/1 middle, p/2 lowest.
         candidates = [
-            CandidatePost(at_uri="at://p/0", score=3.0, content=None, minilm_l12_embedding=None, generator_name="g"),
-            CandidatePost(at_uri="at://p/1", score=2.0, content=None, minilm_l12_embedding=None, generator_name="g"),
-            CandidatePost(at_uri="at://p/2", score=1.0, content=None, minilm_l12_embedding=None, generator_name="g"),
+            CandidatePost(at_uri="at://p/0", score=3.0, content=None, minilm_l12_embedding=TEST_EMBEDDING, generator_name="g"),
+            CandidatePost(at_uri="at://p/1", score=2.0, content=None, minilm_l12_embedding=TEST_EMBEDDING, generator_name="g"),
+            CandidatePost(at_uri="at://p/2", score=1.0, content=None, minilm_l12_embedding=TEST_EMBEDDING, generator_name="g"),
         ]
         # Ranker reverses the order: p/2 best, p/1 middle, p/0 worst.
         rank_result = RankPredictResult(rankings=[
@@ -1341,7 +1367,7 @@ class TestRankedFeed:
 
     def test_ranking_failure_returns_500(self):
         """When ranking raises, the feed fails with a 500."""
-        candidates = _make_candidates("p", 3)
+        candidates = _make_candidates("p", 3, with_embedding=True)
 
         with self._patch_generators(candidates), \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, side_effect=RuntimeError("inference down")):
@@ -1384,7 +1410,7 @@ class TestBestOfFriendsFeed:
 
     def test_ranking_applied_to_candidates(self):
         """Candidates from followed_users are returned in two-tower ranked order."""
-        candidates = _make_candidates("p", 3)
+        candidates = _make_candidates("p", 3, with_embedding=True)
         reversed_rankings = [
             RankedCandidate(at_uri=f"at://p/{i}", rank=r + 1, rank_score=float(3 - r))
             for r, i in enumerate([2, 1, 0])
@@ -1403,7 +1429,7 @@ class TestBestOfFriendsFeed:
 
     def test_ranking_failure_returns_500(self):
         """When the two-tower ranker raises, the feed returns HTTP 500."""
-        candidates = _make_candidates("p", 3)
+        candidates = _make_candidates("p", 3, with_embedding=True)
 
         with self._patch_generators(candidates), \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, side_effect=RuntimeError("inference down")):
