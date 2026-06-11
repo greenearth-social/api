@@ -1,4 +1,4 @@
-"""Helpers for elastic search related to candidate generation
+"""Helpers for elasticsearch related to candidate generation
 """
 
 import logging

@@ -1,4 +1,7 @@
 """Shared Inference Service utilities.
+
+Used for calling the engagement prediction models: the user and post
+towers of the two tower model, etc.
 """
 
 import logging
