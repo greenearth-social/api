@@ -622,7 +622,6 @@ class TestPostSimilarityGenerator:
                                     "_source": {
                                         "at_uri": "at://result/1",
                                         "content": "recommended post",
-                                        "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.5]},
                                     },
                                 }
                             ]
@@ -636,6 +635,7 @@ class TestPostSimilarityGenerator:
         assert len(result.candidates) == 1
         assert result.candidates[0].at_uri == "at://result/1"
         assert result.candidates[0].score == 0.9
+        assert result.candidates[0].minilm_l12_embedding is None
         assert result.candidates[0].generator_name == "post_similarity"
 
     @pytest.mark.asyncio

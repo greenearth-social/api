@@ -1311,6 +1311,27 @@ class TestRankedFeed:
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
+    def test_hydrates_lightweight_candidates_before_ranking(self):
+        """Embedding-free generated candidates are hydrated before ranking."""
+        candidates = _make_candidates("p", 1)
+        rank_result = RankPredictResult(rankings=[
+            RankedCandidate(at_uri="at://p/0", rank=1, rank_score=1.0),
+        ])
+
+        with self._patch_generators(candidates), \
+             patch("app.routers.xrpc.fetch_post_embeddings", new_callable=AsyncMock, return_value=[("at://p/0", [1.0, 0.0, 0.0])]) as mock_fetch, \
+             patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result) as mock_run:
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            ).json()
+
+        mock_fetch.assert_awaited_once()
+        assert mock_fetch.await_args.args[1] == ["at://p/0"]
+        rank_req = mock_run.await_args.args[0]
+        assert rank_req.candidates[0].minilm_l12_embedding == TEST_EMBEDDING
+        assert [item["post"] for item in data["feed"]] == ["at://p/0"]
+
     def test_drops_candidates_missing_embeddings_before_ranking(self):
         """Candidates still missing embeddings after hydration are not sent to ranking."""
         candidates = [
