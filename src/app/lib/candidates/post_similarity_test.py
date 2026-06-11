@@ -403,7 +403,7 @@ class TestKnnSearchPosts:
             }
         })
         candidates = await knn_search_posts(es, [0.1, 0.2], num_candidates=10, search_field=MINILM_L12_EMBEDDING_FIELD)
-        assert len(candidates) == 1
+        assert len(candidates) == 2
         assert candidates[0].at_uri == "at://post/1"
         assert candidates[1].at_uri == "at://post/2"
         assert candidates[1].minilm_l12_embedding is None

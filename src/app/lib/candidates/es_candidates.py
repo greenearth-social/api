@@ -88,13 +88,4 @@ async def knn_search_posts(
         if len(candidates) >= num_candidates:
             break
     
-    # drop candidates without embeddings
-    candidates_with_embeddings = [
-        candidate for candidate in candidates if candidate.minilm_l12_embedding
-    ]
-    if len(candidates_with_embeddings) < len(candidates):
-        logger.info(
-            "Dropped %d post-similarity candidates without embeddings",
-            len(candidates) - len(candidates_with_embeddings),
-        )
-    return candidates_with_embeddings
+    return candidates
