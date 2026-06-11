@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 TWO_TOWER_GENERATOR_NAME = "two_tower"
-POST_EMBEDDING_FIELD = "ge_post_embedding"
+POST_EMBEDDING_FIELD = "embeddings.ge_post_embedding"
 
 
 class TwoTowerCandidateGenerator(CandidateGenerator):
