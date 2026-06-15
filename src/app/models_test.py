@@ -50,3 +50,10 @@ class TestFeedConfig:
         cfg = _minimal_feed_cfg(internal_rkey="e2-s", internal_display_name="e2 S")
         assert cfg.internal_rkey == "e2-s"
         assert cfg.internal_display_name == "e2 S"
+
+    def test_pinned_post_uri_defaults_to_none(self):
+        assert _minimal_feed_cfg().pinned_post_uri is None
+
+    def test_pinned_post_uri_can_be_set(self):
+        uri = "at://did:plc:example/app.bsky.feed.post/abc123"
+        assert _minimal_feed_cfg(pinned_post_uri=uri).pinned_post_uri == uri
