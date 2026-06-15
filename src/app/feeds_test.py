@@ -19,6 +19,10 @@ class TestFeedsRegistry:
         overlap = primary_rkeys & internal_rkeys
         assert not overlap, f"internal_rkey collides with a primary rkey: {overlap}"
 
+    def test_your_feed_and_random_have_pinned_post_uris(self):
+        assert FEEDS["your-feed"].pinned_post_uri is not None
+        assert FEEDS["random"].pinned_post_uri is not None
+
     def test_candidate_only_feeds_are_direct_unranked_generators(self):
         for feed_name, generator_name in CANDIDATE_ONLY_FEEDS.items():
             cfg = FEEDS[feed_name]
