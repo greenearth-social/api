@@ -78,7 +78,7 @@ class TestPerspectiveRanker:
         assert [c.at_uri for c in scored_candidates] == ["at://a/1"]
         assert [r.at_uri for r in result.result.rankings] == ["at://a/1"]
 
-    def test_predict_uses_neutral_score_for_unscored_candidates(self):
+    def test_predict_uses_missing_score_for_unscored_candidates(self):
         candidates = [
             _make_candidate("at://a/1", content="scored"),
             _make_candidate("at://a/2", content="unscored"),
@@ -86,9 +86,35 @@ class TestPerspectiveRanker:
         with patch(
             "app.lib.rankers.perspective.score_candidates",
             new_callable=AsyncMock,
-            return_value={"at://a/1": 0.5},  # at://a/2 missing -> neutral
+            return_value={"at://a/1": 0.5},  # at://a/2 missing -> None
         ):
             result = asyncio.run(PerspectiveRanker().predict(es=object(), user_did="did:plc:user1", candidates=candidates))
 
         by_uri = {r.at_uri: r.rank_score for r in result.result.rankings}
-        assert by_uri == {"at://a/1": 0.5, "at://a/2": 0.0}
+        assert by_uri == {"at://a/1": 0.5, "at://a/2": None}
+
+    def test_predict_orders_real_scores_descending_with_missing_last(self):
+        candidates = [
+            _make_candidate("at://a/missing", content="missing"),
+            _make_candidate("at://a/negative", content="negative"),
+            _make_candidate("at://a/zero", content="zero"),
+            _make_candidate("at://a/positive", content="positive"),
+        ]
+        with patch(
+            "app.lib.rankers.perspective.score_candidates",
+            new_callable=AsyncMock,
+            return_value={
+                "at://a/missing": None,
+                "at://a/negative": -0.2,
+                "at://a/zero": 0.0,
+                "at://a/positive": 0.7,
+            },
+        ):
+            result = asyncio.run(PerspectiveRanker().predict(es=object(), user_did="did:plc:user1", candidates=candidates))
+
+        assert [(r.at_uri, r.rank, r.rank_score) for r in result.result.rankings] == [
+            ("at://a/positive", 1, 0.7),
+            ("at://a/zero", 2, 0.0),
+            ("at://a/negative", 3, -0.2),
+            ("at://a/missing", 4, None),
+        ]

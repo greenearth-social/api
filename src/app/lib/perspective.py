@@ -23,7 +23,7 @@ class PerspectiveLanguageNotSupportedError(Exception):
     language is not supported by one or more requested attributes.
 
     This is expected for non-English content and should be handled gracefully
-    by callers (e.g. assign a neutral score rather than logging an error).
+    by callers (e.g. mark the score missing rather than logging an error).
     """
 
     def __init__(self, language: str | None = None) -> None:
@@ -175,42 +175,42 @@ def _get_client() -> PerspectiveClient:
     return _client
 
 
-async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float]:
+async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float | None]:
     """Return PRC scores for *candidates*, keyed by ``at_uri``.
 
     Posts with content=None, where the minute quota is exhausted, or where the
-    API call fails receive a neutral score of 0.0. Every candidate with an
-    ``at_uri`` is scored — none are dropped.
+    API call fails receive a missing score of None. Every candidate with an
+    ``at_uri`` is returned — none are dropped.
     """
     if not candidates:
         return {}
 
     client = _get_client()
 
-    async def _score_one(c: CandidatePost) -> float:
+    async def _score_one(c: CandidatePost) -> float | None:
         if not c.content or not c.content.strip():
-            return 0.0
+            return None
         if not await _rate_limit_acquire():
-            logger.warning("Perspective API minute quota exhausted; using neutral score for post %s", c.at_uri)
-            return 0.0
+            logger.warning("Perspective API minute quota exhausted; using missing score for post %s", c.at_uri)
+            return None
         try:
             return await client.score(c.content)
         except PerspectiveLanguageNotSupportedError as exc:
             logger.debug(
-                "Perspective API: language not supported (%s) for post %s; using neutral score",
+                "Perspective API: language not supported (%s) for post %s; using missing score",
                 exc.language,
                 c.at_uri,
             )
-            return 0.0
+            return None
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
-                logger.warning("Perspective API rate limited for post %s; using neutral score", c.at_uri)
+                logger.warning("Perspective API rate limited for post %s; using missing score", c.at_uri)
             else:
                 logger.exception("Perspective API scoring failed for post %s", c.at_uri)
-            return 0.0
+            return None
         except Exception:
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)
-            return 0.0
+            return None
 
     scorable = [c for c in candidates if c.at_uri]
     scores = await asyncio.gather(*(_score_one(c) for c in scorable))

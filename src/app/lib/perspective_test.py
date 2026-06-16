@@ -186,7 +186,20 @@ class TestScoreCandidates:
 
         assert result == {"at://a/1": 0.1, "at://a/2": 0.5, "at://a/3": 0.9}
 
-    def test_none_content_gets_neutral_score(self):
+    def test_zero_score_remains_valid_score(self):
+        candidates = [
+            _make_candidate("at://a/1", content="neutral post"),
+            _make_candidate("at://a/2", content="good post"),
+        ]
+        fake = _fake_client([0.0, 0.8])
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
+            import asyncio
+            result = asyncio.run(score_candidates(candidates))
+
+        assert result == {"at://a/1": 0.0, "at://a/2": 0.8}
+
+    def test_none_content_gets_missing_score(self):
         candidates = [
             _make_candidate("at://a/1", content=None),
             _make_candidate("at://a/2", content="good post"),
@@ -197,9 +210,9 @@ class TestScoreCandidates:
             import asyncio
             result = asyncio.run(score_candidates(candidates))
 
-        assert result == {"at://a/1": 0.0, "at://a/2": 0.8}
+        assert result == {"at://a/1": None, "at://a/2": 0.8}
 
-    def test_api_failure_gets_neutral_score(self):
+    def test_api_failure_gets_missing_score(self):
         candidates = [
             _make_candidate("at://a/1", content="some content"),
             _make_candidate("at://a/2", content="other content"),
@@ -211,10 +224,10 @@ class TestScoreCandidates:
             import asyncio
             result = asyncio.run(score_candidates(candidates))
 
-        assert result == {"at://a/1": 0.0, "at://a/2": 0.7}
+        assert result == {"at://a/1": None, "at://a/2": 0.7}
 
-    def test_language_not_supported_gets_neutral_score(self):
-        """A LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE 400 should return 0.0 without
+    def test_language_not_supported_gets_missing_score(self):
+        """A LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE 400 should return None without
         logging at ERROR level — it's expected for non-English content."""
         import asyncio
 
@@ -228,9 +241,9 @@ class TestScoreCandidates:
         with patch("app.lib.perspective._get_client", return_value=fake):
             result = asyncio.run(score_candidates(candidates))
 
-        assert result == {"at://a/1": 0.0, "at://a/2": 0.7}
+        assert result == {"at://a/1": None, "at://a/2": 0.7}
 
-    def test_rate_limit_gets_neutral_score(self):
+    def test_rate_limit_gets_missing_score(self):
         candidates = [
             _make_candidate("at://a/1", content="some content"),
             _make_candidate("at://a/2", content="other content"),
@@ -245,9 +258,9 @@ class TestScoreCandidates:
             import asyncio
             result = asyncio.run(score_candidates(candidates))
 
-        assert result == {"at://a/1": 0.0, "at://a/2": 0.7}
+        assert result == {"at://a/1": None, "at://a/2": 0.7}
 
-    def test_minute_quota_exhausted_returns_neutral_without_api_call(self):
+    def test_minute_quota_exhausted_returns_missing_without_api_call(self):
         candidates = [_make_candidate("at://a/1", content="text")]
         fake = _fake_client([0.9])
 
@@ -259,7 +272,7 @@ class TestScoreCandidates:
             result = asyncio.run(score_candidates(candidates))
 
         fake.score.assert_not_called()
-        assert result == {"at://a/1": 0.0}
+        assert result == {"at://a/1": None}
 
     def test_all_candidates_scored_none_dropped(self):
         candidates = [_make_candidate(f"at://a/{i}", content="text") for i in range(5)]
