@@ -655,12 +655,12 @@ async def get_feed_skeleton(
 
     # Cloud Scheduler probe bypass: if GE_PROBE_SECRET is set and the request
     # carries the matching X-Probe-Secret header, skip AT Protocol auth and
-    # use a synthetic DID so the full pipeline runs and emits latency metrics.
+    # use the configured probe DID so the full pipeline runs and emits latency metrics.
     _probe_secret = os.environ.get("GE_PROBE_SECRET")
     if _probe_secret and hmac.compare_digest(
         request.headers.get("X-Probe-Secret", ""), _probe_secret
     ):
-        user_did = "did:plc:probe"
+        user_did = os.environ.get("GE_PROBE_USER_DID", "did:plc:wrmpulygwvuhjn2c3jbalgqj")
     else:
         user_did = await verify_auth_header(request, service_did=_get_service_did())
 
@@ -682,8 +682,7 @@ async def get_feed_skeleton(
         logger.error("Firestore client not initialized")
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
-    if user_did != "did:plc:probe":
-        _spawn_background(_record_session(request, user_did, feed_name, db))
+    _spawn_background(_record_session(request, user_did, feed_name, db))
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
