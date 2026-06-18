@@ -116,7 +116,8 @@ setup_gcp_project() {
         apikeys.googleapis.com \
         secretmanager.googleapis.com \
         vpcaccess.googleapis.com \
-        compute.googleapis.com
+        compute.googleapis.com \
+        cloudscheduler.googleapis.com
 
     log_info "GCP APIs enabled successfully"
 }
