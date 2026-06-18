@@ -202,6 +202,31 @@ class TestTwoTowerCandidateGenerator:
         assert result.candidates == []
 
     @pytest.mark.asyncio
+    async def test_generate_propagates_post_tower_uuid_errors(self, generator):
+        with (
+            patch(GET_INFERENCE_SETTINGS, return_value=INFERENCE_SETTINGS),
+            patch(
+                GET_CACHED_POST_TOWER_UUID,
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("ready response malformed"),
+            ) as get_post_tower_uuid,
+            patch(
+                COMPUTE_USER_EMBEDDING,
+                new_callable=AsyncMock,
+            ) as compute_user_embedding,
+            patch(
+                KNN_SEARCH_POSTS,
+                new_callable=AsyncMock,
+            ) as knn_search,
+        ):
+            with pytest.raises(RuntimeError, match="ready response malformed"):
+                await generator.generate(object(), "did:plc:user1")
+
+        get_post_tower_uuid.assert_awaited_once_with("https://inference", "api-key")
+        compute_user_embedding.assert_not_awaited()
+        knn_search.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_generate_propagates_settings_errors(self, generator):
         with (
             patch(

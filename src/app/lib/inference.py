@@ -23,6 +23,10 @@ _post_tower_uuid_cache: dict[tuple[str, str], tuple[str, float]] = {}
 _post_tower_uuid_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 
+class InferenceResponseFormatError(RuntimeError):
+    """Raised when inference-service returns a successful but malformed response."""
+
+
 def build_inference_headers(api_key: str) -> dict[str, str]:
     """Outbound headers for inference HTTP calls.
 
@@ -50,7 +54,7 @@ def get_inference_settings() -> tuple[str, str]:
 
 
 def raise_inference_response_error(
-    model_type: str,
+    source_name: str,
     status_code: int,
     body: str
 ) -> None:
@@ -58,8 +62,65 @@ def raise_inference_response_error(
     if len(body) > 2000:
         body = f"{body[:2000]}..."
     raise RuntimeError(
-        f"{model_type} inference failed status={status_code} body={body}",
+        f"{source_name} inference failed status={status_code} body={body}",
     )
+
+
+def _decode_inference_json(source_name: str, resp) -> object:
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise InferenceResponseFormatError(
+            f"{source_name} inference response was not valid JSON",
+        ) from exc
+
+
+def _extract_inference_outputs(
+    source_name: str,
+    payload: object,
+) -> list[list[float]]:
+    if not isinstance(payload, dict):
+        raise InferenceResponseFormatError(
+            f"{source_name} inference response was not an object",
+        )
+    outputs = payload.get("outputs")
+    if not isinstance(outputs, list):
+        raise InferenceResponseFormatError(
+            f"{source_name} inference response missing outputs list",
+        )
+    return outputs
+
+
+def _extract_post_tower_uuid_from_ready(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        raise InferenceResponseFormatError("ready response was not an object")
+
+    models = payload.get("models")
+    if not isinstance(models, list):
+        raise InferenceResponseFormatError("ready response missing models list")
+
+    for idx, model_dict in enumerate(models):
+        if not isinstance(model_dict, dict):
+            raise InferenceResponseFormatError(
+                f"ready response model entry {idx} was not an object",
+            )
+
+        model_type = model_dict.get("type")
+        if not isinstance(model_type, str):
+            raise InferenceResponseFormatError(
+                f"ready response model entry {idx} missing string type",
+            )
+        if model_type != "post-tower":
+            continue
+
+        post_tower_uuid = model_dict.get("model_uuid")
+        if not isinstance(post_tower_uuid, str) or not post_tower_uuid:
+            raise InferenceResponseFormatError(
+                "ready response post-tower model missing model_uuid",
+            )
+        return post_tower_uuid
+
+    return None
 
 
 async def predict_user_tower_single(
@@ -86,7 +147,8 @@ async def predict_user_tower_single(
             resp.text,
         )
         raise_inference_response_error("user-tower", resp.status_code, resp.text)
-    return resp.json()["outputs"]
+    payload = _decode_inference_json("user-tower", resp)
+    return _extract_inference_outputs("user-tower", payload)
 
 
 async def compute_user_embedding(
@@ -154,17 +216,9 @@ async def get_post_tower_uuid(
             resp.text,
         )
         raise_inference_response_error("ready", resp.status_code, resp.text)
-    
-    post_tower_uuid = None
-    try:
-        models_list = resp.json()["models"]
-        for model_dict in models_list:
-            if model_dict["type"] == "post-tower":
-                post_tower_uuid = model_dict["model_uuid"]
-                break
-    except:
-        pass
-    return post_tower_uuid
+
+    payload = _decode_inference_json("ready", resp)
+    return _extract_post_tower_uuid_from_ready(payload)
 
 
 async def get_cached_post_tower_uuid(
@@ -207,9 +261,4 @@ async def get_cached_post_tower_uuid(
                 time.monotonic() + _POST_TOWER_UUID_TTL_SEC,
             )
             return post_tower_uuid
-        if stale_post_tower_uuid is not None:
-            logger.warning(
-                "Using stale post tower UUID because ready response did not include one",
-            )
-            return stale_post_tower_uuid
         return post_tower_uuid

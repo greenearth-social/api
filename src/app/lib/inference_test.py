@@ -16,6 +16,60 @@ def clear_post_tower_uuid_cache():
     inference_module._post_tower_uuid_locks.clear()
 
 
+def test_extract_post_tower_uuid_from_ready_returns_uuid():
+    payload = {
+        "models": [
+            {"type": "user-tower", "model_uuid": "user-uuid"},
+            {"type": "post-tower", "model_uuid": "post-uuid"},
+        ],
+    }
+
+    assert inference_module._extract_post_tower_uuid_from_ready(payload) == "post-uuid"
+
+
+def test_extract_post_tower_uuid_from_ready_returns_none_when_not_configured():
+    payload = {
+        "models": [
+            {"type": "user-tower", "model_uuid": "user-uuid"},
+        ],
+    }
+
+    assert inference_module._extract_post_tower_uuid_from_ready(payload) is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        ({}, "missing models list"),
+        ({"models": {"type": "post-tower"}}, "missing models list"),
+        ({"models": [None]}, "model entry 0 was not an object"),
+        ({"models": [{"model_uuid": "post-uuid"}]}, "missing string type"),
+        (
+            {"models": [{"type": "post-tower"}]},
+            "post-tower model missing model_uuid",
+        ),
+        (
+            {"models": [{"type": "post-tower", "model_uuid": ""}]},
+            "post-tower model missing model_uuid",
+        ),
+    ],
+)
+def test_extract_post_tower_uuid_from_ready_raises_for_malformed_payload(
+    payload,
+    match,
+):
+    with pytest.raises(inference_module.InferenceResponseFormatError, match=match):
+        inference_module._extract_post_tower_uuid_from_ready(payload)
+
+
+def test_extract_inference_outputs_raises_for_malformed_payload():
+    with pytest.raises(
+        inference_module.InferenceResponseFormatError,
+        match="missing outputs list",
+    ):
+        inference_module._extract_inference_outputs("user-tower", {})
+
+
 @pytest.mark.asyncio
 async def test_cached_post_tower_uuid_reuses_successful_lookup(monkeypatch):
     calls = 0
@@ -131,7 +185,7 @@ async def test_cached_post_tower_uuid_returns_stale_uuid_on_refresh_error(
 
 
 @pytest.mark.asyncio
-async def test_cached_post_tower_uuid_returns_stale_uuid_on_missing_refresh_uuid(
+async def test_cached_post_tower_uuid_returns_none_when_post_tower_not_configured(
     monkeypatch,
 ):
     now = 1000.0
@@ -150,7 +204,7 @@ async def test_cached_post_tower_uuid_returns_stale_uuid_on_missing_refresh_uuid
         "https://inference", "key"
     )
 
-    assert result == "stale-uuid"
+    assert result is None
     assert inference_module._post_tower_uuid_cache[key] == ("stale-uuid", now - 1)
 
 

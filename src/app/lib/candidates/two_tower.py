@@ -45,7 +45,10 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         )
 
         post_tower_uuid = await get_cached_post_tower_uuid(inference_base_url, inference_api_key)
-        if not post_tower_uuid:
+        if post_tower_uuid is None:
+            logger.warning(
+                "Skipping two-tower candidates because post-tower is not configured",
+            )
             return CandidateResult(generator_name=self.name, candidates=[])
 
         async with timed(logger, "two_tower_candidate_user_side"):
