@@ -609,7 +609,7 @@ setup_feed_probe_cloud_scheduler() {
 
     for feed_rkey in "${public_feeds[@]}"; do
         local job_name="feed-probe-${feed_rkey}-${ENVIRONMENT}"
-        local uri="${service_url}/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://${generator_did}/app.bsky.feed.generator/${feed_rkey}&limit=5"
+        local uri="${service_url}/xrpc/app.bsky.feed.getFeedSkeleton?feed=at://${generator_did}/app.bsky.feed.generator/${feed_rkey}&limit=30"
         local description="Per-minute feed probe for ${feed_rkey} (${ENVIRONMENT}) — latency signal in Cloud Monitoring"
 
         log_info "Configuring feed probe: $job_name"
