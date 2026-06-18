@@ -455,6 +455,28 @@ class TestKnnSearchPosts:
         assert {"terms": {"at_uri": ["at://a", "at://b"]}} in knn["filter"]["bool"]["must_not"]
 
     @pytest.mark.asyncio
+    async def test_ge_post_embedding_model_uuid_is_an_es_filter(self):
+        es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
+        await knn_search_posts(
+            es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
+            ge_post_embedding_model_uuid="model-uuid-123"
+        )
+        knn = es.calls[0]["knn"]
+        assert {"term": {"ge_post_embedding_model_uuid": "model-uuid-123"}} in knn["filter"]["bool"]["filter"]
+
+    @pytest.mark.asyncio
+    async def test_ge_post_embedding_model_uuid_filter_combines_with_exclude_uris(self):
+        es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
+        await knn_search_posts(
+            es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
+            exclude_uris=["at://a", "at://b"],
+            ge_post_embedding_model_uuid="model-uuid-123",
+        )
+        knn = es.calls[0]["knn"]
+        assert {"term": {"ge_post_embedding_model_uuid": "model-uuid-123"}} in knn["filter"]["bool"]["filter"]
+        assert {"terms": {"at_uri": ["at://a", "at://b"]}} in knn["filter"]["bool"]["must_not"]
+
+    @pytest.mark.asyncio
     async def test_replies_are_filtered_out_in_python(self):
         """Hits with thread_parent_post set are dropped from the returned set."""
         es = FakeEs(responses={

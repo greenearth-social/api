@@ -8,7 +8,7 @@ import logging
 
 from .base import CandidateGenerator, CandidateResult
 from ..feed_debug import current_recorder
-from ..inference import get_inference_settings, compute_user_embedding
+from ..inference import get_inference_settings, compute_user_embedding, get_post_tower_uuid
 from .es_candidates import knn_search_posts
 from ..telemetry import timed
 from ..embeddings import GE_POST_EMBEDDING_FIELD
@@ -44,6 +44,10 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             get_inference_settings()
         )
 
+        post_tower_uuid = await get_post_tower_uuid(inference_base_url, inference_api_key)
+        if not post_tower_uuid:
+            return CandidateResult(generator_name=self.name, candidates=[])
+
         async with timed(logger, "two_tower_candidate_user_side"):
             # run the user tower to get the user embedding
             user_embedding = await compute_user_embedding(
@@ -58,7 +62,8 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             # kNN search for the most relevant posts given the user embedding
             candidates = await knn_search_posts(
                 es, user_embedding, num_candidates, search_field=GE_POST_EMBEDDING_FIELD,
-                generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris
+                generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
+                ge_post_embedding_model_uuid=post_tower_uuid,
             )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

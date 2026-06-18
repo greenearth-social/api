@@ -29,6 +29,7 @@ async def knn_search_posts(
     generator_name: str | None = None,
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
+    ge_post_embedding_model_uuid: str | None = None,
 ) -> list[CandidatePost]:
     """Run a kNN search against the ``posts_recent`` index and return candidate posts.
 
@@ -55,10 +56,15 @@ async def knn_search_posts(
         "k": fetch_size,
         "num_candidates": min(1500, fetch_size * 3),
     }
+    filter_bool: dict[str, list[dict]] = {}
+    if ge_post_embedding_model_uuid is not None:
+        filter_bool["filter"] = [
+            {"term": {"ge_post_embedding_model_uuid": ge_post_embedding_model_uuid}}
+        ]
     if exclude_uris:
-        knn_clause["filter"] = {
-            "bool": {"must_not": [{"terms": {"at_uri": exclude_uris}}]}
-        }
+        filter_bool["must_not"] = [{"terms": {"at_uri": exclude_uris}}]
+    if filter_bool:
+        knn_clause["filter"] = {"bool": filter_bool}
 
     async with timed(
         logger,
@@ -87,5 +93,5 @@ async def knn_search_posts(
         candidates.append(candidate_post_from_hit(hit, generator_name=generator_name))
         if len(candidates) >= num_candidates:
             break
-    
+
     return candidates

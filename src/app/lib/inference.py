@@ -129,3 +129,32 @@ async def compute_user_embedding(
                 f"user inference returned {len(output_user_embedding_list)} embeddings; expected 1",
             )
         return output_user_embedding_list[0]
+
+
+async def get_post_tower_uuid(
+    base_url: str,
+    api_key: str,
+) -> str | None:
+    url = f"{base_url}/ready"
+    headers = build_inference_headers(api_key)
+
+    client = get_http_client()
+    resp = await client.get(url, headers=headers)
+    if resp.is_error:
+        logger.error(
+            "get post tower uuid from inference-service failed; status=%s body=%s",
+            resp.status_code,
+            resp.text,
+        )
+        raise_inference_response_error("ready", resp.status_code, resp.text)
+    
+    post_tower_uuid = None
+    try:
+        models_list = resp.json()["models"]
+        for model_dict in models_list:
+            if model_dict["type"] == "post-tower":
+                post_tower_uuid = model_dict["model_uuid"]
+                break
+    except:
+        pass
+    return post_tower_uuid
