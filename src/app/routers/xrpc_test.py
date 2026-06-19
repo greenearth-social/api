@@ -36,6 +36,7 @@ CANDIDATE_ONLY_FEEDS = (
     ("followed-users", "followed_users"),
     ("network-likes", "network_likes"),
     ("popularity", "popularity"),
+    ("two-tower", "two_tower"),
 )
 TEST_EMBEDDING = encode_float32_b64([1.0, 0.0, 0.0])
 
@@ -49,7 +50,7 @@ def _make_candidates(prefix: str, n: int, generator_name: str = "test", with_emb
 
 
 def _patch_unranked_your_feed_generators(
-    post_similarity_candidates,
+    two_tower_candidates,
     followed_users_candidates=None,
     infill_candidates=None,
 ):
@@ -57,19 +58,19 @@ def _patch_unranked_your_feed_generators(
 
     Most tests care about feed endpoint behavior rather than the exact mix of
     candidate sources, so followed_users defaults to the same candidates as
-    post_similarity. The pipeline then deduplicates them back to the expected
+    two_tower. The pipeline then deduplicates them back to the expected
     output shape.
     """
-    post_similarity_gen = AsyncMock()
-    post_similarity_gen.generate.return_value = CandidateResult(
-        generator_name="post_similarity",
-        candidates=post_similarity_candidates,
+    two_tower_gen = AsyncMock()
+    two_tower_gen.generate.return_value = CandidateResult(
+        generator_name="two_tower",
+        candidates=two_tower_candidates,
     )
     followed_users_gen = AsyncMock()
     followed_users_gen.generate.return_value = CandidateResult(
         generator_name="followed_users",
         candidates=(
-            post_similarity_candidates
+            two_tower_candidates
             if followed_users_candidates is None
             else followed_users_candidates
         ),
@@ -81,8 +82,8 @@ def _patch_unranked_your_feed_generators(
     )
 
     def fake_get_generator(name):
-        if name == "post_similarity":
-            return post_similarity_gen
+        if name == "two_tower":
+            return two_tower_gen
         if name == "followed_users":
             return followed_users_gen
         if name == "popularity":
@@ -293,7 +294,7 @@ class TestGetFeedSkeleton:
         """A fresh feed load excludes the user's recently-seen posts."""
         primary_gen = AsyncMock()
         primary_gen.generate.return_value = CandidateResult(
-            generator_name="post_similarity", candidates=_make_candidates("p", 2),
+            generator_name="two_tower", candidates=_make_candidates("p", 2),
         )
         followed_gen = AsyncMock()
         followed_gen.generate.return_value = CandidateResult(
@@ -306,7 +307,7 @@ class TestGetFeedSkeleton:
 
         def fake_get(name):
             return {
-                "post_similarity": primary_gen,
+                "two_tower": primary_gen,
                 "followed_users": followed_gen,
                 "popularity": infill_gen,
             }.get(name)
@@ -335,7 +336,7 @@ class TestGetFeedSkeleton:
 
         primary_gen = AsyncMock()
         primary_gen.generate.return_value = CandidateResult(
-            generator_name="post_similarity", candidates=_make_candidates("p", 2),
+            generator_name="two_tower", candidates=_make_candidates("p", 2),
         )
         followed_gen = AsyncMock()
         followed_gen.generate.return_value = CandidateResult(
@@ -348,7 +349,7 @@ class TestGetFeedSkeleton:
 
         def fake_get(name):
             return {
-                "post_similarity": primary_gen,
+                "two_tower": primary_gen,
                 "followed_users": followed_gen,
                 "popularity": infill_gen,
             }.get(name)
@@ -488,7 +489,7 @@ class TestGetFeedSkeleton:
     # --- infill ---
 
     def test_infill_called_when_primary_short(self):
-        primary = _make_candidates("prim", 2, "post_similarity")
+        primary = _make_candidates("prim", 2, "two_tower")
         infill = _make_candidates("infill", 5, "popularity")
         with self._patch_generators(primary, infill):
             data = client.get(
@@ -503,7 +504,7 @@ class TestGetFeedSkeleton:
     def test_infill_not_called_when_primary_sufficient(self):
         # The pipeline pre-generates a batch larger than limit (limit * 5),
         # so we supply enough candidates to cover the full batch.
-        primary = _make_candidates("prim", 25, "post_similarity")
+        primary = _make_candidates("prim", 25, "two_tower")
         with self._patch_generators(primary) as mock_get:
             data = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -515,11 +516,11 @@ class TestGetFeedSkeleton:
         infill_gen.generate.assert_not_called()
 
     def test_unranked_your_feed_uses_followed_users_generator(self):
-        similarity = _make_candidates("sim", 3, "post_similarity")
+        two_tower = _make_candidates("tower", 3, "two_tower")
         followed = _make_candidates("followed", 3, "followed_users")
 
         with _patch_unranked_your_feed_generators(
-            similarity,
+            two_tower,
             followed_users_candidates=followed,
         ) as mock_get:
             data = client.get(
@@ -528,7 +529,7 @@ class TestGetFeedSkeleton:
             ).json()
 
         posts = [item["post"] for item in data["feed"]]
-        assert "at://sim/0" in posts
+        assert "at://tower/0" in posts
         assert "at://followed/0" in posts
         mock_get.side_effect("followed_users").generate.assert_awaited_once()
 
@@ -555,7 +556,7 @@ class TestGetFeedSkeleton:
 
         def fake_get(name):
             return {
-                "post_similarity": primary_gen,
+                "two_tower": primary_gen,
                 "followed_users": followed_users_gen,
                 "popularity": infill_gen,
             }.get(name)
@@ -951,7 +952,7 @@ class TestFeedSkeletonCursor:
         # Track what the generator receives.
         primary_gen = AsyncMock()
         primary_gen.generate.return_value = CandidateResult(
-            generator_name="post_similarity",
+            generator_name="two_tower",
             candidates=_make_candidates("new", 2),
         )
         infill_gen = AsyncMock()
@@ -965,7 +966,7 @@ class TestFeedSkeletonCursor:
 
         def fake_get(name):
             return {
-                "post_similarity": primary_gen,
+                "two_tower": primary_gen,
                 "followed_users": followed_users_gen,
                 "popularity": infill_gen,
             }.get(name)
@@ -1271,7 +1272,7 @@ class TestRankedFeed:
     def _patch_generators(self, candidates):
         primary_gen = AsyncMock()
         primary_gen.generate.return_value = CandidateResult(
-            generator_name="post_similarity", candidates=candidates
+            generator_name="two_tower", candidates=candidates
         )
         followed_gen = AsyncMock()
         followed_gen.generate.return_value = CandidateResult(
@@ -1284,7 +1285,7 @@ class TestRankedFeed:
 
         def fake_get(name):
             return {
-                "post_similarity": primary_gen,
+                "two_tower": primary_gen,
                 "followed_users": followed_gen,
                 "popularity": infill_gen,
             }.get(name)
@@ -1703,7 +1704,7 @@ class TestFeedDebugCapture:
         assert doc.feed_name == FEED_RKEY
         assert doc.final_order == ["at://p/0", "at://p/1", "at://p/2"]
         # Generator output was captured under the active recorder scope.
-        assert any(r.generator_name == "post_similarity" for r in doc.generator_outputs)
+        assert any(r.generator_name == "two_tower" for r in doc.generator_outputs)
 
     def test_no_debug_record_when_disabled(self):
         spawned: list = []

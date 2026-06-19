@@ -10,15 +10,11 @@ Generates candidates by finding posts similar to a user's recent likes:
 
 import logging
 
-from ...models import CandidatePost
 from .base import CandidateGenerator, CandidateResult
-from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings, POSTS_KNN_INDEX
+from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings
 from ..feed_debug import current_recorder
-from ..embeddings import (
-    MINILM_L12_EMBEDDING_FIELD,
-)
-from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
-from ..telemetry import timed
+from ..embeddings import MINILM_L12_EMBEDDING_FIELD
+from .es_candidates import knn_search_posts
 
 logger = logging.getLogger(__name__)
 
@@ -35,59 +31,6 @@ def average_vectors(vectors: list[list[float]]) -> list[float]:
             avg[i] += val
     n = len(vectors)
     return [x / n for x in avg]
-
-
-async def knn_search_posts(
-    es,
-    query_vector: list[float],
-    num_candidates: int,
-    generator_name: str | None = None,
-    video_only: bool = False,
-    exclude_uris: list[str] | None = None,
-) -> list[CandidatePost]:
-    """Run a kNN search against the ``posts_recent`` index and return candidate posts.
-
-    Filters are passed inside the kNN clause so ES applies them during HNSW
-    traversal. The ``posts_recent`` index contains only top-level posts (no
-    replies), so no reply-exclusion filter is needed.
-    """
-    filters: list[dict] = []
-    if video_only:
-        filters.append({"term": {"contains_video": True}})
-
-    must_not: list[dict] = []
-    if exclude_uris:
-        must_not.append({"terms": {"at_uri": exclude_uris}})
-
-    knn_clause: dict = {
-        "field": MINILM_L12_EMBEDDING_FIELD,
-        "query_vector": query_vector,
-        "k": num_candidates,
-        "num_candidates": max(100, num_candidates * 10),
-    }
-    if filters or must_not:
-        knn_clause["filter"] = {
-            "bool": {
-                **({"filter": filters} if filters else {}),
-                **({"must_not": must_not} if must_not else {}),
-            }
-        }
-
-    async with timed(
-        logger,
-        "knn_search_posts",
-        index=POSTS_KNN_INDEX,
-        num_candidates=num_candidates,
-    ):
-        resp = await es.search(
-            index=POSTS_KNN_INDEX,
-            knn=knn_clause,
-            size=num_candidates,
-            _source=CANDIDATE_SOURCE_FIELDS,
-            request_timeout=60,
-        )
-
-    return candidate_posts_from_es_response(resp, generator_name=generator_name)
 
 
 class PostSimilarityCandidateGenerator(CandidateGenerator):
@@ -140,8 +83,8 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
 
         # 4. kNN search for similar posts
         candidates = await knn_search_posts(
-            es, avg_vector, num_candidates, generator_name=self.name, video_only=video_only,
-            exclude_uris=exclude_uris,
+            es, avg_vector, num_candidates, search_field=MINILM_L12_EMBEDDING_FIELD,
+            generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
         )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

@@ -29,7 +29,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="e2 S",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="post_similarity", weight=0.5),
+                GeneratorSpec(name="two_tower", weight=0.5),
                 GeneratorSpec(name="followed_users", weight=0.5),
             ],
             infill="popularity",
@@ -62,7 +62,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="a0 YF",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="post_similarity", weight=0.5),
+                GeneratorSpec(name="two_tower", weight=0.5),
                 GeneratorSpec(name="followed_users", weight=0.5),
             ],
             infill="popularity",
@@ -157,6 +157,22 @@ FEEDS: dict[str, FeedConfig] = {
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="popularity", weight=1.0),
+            ],
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
+        ),
+    ),
+    "two-tower": FeedConfig(
+        display_name="Two Tower",
+        description="Development feed — two-tower candidates only.",
+        internal_rkey="op-tt",
+        internal_display_name="op TT",
+        diversify=False,
+        exclude_seen_posts=False,
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[
+                GeneratorSpec(name="two_tower", weight=1.0),
             ],
             num_candidates=30,
             video_only=False,

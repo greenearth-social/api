@@ -26,6 +26,7 @@ from .post_similarity import PostSimilarityCandidateGenerator
 from .random_posts import RandomPostsCandidateGenerator
 from .followed_users import FollowedUsersCandidateGenerator
 from .network_likes import NetworkLikesCandidateGenerator
+from .two_tower import TwoTowerCandidateGenerator
 
 # Register built-in generators
 _post_similarity = PostSimilarityCandidateGenerator()
@@ -42,6 +43,9 @@ register_generator(_followed_users)
 
 _network_likes = NetworkLikesCandidateGenerator()
 register_generator(_network_likes)
+
+_two_tower = TwoTowerCandidateGenerator()
+register_generator(_two_tower)
 
 __all__ = [
     "CandidateGenerator",
@@ -60,4 +64,5 @@ __all__ = [
     "RandomPostsCandidateGenerator",
     "FollowedUsersCandidateGenerator",
     "NetworkLikesCandidateGenerator",
+    "TwoTowerCandidateGenerator",
 ]

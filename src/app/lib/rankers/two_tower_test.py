@@ -6,6 +6,8 @@ import pytest
 
 from ...models import CandidatePost
 from . import two_tower as two_tower_module
+from .. import inference as inference_module
+from .. import elasticsearch as elasticsearch_module
 from .base import RankerExecutionError
 from .two_tower import TwoTowerRanker
 
@@ -16,7 +18,7 @@ def test_predict_requires_inference_env_vars(monkeypatch):
 
     ranker = TwoTowerRanker()
 
-    with pytest.raises(RankerExecutionError, match="GE_INFERENCE_BASE_URL"):
+    with pytest.raises(RuntimeError, match="GE_INFERENCE_BASE_URL"):
         asyncio.run(
             ranker.predict(
                 es=None,
@@ -37,7 +39,7 @@ def test_predict_keeps_candidate_uris_aligned_with_embeddings(monkeypatch):
         return ["at://liked/1"]
 
     monkeypatch.setattr(
-        two_tower_module,
+        inference_module,
         "fetch_recent_liked_post_uris",
         fake_fetch_recent_liked_post_uris,
     )
@@ -51,6 +53,7 @@ def test_predict_keeps_candidate_uris_aligned_with_embeddings(monkeypatch):
         ]
 
     monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
+    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
 
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
         assert history_embeddings == [[0.5, 0.5]]
@@ -63,7 +66,7 @@ def test_predict_keeps_candidate_uris_aligned_with_embeddings(monkeypatch):
         return post_embeddings
 
     monkeypatch.setattr(
-        two_tower_module,
+        inference_module,
         "predict_user_tower_single",
         fake_predict_user_tower_single,
     )
@@ -113,13 +116,19 @@ def test_predict_calls_user_tower_with_empty_history_when_user_has_no_likes(monk
         return post_embeddings
 
     monkeypatch.setattr(
-        two_tower_module,
+        elasticsearch_module,
+        "fetch_recent_liked_post_uris",
+        fake_fetch_recent_liked_post_uris,
+    )
+    monkeypatch.setattr(
+        inference_module,
         "fetch_recent_liked_post_uris",
         fake_fetch_recent_liked_post_uris,
     )
     monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
+    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
     monkeypatch.setattr(
-        two_tower_module,
+        inference_module,
         "predict_user_tower_single",
         fake_predict_user_tower_single,
     )
@@ -168,13 +177,19 @@ def test_predict_calls_user_tower_with_empty_history_when_likes_have_no_embeddin
         return post_embeddings
 
     monkeypatch.setattr(
-        two_tower_module,
+        elasticsearch_module,
+        "fetch_recent_liked_post_uris",
+        fake_fetch_recent_liked_post_uris,
+    )
+    monkeypatch.setattr(
+        inference_module,
         "fetch_recent_liked_post_uris",
         fake_fetch_recent_liked_post_uris,
     )
     monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
+    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
     monkeypatch.setattr(
-        two_tower_module,
+        inference_module,
         "predict_user_tower_single",
         fake_predict_user_tower_single,
     )
@@ -220,13 +235,18 @@ def test_predict_returns_unscored_candidates_when_candidate_embeddings_are_missi
         raise AssertionError("post tower should not be called without candidate embeddings")
 
     monkeypatch.setattr(
-        two_tower_module,
+        elasticsearch_module,
+        "fetch_recent_liked_post_uris",
+        fake_fetch_recent_liked_post_uris,
+    )
+    monkeypatch.setattr(
+        inference_module,
         "fetch_recent_liked_post_uris",
         fake_fetch_recent_liked_post_uris,
     )
     monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
     monkeypatch.setattr(
-        two_tower_module,
+        inference_module,
         "predict_user_tower_single",
         fake_predict_user_tower_single,
     )
@@ -273,20 +293,26 @@ def test_predict_raises_when_user_tower_returns_wrong_number_of_embeddings(monke
         return post_embeddings
 
     monkeypatch.setattr(
-        two_tower_module,
+        elasticsearch_module,
+        "fetch_recent_liked_post_uris",
+        fake_fetch_recent_liked_post_uris,
+    )
+    monkeypatch.setattr(
+        inference_module,
         "fetch_recent_liked_post_uris",
         fake_fetch_recent_liked_post_uris,
     )
     monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
+    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
     monkeypatch.setattr(
-        two_tower_module,
+        inference_module,
         "predict_user_tower_single",
         fake_predict_user_tower_single,
     )
     monkeypatch.setattr(two_tower_module, "predict_post_tower_batch", fake_predict_post_tower_batch)
 
     with pytest.raises(
-        RankerExecutionError,
+        RuntimeError,
         match="user inference returned 0 embeddings; expected 1",
     ):
         asyncio.run(

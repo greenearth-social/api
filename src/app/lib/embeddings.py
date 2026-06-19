@@ -10,6 +10,8 @@ import struct
 MINILM_L12_EMBEDDING_KEY = "all_MiniLM_L12_v2"
 MINILM_L12_EMBEDDING_FIELD = f"embeddings.{MINILM_L12_EMBEDDING_KEY}"
 
+GE_POST_EMBEDDING_KEY = "ge_post_embedding"
+GE_POST_EMBEDDING_FIELD = f"embeddings.{GE_POST_EMBEDDING_KEY}"
 
 def encode_float32_b64(vec: list[float]) -> str:
     """Encode a list of floats as little-endian float32 bytes, then base64.

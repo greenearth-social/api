@@ -5,6 +5,7 @@ CANDIDATE_ONLY_FEEDS = {
     "followed-users": "followed_users",
     "network-likes": "network_likes",
     "popularity": "popularity",
+    "two-tower": "two_tower",
 }
 
 
