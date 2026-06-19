@@ -53,22 +53,20 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             )
             return CandidateResult(generator_name=self.name, candidates=[])
 
-        async with timed(logger, "two_tower_candidate_user_side"):
-            # run the user tower to get the user embedding
-            user_embedding = await compute_user_embedding(
-                user_did,
-                es,
-                inference_base_url,
-                inference_api_key,
-                TWO_TOWER_GENERATOR_NAME,
-            )
+        # run the user tower to get the user embedding
+        user_embedding = await compute_user_embedding(
+            user_did,
+            es,
+            inference_base_url,
+            inference_api_key,
+            TWO_TOWER_GENERATOR_NAME,
+        )
 
-        async with timed(logger, "two_tower_candidate_posts_search", n_candidates=num_candidates):
-            # kNN search for the most relevant posts given the user embedding
-            candidates = await knn_search_posts(
-                es, user_embedding, num_candidates, search_field=GE_POST_EMBEDDING_FIELD,
-                generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
-                ge_post_embedding_model_uuid=post_tower_uuid,
-            )
+        # kNN search for the most relevant posts given the user embedding
+        candidates = await knn_search_posts(
+            es, user_embedding, num_candidates, search_field=GE_POST_EMBEDDING_FIELD,
+            generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
+            ge_post_embedding_model_uuid=post_tower_uuid,
+        )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)
