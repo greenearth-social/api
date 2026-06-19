@@ -14,7 +14,6 @@ CANDIDATE_SOURCE_FIELDS = [
     "at_uri",
     "author_did",
     "content",
-    "thread_parent_post",   # used for Python-side reply filtering
     "contains_video",       # used for video_only filtering
     "contains_images",      # media metadata (feed debugging)
     "image_count",          # media metadata (feed debugging)

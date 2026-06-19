@@ -203,7 +203,6 @@ class TestFetchPostsByUris:
         assert {"term": {"contains_video": True}} in query["bool"]["filter"]
         assert {"terms": {"at_uri": ["at://post/a"]}} in query["bool"]["filter"]
         assert query["bool"]["must_not"] == [
-            {"exists": {"field": "thread_parent_post"}},
             {"terms": {"at_uri": ["at://post/seen"]}},
         ]
 

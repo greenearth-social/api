@@ -39,7 +39,7 @@ async def followed_users_search(
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
-    must_not: list[dict] = [{"exists": {"field": "thread_parent_post"}}]
+    must_not: list[dict] = []
     if exclude_uris:
         must_not.append({"terms": {"at_uri": exclude_uris}})
 

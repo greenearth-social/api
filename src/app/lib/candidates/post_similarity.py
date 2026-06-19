@@ -12,12 +12,12 @@ import logging
 
 from ...models import CandidatePost
 from .base import CandidateGenerator, CandidateResult
-from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings, POSTS_KNN_INDEX, unwrap_es_response
+from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings, POSTS_KNN_INDEX
 from ..feed_debug import current_recorder
 from ..embeddings import (
     MINILM_L12_EMBEDDING_FIELD,
 )
-from .utils import CANDIDATE_SOURCE_FIELDS, candidate_post_from_hit
+from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -37,16 +37,6 @@ def average_vectors(vectors: list[list[float]]) -> list[float]:
     return [x / n for x in avg]
 
 
-# How many extra hits to fetch from ES per requested candidate. The kNN
-# neighborhood of an averaged-likes vector is empirically ~75% replies and
-# ~5-10% videos, so we need significant margin to still hit num_candidates
-# after Python-side filtering. Capped so we don't blow out latency on large
-# requests.
-OVERFETCH_MULTIPLIER = 5
-MIN_OVERFETCH = 60
-MAX_OVERFETCH = 500
-
-
 async def knn_search_posts(
     es,
     query_vector: list[float],
@@ -57,32 +47,30 @@ async def knn_search_posts(
 ) -> list[CandidatePost]:
     """Run a kNN search against the ``posts_recent`` index and return candidate posts.
 
-    Reply exclusion (``thread_parent_post exists``) and the rare
-    ``video_only`` filter are applied **in Python** rather than via the ES
-    ``knn.filter`` parameter. Empirically, putting those filters in the
-    kNN clause forces ES into brute-force scoring (>1 s per shard, several
-    seconds total), even when ~55% of docs survive the filter. Profiling
-    shows the per-shard ``vector_operations_count`` jumps from a few
-    thousand to >100k when this happens.
-
-    Cheap, bitmap-friendly filters (``exclude_uris`` as a ``terms``
-    must_not) stay in ES because they don't trigger the fallback and
-    they save bandwidth.
+    Filters are passed inside the kNN clause so ES applies them during HNSW
+    traversal. The ``posts_recent`` index contains only top-level posts (no
+    replies), so no reply-exclusion filter is needed.
     """
-    fetch_size = max(
-        MIN_OVERFETCH,
-        min(MAX_OVERFETCH, num_candidates * OVERFETCH_MULTIPLIER),
-    )
+    filters: list[dict] = []
+    if video_only:
+        filters.append({"term": {"contains_video": True}})
+
+    must_not: list[dict] = []
+    if exclude_uris:
+        must_not.append({"terms": {"at_uri": exclude_uris}})
 
     knn_clause: dict = {
         "field": MINILM_L12_EMBEDDING_FIELD,
         "query_vector": query_vector,
-        "k": fetch_size,
-        "num_candidates": min(1500, fetch_size * 3),
+        "k": num_candidates,
+        "num_candidates": max(100, num_candidates * 10),
     }
-    if exclude_uris:
+    if filters or must_not:
         knn_clause["filter"] = {
-            "bool": {"must_not": [{"terms": {"at_uri": exclude_uris}}]}
+            "bool": {
+                **({"filter": filters} if filters else {}),
+                **({"must_not": must_not} if must_not else {}),
+            }
         }
 
     async with timed(
@@ -90,30 +78,16 @@ async def knn_search_posts(
         "knn_search_posts",
         index=POSTS_KNN_INDEX,
         num_candidates=num_candidates,
-        fetch_size=fetch_size,
     ):
         resp = await es.search(
             index=POSTS_KNN_INDEX,
             knn=knn_clause,
-            size=fetch_size,
+            size=num_candidates,
             _source=CANDIDATE_SOURCE_FIELDS,
             request_timeout=60,
         )
 
-    data = unwrap_es_response(resp)
-    candidates: list[CandidatePost] = []
-    for hit in data.get("hits", {}).get("hits", []):
-        src = hit.get("_source") or {}
-        # Skip replies — exclude documents where thread_parent_post is set.
-        if src.get("thread_parent_post"):
-            continue
-        if video_only and not src.get("contains_video"):
-            continue
-        candidates.append(candidate_post_from_hit(hit, generator_name=generator_name))
-        if len(candidates) >= num_candidates:
-            break
-
-    return candidates
+    return candidate_posts_from_es_response(resp, generator_name=generator_name)
 
 
 class PostSimilarityCandidateGenerator(CandidateGenerator):
