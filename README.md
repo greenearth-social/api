@@ -469,6 +469,50 @@ Please disable it when you're done, since it stores a bunch of data for you and 
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --disable
 ```
 
+## Elasticsearch Query Profiling
+
+The API logs any ES query that exceeds `GE_SLOW_ES_THRESHOLD_MS` (default 500 ms) to Cloud Run as a
+`slow_es_query` line. Two scripts turn those logs into actionable profiles.
+
+### Pull slow queries from Cloud Logging
+
+```bash
+# Stage — past 3 weeks, up to 200 entries
+./scripts/pull_slow_es_queries.sh --environment stage --hours 504 > /tmp/slow_queries.ndjson
+
+# Production
+./scripts/pull_slow_es_queries.sh --environment prod --hours 504 --limit 200 > /tmp/slow_queries.ndjson
+```
+
+Requires `gcloud` authenticated: `gcloud auth application-default login`
+
+### Replay and profile
+
+Replay each logged query against ES with `profile: true` to get per-shard, per-phase timing.
+Run from the `api/` directory:
+
+```bash
+# Dry-run: inspect query shapes without hitting ES
+pipenv run python scripts/profile_es_queries.py --dry-run < /tmp/slow_queries.ndjson
+
+# Full replay — requires ES port-forward (see Testing Feeds in Development above)
+export GE_ELASTICSEARCH_URL="https://localhost:9200"
+export GE_ELASTICSEARCH_API_KEY="<your-key>"
+export GE_ELASTICSEARCH_VERIFY_SSL="false"
+
+pipenv run python scripts/profile_es_queries.py --top 10 < /tmp/slow_queries.ndjson
+```
+
+`--top N` limits output to the N slowest queries sorted by logged elapsed time.
+
+### What to look for
+
+| Profile symptom | Likely cause |
+|---|---|
+| `vector_ops_count` > 50 k on a kNN query | `knn.filter` clause triggering brute-force HNSW scoring |
+| `max_fetch_ms` >> `max_query_ms` | Embedding arrays included in `_source` |
+| One shard much slower than others | Shard hot-spot / imbalanced index |
+
 ## Project Structure
 
 ```text
