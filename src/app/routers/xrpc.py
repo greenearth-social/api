@@ -660,7 +660,7 @@ async def get_feed_skeleton(
     if _probe_secret and hmac.compare_digest(
         request.headers.get("X-Probe-Secret", ""), _probe_secret
     ):
-        user_did = os.environ.get("GE_PROBE_USER_DID", "did:plc:wrmpulygwvuhjn2c3jbalgqj")
+        user_did = os.environ.get("GE_PROBE_USER_DID", "did:plc:s4tl2ajfsnstzuxtegl7r33g")
     else:
         user_did = await verify_auth_header(request, service_did=_get_service_did())
 
