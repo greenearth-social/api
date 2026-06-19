@@ -39,10 +39,6 @@ async def followed_users_search(
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
-    must_not: list[dict] = []
-    if exclude_uris:
-        must_not.append({"terms": {"at_uri": exclude_uris}})
-
     try:
         async with timed(logger, "bsky_get_follows", user_did=user_did):
             followed_dids: list[str] = await get_followed_user_dids(
@@ -67,9 +63,10 @@ async def followed_users_search(
                 *filters,
                 {"terms": {"author_did": followed_dids}},
             ],
-            **("must_not" and {"must_not": must_not} if must_not else {}),
         }
     }
+
+    fetch_size = num_candidates + len(exclude_uris or [])
 
     async with timed(
         logger,
@@ -80,11 +77,16 @@ async def followed_users_search(
         resp = await es.search(
             index="posts",
             query=query,
-            size=num_candidates,
+            size=fetch_size,
             sort=[{"created_at": "desc"}],
             _source=CANDIDATE_SOURCE_FIELDS,
         )
-    return candidate_posts_from_es_response(resp, generator_name=generator_name)
+
+    candidates = candidate_posts_from_es_response(resp, generator_name=generator_name)
+    if exclude_uris:
+        exclude_set = set(exclude_uris)
+        candidates = [c for c in candidates if c.at_uri not in exclude_set]
+    return candidates[:num_candidates]
 
 
 class FollowedUsersCandidateGenerator(CandidateGenerator):

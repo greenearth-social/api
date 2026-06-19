@@ -67,16 +67,11 @@ async def popularity_search(
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
-    must_not: list[dict] = []
-    if exclude_uris:
-        must_not.append({"terms": {"at_uri": exclude_uris}})
-
     query = {
         "function_score": {
             "query": {
                 "bool": {
                     "filter": filters,
-                    **("must_not" and {"must_not": must_not} if must_not else {}),
                 }
             },
             "functions": [
@@ -112,14 +107,21 @@ async def popularity_search(
         }
     }
 
+    fetch_size = num_candidates + len(exclude_uris or [])
+
     async with timed(logger, "es_popularity", num_candidates=num_candidates):
         resp = await es.search(
             index="posts",
             query=query,
-            size=num_candidates,
+            size=fetch_size,
             _source=CANDIDATE_SOURCE_FIELDS,
         )
-    return candidate_posts_from_es_response(resp, generator_name=generator_name)
+
+    candidates = candidate_posts_from_es_response(resp, generator_name=generator_name)
+    if exclude_uris:
+        exclude_set = set(exclude_uris)
+        candidates = [c for c in candidates if c.at_uri not in exclude_set]
+    return candidates[:num_candidates]
 
 
 # ---------------------------------------------------------------------------

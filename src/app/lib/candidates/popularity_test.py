@@ -116,6 +116,46 @@ class TestPopularitySearch:
         assert any("range" in f for f in filters)
 
     @pytest.mark.asyncio
+    async def test_exclude_uris_overfetches_and_filters_in_python(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_score": 10.0,
+                            "_source": {"at_uri": "at://popular/1", "content": "x", "embeddings": {}},
+                        },
+                        {
+                            "_score": 9.0,
+                            "_source": {"at_uri": "at://popular/excluded", "content": "x", "embeddings": {}},
+                        },
+                        {
+                            "_score": 8.0,
+                            "_source": {"at_uri": "at://popular/2", "content": "x", "embeddings": {}},
+                        },
+                    ]
+                }
+            }
+        })
+
+        candidates = await popularity_search(
+            es,
+            num_candidates=2,
+            exclude_uris=["at://popular/excluded"],
+        )
+
+        inner_bool = es.calls[0]["query"]["function_score"]["query"]["bool"]
+        assert "must_not" not in inner_bool
+        assert es.calls[0]["size"] == 3  # num_candidates + len(exclude_uris)
+        assert [c.at_uri for c in candidates] == ["at://popular/1", "at://popular/2"]
+
+    @pytest.mark.asyncio
+    async def test_no_exclude_uris_no_overfetch(self):
+        es = FakeEs()
+        await popularity_search(es, num_candidates=10)
+        assert es.calls[0]["size"] == 10
+
+    @pytest.mark.asyncio
     async def test_returns_empty_when_no_results(self):
         es = FakeEs()
         candidates = await popularity_search(es, num_candidates=10)

@@ -189,22 +189,26 @@ class TestFetchPostsByUris:
         assert candidates[0].minilm_l12_embedding is not None
 
     @pytest.mark.asyncio
-    async def test_applies_video_and_exclude_filters(self):
-        es = FakeEs()
+    async def test_applies_video_filter_in_es_and_exclude_filter_in_python(self):
+        es = FakeEs(
+            posts_by_uri={
+                "at://post/a": post_hit("at://post/a"),
+                "at://post/seen": post_hit("at://post/seen"),
+            },
+        )
 
-        await fetch_posts_by_uris(
+        candidates = await fetch_posts_by_uris(
             es,
-            ["at://post/a"],
+            ["at://post/a", "at://post/seen"],
             video_only=True,
             exclude_uris=["at://post/seen"],
         )
 
         query = es.calls[0]["query"]
         assert {"term": {"contains_video": True}} in query["bool"]["filter"]
-        assert {"terms": {"at_uri": ["at://post/a"]}} in query["bool"]["filter"]
-        assert query["bool"]["must_not"] == [
-            {"terms": {"at_uri": ["at://post/seen"]}},
-        ]
+        assert {"terms": {"at_uri": ["at://post/a", "at://post/seen"]}} in query["bool"]["filter"]
+        assert "must_not" not in query["bool"]
+        assert [c.at_uri for c in candidates] == ["at://post/a"]
 
     @pytest.mark.asyncio
     async def test_empty_uri_list_skips_es(self):

@@ -98,6 +98,46 @@ class TestRandomPostsSearch:
         assert {"term": {"contains_video": True}} not in filters
 
     @pytest.mark.asyncio
+    async def test_exclude_uris_overfetches_and_filters_in_python(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_score": 1.0,
+                            "_source": {"at_uri": "at://post/1", "content": "x", "embeddings": {}},
+                        },
+                        {
+                            "_score": 0.9,
+                            "_source": {"at_uri": "at://post/excluded", "content": "x", "embeddings": {}},
+                        },
+                        {
+                            "_score": 0.8,
+                            "_source": {"at_uri": "at://post/2", "content": "x", "embeddings": {}},
+                        },
+                    ]
+                }
+            }
+        })
+
+        candidates = await random_posts_search(
+            es,
+            num_candidates=2,
+            exclude_uris=["at://post/excluded"],
+        )
+
+        inner_bool = es.calls[0]["query"]["function_score"]["query"]["bool"]
+        assert "must_not" not in inner_bool
+        assert es.calls[0]["size"] == 3  # num_candidates + len(exclude_uris)
+        assert [c.at_uri for c in candidates] == ["at://post/1", "at://post/2"]
+
+    @pytest.mark.asyncio
+    async def test_no_exclude_uris_no_overfetch(self):
+        es = FakeEs()
+        await random_posts_search(es, num_candidates=10)
+        assert es.calls[0]["size"] == 10
+
+    @pytest.mark.asyncio
     async def test_returns_empty_when_no_results(self):
         es = FakeEs()
         candidates = await random_posts_search(es, num_candidates=10)

@@ -112,7 +112,7 @@ class TestFollowedUsersSearch:
         assert len(es.calls) == 1
         call = es.calls[0]
         assert call["index"] == "posts"
-        assert call["size"] == 20
+        assert call["size"] == 20  # num_candidates=20, no exclude_uris
         assert call["sort"] == [{"created_at": "desc"}]
 
         query = call["query"]
@@ -146,30 +146,49 @@ class TestFollowedUsersSearch:
         assert {"term": {"contains_video": True}} not in filters
 
     @pytest.mark.asyncio
-    async def test_exclude_uris_adds_must_not_terms(self, monkeypatch):
+    async def test_exclude_uris_overfetches_and_filters_in_python(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
-        es = FakeEs()
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_score": 1.0,
+                            "_source": {"at_uri": "at://post/1", "content": "x", "embeddings": {}},
+                        },
+                        {
+                            "_score": 0.9,
+                            "_source": {"at_uri": "at://post/excluded", "content": "x", "embeddings": {}},
+                        },
+                        {
+                            "_score": 0.8,
+                            "_source": {"at_uri": "at://post/2", "content": "x", "embeddings": {}},
+                        },
+                    ]
+                }
+            }
+        })
 
-        await followed_users_search(
+        candidates = await followed_users_search(
             es,
             "did:plc:user1",
-            num_candidates=10,
-            exclude_uris=["at://post/1", "at://post/2"],
+            num_candidates=2,
+            exclude_uris=["at://post/excluded"],
         )
 
-        query = es.calls[0]["query"]
-        assert query["bool"]["must_not"] == [
-            {"terms": {"at_uri": ["at://post/1", "at://post/2"]}},
-        ]
+        assert "must_not" not in es.calls[0]["query"]["bool"]
+        assert es.calls[0]["size"] == 3  # num_candidates + len(exclude_uris)
+        assert [c.at_uri for c in candidates] == ["at://post/1", "at://post/2"]
 
     @pytest.mark.asyncio
-    async def test_no_exclude_uris_omits_must_not(self, monkeypatch):
+    async def test_no_exclude_uris_omits_must_not_and_no_overfetch(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs()
 
         await followed_users_search(es, "did:plc:user1", num_candidates=10)
 
         assert "must_not" not in es.calls[0]["query"]["bool"]
+        assert es.calls[0]["size"] == 10
 
     @pytest.mark.asyncio
     async def test_returns_empty_and_skips_es_when_no_followed_users(self, monkeypatch):

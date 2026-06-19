@@ -113,17 +113,12 @@ async def fetch_posts_by_uris(
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
-    must_not: list[dict] = []
-    if exclude_uris:
-        must_not.append({"terms": {"at_uri": exclude_uris}})
-
     posts_query = {
         "bool": {
             "filter": [
                 *filters,
                 {"terms": {"at_uri": at_uris}},
             ],
-            "must_not": must_not,
         }
     }
 
@@ -134,9 +129,10 @@ async def fetch_posts_by_uris(
         _source=CANDIDATE_SOURCE_FIELDS,
     )
 
+    exclude_set = set(exclude_uris) if exclude_uris else set()
     candidates_by_uri: dict[str, CandidatePost] = {}
     for candidate in candidate_posts_from_es_response(resp, generator_name=generator_name):
-        if candidate.at_uri:
+        if candidate.at_uri and candidate.at_uri not in exclude_set:
             candidates_by_uri[candidate.at_uri] = candidate
 
     return [
