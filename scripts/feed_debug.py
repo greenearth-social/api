@@ -28,7 +28,7 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import NoReturn
 
 from rich import box
@@ -98,7 +98,7 @@ def _die(message: str) -> NoReturn:
 def _relative_time(dt: datetime) -> str:
     """Compact relative-time string for a tz-aware datetime."""
     try:
-        delta = datetime.now(timezone.utc) - dt
+        delta = datetime.now(UTC) - dt
         secs = delta.total_seconds()
         if secs < 60:
             return "just now"
@@ -115,6 +115,11 @@ def _relative_time(dt: datetime) -> str:
 
 def _fmt_score(score: float | None) -> str:
     return f"{score:.4f}" if score is not None else "—"
+
+
+def _diversification_relevance_contribution(div) -> float:
+    """Displayed relevance term so: score = rel - author_penalty - content_penalty."""
+    return div.score + div.author_penalty + div.content_penalty
 
 
 def _model_specs_str(doc: FeedDebugDocument) -> str:
@@ -326,7 +331,7 @@ def _item_panel(
     if div is not None:
         diversify_line = Text()
         diversify_line.append("diversify    rel ", style="dim")
-        diversify_line.append(f"{div.relevance:.3f}", style="white")
+        diversify_line.append(f"{_diversification_relevance_contribution(div):.3f}", style="white")
         diversify_line.append("   −author ", style="dim")
         diversify_line.append(f"{div.author_penalty:.3f}", style="magenta")
         diversify_line.append("   −content ", style="dim")

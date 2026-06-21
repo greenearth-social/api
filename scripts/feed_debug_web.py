@@ -43,6 +43,7 @@ _ENVIRONMENTS = {
 DEFAULT_ENVIRONMENT = "stage"
 TARGET_FEED_NAME = "your-feed"
 FEED_DEBUG_LOOKUP_LIMIT = 50
+SCORE_BREAKDOWN_MAX = 0.5
 
 _GENERATOR_TONES = {
     "two_tower": "green",
@@ -51,6 +52,10 @@ _GENERATOR_TONES = {
     "post_similarity": "violet",
     "network_likes": "cyan",
     "random_posts": "slate",
+}
+_MODEL_TONES = {
+    "two_tower": "green",
+    "perspective": "violet",
 }
 
 app = FastAPI(title="Feed Debug Viewer")
@@ -67,6 +72,18 @@ class ModelScoreView:
     name: str
     weight: float
     score: float
+
+
+@dataclass(frozen=True)
+class RankContributionView:
+    name: str
+    score: float
+    weight: float
+    contribution: float
+    scaled_contribution: float
+    tone: str
+    bottom_pct: float
+    height_pct: float
 
 
 @dataclass(frozen=True)
@@ -191,6 +208,11 @@ def _fmt_short_score(score: float) -> str:
     return f"{score:.2f}"
 
 
+def _diversification_relevance_contribution(div: DiversificationView) -> float:
+    """Displayed relevance term so: score = rel - author_penalty - content_penalty."""
+    return div.score + div.author_penalty + div.content_penalty
+
+
 def _model_specs_str(doc: FeedDebugDocument) -> str:
     if doc.model_scores:
         return ", ".join(f"{m.model_name}({m.weight:g})" for m in doc.model_scores)
@@ -199,6 +221,73 @@ def _model_specs_str(doc: FeedDebugDocument) -> str:
 
 def _generator_tone(name: str) -> str:
     return _GENERATOR_TONES.get(name, "slate")
+
+
+def _model_tone(name: str) -> str:
+    return _MODEL_TONES.get(name, "slate")
+
+
+def _rank_contributions(
+    model_scores: list[ModelScoreView],
+    *,
+    rank_total: float | None = None,
+    target_total: float | None = None,
+) -> list[RankContributionView]:
+    total_weight = sum(score.weight for score in model_scores)
+    if total_weight <= 0:
+        return []
+
+    raw = [
+        (
+            score,
+            score.score * score.weight / total_weight,
+        )
+        for score in model_scores
+    ]
+    if rank_total is None:
+        rank_total = sum(contribution for _, contribution in raw)
+    if target_total is not None and rank_total > 0:
+        scale_factor = target_total / rank_total
+    else:
+        scale_factor = 1.0
+
+    scaled = [
+        (
+            score,
+            contribution,
+            contribution * scale_factor,
+        )
+        for score, contribution in raw
+    ]
+    positive_only = all(scaled_contribution >= 0 for _, _, scaled_contribution in scaled)
+    scale = (100.0 if positive_only else 50.0) / SCORE_BREAKDOWN_MAX
+    positive_seen = 0.0
+    negative_seen = 0.0
+    contributions = []
+    for score, contribution, scaled_contribution in scaled:
+        height_pct = min(100.0, abs(scaled_contribution) * scale)
+        if positive_only:
+            bottom_pct = min(100.0, positive_seen * scale)
+            positive_seen += max(0.0, scaled_contribution)
+        elif scaled_contribution >= 0:
+            bottom_pct = min(100.0, 50.0 + positive_seen * scale)
+            positive_seen += scaled_contribution
+        else:
+            negative_seen += abs(scaled_contribution)
+            bottom_pct = max(0.0, 50.0 - negative_seen * scale)
+        contributions.append(
+            RankContributionView(
+                name=score.name,
+                score=score.score,
+                weight=score.weight,
+                contribution=contribution,
+                scaled_contribution=scaled_contribution,
+                tone=_model_tone(score.name),
+                bottom_pct=bottom_pct,
+                height_pct=height_pct,
+            )
+        )
+    return contributions
 
 
 def _at_uri_to_bsky_url(at_uri: str) -> str | None:
@@ -335,6 +424,101 @@ def _render_chip_group(label: str, chips: list[str], kind: str) -> str:
     )
 
 
+def _render_rank_visual(item: ItemView) -> str:
+    if item.final_position == 1:
+        return ""
+
+    div_score = item.diversification.score if item.diversification is not None else None
+    target_total = (
+        _diversification_relevance_contribution(item.diversification)
+        if item.diversification is not None
+        else None
+    )
+    contributions = _rank_contributions(
+        item.model_scores,
+        rank_total=item.rank_score,
+        target_total=target_total,
+    )
+    if not contributions:
+        return ""
+
+    total = item.rank_score
+    if total is None:
+        total = sum(contribution.contribution for contribution in contributions)
+    display_total = div_score if div_score is not None else total
+    chart_mode = (
+        "positive"
+        if all(contribution.contribution >= 0 for contribution in contributions)
+        else "diverging"
+    )
+    segments = "".join(
+        (
+            f'<span class="rank-segment rank-model-{_h(contribution.tone)}" '
+            f'style="height: {contribution.height_pct:.2f}%; '
+            f'bottom: {contribution.bottom_pct:.2f}%;" '
+            f'data-scaled-contribution="{contribution.scaled_contribution:.6f}" '
+            f'title="{_h(contribution.name)}: {_fmt_score(contribution.scaled_contribution)}">'
+            "</span>"
+        )
+        for contribution in contributions
+    )
+    diversity_bar = ""
+    if div_score is not None:
+        div_height_pct = min(100.0, max(0.0, div_score / SCORE_BREAKDOWN_MAX * 100.0))
+        diversity_bar = f"""
+        <div class="score-bar-column">
+          <div class="rank-bar score-bar score-bar-diversity">
+            <span class="rank-baseline"></span>
+            <span class="div-score-segment" style="height: {div_height_pct:.2f}%; bottom: 0;"
+              data-div-score="{div_score:.6f}" title="div score: {_fmt_score(div_score)}"></span>
+          </div>
+          <span class="bar-label">div score</span>
+        </div>
+        """
+    legend = "".join(
+        (
+            f'<div class="rank-legend-item">'
+            f'<span class="rank-swatch rank-model-{_h(contribution.tone)}"></span>'
+            f'<strong>{_h(contribution.name)}</strong>'
+            f'<span>score {_fmt_score(contribution.score)} -> '
+            f'{_fmt_score(contribution.scaled_contribution)}</span>'
+            "</div>"
+        )
+        for contribution in contributions
+    )
+    if div_score is not None:
+        legend += (
+            '<div class="rank-legend-item">'
+            '<span class="rank-swatch rank-model-diversity"></span>'
+            "<strong>diversity</strong>"
+            f"<span>score {_fmt_score(div_score)}</span>"
+            "</div>"
+        )
+    return f"""
+    <section class="rank-visual">
+      <div class="rank-visual-head">
+        <span>Score breakdown</span>
+        <strong>{_fmt_score(display_total)}</strong>
+      </div>
+      <div class="rank-visual-body">
+        <div class="rank-chart rank-chart-{_h(chart_mode)}">
+          <div class="score-bars">
+            <div class="score-bar-column">
+              <div class="rank-bar score-bar score-bar-rank">
+                <span class="rank-baseline"></span>
+                {segments}
+              </div>
+              <span class="bar-label">rank rel</span>
+            </div>
+            {diversity_bar}
+          </div>
+        </div>
+        <div class="rank-legend">{legend}</div>
+      </div>
+    </section>
+    """
+
+
 def _render_item(item: ItemView) -> str:
     rank_chips = []
     diversity_chips = []
@@ -354,7 +538,11 @@ def _render_item(item: ItemView) -> str:
         )
     if item.diversification is not None:
         diversity_chips.append(
-            _chip("div rel", _fmt_short_score(item.diversification.relevance), "div")
+            _chip(
+                "div rel",
+                _fmt_short_score(_diversification_relevance_contribution(item.diversification)),
+                "div",
+            )
         )
         diversity_chips.append(
             _chip("div score", _fmt_short_score(item.diversification.score), "div")
@@ -398,6 +586,10 @@ def _render_item(item: ItemView) -> str:
         )
     rank_group = _render_chip_group("Ranking", rank_chips, "rank")
     diversity_group = _render_chip_group("Diversity", diversity_chips, "diversity")
+    rank_visual = _render_rank_visual(item)
+    layout_class = "post-card-layout"
+    if not rank_visual:
+        layout_class += " post-card-layout-simple"
     return f"""
     <article class="feed-card">
       <div class="position position-{_h(primary_tone)}">#{item.final_position}</div>
@@ -413,8 +605,13 @@ def _render_item(item: ItemView) -> str:
           </div>
         </div>
         <div class="generator-row generator-row-card">{generators}</div>
-        {content}
-        <div class="debug-groups">{rank_group}{diversity_group}</div>
+        <div class="{layout_class}">
+          <div class="post-detail">
+            {content}
+            <div class="debug-groups">{rank_group}{diversity_group}</div>
+          </div>
+          {rank_visual}
+        </div>
       </div>
     </article>
     """
@@ -789,29 +986,152 @@ def _render_page(user: str, environment: str, main_html: str) -> str:
       white-space: nowrap;
     }}
     .post-text {{
-      margin: 10px 0 12px;
+      margin: 0 0 12px;
       color: #293349;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+    }}
+    .post-card-layout {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 390px;
+      gap: 14px;
+      align-items: start;
+    }}
+    .post-card-layout-simple {{ grid-template-columns: minmax(0, 1fr); }}
+    .post-detail {{ min-width: 0; }}
+    .rank-visual {{
+      display: grid;
+      gap: 10px;
+      background: #fbfcff;
+      border: 1px solid #ccd8ef;
+      border-radius: 8px;
+      margin: 0;
+      padding: 12px;
+    }}
+    .rank-visual-head {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+    }}
+    .rank-visual-head span {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }}
+    .rank-visual-head strong {{
+      color: var(--ink);
+      font-size: 24px;
+      line-height: 1;
+    }}
+    .rank-visual-body {{
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 14px;
+      align-items: end;
+    }}
+    .rank-chart {{
+      display: flex;
+      justify-content: center;
+      align-items: end;
+      min-height: 132px;
+      border-left: 1px solid #d9e1f1;
+      border-bottom: 1px solid #d9e1f1;
+      padding: 0 10px;
+    }}
+    .score-bars {{
+      display: flex;
+      align-items: flex-end;
+      gap: 18px;
+    }}
+    .score-bar-column {{
+      display: grid;
+      justify-items: center;
+      gap: 7px;
+    }}
+    .rank-bar {{
+      position: relative;
+      width: 44px;
+      height: 120px;
+      background: #eef2f9;
+      border-radius: 7px 7px 3px 3px;
+      overflow: hidden;
+    }}
+    .rank-baseline {{
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 1px;
+      background: #718096;
+      z-index: 2;
+    }}
+    .rank-chart-diverging .rank-baseline {{ bottom: 50%; }}
+    .rank-segment {{
+      position: absolute;
+      left: 0;
+      right: 0;
+      min-height: 2px;
+      box-shadow: inset 0 1px 0 rgb(255 255 255 / 30%);
+    }}
+    .rank-model-green {{ background: #20996a; }}
+    .rank-model-violet {{ background: #7c4bd1; }}
+    .rank-model-blue {{ background: #2f6dd2; }}
+    .rank-model-slate {{ background: #637084; }}
+    .rank-model-diversity,
+    .div-score-segment {{ background: #16724a; }}
+    .div-score-segment {{
+      position: absolute;
+      left: 0;
+      right: 0;
+      min-height: 2px;
+      box-shadow: inset 0 1px 0 rgb(255 255 255 / 30%);
+    }}
+    .bar-label {{
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 850;
+      text-transform: uppercase;
+    }}
+    .rank-legend {{
+      display: grid;
+      gap: 7px;
+      align-content: end;
+    }}
+    .rank-legend-item {{
+      display: grid;
+      grid-template-columns: auto max-content 1fr;
+      gap: 7px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .rank-legend-item strong {{ color: var(--ink); }}
+    .rank-swatch {{
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      border-radius: 3px;
     }}
     .debug-groups {{
       display: grid;
       gap: 8px;
       grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-      margin-top: 12px;
+      margin-top: 8px;
     }}
     .debug-group {{
       border: 1px solid var(--group-border);
       border-radius: 8px;
       background: var(--group-bg);
-      padding: 9px;
+      padding: 7px;
     }}
     .debug-group h3 {{
       color: var(--group-label);
-      font-size: 11px;
+      font-size: 10px;
       font-weight: 900;
       letter-spacing: 0;
-      margin: 0 0 7px;
+      margin: 0 0 6px;
       text-transform: uppercase;
     }}
     .debug-group-rank {{
@@ -832,8 +1152,8 @@ def _render_page(user: str, environment: str, main_html: str) -> str:
       border-radius: 999px;
       border: 1px solid var(--line);
       background: #f8fafc;
-      padding: 4px 8px;
-      font-size: 12px;
+      padding: 3px 7px;
+      font-size: 11px;
     }}
     .chip span {{ color: var(--muted); font-weight: 750; }}
     .chip strong {{ color: var(--ink); font-weight: 850; }}
@@ -844,11 +1164,17 @@ def _render_page(user: str, environment: str, main_html: str) -> str:
     @media (max-width: 760px) {{
       .toolbar {{ grid-template-columns: 1fr; }}
       .feed-card {{ grid-template-columns: 52px minmax(0, 1fr); }}
+      .post-card-layout {{ grid-template-columns: 1fr; }}
+      .rank-visual {{ max-width: 390px; }}
       header.top {{ display: block; }}
     }}
     @media (max-width: 520px) {{
       .shell {{ width: min(100vw - 20px, 1120px); margin-top: 16px; }}
       .item-header {{ display: block; }}
+      .rank-visual {{ max-width: none; }}
+      .rank-visual-body {{ grid-template-columns: 120px minmax(0, 1fr); }}
+      .rank-chart {{ min-height: 112px; padding: 0 6px; }}
+      .rank-bar {{ width: 34px; height: 100px; }}
       .card-actions {{ align-items: flex-start; margin-top: 8px; }}
       .media-row {{ justify-content: flex-start; margin-top: 8px; }}
     }}
