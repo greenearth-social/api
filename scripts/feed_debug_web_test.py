@@ -118,22 +118,30 @@ def test_render_debug_doc_includes_summary_and_feed_card():
     assert "followed_users" in html
     assert "gen-green" in html
     assert "0.71" in html
-    assert "#3 model 0.66" in html
     assert "post-card-layout" in html
-    assert "post-card-layout-simple" in html
-    assert '<section class="rank-visual">' not in html
+    assert '<div class="post-card-layout-simple">' not in html
+    assert '<section class="rank-visual">' in html
+    assert "<span>Rank scores</span>" in html
+    assert '<strong>final rank</strong><span>0.66</span>' in html
     assert "<span>Score breakdown</span>" not in html
-    assert "debug-group-rank" in html
-    assert "debug-group-diversity" in html
-    assert "<h3>Ranking</h3>" in html
-    assert "<h3>Diversity</h3>" in html
-    assert "div rel</span><strong>1.00" in html
-    assert "div score" in html
+    assert "debug-group-rank" not in html
+    assert "debug-group-diversity" not in html
+    assert "<h3>Ranking</h3>" not in html
+    assert "<h3>Diversity</h3>" not in html
+    assert "div rel</span><strong>1.00" not in html
+    assert "div score" not in html
+    assert "at://did:plc:author/app.bsky.feed.post/abc" not in html
     assert (
         'href="https://bsky.app/profile/did:plc:author/post/abc" '
         'target="_blank" rel="noopener noreferrer"'
     ) in html
     assert "Open in Bluesky" in html
+    assert '<div class="card-actions">' in html
+    assert '<div class="media-row"><span class="media-badge">2 images</span>' in html
+    assert '<span class="penalty-badge">div penalty 0.30</span>' in html
+    assert html.index("Solar farms are looking especially good today.") < html.index(
+        '<div class="card-actions">'
+    )
 
 
 def test_no_records_message_is_presentable():
@@ -201,7 +209,7 @@ def test_diversification_relevance_contribution_makes_score_add_up():
     assert cli._diversification_relevance_contribution(div) == 1.0
 
 
-def test_score_breakdown_renders_for_non_first_post_with_half_scale():
+def test_rank_score_axis_renders_for_non_first_post():
     item = web.ItemView(
         at_uri="at://did:plc:author/app.bsky.feed.post/abc",
         post_url="https://bsky.app/profile/did:plc:author/post/abc",
@@ -228,33 +236,28 @@ def test_score_breakdown_renders_for_non_first_post_with_half_scale():
     html = web._render_rank_visual(item)
 
     assert "rank-visual" in html
-    assert "<span>Score breakdown</span>" in html
-    assert "<strong>0.34</strong>" in html
-    assert 'height: 55.68%; bottom: 0.00%;' in html
-    assert 'height: 42.32%; bottom: 55.68%;' in html
-    assert 'data-scaled-contribution="0.278409"' in html
-    assert 'data-scaled-contribution="0.211591"' in html
-    assert 'data-div-score="0.340000"' in html
-    assert 'style="height: 68.00%; bottom: 0;"' in html
-    assert "score 0.75 -> 0.28" in html
-    assert "score 0.57 -> 0.21" in html
+    assert "<span>Rank scores</span>" in html
+    assert "<strong>0.66</strong>" in html
+    assert "score-axis-line" in html
+    assert "score-axis-zero" in html
+    assert "score-dot-model rank-model-green" in html
+    assert "score-dot-model rank-model-violet" in html
+    assert "score-dot-final" in html
+    assert 'style="left: 87.50%;" data-score="0.750000"' in html
+    assert 'style="left: 78.50%;" data-score="0.570000"' in html
+    assert 'style="left: 83.00%;" data-final-score="0.660000"' in html
+    assert "<strong>two_tower</strong><span>0.75</span>" in html
+    assert "<strong>perspective</strong><span>0.57</span>" in html
+    assert "<strong>final rank</strong><span>0.66</span>" in html
+    assert "score-bars" not in html
 
 
-def test_rank_contributions_scale_to_diversity_relevance():
-    contributions = web._rank_contributions(
-        [
-            web.ModelScoreView("two_tower", 1.0, 0.75),
-            web.ModelScoreView("perspective", 1.0, 0.57),
-        ],
-        rank_total=0.66,
-        target_total=0.49,
-    )
-
-    assert round(contributions[0].scaled_contribution, 6) == 0.278409
-    assert round(contributions[1].scaled_contribution, 6) == 0.211591
-    assert round(contributions[0].height_pct, 2) == 55.68
-    assert round(contributions[1].height_pct, 2) == 42.32
-    assert round(contributions[1].bottom_pct, 2) == 55.68
+def test_score_axis_position_maps_negative_one_to_one_range():
+    assert web._score_axis_position_pct(-1.0) == 0.0
+    assert web._score_axis_position_pct(0.0) == 50.0
+    assert web._score_axis_position_pct(1.0) == 100.0
+    assert web._score_axis_position_pct(-2.0) == 0.0
+    assert web._score_axis_position_pct(2.0) == 100.0
 
 
 def test_latest_target_feed_debug_filters_to_your_feed():
