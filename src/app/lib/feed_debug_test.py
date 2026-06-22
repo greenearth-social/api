@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from .candidates.base import CandidateResult
-from .diversify import mmr_rerank
+from .diversify import BETA, mmr_rerank
 from .embeddings import encode_float32_b64
 from .feed_debug import (
     CONTENT_SNIPPET_MAX,
@@ -225,8 +225,12 @@ class TestDiversificationCapture:
             mmr_rerank([a, b])
 
         assert [e[0] for e in rec.diversification] == ["at://a", "at://b"]
-        # First pick: selected on relevance alone, no penalty.
-        assert rec.diversification[0] == ("at://a", 1.0, 1.0, 0.0, 0.0)
+        # First pick: selected on weighted relevance alone, no penalty.
+        _, rel, score, author_pen, content_pen = rec.diversification[0]
+        assert rel == pytest.approx(1.0)
+        assert score == pytest.approx((1 - BETA) * 1.0)
+        assert author_pen == pytest.approx(0.0)
+        assert content_pen == pytest.approx(0.0)
         # Second pick: author_penalty = BETA * AUTHOR_WEIGHT * 1 = 0.5 * 0.75.
         _, rel, score, author_pen, content_pen = rec.diversification[1]
         assert rel == pytest.approx(0.5)

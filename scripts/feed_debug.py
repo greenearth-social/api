@@ -117,6 +117,11 @@ def _fmt_score(score: float | None) -> str:
     return f"{score:.4f}" if score is not None else "—"
 
 
+def _diversification_relevance_contribution(div) -> float:
+    """Displayed relevance term so: score = rel - author_penalty - content_penalty."""
+    return div.score + div.author_penalty + div.content_penalty
+
+
 def _model_specs_str(doc: FeedDebugDocument) -> str:
     """Configured rank models with weights, e.g. 'two_tower(1), perspective(1)'.
 
@@ -326,7 +331,7 @@ def _item_panel(
     if div is not None:
         diversify_line = Text()
         diversify_line.append("diversify    rel ", style="dim")
-        diversify_line.append(f"{div.relevance:.3f}", style="white")
+        diversify_line.append(f"{_diversification_relevance_contribution(div):.3f}", style="white")
         diversify_line.append("   −author ", style="dim")
         diversify_line.append(f"{div.author_penalty:.3f}", style="magenta")
         diversify_line.append("   −content ", style="dim")

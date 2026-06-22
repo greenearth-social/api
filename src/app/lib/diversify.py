@@ -50,10 +50,16 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
 
     while remaining:
         if not selected:
-            best = max(remaining, key=lambda i: norm_scores[i])
+            best = max(remaining, key=lambda i: (1 - BETA) * norm_scores[i])
             if diag is not None:
                 diag.append(
-                    (candidates[best].at_uri or "", norm_scores[best], norm_scores[best], 0.0, 0.0)
+                    (
+                        candidates[best].at_uri or "",
+                        norm_scores[best],
+                        (1 - BETA) * norm_scores[best],
+                        0.0,
+                        0.0,
+                    )
                 )
         else:
             best = max(
