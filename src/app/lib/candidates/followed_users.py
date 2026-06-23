@@ -33,7 +33,7 @@ async def followed_users_search(
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
 ) -> list[CandidatePost]:
-    """Fetch posts from users followed by user_did from the ``posts`` index."""
+    """Fetch posts from users followed by user_did from the ``posts_recent`` index."""
 
     filters: list[dict] = []
     if video_only:
@@ -75,7 +75,7 @@ async def followed_users_search(
         num_candidates=num_candidates,
     ):
         resp = await es.search(
-            index="posts",
+            index="posts_recent",
             query=query,
             size=fetch_size,
             sort=[{"created_at": "desc"}],

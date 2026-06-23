@@ -111,7 +111,7 @@ async def popularity_search(
 
     async with timed(logger, "es_popularity", num_candidates=num_candidates):
         resp = await es.search(
-            index="posts",
+            index="posts_recent",
             query=query,
             size=fetch_size,
             _source=CANDIDATE_SOURCE_FIELDS,

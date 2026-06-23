@@ -44,7 +44,7 @@ def test_predict_keeps_candidate_uris_aligned_with_embeddings(monkeypatch):
         fake_fetch_recent_liked_post_uris,
     )
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris):
+    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index=None):
         if at_uris == ["at://liked/1"]:
             return [("at://liked/1", [0.5, 0.5], "did:plc:liked")]
         return [
@@ -102,7 +102,7 @@ def test_predict_calls_user_tower_with_empty_history_when_user_has_no_likes(monk
     async def fake_fetch_recent_liked_post_uris(es, user_did):
         return []
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris):
+    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index=None):
         seen.setdefault("fetch_post_embeddings_calls", []).append(at_uris)
         return [("at://post/a", [2.0, 0.0], "did:plc:a")]
 
@@ -161,7 +161,7 @@ def test_predict_calls_user_tower_with_empty_history_when_likes_have_no_embeddin
     async def fake_fetch_recent_liked_post_uris(es, user_did):
         return ["at://liked/1"]
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris):
+    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index=None):
         seen.setdefault("fetch_post_embeddings_calls", []).append(at_uris)
         if at_uris == ["at://liked/1"]:
             return []
@@ -224,7 +224,7 @@ def test_predict_returns_unscored_candidates_when_candidate_embeddings_are_missi
     async def fake_fetch_recent_liked_post_uris(es, user_did):
         return []
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris):
+    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index=None):
         return []
 
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
@@ -279,7 +279,7 @@ def test_predict_raises_when_user_tower_returns_wrong_number_of_embeddings(monke
     async def fake_fetch_recent_liked_post_uris(es, user_did):
         return ["at://liked/1"]
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris):
+    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index=None):
         if at_uris == ["at://liked/1"]:
             return [("at://liked/1", [0.5, 0.5], "did:plc:liked")]
         return [("at://post/a", [1.0, 0.0], "did:plc:a")]

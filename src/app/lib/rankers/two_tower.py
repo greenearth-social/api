@@ -125,7 +125,7 @@ class TwoTowerRanker(Ranker):
                     missing_uris.append(uri)
 
                 if missing_uris:
-                    fetched = await fetch_post_embeddings_and_authors(es, missing_uris)
+                    fetched = await fetch_post_embeddings_and_authors(es, missing_uris, index="posts_recent")
                     uris_embs_authors.extend(fetched)
 
                 if not uris_embs_authors:

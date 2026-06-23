@@ -16,7 +16,7 @@ async def random_posts_search(
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
 ) -> list[CandidatePost]:
-    """Fetch random posts from the ``posts`` index."""
+    """Fetch random posts from the ``posts_recent`` index."""
 
     filters: list[dict] = []
     if video_only:
@@ -37,7 +37,7 @@ async def random_posts_search(
     fetch_size = num_candidates + len(exclude_uris or [])
 
     resp = await es.search(
-        index="posts",
+        index="posts_recent",
         query=query,
         size=fetch_size,
         _source=CANDIDATE_SOURCE_FIELDS,

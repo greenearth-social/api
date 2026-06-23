@@ -219,7 +219,7 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
 
     try:
         async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
-            pairs = await fetch_post_embeddings(es, missing)
+            pairs = await fetch_post_embeddings(es, missing, index="posts_recent")
     except Exception:
         # If the refetch fails, MMR falls back to author-only similarity
         # and the two-tower ranker has its own refetch path. Don't fail

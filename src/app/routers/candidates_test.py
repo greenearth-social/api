@@ -52,7 +52,8 @@ def fake_app_es():
                             ]
                         }
                     }
-                # function_score (popularity) or kNN (post_similarity)
+            if index == "posts_recent":
+                # function_score (popularity, random_posts)
                 if isinstance(query, dict) and "function_score" in query:
                     return {
                         "hits": {
@@ -76,7 +77,6 @@ def fake_app_es():
                             ]
                         }
                     }
-            if index == "posts_recent":
                 # kNN search result (post_similarity)
                 return {
                     "hits": {

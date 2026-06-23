@@ -60,7 +60,7 @@ class TestFollowedUsersSearch:
             fake_get_followed_user_dids,
         )
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {
@@ -111,7 +111,7 @@ class TestFollowedUsersSearch:
 
         assert len(es.calls) == 1
         call = es.calls[0]
-        assert call["index"] == "posts"
+        assert call["index"] == "posts_recent"
         assert call["size"] == 20  # num_candidates=20, no exclude_uris
         assert call["sort"] == [{"created_at": "desc"}]
 
@@ -149,7 +149,7 @@ class TestFollowedUsersSearch:
     async def test_exclude_uris_overfetches_and_filters_in_python(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {
@@ -225,7 +225,7 @@ class TestFollowedUsersSearch:
     async def test_generator_name_defaults_to_none(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {
@@ -255,7 +255,7 @@ class TestFollowedUsersCandidateGenerator:
     async def test_generate(self, generator, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {

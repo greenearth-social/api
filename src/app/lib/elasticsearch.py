@@ -107,6 +107,7 @@ async def fetch_recent_liked_post_uris(
 async def fetch_post_embeddings(
     es,
     at_uris: list[str],
+    index: str = "posts",
 ) -> list[tuple[str, list[float]]]:
     """Fetch MiniLM L12 embeddings for a list of post AT URIs.
 
@@ -124,7 +125,7 @@ async def fetch_post_embeddings(
             query = {"terms": {"at_uri": at_uris}}
 
             resp = await es.search(
-                index="posts",
+                index=index,
                 query=query,
                 size=len(at_uris),
                 _source=[
@@ -159,13 +160,14 @@ async def fetch_post_embeddings(
     cache = get_request_cache()
     if cache is None:
         return await _fetch()
-    key = ("fetch_post_embeddings", tuple(at_uris))
+    key = ("fetch_post_embeddings", index, tuple(at_uris))
     return await cache.get_or_compute(key, _fetch)
 
 
 async def fetch_post_embeddings_and_authors(
     es,
     at_uris: list[str],
+    index: str = "posts",
 ) -> list[tuple[str, list[float], str]]:
     """Fetch MiniLM L12 embeddings for a list of post AT URIs, as well as their author DIDs.
 
@@ -184,7 +186,7 @@ async def fetch_post_embeddings_and_authors(
             query = {"terms": {"at_uri": at_uris}}
 
             resp = await es.search(
-                index="posts",
+                index=index,
                 query=query,
                 size=len(at_uris),
                 _source=[
@@ -225,5 +227,5 @@ async def fetch_post_embeddings_and_authors(
     cache = get_request_cache()
     if cache is None:
         return await _fetch()
-    key = ("fetch_post_embeddings_and_authors", tuple(at_uris))
+    key = ("fetch_post_embeddings_and_authors", index, tuple(at_uris))
     return await cache.get_or_compute(key, _fetch)

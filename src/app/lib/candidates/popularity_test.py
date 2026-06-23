@@ -39,7 +39,7 @@ class TestPopularitySearch:
     @pytest.mark.asyncio
     async def test_returns_candidates_scored(self):
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {
@@ -82,7 +82,7 @@ class TestPopularitySearch:
 
         assert len(es.calls) == 1
         call = es.calls[0]
-        assert call["index"] == "posts"
+        assert call["index"] == "posts_recent"
         assert call["size"] == 20
 
         query = call["query"]
@@ -118,7 +118,7 @@ class TestPopularitySearch:
     @pytest.mark.asyncio
     async def test_exclude_uris_overfetches_and_filters_in_python(self):
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {
@@ -164,7 +164,7 @@ class TestPopularitySearch:
     @pytest.mark.asyncio
     async def test_handles_missing_embeddings(self):
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {
@@ -185,7 +185,7 @@ class TestPopularitySearch:
     @pytest.mark.asyncio
     async def test_generator_name_defaults_to_none(self):
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {
@@ -216,7 +216,7 @@ class TestPopularityCandidateGenerator:
     @pytest.mark.asyncio
     async def test_generate(self, generator):
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {

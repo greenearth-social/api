@@ -31,7 +31,7 @@ class TestRandomPostsSearch:
     @pytest.mark.asyncio
     async def test_returns_candidates_scored(self):
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {
@@ -75,7 +75,7 @@ class TestRandomPostsSearch:
 
         assert len(es.calls) == 1
         call = es.calls[0]
-        assert call["index"] == "posts"
+        assert call["index"] == "posts_recent"
         assert call["size"] == 20
 
         query = call["query"]
@@ -100,7 +100,7 @@ class TestRandomPostsSearch:
     @pytest.mark.asyncio
     async def test_exclude_uris_overfetches_and_filters_in_python(self):
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {
@@ -152,7 +152,7 @@ class TestRandomPostsCandidateGenerator:
     @pytest.mark.asyncio
     async def test_generate(self, generator):
         es = FakeEs(responses={
-            "posts": {
+            "posts_recent": {
                 "hits": {
                     "hits": [
                         {
