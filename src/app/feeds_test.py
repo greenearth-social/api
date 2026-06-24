@@ -29,3 +29,11 @@ class TestFeedsRegistry:
             assert cfg.gen_request_template.infill is None
             assert cfg.rank_request_template is None
             assert cfg.diversify is False
+
+    def test_personalized_feeds_use_heavy_ranker_and_perspective(self):
+        for feed_name in ("your-feed", "best-of-friends"):
+            cfg = FEEDS[feed_name]
+            assert cfg.rank_request_template is not None
+            assert [
+                spec.name for spec in cfg.rank_request_template.models
+            ] == ["heavy_ranker", "perspective"]

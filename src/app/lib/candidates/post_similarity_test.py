@@ -10,7 +10,7 @@ from ..candidates.post_similarity import (
     fetch_recent_liked_post_uris,
 )
 from ..candidates.utils import candidate_post_from_hit
-from ..elasticsearch import fetch_post_embeddings_and_authors
+from ..elasticsearch import fetch_post_embeddings_and_authors, fetch_recent_liked_post_uris_and_times
 from ..embeddings import MINILM_L12_EMBEDDING_FIELD, MINILM_L12_EMBEDDING_KEY
 
 # ---------------------------------------------------------------------------
@@ -92,6 +92,69 @@ class TestFetchRecentLikedPostUris:
         })
         uris = await fetch_recent_liked_post_uris(es, "did:plc:user1")
         assert uris == ["at://post/1", "at://post/3"]
+
+
+class TestFetchRecentLikedPostUrisAndTimes:
+    @pytest.mark.asyncio
+    async def test_returns_subject_uris_and_times(self):
+        es = FakeEs(responses={
+            "likes": {
+                "hits": {
+                    "hits": [
+                        {"_source": {"subject_uri": "at://post/1", "created_at": "2026-01-01T00:00:00+00:00"}},
+                        {"_source": {"subject_uri": "at://post/2", "created_at": "2026-01-02T00:00:00+00:00"}},
+                    ]
+                }
+            }
+        })
+        uris, times = await fetch_recent_liked_post_uris_and_times(es, "did:plc:user1", limit=10)
+
+        assert uris == ["at://post/1", "at://post/2"]
+        assert times == ["2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"]
+
+        call = es.calls[0]
+        assert call["index"] == "likes"
+        assert call["query"] == {
+            "bool": {
+                "filter": [
+                    {"terms": {"author_did": ["did:plc:user1"]}},
+                    {"exists": {"field": "created_at"}},
+                ],
+            }
+        }
+        assert call["sort"] == [{"created_at": "desc"}]
+        assert call["_source"] == ["subject_uri", "created_at"]
+
+    @pytest.mark.asyncio
+    async def test_skips_hits_missing_subject_uri_or_time_to_keep_lists_aligned(self):
+        es = FakeEs(responses={
+            "likes": {
+                "hits": {
+                    "hits": [
+                        {"_source": {"subject_uri": "at://post/1", "created_at": "2026-01-01T00:00:00+00:00"}},
+                        {"_source": {"created_at": "2026-01-02T00:00:00+00:00"}},
+                        {"_source": {"subject_uri": "at://post/3"}},
+                        {"_source": {"subject_uri": "at://post/4", "created_at": "2026-01-04T00:00:00+00:00"}},
+                    ]
+                }
+            }
+        })
+
+        uris, times = await fetch_recent_liked_post_uris_and_times(es, ["did:plc:user1", "did:plc:user2"])
+
+        assert uris == ["at://post/1", "at://post/4"]
+        assert times == ["2026-01-01T00:00:00+00:00", "2026-01-04T00:00:00+00:00"]
+        assert len(uris) == len(times)
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_without_search_for_empty_users(self):
+        es = FakeEs()
+
+        uris, times = await fetch_recent_liked_post_uris_and_times(es, [])
+
+        assert uris == []
+        assert times == []
+        assert es.calls == []
 
 
 class TestFetchPostEmbeddings:

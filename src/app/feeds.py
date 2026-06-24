@@ -72,7 +72,7 @@ FEEDS: dict[str, FeedConfig] = {
         ),
         rank_request_template=RankPredictRequest.model_construct(
             models=[
-                RankModelSpec(name="two_tower", weight=1.0),
+                RankModelSpec(name="heavy_ranker", weight=1.0),
                 RankModelSpec(name="perspective", weight=1.0),
             ],
         ),
@@ -92,7 +92,7 @@ FEEDS: dict[str, FeedConfig] = {
         ),
         rank_request_template=RankPredictRequest.model_construct(
             models=[
-                RankModelSpec(name="two_tower", weight=1.0),
+                RankModelSpec(name="heavy_ranker", weight=1.0),
                 RankModelSpec(name="perspective", weight=1.0),
             ],
         ),

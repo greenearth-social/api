@@ -20,6 +20,7 @@ from ..inference import (
     raise_inference_response_error,
     compute_user_embedding,
 )
+from .utils import get_rank_predict_results_from_candidates_and_scores
 
 
 logger = logging.getLogger(__name__)
@@ -196,41 +197,9 @@ class TwoTowerRanker(Ranker):
                 )
             final_scores.append(sum([ u*p for u,p in zip(post_embedding, output_user_embedding)]))
 
-        # Rank by the final scores, breaking ties by original order in candidates list
-        candidates_with_scores = zip(ranked_candidates_input, final_scores)
-        ranked_candidates = sorted(
-            enumerate(candidates_with_scores), # (index, (candidate, score))
-            key=lambda item: (
-                -(item[1][1] if item[1][1] is not None else float("-inf")),
-                item[0],
-            ),
-        )
-
-        # Get in correct output format
-        rankings: list[RankedCandidate] = []
-        for rank_idx, (_, (candidate, score)) in enumerate(ranked_candidates, start=1):
-            assert candidate.at_uri is not None
-            rankings.append(
-                RankedCandidate(
-                    at_uri=candidate.at_uri,
-                    rank=rank_idx,
-                    rank_score=score,
-                )
-            )
-
-        ranked_uris = {ranking.at_uri for ranking in rankings}
-        for candidate in valid_candidates:
-            if candidate.at_uri is None or candidate.at_uri in ranked_uris:
-                continue
-            rankings.append(
-                RankedCandidate(
-                    at_uri=candidate.at_uri,
-                    rank=len(rankings) + 1,
-                    rank_score=None,
-                )
-            )
-
-        result = RankPredictResult(
-            rankings=rankings,
+        result = get_rank_predict_results_from_candidates_and_scores(
+            ranked_candidates_input,
+            final_scores,
+            valid_candidates
         )
         return RankerResult(model=self.name, result=result)

@@ -70,6 +70,85 @@ def test_extract_inference_outputs_raises_for_malformed_payload():
         inference_module._extract_inference_outputs("user-tower", {})
 
 
+def test_extract_inference_outputs_accepts_ranker_score_list():
+    assert inference_module._extract_inference_outputs(
+        "ranker",
+        {"outputs": [0.1, -0.2]},
+    ) == [0.1, -0.2]
+
+
+@pytest.mark.asyncio
+async def test_predict_heavy_ranker_single_user_posts_ranker_payload(monkeypatch):
+    class FakeResponse:
+        is_error = False
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"outputs": [0.7, -0.1]}
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        async def post(self, url, json, headers):
+            self.calls.append({"url": url, "json": json, "headers": headers})
+            return FakeResponse()
+
+    client = FakeClient()
+    monkeypatch.setattr(inference_module, "get_http_client", lambda: client)
+
+    result = await inference_module.predict_heavy_ranker_single_user(
+        history_embeddings=[[1.0, 0.0]],
+        history_author_dids=["did:plc:history"],
+        history_liked_at_times=["2026-01-01T00:00:00+00:00"],
+        candidate_post_embeddings=[[0.0, 1.0], [1.0, 1.0]],
+        candidate_author_dids=["did:plc:candidate-a", "did:plc:candidate-b"],
+        base_url="https://inference.example",
+        api_key="secret",
+    )
+
+    assert result == [0.7, -0.1]
+    assert client.calls == [
+        {
+            "url": "https://inference.example/models/ranker/predict",
+            "headers": {"X-API-Key": "secret"},
+            "json": {
+                "history_embeddings": [[1.0, 0.0]],
+                "history_author_dids": ["did:plc:history"],
+                "history_liked_at_times": ["2026-01-01T00:00:00+00:00"],
+                "candidate_post_embeddings": [[0.0, 1.0], [1.0, 1.0]],
+                "candidate_author_dids": ["did:plc:candidate-a", "did:plc:candidate-b"],
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_predict_heavy_ranker_single_user_raises_for_http_error(monkeypatch):
+    class FakeResponse:
+        is_error = True
+        status_code = 503
+        text = "ranker unavailable"
+
+    class FakeClient:
+        async def post(self, url, json, headers):
+            return FakeResponse()
+
+    monkeypatch.setattr(inference_module, "get_http_client", lambda: FakeClient())
+
+    with pytest.raises(RuntimeError, match="ranker inference failed status=503"):
+        await inference_module.predict_heavy_ranker_single_user(
+            history_embeddings=[],
+            history_author_dids=[],
+            history_liked_at_times=[],
+            candidate_post_embeddings=[[0.0, 1.0]],
+            candidate_author_dids=["did:plc:candidate"],
+            base_url="https://inference.example",
+            api_key="secret",
+        )
+
+
 @pytest.mark.asyncio
 async def test_cached_post_tower_uuid_reuses_successful_lookup(monkeypatch):
     calls = 0

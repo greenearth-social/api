@@ -51,6 +51,7 @@ def test_list_models(app):
             "candidate_score",
             "two_tower",
             "perspective",
+            "heavy_ranker",
         ]
     }
 

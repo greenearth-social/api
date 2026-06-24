@@ -80,7 +80,7 @@ def _decode_inference_json(source_name: str, resp) -> object:
 def _extract_inference_outputs(
     source_name: str,
     payload: object,
-) -> list[list[float]]:
+) -> list:
     if not isinstance(payload, dict):
         raise InferenceResponseFormatError(
             f"{source_name} inference response was not an object",
@@ -153,6 +153,45 @@ async def predict_user_tower_single(
         raise_inference_response_error("user-tower", resp.status_code, resp.text)
     payload = _decode_inference_json("user-tower", resp)
     return _extract_inference_outputs("user-tower", payload)
+
+
+async def predict_heavy_ranker_single_user(
+    history_embeddings: list[list[float]],
+    history_author_dids: list[str],
+    history_liked_at_times: list[str],
+    candidate_post_embeddings: list[list[float]],
+    candidate_author_dids: list[str],
+    *,
+    base_url: str,
+    api_key: str,
+) -> list[float]:
+    url = f"{base_url}/models/ranker/predict"
+    headers = build_inference_headers(api_key)
+    payload = {
+        "history_embeddings": history_embeddings,
+        "history_author_dids": history_author_dids,
+        "history_liked_at_times": history_liked_at_times,
+        "candidate_post_embeddings": candidate_post_embeddings,
+        "candidate_author_dids": candidate_author_dids,
+    }
+
+    client = get_http_client()
+    async with timed(
+        logger,
+        "ranker_predict_http",
+        n_history=len(history_embeddings),
+        n_candidates=len(candidate_post_embeddings)
+    ):
+        resp = await client.post(url, json=payload, headers=headers)
+    if resp.is_error:
+        logger.error(
+            "ranker predict failed status=%s body=%s",
+            resp.status_code,
+            resp.text,
+        )
+        raise_inference_response_error("ranker", resp.status_code, resp.text)
+    payload = _decode_inference_json("ranker", resp)
+    return _extract_inference_outputs("ranker", payload)
 
 
 async def compute_user_embedding(
