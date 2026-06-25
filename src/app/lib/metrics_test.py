@@ -108,6 +108,50 @@ def test_attributes_attached_to_histogram():
                     assert attrs.get("feed_name") == "nature"
 
 
+def _attrs_for(reader, name: str) -> dict:
+    data = _get_metrics_data(reader)
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name == name:
+                    return dict(metric.data.data_points[0].attributes or {})
+    raise AssertionError(f"{name} not found in exported metrics")
+
+
+def test_endpoint_label_added_from_context():
+    from .request_context import reset_endpoint, set_endpoint
+
+    collector, reader = _make_collector()
+    token = set_endpoint("get_feed_skeleton")
+    try:
+        collector.record("feed.render.duration_ms", 50.0, feed_name="nature")
+    finally:
+        reset_endpoint(token)
+
+    attrs = _attrs_for(reader, "feed.render.duration_ms")
+    assert attrs.get("endpoint") == "get_feed_skeleton"
+    assert attrs.get("feed_name") == "nature"
+
+
+def test_no_endpoint_label_outside_request_context():
+    collector, reader = _make_collector()
+    collector.record("feed.render.duration_ms", 50.0)
+    assert "endpoint" not in _attrs_for(reader, "feed.render.duration_ms")
+
+
+def test_explicit_endpoint_attribute_wins():
+    from .request_context import reset_endpoint, set_endpoint
+
+    collector, reader = _make_collector()
+    token = set_endpoint("get_feed_skeleton")
+    try:
+        collector.record("something.latency", 1.0, endpoint="explicit")
+    finally:
+        reset_endpoint(token)
+
+    assert _attrs_for(reader, "something.latency").get("endpoint") == "explicit"
+
+
 # ---------------------------------------------------------------------------
 # Lazy instrument reuse
 # ---------------------------------------------------------------------------

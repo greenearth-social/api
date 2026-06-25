@@ -38,9 +38,15 @@ from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
 from .lib.metrics import MetricCollector, set_metric_collector
 from .lib.profiling import install_profiling
-from .lib.request_context import reset_request_id, set_request_id
+from .lib.request_context import (
+    reset_endpoint,
+    reset_request_id,
+    set_endpoint,
+    set_request_id,
+)
 
 from elasticsearch import AsyncElasticsearch
+from starlette.routing import Match
 
 
 @asynccontextmanager
@@ -213,21 +219,45 @@ app = FastAPI(
 install_profiling(app)
 
 
+def _resolve_endpoint(request: Request) -> str | None:
+    """Return the name of the route that will handle *request*.
+
+    Matching is done up front (before ``call_next``) so the endpoint is
+    available as a ContextVar throughout request handling, including in
+    background tasks spawned from the handler. Returns ``None`` for requests
+    that don't fully match a named route (e.g. 404s), so we never tag metrics
+    with an arbitrary, high-cardinality label.
+    """
+    for route in request.app.routes:
+        match, _ = route.matches(request.scope)
+        if match is Match.FULL:
+            return getattr(route, "name", None)
+    return None
+
+
 @app.middleware("http")
 async def request_id_mw(request: Request, call_next):
-    """Stamp a server-generated request ID on every request.
+    """Stamp a server-generated request ID and the endpoint on every request.
 
     The ID is set as a ContextVar so log lines emitted on the request
     path (via ``timed()`` or otherwise) can include it. We deliberately
     ignore any inbound ``x-request-id`` header to avoid log forging or
     correlation poisoning from untrusted callers.
+
+    The matched endpoint name is likewise stored in a ContextVar so metrics
+    recorded anywhere on the request path are tagged with the endpoint that
+    generated them (see ``MetricCollector.record``).
     """
     rid = uuid.uuid4().hex[:12]
-    token = set_request_id(rid)
+    rid_token = set_request_id(rid)
+    endpoint = _resolve_endpoint(request)
+    endpoint_token = set_endpoint(endpoint) if endpoint is not None else None
     try:
         response = await call_next(request)
     finally:
-        reset_request_id(token)
+        reset_request_id(rid_token)
+        if endpoint_token is not None:
+            reset_endpoint(endpoint_token)
     response.headers["x-request-id"] = rid
     return response
 

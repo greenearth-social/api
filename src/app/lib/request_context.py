@@ -21,6 +21,14 @@ from contextvars import ContextVar, Token
 
 _request_id: ContextVar[str | None] = ContextVar("ge_request_id", default=None)
 
+# The name of the API endpoint handling the current request (the matched
+# route's name, e.g. ``get_feed_skeleton`` or ``candidates_generate``). Set by
+# the endpoint middleware in :mod:`app.main` so that metrics recorded anywhere
+# on the request path can be tagged with their originating endpoint without
+# threading it through every callsite. Propagates through ``asyncio`` the same
+# way as ``rid``, so background tasks spawned from a request inherit it.
+_endpoint: ContextVar[str | None] = ContextVar("ge_endpoint", default=None)
+
 
 def get_request_id() -> str | None:
     return _request_id.get()
@@ -32,3 +40,15 @@ def set_request_id(rid: str) -> Token:
 
 def reset_request_id(token: Token) -> None:
     _request_id.reset(token)
+
+
+def get_endpoint() -> str | None:
+    return _endpoint.get()
+
+
+def set_endpoint(endpoint: str) -> Token:
+    return _endpoint.set(endpoint)
+
+
+def reset_endpoint(token: Token) -> None:
+    _endpoint.reset(token)

@@ -97,8 +97,20 @@ class MetricCollector:
 
         Instruments are lazily created based on the name suffix (see module
         docstring).  Attributes become GCP metric labels.
+
+        When recorded on a request path, the metric is automatically tagged
+        with an ``endpoint`` label naming the originating API endpoint (e.g.
+        ``get_feed_skeleton`` vs ``candidates_generate``). This is read from a
+        ContextVar set by the endpoint middleware, so every callsite gets it
+        for free. An explicitly passed ``endpoint`` attribute wins.
         """
-        attrs = dict(attributes) if attributes else None
+        from .request_context import get_endpoint
+
+        labels: dict[str, str] = dict(attributes)
+        endpoint = get_endpoint()
+        if endpoint is not None:
+            labels.setdefault("endpoint", endpoint)
+        attrs = labels or None
         if name.endswith("_count"):
             self._get_counter(name).add(int(value), attrs)
         elif name.endswith("_rate"):
