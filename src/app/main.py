@@ -231,6 +231,14 @@ def _resolve_endpoint(request: Request) -> str | None:
     for route in request.app.routes:
         match, _ = route.matches(request.scope)
         if match is Match.FULL:
+            # FastAPI 0.137+ wraps included routers in _IncludedRouter which
+            # carries no name itself. Iterate its effective sub-routes to find
+            # the concrete one that matches.
+            if hasattr(route, "effective_route_contexts"):
+                for ctx in route.effective_route_contexts():
+                    orig = getattr(ctx, "original_route", None)
+                    if orig is not None and orig.matches(request.scope)[0] is Match.FULL:
+                        return getattr(orig, "name", None)
             return getattr(route, "name", None)
     return None
 
