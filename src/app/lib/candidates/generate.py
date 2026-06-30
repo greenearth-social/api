@@ -9,6 +9,7 @@ REST API and the XRPC feed-skeleton endpoint.
 import asyncio
 import logging
 import math
+import os
 
 from ...models import (
     CandidateGenerateRequest,
@@ -18,9 +19,18 @@ from ...models import (
 )
 from .base import CandidateGenerator, CandidateResult, get_generator
 from ..feed_debug import current_recorder
+from ..metrics import get_metric_collector
 from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
+
+
+def _generator_timeout_sec() -> float:
+    """Read per-call so the value tracks env changes during dev."""
+    try:
+        return float(os.environ.get("GE_CANDIDATE_GENERATOR_TIMEOUT_SEC", "10"))
+    except ValueError:
+        return 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -123,15 +133,43 @@ async def run_generate(
     ) -> CandidateResult | None:
         try:
             async with timed(logger, "candidates.generate.duration_ms", record_metric=True, metric_attrs={"generator_name": spec.name}, count=count):
-                return await gen.generate(
-                    es=es,
-                    user_did=request.user_did,
-                    num_candidates=count,
-                    video_only=request.video_only,
-                    exclude_uris=request.exclude_uris or None,
+                return await asyncio.wait_for(
+                    gen.generate(
+                        es=es,
+                        user_did=request.user_did,
+                        num_candidates=count,
+                        video_only=request.video_only,
+                        exclude_uris=request.exclude_uris or None,
+                    ),
+                    timeout=_generator_timeout_sec(),
                 )
+        except asyncio.TimeoutError as exc:
+            logger.warning(
+                "Candidate generator '%s' timed out after %.1fs",
+                spec.name,
+                _generator_timeout_sec(),
+            )
+            if mc := get_metric_collector():
+                mc.record(
+                    "candidates.generator_failure_count",
+                    1,
+                    generator_name=spec.name,
+                    outcome="timeout",
+                    is_infill="false",
+                )
+            if swallow_errors:
+                return None
+            raise GeneratorError(spec.name, exc) from exc
         except Exception as exc:
             logger.exception("Candidate generator '%s' failed", spec.name)
+            if mc := get_metric_collector():
+                mc.record(
+                    "candidates.generator_failure_count",
+                    1,
+                    generator_name=spec.name,
+                    outcome="error",
+                    is_infill="false",
+                )
             if swallow_errors:
                 return None
             raise GeneratorError(spec.name, exc) from exc
@@ -161,15 +199,44 @@ async def run_generate(
 
         try:
             # Ask for extra to compensate for likely dedup losses
-            infill_result = await infill_gen.generate(
-                es=es,
-                user_did=request.user_did,
-                num_candidates=shortfall * 2,
-                video_only=request.video_only,
-                exclude_uris=request.exclude_uris or None,
+            infill_result = await asyncio.wait_for(
+                infill_gen.generate(
+                    es=es,
+                    user_did=request.user_did,
+                    num_candidates=shortfall * 2,
+                    video_only=request.video_only,
+                    exclude_uris=request.exclude_uris or None,
+                ),
+                timeout=_generator_timeout_sec(),
             )
+        except asyncio.TimeoutError as exc:
+            logger.warning(
+                "Infill generator '%s' timed out after %.1fs",
+                request.infill,
+                _generator_timeout_sec(),
+            )
+            if mc := get_metric_collector():
+                mc.record(
+                    "candidates.generator_failure_count",
+                    1,
+                    generator_name=request.infill,
+                    outcome="timeout",
+                    is_infill="true",
+                )
+            if swallow_errors:
+                infill_result = CandidateResult(generator_name=request.infill, candidates=[])
+            else:
+                raise GeneratorError(request.infill, exc, is_infill=True) from exc
         except Exception as exc:
             logger.exception("Infill generator '%s' failed", request.infill)
+            if mc := get_metric_collector():
+                mc.record(
+                    "candidates.generator_failure_count",
+                    1,
+                    generator_name=request.infill,
+                    outcome="error",
+                    is_infill="true",
+                )
             if swallow_errors:
                 infill_result = CandidateResult(generator_name=request.infill, candidates=[])
             else:
