@@ -133,7 +133,7 @@ async def run_generate(
     ) -> CandidateResult | None:
         try:
             async with timed(logger, "candidates.generate.duration_ms", record_metric=True, metric_attrs={"generator_name": spec.name}, count=count):
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     gen.generate(
                         es=es,
                         user_did=request.user_did,
@@ -143,6 +143,14 @@ async def run_generate(
                     ),
                     timeout=_GENERATOR_TIMEOUT_SEC,
                 )
+            if mc := get_metric_collector():
+                mc.record(
+                    "candidates.generate.success_count",
+                    1,
+                    generator_name=spec.name,
+                    is_infill="false",
+                )
+            return result
         except asyncio.TimeoutError as exc:
             logger.warning(
                 "Candidate generator '%s' timed out after %.1fs",
@@ -151,7 +159,7 @@ async def run_generate(
             )
             if mc := get_metric_collector():
                 mc.record(
-                    "candidates.generator_failure_count",
+                    "candidates.generate.failure_count",
                     1,
                     generator_name=spec.name,
                     outcome="timeout",
@@ -164,7 +172,7 @@ async def run_generate(
             logger.exception("Candidate generator '%s' failed", spec.name)
             if mc := get_metric_collector():
                 mc.record(
-                    "candidates.generator_failure_count",
+                    "candidates.generate.failure_count",
                     1,
                     generator_name=spec.name,
                     outcome="error",
@@ -209,6 +217,13 @@ async def run_generate(
                 ),
                 timeout=_GENERATOR_TIMEOUT_SEC,
             )
+            if mc := get_metric_collector():
+                mc.record(
+                    "candidates.generate.success_count",
+                    1,
+                    generator_name=request.infill,
+                    is_infill="true",
+                )
         except asyncio.TimeoutError as exc:
             logger.warning(
                 "Infill generator '%s' timed out after %.1fs",
@@ -217,7 +232,7 @@ async def run_generate(
             )
             if mc := get_metric_collector():
                 mc.record(
-                    "candidates.generator_failure_count",
+                    "candidates.generate.failure_count",
                     1,
                     generator_name=request.infill,
                     outcome="timeout",
@@ -231,7 +246,7 @@ async def run_generate(
             logger.exception("Infill generator '%s' failed", request.infill)
             if mc := get_metric_collector():
                 mc.record(
-                    "candidates.generator_failure_count",
+                    "candidates.generate.failure_count",
                     1,
                     generator_name=request.infill,
                     outcome="error",

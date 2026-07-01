@@ -110,7 +110,7 @@ class TestGeneratorTimeout:
         result = await run_generate(_make_request("post_similarity"), es=None, swallow_errors=True)
 
         assert result.candidates == []
-        failure_calls = [c for c in mc.calls if c[0] == "candidates.generator_failure_count"]
+        failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
         assert len(failure_calls) == 1
         name, value, attrs = failure_calls[0]
         assert value == 1
@@ -162,7 +162,7 @@ class TestGeneratorTimeout:
         with pytest.raises(GeneratorError):
             await run_generate(_make_request("post_similarity"), es=None, swallow_errors=False)
 
-        failure_calls = [c for c in mc.calls if c[0] == "candidates.generator_failure_count"]
+        failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
         assert len(failure_calls) == 1
         _, _, attrs = failure_calls[0]
         assert attrs["outcome"] == "timeout"
@@ -178,7 +178,7 @@ class TestGeneratorTimeout:
         result = await run_generate(_make_request("network_likes"), es=None, swallow_errors=True)
 
         assert result.candidates == []
-        failure_calls = [c for c in mc.calls if c[0] == "candidates.generator_failure_count"]
+        failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
         assert len(failure_calls) == 1
         _, _, attrs = failure_calls[0]
         assert attrs == {
@@ -186,6 +186,19 @@ class TestGeneratorTimeout:
             "outcome": "error",
             "is_infill": "false",
         }
+
+    @pytest.mark.asyncio
+    async def test_success_records_success_count_metric(self, monkeypatch):
+        _stub_generators(monkeypatch, {"popular": _EmptyGenerator("popular")})
+        mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, mc))
+
+        await run_generate(_make_request("popular"), es=None, swallow_errors=True)
+
+        success_calls = [c for c in mc.calls if c[0] == "candidates.generate.success_count"]
+        assert len(success_calls) == 1
+        _, _, attrs = success_calls[0]
+        assert attrs == {"generator_name": "popular", "is_infill": "false"}
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +224,7 @@ class TestInfillGeneratorTimeout:
         )
 
         assert result.candidates == []
-        failure_calls = [c for c in mc.calls if c[0] == "candidates.generator_failure_count"]
+        failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
         assert len(failure_calls) == 1
         _, _, attrs = failure_calls[0]
         assert attrs == {
@@ -255,7 +268,7 @@ class TestInfillGeneratorTimeout:
                 swallow_errors=False,
             )
 
-        failure_calls = [c for c in mc.calls if c[0] == "candidates.generator_failure_count"]
+        failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
         assert len(failure_calls) == 1
         _, _, attrs = failure_calls[0]
         assert attrs["is_infill"] == "true"
@@ -277,7 +290,7 @@ class TestInfillGeneratorTimeout:
         )
 
         assert result.candidates == []
-        failure_calls = [c for c in mc.calls if c[0] == "candidates.generator_failure_count"]
+        failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
         assert len(failure_calls) == 1
         _, _, attrs = failure_calls[0]
         assert attrs == {
@@ -285,3 +298,24 @@ class TestInfillGeneratorTimeout:
             "outcome": "error",
             "is_infill": "true",
         }
+
+    @pytest.mark.asyncio
+    async def test_infill_success_records_success_count_metric(self, monkeypatch):
+        _stub_generators(monkeypatch, {
+            "random": _EmptyGenerator("random"),
+            "popular": _EmptyGenerator("popular"),
+        })
+        mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, mc))
+
+        await run_generate(
+            _make_request("random", num_candidates=5, infill="popular"),
+            es=None,
+            swallow_errors=True,
+        )
+
+        success_calls = [c for c in mc.calls if c[0] == "candidates.generate.success_count"]
+        assert len(success_calls) == 2  # one for "random", one for "popular" infill
+        infill_success = [c for c in success_calls if c[2].get("is_infill") == "true"]
+        assert len(infill_success) == 1
+        assert infill_success[0][2] == {"generator_name": "popular", "is_infill": "true"}
