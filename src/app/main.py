@@ -1,6 +1,7 @@
 import logging
 import os
 import uuid
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -46,7 +47,8 @@ from .lib.request_context import (
 )
 
 from elasticsearch import AsyncElasticsearch
-from starlette.routing import Match
+from starlette.routing import BaseRoute, Match
+from starlette.types import Scope
 
 
 @asynccontextmanager
@@ -228,10 +230,32 @@ def _resolve_endpoint(request: Request) -> str | None:
     that don't fully match a named route (e.g. 404s), so we never tag metrics
     with an arbitrary, high-cardinality label.
     """
-    for route in request.app.routes:
-        match, _ = route.matches(request.scope)
-        if match is Match.FULL:
-            return getattr(route, "name", None)
+    return _match_route(request.app.routes, request.scope)
+
+
+def _match_route(routes: Sequence[BaseRoute], scope: Scope) -> str | None:
+    """Recursively walk *routes* to find the name of the first fully-matching route.
+
+    Handles nested route containers (Starlette ``Mount``, FastAPI included
+    routers) by checking ``route.routes`` and, if absent, the ``routes``
+    attribute of an ``original_router`` field (FastAPI's internal wrapper).
+    """
+    for route in routes:
+        match, _ = route.matches(scope)
+        if match is not Match.FULL:
+            continue
+        name = getattr(route, "name", None)
+        if name is not None:
+            return name
+        # Route matched but carries no name — recurse into its sub-routes.
+        sub: Sequence[BaseRoute] | None = getattr(route, "routes", None)
+        if sub is None:
+            orig = getattr(route, "original_router", None)
+            sub = getattr(orig, "routes", None)
+        if sub is not None:
+            result = _match_route(sub, scope)
+            if result is not None:
+                return result
     return None
 
 
