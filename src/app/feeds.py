@@ -64,8 +64,9 @@ FEEDS: dict[str, FeedConfig] = {
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mprirzcv3a24",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="two_tower", weight=0.5),
-                GeneratorSpec(name="followed_users", weight=0.5),
+                GeneratorSpec(name="two_tower", weight=0.4),
+                GeneratorSpec(name="followed_users", weight=0.4),
+                GeneratorSpec(name="popularity", weight=0.2),
             ],
             infill="popularity",
             num_candidates=30,
