@@ -1127,12 +1127,12 @@
         },
         "opentelemetry-api": {
             "hashes": [
-                "sha256:51a69edacadbc03a8950ace1c4c21099cacc538820ac2c9e36277e78cebba714",
-                "sha256:56c63bea9f77b62856be8c47600474acad853b2924b99b1687c4cb6297166716"
+                "sha256:107d0d03857ea8fc7c5fcbbbd83f800c281f0d560553d61c1d675fccfd1761c1",
+                "sha256:20acf45e9b21851926835292e4045d290acade1edd2ff3de86d2f069687ba1fd"
             ],
             "index": "pypi",
             "markers": "python_version >= '3.10'",
-            "version": "==1.42.1"
+            "version": "==1.43.0"
         },
         "opentelemetry-exporter-gcp-monitoring": {
             "hashes": [
