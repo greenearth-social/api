@@ -133,6 +133,58 @@ def _model_specs_str(doc: FeedDebugDocument) -> str:
     return doc.ranker_model or "(none)"
 
 
+def _generator_output_stats_str(doc: FeedDebugDocument) -> str:
+    """Raw candidate counts and average 1-based final rank by generator output."""
+    req = doc.generate_request
+    primary_remaining: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    rank_sums: dict[str, int] = {}
+    rank_counts: dict[str, int] = {}
+    final_ranks = {uri: i + 1 for i, uri in enumerate(doc.final_order)}
+
+    def ensure(label: str) -> None:
+        if label not in counts:
+            counts[label] = 0
+            rank_sums[label] = 0
+            rank_counts[label] = 0
+
+    for spec in req.generators:
+        primary_remaining[spec.name] = primary_remaining.get(spec.name, 0) + 1
+        ensure(spec.name)
+    if req.infill:
+        ensure(f"infill {req.infill}")
+
+    for result in doc.generator_outputs:
+        name = result.generator_name
+        if primary_remaining.get(name, 0) > 0:
+            label = name
+            primary_remaining[name] -= 1
+        elif req.infill and name == req.infill:
+            label = f"infill {name}"
+        else:
+            label = name
+            ensure(label)
+        counts[label] += len(result.candidates)
+        for c in result.candidates:
+            rank = final_ranks.get(c.at_uri)
+            if rank is not None:
+                rank_sums[label] += rank
+                rank_counts[label] += 1
+
+    def fmt_avg(label: str) -> str:
+        if rank_counts[label] == 0:
+            return "—"
+        return f"{rank_sums[label] / rank_counts[label]:.1f}"
+
+    return (
+        ", ".join(
+            f"{label}={count} in_final={rank_counts[label]} avg_rank={fmt_avg(label)}"
+            for label, count in counts.items()
+        )
+        or "(none)"
+    )
+
+
 def _media_summary(c) -> Text | None:
     """Yellow media badges for a candidate, or None when it has no media."""
     parts = []
@@ -245,9 +297,11 @@ def _header_panel(doc: FeedDebugDocument) -> Panel:
         body.append("   video_only", style="yellow")
     if req.exclude_uris:
         body.append(f"   excluded={len(req.exclude_uris)}", style="dim")
+    body.append("\n\n")
+    body.append("candidates  ", style="dim")
+    body.append(f"{_generator_output_stats_str(doc)}", style="white")
 
     if doc.user_features:
-        body.append("\n")
         for uf in doc.user_features:
             body.append("\nuser feats  ", style="dim")
             body.append(
