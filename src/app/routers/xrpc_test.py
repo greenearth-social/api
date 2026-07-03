@@ -1427,6 +1427,11 @@ class TestBestOfFriendsFeed:
              patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
             yield
 
+    @pytest.fixture(autouse=True)
+    def _clear_pinned_post(self, monkeypatch):
+        """Isolate ranking tests from the pinned post — that's tested in TestPinnedPost."""
+        monkeypatch.setattr(FEEDS["best-of-friends"], "pinned_post_uri", None)
+
     def _patch_generators(self, candidates):
         primary_gen = AsyncMock()
         primary_gen.generate.return_value = CandidateResult(
