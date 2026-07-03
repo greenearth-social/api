@@ -145,6 +145,20 @@ def fake_app_es():
     app.state.firestore = AsyncMock()
     app.state.feed_cache = InMemoryFeedCache()
     yield
+
+
+@pytest.fixture(autouse=True)
+def passthrough_hydrate_embeddings():
+    """Return no embedding pairs so candidates pass through unchanged.
+
+    Patching at fetch_post_embeddings level (not _hydrate_embeddings) lets
+    tests that want to verify hydration behaviour override just this patch.
+    """
+    with patch(
+        "app.routers.xrpc.fetch_post_embeddings",
+        new=AsyncMock(return_value=[]),
+    ):
+        yield
     try:
         delattr(app.state, "es")
     except Exception:
@@ -535,8 +549,35 @@ class TestGetFeedSkeleton:
 
     # --- primary generator failure ---
 
-    def test_primary_failure_falls_back_to_infill(self):
-        """If primary raises, we still get infill results."""
+    def test_primary_failure_returns_500_when_fail_fast(self, monkeypatch):
+        """With GE_FAIL_FAST=true (default), a generator error surfaces as 500."""
+        monkeypatch.setenv("GE_FAIL_FAST", "true")
+
+        primary_gen = AsyncMock()
+        primary_gen.generate.side_effect = RuntimeError("ES down")
+
+        followed_users_gen = AsyncMock()
+        followed_users_gen.generate.return_value = CandidateResult(
+            generator_name="followed_users", candidates=[]
+        )
+
+        def fake_get(name):
+            return {
+                "two_tower": primary_gen,
+                "followed_users": followed_users_gen,
+            }.get(name)
+
+        with patch("app.lib.candidates.generate.get_generator", side_effect=fake_get):
+            resp = TestClient(app, raise_server_exceptions=False).get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 5},
+            )
+
+        assert resp.status_code == 500
+
+    def test_primary_failure_falls_back_to_infill_when_not_fail_fast(self, monkeypatch):
+        """With GE_FAIL_FAST=false, a failing primary generator yields infill results."""
+        monkeypatch.setenv("GE_FAIL_FAST", "false")
         infill = _make_candidates("infill", 3, "popularity")
 
         primary_gen = AsyncMock()

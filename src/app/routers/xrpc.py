@@ -59,6 +59,14 @@ router = APIRouter(tags=["xrpc"])
 # Configuration
 # ---------------------------------------------------------------------------
 
+def _fail_fast() -> bool:
+    """When True, any pipeline component failure raises instead of being swallowed.
+
+    Controlled by the GE_FAIL_FAST env var (default: false).
+    Set to "true" to disable degraded-feed serving and fail on any component error.
+    """
+    return os.environ.get("GE_FAIL_FAST", "false").lower() in ("true", "1", "yes")
+
 
 def _get_service_did() -> str:
     """Return the DID of this feed generator service.
@@ -222,10 +230,9 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
         async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
             pairs = await fetch_post_embeddings(es, missing, index="posts_recent")
     except Exception:
-        # If the refetch fails, MMR falls back to author-only similarity
-        # and the two-tower ranker has its own refetch path. Don't fail
-        # the request over a hydration hiccup.
-        logger.exception("Embedding hydration failed; continuing without")
+        logger.exception("Embedding hydration failed")
+        if _fail_fast():
+            raise
         return candidates
 
     encoded: dict[str, str] = {}
@@ -274,7 +281,7 @@ async def _run_ranking_pipeline(
             num_candidates=gen_request.num_candidates,
             n_generators=len(gen_request.generators),
         ):
-            result = await run_generate(gen_request, es, swallow_errors=True)
+            result = await run_generate(gen_request, es, swallow_errors=not _fail_fast())
         candidates = result.candidates
 
         if not candidates:
