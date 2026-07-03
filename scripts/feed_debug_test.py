@@ -22,7 +22,24 @@ def _result(name: str, uris: list[str]):
     return SimpleNamespace(generator_name=name, candidates=[_candidate(uri) for uri in uris])
 
 
-def _doc(*, generators: list[str], infill: str | None, outputs, final_order: list[str]):
+def _model_score(name: str, scores: dict[str, float]):
+    return SimpleNamespace(
+        model_name=name,
+        scores=[
+            SimpleNamespace(at_uri=uri, score=score)
+            for uri, score in scores.items()
+        ],
+    )
+
+
+def _doc(
+    *,
+    generators: list[str],
+    infill: str | None,
+    outputs,
+    final_order: list[str],
+    model_scores=None,
+):
     return SimpleNamespace(
         generate_request=SimpleNamespace(
             generators=[_generator(name) for name in generators],
@@ -30,6 +47,7 @@ def _doc(*, generators: list[str], infill: str | None, outputs, final_order: lis
         ),
         generator_outputs=outputs,
         final_order=final_order,
+        model_scores=model_scores or [],
     )
 
 
@@ -43,12 +61,38 @@ def test_generator_output_stats_labels_primary_and_infill_with_average_rank():
             _result("popularity", ["at://p/4", "at://p/not-final"]),
         ],
         final_order=["at://p/3", "at://p/2", "at://p/1", "at://p/4"],
+        model_scores=[
+            _model_score(
+                "heavy_ranker",
+                {
+                    "at://p/1": 0.2,
+                    "at://p/2": 0.8,
+                    "at://p/3": 0.6,
+                    "at://p/4": -0.2,
+                    "at://p/not-final": 0.4,
+                },
+            ),
+            _model_score(
+                "perspective",
+                {
+                    "at://p/1": -1.0,
+                    "at://p/2": -1.0,
+                    "at://p/3": -1.0,
+                    "at://p/4": -1.0,
+                    "at://p/not-final": -1.0,
+                },
+            ),
+        ],
     )
 
-    assert feed_debug._generator_output_stats_str(doc) == (
-        "two_tower=3 in_final=2 avg_rank=2.0, "
-        "popularity=1 in_final=1 avg_rank=2.0, "
-        "infill popularity=2 in_final=1 avg_rank=4.0"
+    assert feed_debug._generator_output_counts_str(doc) == (
+        "two_tower=3, popularity=1, infill popularity=2"
+    )
+    assert feed_debug._generator_avg_ranks_str(doc) == (
+        "two_tower=2.0, popularity=2.0, infill popularity=4.0"
+    )
+    assert feed_debug._generator_avg_ranker_scores_str(doc) == (
+        "two_tower=0.4000, popularity=0.8000, infill popularity=0.1000"
     )
 
 
@@ -61,10 +105,14 @@ def test_generator_output_stats_includes_missing_primary_as_zero():
         final_order=["at://p/1"],
     )
 
-    assert feed_debug._generator_output_stats_str(doc) == (
-        "two_tower=1 in_final=1 avg_rank=1.0, "
-        f"followed_users=0 in_final=0 avg_rank={missing}, "
-        f"infill popularity=0 in_final=0 avg_rank={missing}"
+    assert feed_debug._generator_output_counts_str(doc) == (
+        "two_tower=1, followed_users=0, infill popularity=0"
+    )
+    assert feed_debug._generator_avg_ranks_str(doc) == (
+        f"two_tower=1.0, followed_users={missing}, infill popularity={missing}"
+    )
+    assert feed_debug._generator_avg_ranker_scores_str(doc) == (
+        f"two_tower={missing}, followed_users={missing}, infill popularity={missing}"
     )
 
 
@@ -74,6 +122,11 @@ def test_generator_output_stats_counts_duplicate_candidates_in_average():
         infill=None,
         outputs=[_result("two_tower", ["at://p/1", "at://p/1", "at://p/2"])],
         final_order=["at://p/2", "at://p/1"],
+        model_scores=[
+            _model_score("heavy_ranker", {"at://p/1": 0.4, "at://p/2": 1.0}),
+        ],
     )
 
-    assert feed_debug._generator_output_stats_str(doc) == "two_tower=3 in_final=3 avg_rank=1.7"
+    assert feed_debug._generator_output_counts_str(doc) == "two_tower=3"
+    assert feed_debug._generator_avg_ranks_str(doc) == "two_tower=1.7"
+    assert feed_debug._generator_avg_ranker_scores_str(doc) == "two_tower=0.6000"
