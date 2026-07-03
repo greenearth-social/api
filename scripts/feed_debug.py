@@ -50,6 +50,7 @@ from app.lib.firestore import (
 )
 
 console = Console()
+HEAVY_RANKER_MODEL_NAME = "heavy_ranker"
 
 # GCP project + Firestore database per environment. Both environments live in
 # the same project and are separated by database (see scripts/gcp_setup.sh).
@@ -133,20 +134,15 @@ def _model_specs_str(doc: FeedDebugDocument) -> str:
     return doc.ranker_model or "(none)"
 
 
-def _generator_output_stats_str(doc: FeedDebugDocument) -> str:
-    """Raw candidate counts and average 1-based final rank by generator output."""
+def _generator_candidate_groups(doc: FeedDebugDocument) -> dict[str, list]:
+    """Raw candidates grouped by primary/infill generator label."""
     req = doc.generate_request
     primary_remaining: dict[str, int] = {}
-    counts: dict[str, int] = {}
-    rank_sums: dict[str, int] = {}
-    rank_counts: dict[str, int] = {}
-    final_ranks = {uri: i + 1 for i, uri in enumerate(doc.final_order)}
+    groups: dict[str, list] = {}
 
     def ensure(label: str) -> None:
-        if label not in counts:
-            counts[label] = 0
-            rank_sums[label] = 0
-            rank_counts[label] = 0
+        if label not in groups:
+            groups[label] = []
 
     for spec in req.generators:
         primary_remaining[spec.name] = primary_remaining.get(spec.name, 0) + 1
@@ -164,12 +160,40 @@ def _generator_output_stats_str(doc: FeedDebugDocument) -> str:
         else:
             label = name
             ensure(label)
-        counts[label] += len(result.candidates)
-        for c in result.candidates:
+        groups[label].extend(result.candidates)
+
+    return groups
+
+
+def _generator_output_stats(
+    doc: FeedDebugDocument,
+) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    """Raw candidate counts and 1-based final-rank totals by generator output."""
+    groups = _generator_candidate_groups(doc)
+    counts = {label: len(candidates) for label, candidates in groups.items()}
+    rank_sums = {label: 0 for label in groups}
+    rank_counts = {label: 0 for label in groups}
+    final_ranks = {uri: i + 1 for i, uri in enumerate(doc.final_order)}
+
+    for label, candidates in groups.items():
+        for c in candidates:
             rank = final_ranks.get(c.at_uri)
             if rank is not None:
                 rank_sums[label] += rank
                 rank_counts[label] += 1
+
+    return counts, rank_sums, rank_counts
+
+
+def _generator_output_counts_str(doc: FeedDebugDocument) -> str:
+    """Raw candidate counts captured from each generator output."""
+    counts, _, _ = _generator_output_stats(doc)
+    return ", ".join(f"{label}={count}" for label, count in counts.items()) or "(none)"
+
+
+def _generator_avg_ranks_str(doc: FeedDebugDocument) -> str:
+    """Average 1-based final rank for candidates that made the final feed."""
+    counts, rank_sums, rank_counts = _generator_output_stats(doc)
 
     def fmt_avg(label: str) -> str:
         if rank_counts[label] == 0:
@@ -177,10 +201,32 @@ def _generator_output_stats_str(doc: FeedDebugDocument) -> str:
         return f"{rank_sums[label] / rank_counts[label]:.1f}"
 
     return (
-        ", ".join(
-            f"{label}={count} in_final={rank_counts[label]} avg_rank={fmt_avg(label)}"
-            for label, count in counts.items()
-        )
+        ", ".join(f"{label}={fmt_avg(label)}" for label in counts)
+        or "(none)"
+    )
+
+
+def _generator_avg_ranker_scores_str(doc: FeedDebugDocument) -> str:
+    """Average saved heavy-ranker score by generator output."""
+    groups = _generator_candidate_groups(doc)
+    heavy_scores: dict[str, float] = {}
+    for entry in doc.model_scores:
+        if entry.model_name == HEAVY_RANKER_MODEL_NAME:
+            heavy_scores = {score.at_uri: score.score for score in entry.scores}
+            break
+
+    def fmt_avg(candidates: list) -> str:
+        scores = [
+            heavy_scores[c.at_uri]
+            for c in candidates
+            if c.at_uri in heavy_scores
+        ]
+        if not scores:
+            return "—"
+        return f"{sum(scores) / len(scores):.4f}"
+
+    return (
+        ", ".join(f"{label}={fmt_avg(candidates)}" for label, candidates in groups.items())
         or "(none)"
     )
 
@@ -299,7 +345,11 @@ def _header_panel(doc: FeedDebugDocument) -> Panel:
         body.append(f"   excluded={len(req.exclude_uris)}", style="dim")
     body.append("\n\n")
     body.append("candidates  ", style="dim")
-    body.append(f"{_generator_output_stats_str(doc)}", style="white")
+    body.append(f"{_generator_output_counts_str(doc)}", style="white")
+    body.append("\navg_rank    ", style="dim")
+    body.append(f"{_generator_avg_ranks_str(doc)}", style="white")
+    body.append("\navg_ranker_score  ", style="dim")
+    body.append(f"{_generator_avg_ranker_scores_str(doc)}", style="white")
 
     if doc.user_features:
         for uf in doc.user_features:
