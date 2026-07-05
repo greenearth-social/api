@@ -165,70 +165,52 @@ def _generator_candidate_groups(doc: FeedDebugDocument) -> dict[str, list]:
     return groups
 
 
-def _generator_output_stats(
-    doc: FeedDebugDocument,
-) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
-    """Raw candidate counts and 1-based final-rank totals by generator output."""
+def _candidate_stats_rows(doc: FeedDebugDocument) -> list[tuple[str, str, str, str, str]]:
+    """Candidate stats by generator.
+
+    Rows are label, count, placement, heavy ranker, author penalty averages.
+    """
     groups = _generator_candidate_groups(doc)
-    counts = {label: len(candidates) for label, candidates in groups.items()}
-    rank_sums = {label: 0 for label in groups}
-    rank_counts = {label: 0 for label in groups}
     final_ranks = {uri: i + 1 for i, uri in enumerate(doc.final_order)}
-
-    for label, candidates in groups.items():
-        for c in candidates:
-            rank = final_ranks.get(c.at_uri)
-            if rank is not None:
-                rank_sums[label] += rank
-                rank_counts[label] += 1
-
-    return counts, rank_sums, rank_counts
-
-
-def _generator_output_counts_str(doc: FeedDebugDocument) -> str:
-    """Raw candidate counts captured from each generator output."""
-    counts, _, _ = _generator_output_stats(doc)
-    return ", ".join(f"{label}={count}" for label, count in counts.items()) or "(none)"
-
-
-def _generator_avg_ranks_str(doc: FeedDebugDocument) -> str:
-    """Average 1-based final rank for candidates that made the final feed."""
-    counts, rank_sums, rank_counts = _generator_output_stats(doc)
-
-    def fmt_avg(label: str) -> str:
-        if rank_counts[label] == 0:
-            return "—"
-        return f"{rank_sums[label] / rank_counts[label]:.1f}"
-
-    return (
-        ", ".join(f"{label}={fmt_avg(label)}" for label in counts)
-        or "(none)"
-    )
-
-
-def _generator_avg_ranker_scores_str(doc: FeedDebugDocument) -> str:
-    """Average saved heavy-ranker score by generator output."""
-    groups = _generator_candidate_groups(doc)
+    author_penalties = {entry.at_uri: entry.author_penalty for entry in doc.diversification}
     heavy_scores: dict[str, float] = {}
     for entry in doc.model_scores:
         if entry.model_name == HEAVY_RANKER_MODEL_NAME:
             heavy_scores = {score.at_uri: score.score for score in entry.scores}
             break
 
-    def fmt_avg(candidates: list) -> str:
-        scores = [
+    def fmt_avg(values: list[float], precision: int) -> str:
+        if not values:
+            return "—"
+        return f"{sum(values) / len(values):.{precision}f}"
+
+    rows = []
+    for label, candidates in groups.items():
+        placements = [
+            final_ranks[c.at_uri]
+            for c in candidates
+            if c.at_uri in final_ranks
+        ]
+        ranker_scores = [
             heavy_scores[c.at_uri]
             for c in candidates
             if c.at_uri in heavy_scores
         ]
-        if not scores:
-            return "—"
-        return f"{sum(scores) / len(scores):.4f}"
-
-    return (
-        ", ".join(f"{label}={fmt_avg(candidates)}" for label, candidates in groups.items())
-        or "(none)"
-    )
+        author_penalty_scores = [
+            author_penalties[c.at_uri]
+            for c in candidates
+            if c.at_uri in author_penalties
+        ]
+        rows.append(
+            (
+                label,
+                str(len(candidates)),
+                fmt_avg(placements, 1),
+                fmt_avg(ranker_scores, 2),
+                fmt_avg(author_penalty_scores, 3),
+            )
+        )
+    return rows
 
 
 def _media_summary(c) -> Text | None:
@@ -343,13 +325,6 @@ def _header_panel(doc: FeedDebugDocument) -> Panel:
         body.append("   video_only", style="yellow")
     if req.exclude_uris:
         body.append(f"   excluded={len(req.exclude_uris)}", style="dim")
-    body.append("\n\n")
-    body.append("candidates  ", style="dim")
-    body.append(f"{_generator_output_counts_str(doc)}", style="white")
-    body.append("\navg_rank    ", style="dim")
-    body.append(f"{_generator_avg_ranks_str(doc)}", style="white")
-    body.append("\navg_ranker_score  ", style="dim")
-    body.append(f"{_generator_avg_ranker_scores_str(doc)}", style="white")
 
     if doc.user_features:
         for uf in doc.user_features:
@@ -368,6 +343,26 @@ def _header_panel(doc: FeedDebugDocument) -> Panel:
         border_style="blue",
         padding=(0, 2),
     )
+
+
+def _candidate_stats_table(doc: FeedDebugDocument) -> Table:
+    table = Table(
+        box=box.SIMPLE,
+    )
+    table.add_column("generator", style="cyan")
+    table.add_column("count", justify="right", style="green")
+    table.add_column("placement", justify="right", style="yellow")
+    table.add_column("heavy_ranker", justify="right", style="white")
+    table.add_column("author_penalty", justify="right", style="magenta")
+    for (
+        label,
+        count,
+        avg_placement,
+        avg_ranker_score,
+        avg_author_penalty,
+    ) in _candidate_stats_rows(doc):
+        table.add_row(label, count, avg_placement, avg_ranker_score, avg_author_penalty)
+    return table
 
 
 def _item_panel(
@@ -529,6 +524,9 @@ def _render_show(doc: FeedDebugDocument) -> None:
             "[-1, 1], with its configured weight — the inputs to the combined "
             "(model) score above[/dim]"
         )
+    console.print()
+    console.print("[bold]average candidate stats[/bold]")
+    console.print(_candidate_stats_table(doc))
     console.print()
     for pos, uri in enumerate(doc.final_order):
         console.print(
