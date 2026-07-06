@@ -228,10 +228,11 @@ class TestUploadBlob:
         call_headers = client.post.call_args.kwargs["headers"]
         assert call_headers["Content-Type"] == "image/jpeg"
 
-    def test_exits_when_file_does_not_exist(self):
+    def test_returns_none_when_file_does_not_exist(self):
         client = MagicMock(spec=httpx.Client)
-        with pytest.raises(SystemExit):
-            _upload_blob(client, PDS, ACCESS_JWT, "/nonexistent/path/icon.png")
+        result = _upload_blob(client, PDS, ACCESS_JWT, "/nonexistent/path/icon.png")
+        assert result is None
+        client.post.assert_not_called()
 
     def test_exits_on_unsupported_format(self, tmp_path):
         img = tmp_path / "icon.gif"

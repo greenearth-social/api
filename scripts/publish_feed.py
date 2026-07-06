@@ -208,15 +208,15 @@ def _upload_blob(
 ) -> dict | None:
     """Upload an image file as an AT Proto blob and return the blob reference.
 
-    Returns None when avatar_path is None.  Exits if the file is missing,
-    the format is unsupported, or the upload API returns an error.
+    Returns None when avatar_path is None or the file does not exist (warning
+    printed).  Exits if the format is unsupported or the upload API returns an error.
     """
     if not avatar_path:
         return None
     path = pathlib.Path(avatar_path)
     if not path.exists():
-        print(f"Avatar file not found: {avatar_path}", file=sys.stderr)
-        sys.exit(1)
+        print(f"[warn] Avatar file not found, skipping: {avatar_path}", file=sys.stderr)
+        return None
     suffix = path.suffix.lower()
     if suffix == ".png":
         encoding = "image/png"
