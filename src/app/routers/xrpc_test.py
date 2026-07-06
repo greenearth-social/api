@@ -511,9 +511,9 @@ class TestGetFeedSkeleton:
                 params={"feed": FEED_URI, "limit": 5},
             ).json()
         assert len(data["feed"]) == 5
-        # popularity is a primary generator for this feed; no extra infill call should happen.
-        popularity_gen = mock_get.side_effect("popularity")
-        popularity_gen.generate.assert_awaited_once()
+        # Infill generator's generate method should not have been called
+        infill_gen = mock_get.side_effect("popularity")
+        infill_gen.generate.assert_not_called()
 
     def test_unranked_your_feed_uses_followed_users_generator(self):
         two_tower = _make_candidates("tower", 3, "two_tower")

@@ -205,14 +205,6 @@ async def run_generate(
         if infill_gen is None:
             raise GeneratorNotFoundError(request.infill, is_infill=True)
 
-        infill_exclude_uris: list[str] = []
-        for uri in request.exclude_uris or []:
-            if uri not in infill_exclude_uris:
-                infill_exclude_uris.append(uri)
-        for c in deduped:
-            if c.at_uri and c.at_uri not in infill_exclude_uris:
-                infill_exclude_uris.append(c.at_uri)
-
         try:
             # Ask for extra to compensate for likely dedup losses
             infill_result = await asyncio.wait_for(
@@ -221,7 +213,7 @@ async def run_generate(
                     user_did=request.user_did,
                     num_candidates=shortfall * 2,
                     video_only=request.video_only,
-                    exclude_uris=infill_exclude_uris or None,
+                    exclude_uris=request.exclude_uris or None,
                 ),
                 timeout=_GENERATOR_TIMEOUT_SEC,
             )
