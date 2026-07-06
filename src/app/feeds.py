@@ -24,7 +24,7 @@ from .models import (
 FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(
         display_name="Unranked YF",
-        description="Development feed — post-similarity and followed-users candidate with popularity infill. No ranking.",
+        description="Development feed — same as your-feed but without ranking.",
         internal_rkey="e2-s",
         internal_display_name="e2 S",
         gen_request_template=CandidateGenerateRequest.model_construct(
