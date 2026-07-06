@@ -130,7 +130,7 @@ async def run_generate(
 
     async def _run_one(
         spec: GeneratorSpec, count: int, gen: CandidateGenerator
-    ) -> CandidateResult:
+    ) -> CandidateResult | None:
         try:
             async with timed(logger, "candidates.generate.duration_ms", record_metric=True, metric_attrs={"generator_name": spec.name}, count=count):
                 result = await asyncio.wait_for(
@@ -166,7 +166,7 @@ async def run_generate(
                     is_infill="false",
                 )
             if swallow_errors:
-                return CandidateResult(generator_name=spec.name, candidates=[])
+                return None
             raise GeneratorError(spec.name, exc) from exc
         except Exception as exc:
             logger.exception("Candidate generator '%s' failed", spec.name)
@@ -179,7 +179,7 @@ async def run_generate(
                     is_infill="false",
                 )
             if swallow_errors:
-                return CandidateResult(generator_name=spec.name, candidates=[])
+                return None
             raise GeneratorError(spec.name, exc) from exc
 
     results = await asyncio.gather(
@@ -190,6 +190,8 @@ async def run_generate(
 
     all_candidates: list[CandidatePost] = []
     for result in results:
+        if result is None:
+            continue
         if rec is not None:
             rec.record_generator_output(result)
         all_candidates.extend(result.candidates)

@@ -6,11 +6,10 @@ from typing import cast
 
 import pytest
 
-from ...models import CandidateGenerateRequest, CandidatePost, GeneratorSpec
+from ...models import CandidateGenerateRequest, GeneratorSpec
 from ..candidates import generate as generate_module
 from ..candidates.base import CandidateGenerator, CandidateResult
 from ..candidates.generate import GeneratorError, run_generate
-from ..feed_debug import FeedDebugRecorder, feed_debug_scope
 from ..metrics import MetricCollector, set_metric_collector
 
 
@@ -57,23 +56,6 @@ class _EmptyGenerator(CandidateGenerator):
         return CandidateResult(generator_name=self.name, candidates=[])
 
 
-class _FailThenReturnGenerator(CandidateGenerator):
-    def __init__(self, name: str, candidates: list[CandidatePost]):
-        self._name = name
-        self._candidates = candidates
-        self.calls = 0
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
-        self.calls += 1
-        if self.calls == 1:
-            raise RuntimeError("primary failed")
-        return CandidateResult(generator_name=self.name, candidates=self._candidates[:num_candidates])
-
-
 class FakeMetricCollector:
     def __init__(self):
         self.calls: list[tuple[str, float, dict]] = []
@@ -100,10 +82,6 @@ def _make_request(
         video_only=False,
         infill=infill,
     )
-
-
-def _candidate(uri: str, generator_name: str = "test") -> CandidatePost:
-    return CandidatePost(at_uri=uri, generator_name=generator_name)
 
 
 def _stub_generators(monkeypatch, mapping: dict) -> None:
@@ -208,28 +186,6 @@ class TestGeneratorTimeout:
             "outcome": "error",
             "is_infill": "false",
         }
-
-    @pytest.mark.asyncio
-    async def test_swallowed_primary_failure_records_empty_debug_output(self, monkeypatch):
-        gen = _FailThenReturnGenerator("popular", [_candidate("at://infill/1", "popular")])
-        _stub_generators(monkeypatch, {"popular": gen})
-        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
-
-        with feed_debug_scope(rec):
-            result = await run_generate(
-                _make_request("popular", num_candidates=1, infill="popular"),
-                es=None,
-                swallow_errors=True,
-            )
-
-        assert [c.at_uri for c in result.candidates] == ["at://infill/1"]
-        assert [
-            (output.generator_name, [c.at_uri for c in output.candidates])
-            for output in rec.generator_outputs
-        ] == [
-            ("popular", []),
-            ("popular", ["at://infill/1"]),
-        ]
 
     @pytest.mark.asyncio
     async def test_success_records_success_count_metric(self, monkeypatch):
