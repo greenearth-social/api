@@ -29,9 +29,8 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="e2 S",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="two_tower", weight=0.35),
-                GeneratorSpec(name="followed_users", weight=0.35),
-                GeneratorSpec(name="popularity", weight=0.3),
+                GeneratorSpec(name="two_tower", weight=0.5),
+                GeneratorSpec(name="followed_users", weight=0.5),
             ],
             infill="popularity",
             num_candidates=30,
@@ -65,9 +64,8 @@ FEEDS: dict[str, FeedConfig] = {
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mprirzcv3a24",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="two_tower", weight=0.35),
-                GeneratorSpec(name="followed_users", weight=0.35),
-                GeneratorSpec(name="popularity", weight=0.3),
+                GeneratorSpec(name="two_tower", weight=0.5),
+                GeneratorSpec(name="followed_users", weight=0.5),
             ],
             infill="popularity",
             num_candidates=30,
