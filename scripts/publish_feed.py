@@ -233,7 +233,11 @@ def _upload_blob(
     if resp.status_code != 200:
         print(f"uploadBlob failed ({resp.status_code}): {resp.text}", file=sys.stderr)
         sys.exit(1)
-    return resp.json()["blob"]
+    blob = resp.json().get("blob")
+    if not blob:
+        print(f"uploadBlob response missing 'blob' key: {resp.text}", file=sys.stderr)
+        sys.exit(1)
+    return blob
 
 
 def publish_feed(
