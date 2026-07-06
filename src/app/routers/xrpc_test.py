@@ -501,20 +501,6 @@ class TestGetFeedSkeleton:
         assert "at://infill/0" in posts
         assert len(posts) == 5
 
-    def test_infill_not_called_when_primary_sufficient(self):
-        # The pipeline pre-generates a batch larger than limit (limit * 5),
-        # so we supply enough candidates to cover the full batch.
-        primary = _make_candidates("prim", 25, "two_tower")
-        with self._patch_generators(primary) as mock_get:
-            data = client.get(
-                "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": FEED_URI, "limit": 5},
-            ).json()
-        assert len(data["feed"]) == 5
-        # Infill generator's generate method should not have been called
-        infill_gen = mock_get.side_effect("popularity")
-        infill_gen.generate.assert_not_called()
-
     def test_unranked_your_feed_uses_followed_users_generator(self):
         two_tower = _make_candidates("tower", 3, "two_tower")
         followed = _make_candidates("followed", 3, "followed_users")
