@@ -46,6 +46,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="67 R",
         diversify=False,
         exclude_seen_posts=False,
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mprixpw42r25",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="random_posts", weight=1.0)],
             infill=None,
@@ -60,6 +61,7 @@ FEEDS: dict[str, FeedConfig] = {
         public=True,
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mprirzcv3a24",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
                 GeneratorSpec(name="two_tower", weight=0.5),
@@ -83,6 +85,7 @@ FEEDS: dict[str, FeedConfig] = {
         public=True,
         internal_rkey="fd-bof",
         internal_display_name="fd BOF",
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mprivkqqe224",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="followed_users", weight=1.0)],
             infill=None,
