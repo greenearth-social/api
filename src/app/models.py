@@ -214,3 +214,7 @@ class FeedConfig(BaseModel):
         "denormalized onto the user record. When False, neither happens (the raw "
         "interactions are still stored).",
     )
+    pinned_post_uri: str | None = Field(
+        None,
+        description="AT URI of a post to pin at the top of the first page of this feed.",
+    )
