@@ -5,6 +5,7 @@ import json
 import logging
 
 import pytest
+from elastic_transport import ConnectionTimeout
 
 from . import es_client as es_client_module
 from .es_client import SlowQueryLoggingES
@@ -117,6 +118,71 @@ def test_other_attributes_delegate_to_wrapped():
     es = SlowQueryLoggingES(fake)
     asyncio.run(es.close())
     assert fake.closed is True
+
+
+def test_connection_timeout_logs_timeout_message(caplog, monkeypatch):
+    monkeypatch.setenv("GE_SLOW_ES_THRESHOLD_MS", "1000000")
+
+    class TimeoutEs:
+        async def search(self, **kwargs):
+            raise ConnectionTimeout("timed out")
+
+    es = SlowQueryLoggingES(TimeoutEs())
+
+    with caplog.at_level(logging.WARNING, logger=es_client_module.logger.name):
+        with pytest.raises(ConnectionTimeout):
+            asyncio.run(es.search(index="posts", query={"match_all": {}}))
+
+    matching = [r for r in caplog.records if "es_query_timeout" in r.message]
+    assert len(matching) == 1
+    assert "index=posts" in matching[0].message
+
+
+def test_connection_timeout_does_not_log_slow_query(caplog, monkeypatch):
+    monkeypatch.setenv("GE_SLOW_ES_THRESHOLD_MS", "0")
+
+    class TimeoutEs:
+        async def search(self, **kwargs):
+            raise ConnectionTimeout("timed out")
+
+    es = SlowQueryLoggingES(TimeoutEs())
+
+    with caplog.at_level(logging.WARNING, logger=es_client_module.logger.name):
+        with pytest.raises(ConnectionTimeout):
+            asyncio.run(es.search(index="posts", query={"match_all": {}}))
+
+    assert not any("slow_es_query" in r.message for r in caplog.records)
+
+
+def test_connection_timeout_is_reraised():
+    class TimeoutEs:
+        async def search(self, **kwargs):
+            raise ConnectionTimeout("timed out")
+
+    es = SlowQueryLoggingES(TimeoutEs())
+
+    with pytest.raises(ConnectionTimeout):
+        asyncio.run(es.search(index="posts", query={"match_all": {}}))
+
+
+def test_connection_timeout_log_includes_request_id(caplog, monkeypatch):
+    class TimeoutEs:
+        async def search(self, **kwargs):
+            raise ConnectionTimeout("timed out")
+
+    es = SlowQueryLoggingES(TimeoutEs())
+
+    token = set_request_id("tid99")
+    try:
+        with caplog.at_level(logging.WARNING, logger=es_client_module.logger.name):
+            with pytest.raises(ConnectionTimeout):
+                asyncio.run(es.search(index="posts", query={"match_all": {}}))
+    finally:
+        reset_request_id(token)
+
+    matching = [r for r in caplog.records if "es_query_timeout" in r.message]
+    assert matching
+    assert "rid=tid99" in matching[0].message
 
 
 def test_threshold_is_re_read_per_call(caplog, monkeypatch):

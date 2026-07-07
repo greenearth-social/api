@@ -17,6 +17,8 @@ import logging
 import os
 import time
 
+from elastic_transport import ConnectionTimeout
+
 from .request_context import get_request_id
 
 logger = logging.getLogger(__name__)
@@ -44,13 +46,36 @@ class SlowQueryLoggingES:
 
     async def search(self, *args, **kwargs):
         start = time.monotonic()
+        timed_out = False
         try:
             return await self._wrapped.search(*args, **kwargs)
-        finally:
+        except ConnectionTimeout:
+            timed_out = True
             elapsed_ms = (time.monotonic() - start) * 1000
-            threshold = _slow_threshold_ms()
-            if elapsed_ms >= threshold:
-                _log_slow_search(elapsed_ms, args, kwargs)
+            _log_timeout_search(elapsed_ms, args, kwargs)
+            raise
+        finally:
+            if not timed_out:
+                elapsed_ms = (time.monotonic() - start) * 1000
+                if elapsed_ms >= _slow_threshold_ms():
+                    _log_slow_search(elapsed_ms, args, kwargs)
+
+
+def _log_timeout_search(elapsed_ms: float, args: tuple, kwargs: dict) -> None:
+    """Emit a WARNING when the ES query raised ConnectionTimeout."""
+    rid = get_request_id() or "-"
+    body = {k: v for k, v in kwargs.items() if k not in ("index", "request_timeout")}
+    try:
+        body_str = json.dumps(body, default=str)
+    except Exception:
+        body_str = repr(body)
+    logger.warning(
+        "es_query_timeout rid=%s elapsed_ms=%.1f index=%s body=%s",
+        rid,
+        elapsed_ms,
+        kwargs.get("index"),
+        body_str,
+    )
 
 
 def _log_slow_search(elapsed_ms: float, args: tuple, kwargs: dict) -> None:
