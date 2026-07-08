@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish or update Bluesky posts with rich text support.
+"""Publish Bluesky posts with rich text support.
 
 Usage:
     cd api
@@ -8,14 +8,15 @@ Usage:
     pipenv run python scripts/manage_post.py --handle you.bsky.social publish \\
         --file post.txt
 
-    # Update an existing post (preserves AT URI)
-    pipenv run python scripts/manage_post.py --handle you.bsky.social update "at://did:plc:.../app.bsky.feed.post/3abc" \\
-        --file updated_post.txt
-
 post.txt format — plain text with markdown links:
     Hello world. [Click here](https://example.com) for more.
+    To show brackets in the display text: [[link]](https://example.com)
 
 Reads GE_BSKY_APP_PASSWORD from .env or environment, or prompts.
+
+Note: in-place updates (putRecord) are not supported — Bluesky's AppView does
+not reliably re-index updated records, so the visible post would remain stale.
+Delete and re-publish instead.
 """
 
 import argparse
@@ -27,7 +28,7 @@ import sys
 from atproto import Client, client_utils
 from dotenv import load_dotenv
 
-LINK_RE = re.compile(r'\[([^\]]+)\]\((https?://[^)]+)\)')
+LINK_RE = re.compile(r'\[(\[[^\]]+\]|[^\]]+)\]\((https?://[^)]+)\)')
 
 
 def parse_content(text: str) -> list[dict]:
@@ -107,62 +108,6 @@ def cmd_publish(args) -> None:
     print(f"  View:   https://bsky.app/profile/{args.handle}/post/{rkey}")
 
 
-def cmd_update(args) -> None:
-    if not args.at_uri.startswith("at://"):
-        print(f"Not an AT URI: {args.at_uri}", file=sys.stderr)
-        sys.exit(1)
-    parts = args.at_uri[5:].split("/", 2)
-    if len(parts) != 3:
-        print("AT URI must be at://repo/collection/rkey", file=sys.stderr)
-        sys.exit(1)
-    repo, collection, rkey = parts
-
-    content = _load_file(args.file)
-    if not content:
-        print("Error: file is empty", file=sys.stderr)
-        sys.exit(1)
-    segments = parse_content(content)
-    tb = build_text_builder(segments)
-
-    if args.dry_run:
-        print(f"=== DRY RUN — would update {args.at_uri} ===")
-        for seg in segments:
-            if seg["type"] == "text":
-                print(repr(seg["text"]))
-            else:
-                print(f'  [link] "{seg["text"]}" → {seg["url"]}')
-        return
-
-    client = _login(args.handle)
-    if repo != client.me.did:
-        print(f"Error: AT URI repo ({repo}) does not match your DID ({client.me.did})", file=sys.stderr)
-        sys.exit(1)
-
-    # Fetch existing record to preserve fields we're not changing (e.g. createdAt)
-    existing = client.com.atproto.repo.get_record({
-        "repo": repo,
-        "collection": collection,
-        "rkey": rkey,
-    })
-    val = existing.value
-    base = val.model_dump(by_alias=True) if hasattr(val, "model_dump") else dict(val)
-
-    # Build updated record: keep all existing fields, replace text + facets
-    new_text = tb.build_text()
-    new_facets = [f.model_dump(by_alias=True) for f in tb.build_facets()]
-    updated_record = {**base, "text": new_text, "facets": new_facets}
-
-    client.com.atproto.repo.put_record({
-        "repo": client.me.did,
-        "collection": collection,
-        "rkey": rkey,
-        "record": updated_record,
-    })
-    print("Updated!")
-    print(f"  AT URI: {args.at_uri}  (preserved)")
-    print(f"  View:   https://bsky.app/profile/{args.handle}/post/{rkey}")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Publish or update Bluesky posts.")
     parser.add_argument("--handle", required=True, help="Bluesky handle (e.g. you.bsky.social)")
@@ -172,16 +117,9 @@ def main() -> None:
     pub.add_argument("--file", required=True, help="Path to post content file")
     pub.add_argument("--dry-run", action="store_true")
 
-    upd = sub.add_parser("update", help="Update an existing post in-place")
-    upd.add_argument("at_uri", help="AT URI of the post to update")
-    upd.add_argument("--file", required=True, help="Path to updated content file")
-    upd.add_argument("--dry-run", action="store_true")
-
     args = parser.parse_args()
     if args.command == "publish":
         cmd_publish(args)
-    elif args.command == "update":
-        cmd_update(args)
 
 
 if __name__ == "__main__":
