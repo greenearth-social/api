@@ -105,7 +105,52 @@ def cmd_publish(args) -> None:
 
 
 def cmd_update(args) -> None:
-    pass
+    if not args.at_uri.startswith("at://"):
+        print(f"Not an AT URI: {args.at_uri}", file=sys.stderr)
+        sys.exit(1)
+    parts = args.at_uri[5:].split("/", 2)
+    if len(parts) != 3:
+        print("AT URI must be at://repo/collection/rkey", file=sys.stderr)
+        sys.exit(1)
+    repo, collection, rkey = parts
+
+    content = _load_file(args.file)
+    segments = parse_content(content)
+    tb = build_text_builder(segments)
+
+    if args.dry_run:
+        print(f"=== DRY RUN — would update {args.at_uri} ===")
+        for seg in segments:
+            if seg["type"] == "text":
+                print(repr(seg["text"]))
+            else:
+                print(f'  [link] "{seg["text"]}" → {seg["url"]}')
+        return
+
+    client = _login(args.handle)
+
+    # Fetch existing record to preserve fields we're not changing (e.g. createdAt)
+    existing = client.com.atproto.repo.get_record({
+        "repo": repo,
+        "collection": collection,
+        "rkey": rkey,
+    })
+    val = existing.value
+    base = val.model_dump() if hasattr(val, "model_dump") else dict(val)
+
+    # Build updated record: keep all existing fields, replace text + facets
+    post_dict = tb.build_post()
+    updated_record = {**base, "text": post_dict["text"], "facets": post_dict.get("facets", [])}
+
+    client.com.atproto.repo.put_record({
+        "repo": client.me.did,
+        "collection": collection,
+        "rkey": rkey,
+        "record": updated_record,
+    })
+    print("Updated!")
+    print(f"  AT URI: {args.at_uri}  (preserved)")
+    print(f"  View:   https://bsky.app/profile/{args.handle}/post/{rkey}")
 
 
 def main() -> None:
