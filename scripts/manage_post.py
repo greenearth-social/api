@@ -24,6 +24,7 @@ import os
 import re
 import sys
 
+from atproto import client_utils
 from dotenv import load_dotenv
 
 LINK_RE = re.compile(r'\[([^\]]+)\]\((https?://[^)]+)\)')
@@ -41,3 +42,24 @@ def parse_content(text: str) -> list[dict]:
     if last < len(text):
         segments.append({"type": "text", "text": text[last:]})
     return segments
+
+
+def build_text_builder(segments: list[dict]) -> client_utils.TextBuilder:
+    """Build a TextBuilder from parsed content segments.
+
+    Converts a list of text and link segments into an atproto TextBuilder
+    with proper rich text markup.
+
+    Args:
+        segments: List of dicts with type="text" or "link" from parse_content()
+
+    Returns:
+        client_utils.TextBuilder with all segments added
+    """
+    tb = client_utils.TextBuilder()
+    for seg in segments:
+        if seg["type"] == "text":
+            tb.text(seg["text"])
+        elif seg["type"] == "link":
+            tb.link(seg["text"], seg["url"])
+    return tb
