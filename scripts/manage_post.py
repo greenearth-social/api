@@ -5,8 +5,8 @@ Usage:
     cd api
 
     # Publish a new post
-    pipenv run python scripts/manage_post.py publish \\
-        --handle you.bsky.social --file post.txt
+    pipenv run python scripts/manage_post.py --handle you.bsky.social publish \\
+        --file post.txt
 
     # Update an existing post (preserves AT URI)
     pipenv run python scripts/manage_post.py --handle you.bsky.social update "at://did:plc:.../app.bsky.feed.post/3abc" \\
