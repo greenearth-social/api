@@ -6,10 +6,11 @@ from typing import cast
 
 import pytest
 
-from ...models import CandidateGenerateRequest, GeneratorSpec
+from ...models import CandidateGenerateRequest, CandidatePost, GeneratorSpec
 from ..candidates import generate as generate_module
 from ..candidates.base import CandidateGenerator, CandidateResult
 from ..candidates.generate import GeneratorError, run_generate
+from ..feed_debug import FeedDebugRecorder, feed_debug_scope
 from ..metrics import MetricCollector, set_metric_collector
 
 
@@ -56,6 +57,46 @@ class _EmptyGenerator(CandidateGenerator):
         return CandidateResult(generator_name=self.name, candidates=[])
 
 
+class _StaticGenerator(CandidateGenerator):
+    def __init__(self, name: str, candidates: list[CandidatePost]):
+        self._name = name
+        self._candidates = candidates
+        self.calls: list[dict] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+        self.calls.append(
+            {
+                "num_candidates": num_candidates,
+                "video_only": video_only,
+                "exclude_uris": exclude_uris,
+            }
+        )
+        excluded = set(exclude_uris or [])
+        candidates = [c for c in self._candidates if c.at_uri not in excluded]
+        return CandidateResult(generator_name=self.name, candidates=candidates[:num_candidates])
+
+
+class _FailThenReturnGenerator(CandidateGenerator):
+    def __init__(self, name: str, candidates: list[CandidatePost]):
+        self._name = name
+        self._candidates = candidates
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("primary failed")
+        return CandidateResult(generator_name=self.name, candidates=self._candidates[:num_candidates])
+
+
 class FakeMetricCollector:
     def __init__(self):
         self.calls: list[tuple[str, float, dict]] = []
@@ -74,6 +115,7 @@ def _make_request(
     *,
     num_candidates: int = 5,
     infill: str | None = None,
+    exclude_uris: list[str] | None = None,
 ) -> CandidateGenerateRequest:
     return CandidateGenerateRequest(
         generators=[GeneratorSpec(name=generator_name, weight=1.0)],
@@ -81,7 +123,12 @@ def _make_request(
         num_candidates=num_candidates,
         video_only=False,
         infill=infill,
+        exclude_uris=exclude_uris or [],
     )
+
+
+def _candidate(uri: str, generator_name: str = "test") -> CandidatePost:
+    return CandidatePost(at_uri=uri, generator_name=generator_name)
 
 
 def _stub_generators(monkeypatch, mapping: dict) -> None:
@@ -186,6 +233,28 @@ class TestGeneratorTimeout:
             "outcome": "error",
             "is_infill": "false",
         }
+
+    @pytest.mark.asyncio
+    async def test_swallowed_primary_failure_records_empty_debug_output(self, monkeypatch):
+        gen = _FailThenReturnGenerator("popular", [_candidate("at://infill/1", "popular")])
+        _stub_generators(monkeypatch, {"popular": gen})
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+
+        with feed_debug_scope(rec):
+            result = await run_generate(
+                _make_request("popular", num_candidates=1, infill="popular"),
+                es=None,
+                swallow_errors=True,
+            )
+
+        assert [c.at_uri for c in result.candidates] == ["at://infill/1"]
+        assert [
+            (output.generator_name, [c.at_uri for c in output.candidates])
+            for output in rec.generator_outputs
+        ] == [
+            ("popular", []),
+            ("popular", ["at://infill/1"]),
+        ]
 
     @pytest.mark.asyncio
     async def test_success_records_success_count_metric(self, monkeypatch):
@@ -319,3 +388,48 @@ class TestInfillGeneratorTimeout:
         infill_success = [c for c in success_calls if c[2].get("is_infill") == "true"]
         assert len(infill_success) == 1
         assert infill_success[0][2] == {"generator_name": "popular", "is_infill": "true"}
+
+    @pytest.mark.asyncio
+    async def test_infill_excludes_request_and_primary_candidate_uris(self, monkeypatch):
+        primary = _StaticGenerator(
+            "popular",
+            [
+                _candidate("at://seen/1", "popular"),
+                _candidate("at://primary/1", "popular"),
+                _candidate("at://primary/2", "popular"),
+            ],
+        )
+        infill = _StaticGenerator(
+            "popular_infill",
+            [
+                _candidate("at://seen/1", "popular_infill"),
+                _candidate("at://primary/1", "popular_infill"),
+                _candidate("at://primary/2", "popular_infill"),
+                _candidate("at://infill/1", "popular_infill"),
+                _candidate("at://infill/2", "popular_infill"),
+            ],
+        )
+        _stub_generators(monkeypatch, {"popular": primary, "popular_infill": infill})
+
+        result = await run_generate(
+            _make_request(
+                "popular",
+                num_candidates=4,
+                infill="popular_infill",
+                exclude_uris=["at://seen/1"],
+            ),
+            es=None,
+            swallow_errors=True,
+        )
+
+        assert infill.calls[0]["exclude_uris"] == [
+            "at://seen/1",
+            "at://primary/1",
+            "at://primary/2",
+        ]
+        assert [c.at_uri for c in result.candidates] == [
+            "at://primary/1",
+            "at://primary/2",
+            "at://infill/1",
+            "at://infill/2",
+        ]
