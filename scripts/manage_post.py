@@ -85,7 +85,6 @@ def _load_file(path: str) -> str:
 def cmd_publish(args) -> None:
     content = _load_file(args.file)
     segments = parse_content(content)
-    tb = build_text_builder(segments)
 
     if args.dry_run:
         print("=== DRY RUN — post content ===")
@@ -96,12 +95,13 @@ def cmd_publish(args) -> None:
                 print(f'  [link] "{seg["text"]}" → {seg["url"]}')
         return
 
+    tb = build_text_builder(segments)
     client = _login(args.handle)
     post = client.send_post(tb)
     rkey = post.uri.split("/")[-1]
-    print(f"Published!")
+    print("Published!")
     print(f"  AT URI: {post.uri}")
-    print(f"  View:   https://bsky.app/profile/{client.me.handle}/post/{rkey}")
+    print(f"  View:   https://bsky.app/profile/{args.handle}/post/{rkey}")
 
 
 def cmd_update(args) -> None:
