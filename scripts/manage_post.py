@@ -9,8 +9,8 @@ Usage:
         --handle you.bsky.social --file post.txt
 
     # Update an existing post (preserves AT URI)
-    pipenv run python scripts/manage_post.py update "at://did:plc:.../app.bsky.feed.post/3abc" \\
-        --handle you.bsky.social --file updated_post.txt
+    pipenv run python scripts/manage_post.py --handle you.bsky.social update "at://did:plc:.../app.bsky.feed.post/3abc" \\
+        --file updated_post.txt
 
 post.txt format — plain text with markdown links:
     Hello world. [Click here](https://example.com) for more.
@@ -84,6 +84,9 @@ def _load_file(path: str) -> str:
 
 def cmd_publish(args) -> None:
     content = _load_file(args.file)
+    if not content:
+        print("Error: file is empty", file=sys.stderr)
+        sys.exit(1)
     segments = parse_content(content)
 
     if args.dry_run:
@@ -115,6 +118,9 @@ def cmd_update(args) -> None:
     repo, collection, rkey = parts
 
     content = _load_file(args.file)
+    if not content:
+        print("Error: file is empty", file=sys.stderr)
+        sys.exit(1)
     segments = parse_content(content)
     tb = build_text_builder(segments)
 
@@ -128,6 +134,9 @@ def cmd_update(args) -> None:
         return
 
     client = _login(args.handle)
+    if repo != client.me.did:
+        print(f"Error: AT URI repo ({repo}) does not match your DID ({client.me.did})", file=sys.stderr)
+        sys.exit(1)
 
     # Fetch existing record to preserve fields we're not changing (e.g. createdAt)
     existing = client.com.atproto.repo.get_record({
@@ -136,11 +145,12 @@ def cmd_update(args) -> None:
         "rkey": rkey,
     })
     val = existing.value
-    base = val.model_dump() if hasattr(val, "model_dump") else dict(val)
+    base = val.model_dump(by_alias=True) if hasattr(val, "model_dump") else dict(val)
 
     # Build updated record: keep all existing fields, replace text + facets
-    post_dict = tb.build_post()
-    updated_record = {**base, "text": post_dict["text"], "facets": post_dict.get("facets", [])}
+    new_text = tb.build_text()
+    new_facets = [f.model_dump(by_alias=True) for f in tb.build_facets()]
+    updated_record = {**base, "text": new_text, "facets": new_facets}
 
     client.com.atproto.repo.put_record({
         "repo": client.me.did,
