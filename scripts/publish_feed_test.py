@@ -18,6 +18,7 @@ from publish_feed import (
     _put_record,
     _resolve_environment,
     _resolve_feed_publish_params,
+    _upload_blob,
     delete_all_feeds,
     delete_feed,
     list_feeds,
@@ -182,13 +183,82 @@ class TestListRecords:
 
 
 # ---------------------------------------------------------------------------
+# _upload_blob
+# ---------------------------------------------------------------------------
+
+
+class TestUploadBlob:
+    def test_returns_none_when_path_is_none(self):
+        client = MagicMock(spec=httpx.Client)
+        result = _upload_blob(client, PDS, ACCESS_JWT, None)
+        assert result is None
+        client.post.assert_not_called()
+
+    def test_uploads_png_and_returns_blob_ref(self, tmp_path):
+        img = tmp_path / "icon.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        blob_ref = {
+            "$type": "blob",
+            "ref": {"$link": "bafyabc"},
+            "mimeType": "image/png",
+            "size": 16,
+        }
+        client = MagicMock(spec=httpx.Client)
+        client.post.return_value = _mock_response(200, {"blob": blob_ref})
+
+        result = _upload_blob(client, PDS, ACCESS_JWT, str(img))
+
+        assert result == blob_ref
+        client.post.assert_called_once_with(
+            f"{PDS}/xrpc/com.atproto.repo.uploadBlob",
+            headers={"Authorization": f"Bearer {ACCESS_JWT}", "Content-Type": "image/png"},
+            content=img.read_bytes(),
+        )
+
+    def test_uploads_jpg_with_correct_mime_type(self, tmp_path):
+        img = tmp_path / "icon.jpg"
+        img.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 8)
+        blob_ref = {"$type": "blob", "ref": {"$link": "bafyjpg"}, "mimeType": "image/jpeg", "size": 12}
+        client = MagicMock(spec=httpx.Client)
+        client.post.return_value = _mock_response(200, {"blob": blob_ref})
+
+        result = _upload_blob(client, PDS, ACCESS_JWT, str(img))
+
+        assert result == blob_ref
+        call_headers = client.post.call_args.kwargs["headers"]
+        assert call_headers["Content-Type"] == "image/jpeg"
+
+    def test_returns_none_when_file_does_not_exist(self):
+        client = MagicMock(spec=httpx.Client)
+        result = _upload_blob(client, PDS, ACCESS_JWT, "/nonexistent/path/icon.png")
+        assert result is None
+        client.post.assert_not_called()
+
+    def test_exits_on_unsupported_format(self, tmp_path):
+        img = tmp_path / "icon.gif"
+        img.write_bytes(b"GIF89a")
+        client = MagicMock(spec=httpx.Client)
+        with pytest.raises(SystemExit):
+            _upload_blob(client, PDS, ACCESS_JWT, str(img))
+
+    def test_exits_on_upload_api_failure(self, tmp_path):
+        img = tmp_path / "icon.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+        client = MagicMock(spec=httpx.Client)
+        client.post.return_value = _mock_response(500, {})
+        with pytest.raises(SystemExit):
+            _upload_blob(client, PDS, ACCESS_JWT, str(img))
+
+
+# ---------------------------------------------------------------------------
 # publish_feed (high-level)
 # ---------------------------------------------------------------------------
 
 
 class TestPublishFeed:
+    @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_publishes_known_feed(self, MockClient, capsys):
+    def test_publishes_known_feed(self, MockClient, mock_upload_blob, capsys):
         """Publishing a feed defined in FEEDS uses its display metadata."""
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -219,8 +289,9 @@ class TestPublishFeed:
         captured = capsys.readouterr()
         assert "Published feed record:" in captured.out
 
+    @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_publishes_unknown_feed_uses_name_as_display(self, MockClient, capsys):
+    def test_publishes_unknown_feed_uses_name_as_display(self, MockClient, mock_upload_blob, capsys):
         """Publishing a feed not in FEEDS falls back to feed_name."""
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -244,8 +315,9 @@ class TestPublishFeed:
         assert record["displayName"] == "unknown-feed"
         assert record["description"] == ""
 
+    @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_display_name_override(self, MockClient):
+    def test_display_name_override(self, MockClient, mock_upload_blob):
         """Explicit display_name / description override FEEDS metadata."""
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -271,8 +343,9 @@ class TestPublishFeed:
         assert record["displayName"] == "Custom Name"
         assert record["description"] == "Custom desc"
 
+    @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_environment_prefix_applied(self, MockClient, capsys):
+    def test_environment_prefix_applied(self, MockClient, mock_upload_blob, capsys):
         """Passing environment prefixes the display name."""
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -596,8 +669,9 @@ class TestEnvironmentResolution:
 
 
 class TestSyncFeeds:
+    @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_publishes_all_and_deletes_stale(self, MockClient, capsys):
+    def test_publishes_all_and_deletes_stale(self, MockClient, mock_upload_blob, capsys):
         """sync_feeds publishes every FEEDS entry and removes stale records."""
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -630,8 +704,9 @@ class TestSyncFeeds:
         assert "Deleted stale: old-feed" in captured.out
         assert "Sync complete:" in captured.out
 
+    @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_no_stale_records(self, MockClient, capsys):
+    def test_no_stale_records(self, MockClient, mock_upload_blob, capsys):
         """sync_feeds with no existing records deletes nothing."""
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -655,8 +730,9 @@ class TestSyncFeeds:
         assert "Deleted stale" not in captured.out
         assert f"{feed_count} published, 0 deleted" in captured.out
 
+    @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_internal_only_does_not_delete_public_feed_caterpie_records(self, MockClient, capsys):
+    def test_internal_only_does_not_delete_public_feed_caterpie_records(self, MockClient, mock_upload_blob, capsys):
         """A prod --internal-only sync must not delete public feeds' Caterpie
         records that were published by an earlier stage (unfiltered) deployment."""
         client = MagicMock()
@@ -863,3 +939,151 @@ class TestPublicInternalOnlyCLI:
                     main()
         mock_sync.assert_called_once()
         assert mock_sync.call_args.kwargs["visibility"] is None
+
+
+# ---------------------------------------------------------------------------
+# publish_feed — avatar integration
+# ---------------------------------------------------------------------------
+
+
+BLOB_REF = {
+    "$type": "blob",
+    "ref": {"$link": "bafyabc"},
+    "mimeType": "image/png",
+    "size": 100,
+}
+
+
+class TestPublishFeedAvatar:
+    @patch("publish_feed._upload_blob")
+    @patch("publish_feed.httpx.Client")
+    def test_avatar_blob_included_in_record(self, MockClient, mock_upload_blob):
+        mock_upload_blob.return_value = BLOB_REF
+        client = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=client)
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+        client.post.side_effect = [
+            _mock_response(200, SESSION_RESPONSE),
+            _mock_response(200, {"cid": "bafyabc"}),
+        ]
+
+        publish_feed(
+            handle=HANDLE,
+            password=PASSWORD,
+            feed_name="your-feed",
+            generator_did=GENERATOR_DID,
+            pds=PDS,
+        )
+
+        put_call = client.post.call_args_list[1]
+        record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
+        assert record["avatar"] == BLOB_REF
+
+    @patch("publish_feed._upload_blob")
+    @patch("publish_feed.httpx.Client")
+    def test_no_avatar_key_when_upload_returns_none(self, MockClient, mock_upload_blob):
+        mock_upload_blob.return_value = None
+        client = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=client)
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+        client.post.side_effect = [
+            _mock_response(200, SESSION_RESPONSE),
+            _mock_response(200, {"cid": "bafyabc"}),
+        ]
+
+        publish_feed(
+            handle=HANDLE,
+            password=PASSWORD,
+            feed_name="unknown-feed",  # not in FEEDS → no avatar
+            generator_did=GENERATOR_DID,
+            pds=PDS,
+        )
+
+        put_call = client.post.call_args_list[1]
+        record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
+        assert "avatar" not in record
+
+    @patch("publish_feed._upload_blob")
+    @patch("publish_feed.httpx.Client")
+    def test_upload_blob_called_with_feed_avatar_path(self, MockClient, mock_upload_blob):
+        mock_upload_blob.return_value = None
+        client = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=client)
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+        client.post.side_effect = [
+            _mock_response(200, SESSION_RESPONSE),
+            _mock_response(200, {"cid": "bafyabc"}),
+        ]
+
+        publish_feed(
+            handle=HANDLE,
+            password=PASSWORD,
+            feed_name="your-feed",
+            generator_did=GENERATOR_DID,
+            pds=PDS,
+        )
+
+        mock_upload_blob.assert_called_once()
+        _, _, _, avatar_path = mock_upload_blob.call_args.args
+        assert avatar_path == FEEDS["your-feed"].avatar
+
+
+# ---------------------------------------------------------------------------
+# sync_feeds — avatar integration
+# ---------------------------------------------------------------------------
+
+
+class TestSyncFeedsAvatar:
+    @patch("publish_feed._upload_blob")
+    @patch("publish_feed.httpx.Client")
+    def test_avatar_included_in_all_synced_records(self, MockClient, mock_upload_blob):
+        mock_upload_blob.return_value = BLOB_REF
+        client = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=client)
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+        feed_count = len(FEEDS)
+        client.post.side_effect = [
+            _mock_response(200, SESSION_RESPONSE),
+            *[_mock_response(200, {"cid": "bafyabc"}) for _ in range(feed_count)],
+        ]
+        client.get.return_value = _mock_response(200, {"records": []})
+
+        sync_feeds(
+            handle=HANDLE,
+            password=PASSWORD,
+            generator_did=GENERATOR_DID,
+            pds=PDS,
+        )
+
+        put_calls = [
+            c for c in client.post.call_args_list
+            if "putRecord" in str(c)
+        ]
+        for call in put_calls:
+            record = call.kwargs["json"]["record"] if "json" in call.kwargs else call[1]["json"]["record"]
+            assert record["avatar"] == BLOB_REF
+
+    @patch("publish_feed._upload_blob")
+    @patch("publish_feed.httpx.Client")
+    def test_upload_blob_called_once_per_feed(self, MockClient, mock_upload_blob):
+        mock_upload_blob.return_value = BLOB_REF
+        client = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=client)
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+        feed_count = len(FEEDS)
+        client.post.side_effect = [
+            _mock_response(200, SESSION_RESPONSE),
+            *[_mock_response(200, {"cid": "bafyabc"}) for _ in range(feed_count)],
+        ]
+        client.get.return_value = _mock_response(200, {"records": []})
+
+        sync_feeds(
+            handle=HANDLE,
+            password=PASSWORD,
+            generator_did=GENERATOR_DID,
+            pds=PDS,
+        )
+
+        assert mock_upload_blob.call_count == feed_count
