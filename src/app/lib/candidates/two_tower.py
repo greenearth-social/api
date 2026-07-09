@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 TWO_TOWER_GENERATOR_NAME = "two_tower"
+MIN_LIKE_COUNT = 20
 
 
 class TwoTowerCandidateGenerator(CandidateGenerator):
@@ -66,7 +67,7 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         candidates = await knn_search_posts(
             es, user_embedding, num_candidates, search_field=GE_POST_EMBEDDING_FIELD,
             generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
-            ge_post_embedding_model_uuid=post_tower_uuid,
+            ge_post_embedding_model_uuid=post_tower_uuid, min_like_count=MIN_LIKE_COUNT,
         )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

@@ -547,6 +547,16 @@ class TestKnnSearchPosts:
         assert {"term": {"ge_post_embedding_model_uuid": "model-uuid-123"}} in knn["filter"]["bool"]["filter"]
 
     @pytest.mark.asyncio
+    async def test_min_like_count_is_an_es_filter(self):
+        es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
+        await knn_search_posts(
+            es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
+            min_like_count=20
+        )
+        knn = es.calls[0]["knn"]
+        assert {"range": {"like_count": {"gte": 20}}} in knn["filter"]["bool"]["filter"]
+
+    @pytest.mark.asyncio
     async def test_ge_post_embedding_model_uuid_filter_combines_with_exclude_uris(self):
         es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
         await knn_search_posts(
