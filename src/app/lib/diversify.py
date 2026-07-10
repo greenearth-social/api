@@ -7,7 +7,7 @@ from .feed_debug import current_recorder
 from ..models import CandidatePost
 
 BETA = 0.5
-AUTHOR_WEIGHT = 0.75
+AUTHOR_WEIGHT = 0.5
 
 
 def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
