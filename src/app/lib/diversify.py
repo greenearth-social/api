@@ -6,8 +6,14 @@ from .embeddings import decode_float32_b64
 from .feed_debug import current_recorder
 from ..models import CandidatePost
 
-BETA = 0.5
+# Global diversity weight (relevance weight is 1-BETA)
+BETA = 0.7
+
+# Author weight (content weight is 1-AUTHOR_WEIGHT)
 AUTHOR_WEIGHT = 0.5
+
+# Decay tau for position-based decay of author and content penalties
+DECAY_TAU = 15.0
 
 
 def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
@@ -35,13 +41,14 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     author_dids = [c.author_did for c in candidates]
     remaining = list(range(n))
     selected: list[int] = []
-    # max_content_sim[i] tracks the highest (content) similarity candidate i has to
+
+    # tracks the highest decayed (content) similarity candidate i has to
     # any selected candidate so far. Updated incrementally — one new comparison per
     # remaining item each round instead of recomputing the full max from scratch.
-    max_content_sims = [-math.inf] * n
-    # for each remaining post, keep track of the number of times that post's author
+    decayed_max_content_sims = [-math.inf] * n
+    # for each remaining post, keep track of the decayed number of times that post's author
     # has already been selected in the result set
-    same_author_counts = [0] * n
+    decayed_same_author_counts = [0] * n
 
     rec = current_recorder()
     # (at_uri, relevance, score, author_penalty, content_penalty) per pick, for
@@ -49,14 +56,17 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     diag: list[tuple[str, float, float, float, float]] | None = [] if rec is not None else None
 
     def _calculate_author_penalty(i: int) -> float:
-        return BETA * AUTHOR_WEIGHT * same_author_counts[i]
+        return BETA * AUTHOR_WEIGHT * decayed_same_author_counts[i]
 
     def _calculate_content_penalty(i: int) -> float:
-        return BETA * (1 - AUTHOR_WEIGHT) * max_content_sims[i]
+        return BETA * (1 - AUTHOR_WEIGHT) * decayed_max_content_sims[i]
 
     def _calculate_penalized_score(i: int) -> float:
         total_penalty = _calculate_author_penalty(i) + _calculate_content_penalty(i)
         return (1 - BETA) * norm_scores[i] - total_penalty
+
+    # We incrementally decay the counts and similarities after each selection
+    single_decay_factor = math.exp(-1 / DECAY_TAU)
 
     while remaining:
         if not selected:
@@ -91,13 +101,17 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
         selected.append(best)
         remaining.remove(best)
 
+        # position-decay same author counts and content similarities:
+        decayed_same_author_counts = [c * single_decay_factor for c in decayed_same_author_counts]
+        decayed_max_content_sims = [s * single_decay_factor for s in decayed_max_content_sims]
+
         for i in remaining:
             if author_dids[i] is not None and author_dids[best] is not None:
                 if author_dids[i] == author_dids[best]:
-                    same_author_counts[i] += 1
+                    decayed_same_author_counts[i] += 1
             content_sim = _calculate_content_sim(vecs[i], vecs[best])
-            if content_sim > max_content_sims[i]:
-                max_content_sims[i] = content_sim
+            if content_sim > decayed_max_content_sims[i]:
+                decayed_max_content_sims[i] = content_sim
 
     if rec is not None and diag is not None:
         rec.record_diversification(diag)
