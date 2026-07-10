@@ -47,7 +47,6 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="67-r",
         internal_display_name="67 R",
         avatar="assets/icons/random.png",
-        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5uvuzydy2o"
         diversify=False,
         exclude_seen_posts=False,
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5uvuzydy2o",
