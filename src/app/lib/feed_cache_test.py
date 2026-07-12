@@ -342,3 +342,24 @@ class TestDiversityScores:
         result = await cache.append("key1", ["at://a/2"], new_scores=None)
         assert result is not None
         assert result.diversity_scores is None
+
+    @pytest.mark.asyncio
+    async def test_append_clears_scores_in_firestore_when_dropped(self):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {
+            "items": ["at://a/1"],
+            "diversity_scores": [1.0],
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        doc_ref.get.return_value = snap
+
+        result = await cache.append("key1", ["at://a/2"], new_scores=None)
+        assert result is not None
+        assert result.diversity_scores is None
+        called_with = doc_ref.update.call_args[0][0]
+        assert "diversity_scores" in called_with
+        assert called_with["diversity_scores"] is None

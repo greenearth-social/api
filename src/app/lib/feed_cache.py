@@ -146,8 +146,6 @@ class FirestoreFeedCache(FeedCache):
         else:
             updated_scores = None
 
-        update_data: dict = {"items": updated_items}
-        if updated_scores is not None:
-            update_data["diversity_scores"] = updated_scores
+        update_data: dict = {"items": updated_items, "diversity_scores": updated_scores}
         await ref.update(update_data)
         return CachedFeed(items=updated_items, diversity_scores=updated_scores)
