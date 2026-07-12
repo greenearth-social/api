@@ -109,7 +109,8 @@ class TestFirestoreFeedCacheRetrieve:
         doc_ref.get.return_value = snap
 
         result = await cache.retrieve("key1")
-        assert result == ["at://a/1"]
+        assert result is not None
+        assert result.items == ["at://a/1"]
 
     @pytest.mark.asyncio
     async def test_returns_none_when_expired(self):
@@ -160,7 +161,6 @@ class TestFirestoreFeedCacheRetrieve:
 
         snap = MagicMock()
         snap.exists = True
-        # A naive datetime in the future.
         snap.to_dict.return_value = {
             "items": ["at://a/1"],
             "expires_at": datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=5),
@@ -168,7 +168,8 @@ class TestFirestoreFeedCacheRetrieve:
         doc_ref.get.return_value = snap
 
         result = await cache.retrieve("key1")
-        assert result == ["at://a/1"]
+        assert result is not None
+        assert result.items == ["at://a/1"]
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +191,8 @@ class TestFirestoreFeedCacheAppend:
         doc_ref.get.return_value = snap
 
         result = await cache.append("key1", ["at://a/2", "at://a/3"])
-        assert result == ["at://a/1", "at://a/2", "at://a/3"]
+        assert result is not None
+        assert result.items == ["at://a/1", "at://a/2", "at://a/3"]
         doc_ref.update.assert_awaited_once_with({"items": ["at://a/1", "at://a/2", "at://a/3"]})
 
     @pytest.mark.asyncio
@@ -233,3 +235,110 @@ class TestFirestoreFeedCacheAppend:
 
         result = await cache.append("key1", ["at://a/2"])
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Diversity score threading
+# ---------------------------------------------------------------------------
+
+class TestDiversityScores:
+    @pytest.mark.asyncio
+    async def test_store_and_retrieve_scores(self):
+        db, col_ref, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {
+            "items": ["at://a/1", "at://a/2"],
+            "diversity_scores": [1.0, 0.5],
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        doc_ref.get.return_value = snap
+
+        result = await cache.retrieve("key1")
+        assert result is not None
+        assert result.items == ["at://a/1", "at://a/2"]
+        assert result.diversity_scores == [1.0, 0.5]
+
+    @pytest.mark.asyncio
+    async def test_retrieve_without_scores_returns_none_scores(self):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {
+            "items": ["at://a/1"],
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        doc_ref.get.return_value = snap
+
+        result = await cache.retrieve("key1")
+        assert result is not None
+        assert result.diversity_scores is None
+
+    @pytest.mark.asyncio
+    async def test_store_persists_scores(self):
+        db, col_ref, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        await cache.store("key1", ["at://a/1", "at://a/2"], scores=[1.0, 0.7])
+
+        stored = doc_ref.set.call_args[0][0]
+        assert stored["diversity_scores"] == [1.0, 0.7]
+
+    @pytest.mark.asyncio
+    async def test_append_merges_scores(self):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {
+            "items": ["at://a/1"],
+            "diversity_scores": [1.0],
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        doc_ref.get.return_value = snap
+
+        result = await cache.append("key1", ["at://a/2"], new_scores=[0.6])
+        assert result is not None
+        assert result.items == ["at://a/1", "at://a/2"]
+        assert result.diversity_scores == [1.0, 0.6]
+
+    @pytest.mark.asyncio
+    async def test_append_drops_scores_when_existing_has_none(self):
+        """If the existing cache entry has no scores, merged result also has none."""
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {
+            "items": ["at://a/1"],
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        doc_ref.get.return_value = snap
+
+        result = await cache.append("key1", ["at://a/2"], new_scores=[0.6])
+        assert result is not None
+        assert result.diversity_scores is None
+
+    @pytest.mark.asyncio
+    async def test_append_drops_scores_when_new_scores_none(self):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {
+            "items": ["at://a/1"],
+            "diversity_scores": [1.0],
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        doc_ref.get.return_value = snap
+
+        result = await cache.append("key1", ["at://a/2"], new_scores=None)
+        assert result is not None
+        assert result.diversity_scores is None

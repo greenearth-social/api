@@ -58,6 +58,10 @@ class FeedCacheDocument(BaseModel):
     """
 
     items: list[str] = Field(default_factory=list, description="Cached AT URI list")
+    diversity_scores: list[float] | None = Field(
+        default=None,
+        description="Per-item MMR diversity scores parallel to items; None when diversification was disabled",
+    )
     expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")
 
 
