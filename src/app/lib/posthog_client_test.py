@@ -89,3 +89,11 @@ def test_track_interaction_captures_event_without_uri():
         properties={"feed_name": "your-feed"},
         timestamp=NOW,
     )
+
+
+def test_real_posthog_client_is_disabled_in_tests():
+    """The global conftest fixture must force every real Posthog client to
+    be disabled, so a stray GE_POSTHOG_API_KEY in a developer's environment
+    can never cause a test run to send live analytics events."""
+    client = init_posthog_client("phc_key", "https://us.i.posthog.com")
+    assert client.disabled is True

@@ -6,6 +6,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 
+def _is_deployed_environment() -> bool:
+    """True when running in a deployed environment (stage/prod) rather than local dev or tests."""
+    env = (os.environ.get("ENVIRONMENT") or os.environ.get("GE_ENVIRONMENT") or "").strip().lower()
+    return env in ("prod", "production", "stage", "staging")
+
+
 # Configure the root logger so app modules' messages reach stderr. Uvicorn only
 # configures handlers on its own loggers (uvicorn.error, uvicorn.access), so
 # without this our `timed()` spans and `profile_written` lines are silently
@@ -19,8 +25,7 @@ def _default_log_level() -> str:
     and errors still surface. Local dev and tests default to INFO.
     ``GE_LOG_LEVEL`` overrides this when set.
     """
-    env = (os.environ.get("ENVIRONMENT") or os.environ.get("GE_ENVIRONMENT") or "").strip().lower()
-    return "WARNING" if env in ("prod", "production", "stage", "staging") else "INFO"
+    return "WARNING" if _is_deployed_environment() else "INFO"
 
 
 logging.basicConfig(
@@ -91,6 +96,11 @@ async def lifespan(app: FastAPI):
     posthog_host = os.environ.get("GE_POSTHOG_HOST", "https://us.i.posthog.com")
     if posthog_api_key:
         set_posthog_client(init_posthog_client(posthog_api_key, posthog_host))
+    elif _is_deployed_environment():
+        # Local dev intentionally runs without PostHog (no key = silent no-op), but a
+        # deployed environment missing the key means the analytics secret didn't wire
+        # up correctly -- fail loudly rather than silently drop user metrics.
+        raise RuntimeError("GE_POSTHOG_API_KEY environment variable is required in stage/prod")
 
     app.state.es = SlowQueryLoggingES(es)
     app.state.id_resolver = init_id_resolver()
