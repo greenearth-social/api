@@ -249,7 +249,7 @@ async def _run_ranking_pipeline(
     feed_cfg: FeedConfig,
     gen_request: CandidateGenerateRequest,
     es,
-) -> list[str]:
+) -> tuple[list[str], list[float] | None]:
     """Generate candidates, optionally rank them, then diversify with MMR.
 
     Runs inside a per-request cache scope so that identical ES queries
@@ -277,7 +277,7 @@ async def _run_ranking_pipeline(
         candidates = result.candidates
 
         if not candidates:
-            return []
+            return [], None
 
         # Generators fetch lightweight candidates (no embedding); ranker and
         # MMR need embeddings, so backfill in one batched ES call now that
@@ -287,7 +287,7 @@ async def _run_ranking_pipeline(
         if feed_cfg.rank_request_template is not None:
             candidates = [c for c in candidates if c.minilm_l12_embedding]
             if not candidates:
-                return []
+                return [], None
 
             rank_req = feed_cfg.rank_request_template.model_copy(
                 update={"candidates": candidates, "user_did": gen_request.user_did}
@@ -319,7 +319,15 @@ async def _run_ranking_pipeline(
         final_uris = [c.at_uri for c in final if c.at_uri]
         if rec is not None:
             rec.record_final_order(final_uris)
-        return final_uris
+        if feed_cfg.diversify:
+            diversity_scores: list[float] | None = [
+                c.diversity_score for c in final if c.at_uri and c.diversity_score is not None
+            ]
+            if len(diversity_scores) != len(final_uris):
+                diversity_scores = None
+        else:
+            diversity_scores = None
+        return final_uris, diversity_scores
 
 
 async def _run_pipeline_capturing(
@@ -333,7 +341,7 @@ async def _run_pipeline_capturing(
     request_id: str,
     regenerated: bool,
     debug_enabled: bool,
-) -> list[str]:
+) -> tuple[list[str], list[float] | None]:
     """Run the ranking pipeline, optionally capturing debug info for this user.
 
     When ``debug_enabled``, a :class:`FeedDebugRecorder` is installed for the
@@ -347,9 +355,9 @@ async def _run_pipeline_capturing(
     recorder = FeedDebugRecorder(feed_name=feed_name, regenerated=regenerated)
     generated_at = datetime.now(timezone.utc)
     with feed_debug_scope(recorder):
-        uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
+        uris, scores = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
     _spawn_background(_write_feed_debug(request, db, recorder, request_id, user_did, generated_at))
-    return uris
+    return uris, scores
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +380,30 @@ def _get_feed_cache(request: Request) -> FeedCache:
         logger.error("FeedCache not initialized")
         raise HTTPException(status_code=500, detail="Feed cache unavailable")
     return cache
+
+
+def _log_diversity_metric(
+    scores: list[float] | None,
+    all_items: list[str],
+    page_offset: int,
+    page_len: int,
+    feed_name: str,
+    batch: int,
+) -> None:
+    from ..lib.metrics import get_metric_collector
+    if scores is None or len(scores) != len(all_items) or page_len == 0:
+        return
+    mc = get_metric_collector()
+    if mc is None:
+        return
+    page_scores = scores[page_offset : page_offset + page_len]
+    if page_scores:
+        mc.record(
+            "feed.mean_diversity_score",
+            sum(page_scores) / len(page_scores),
+            feed_name=feed_name,
+            batch=str(batch),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -712,8 +744,10 @@ async def get_feed_skeleton(
                 raise HTTPException(status_code=400, detail="Invalid cursor")
 
             async with timed(logger, "feedcache_retrieve", cache_id=parsed.id):
-                cached_uris = await feed_cache.retrieve(parsed.id)
-            if cached_uris is not None:
+                cached = await feed_cache.retrieve(parsed.id)
+            if cached is not None:
+                cached_uris = cached.items
+                cached_scores = cached.diversity_scores
                 if parsed.offset < len(cached_uris):
                     # Serve from the existing cached batch.
                     page = cached_uris[parsed.offset : parsed.offset + limit]
@@ -725,6 +759,14 @@ async def get_feed_skeleton(
                         # next request will fall into the regeneration branch
                         # below, which fetches fresh candidates.
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                    _log_diversity_metric(
+                        cached_scores,
+                        cached_uris,
+                        parsed.offset,
+                        len(page),
+                        feed_name,
+                        batch=parsed.offset // limit,
+                    )
                     feed_context = _make_feed_context(user_did, feed_name, parsed.id)
                     return FeedSkeletonResponse(
                         feed=_skeleton_items(page, feed_context),
@@ -745,7 +787,7 @@ async def get_feed_skeleton(
                     }
                 )
 
-                new_uris = await _run_pipeline_capturing(
+                new_uris, new_scores = await _run_pipeline_capturing(
                     request,
                     db,
                     feed_cfg,
@@ -758,9 +800,17 @@ async def get_feed_skeleton(
                 )
                 if new_uris:
                     async with timed(logger, "feedcache_append", cache_id=parsed.id):
-                        updated = await feed_cache.append(parsed.id, new_uris)
+                        updated = await feed_cache.append(parsed.id, new_uris, new_scores)
                     if updated is not None:
                         page = new_uris[:limit]
+                        _log_diversity_metric(
+                            new_scores,
+                            new_uris,
+                            0,
+                            len(page),
+                            feed_name,
+                            batch=parsed.offset // limit,
+                        )
                         next_offset = parsed.offset + len(page)
                         next_cursor = None
                         if len(page) == limit:
@@ -790,7 +840,7 @@ async def get_feed_skeleton(
         # Generated up front so it can key the debug record too.
         request_id = uuid.uuid4().hex
 
-        all_uris = await _run_pipeline_capturing(
+        all_uris, all_scores = await _run_pipeline_capturing(
             request,
             db,
             feed_cfg,
@@ -804,12 +854,13 @@ async def get_feed_skeleton(
 
         # First page to return immediately.
         page = all_uris[:limit]
+        _log_diversity_metric(all_scores, all_uris, 0, len(page), feed_name, batch=0)
 
         # Store the full batch and issue a cursor only when there are more pages.
         next_cursor = None
         if len(all_uris) > limit:
             async with timed(logger, "feedcache_store", cache_id=request_id):
-                await feed_cache.store(request_id, all_uris)
+                await feed_cache.store(request_id, all_uris, all_scores)
             next_cursor = FeedCursor(id=request_id, offset=limit).encode()
 
         feed_context = _make_feed_context(user_did, feed_name, request_id)

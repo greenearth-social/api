@@ -12,6 +12,7 @@ from ..models import CandidatePost, FeedCursor, RankedCandidate, RankPredictResu
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import FeedCache
+from ..lib.metrics import set_metric_collector
 
 
 # ---------------------------------------------------------------------------
@@ -97,19 +98,39 @@ class InMemoryFeedCache(FeedCache):
     """Trivial in-memory feed cache for tests."""
 
     def __init__(self):
-        self._store: dict[str, list[str]] = {}
+        from ..lib.feed_cache import CachedFeed as _CachedFeed
+        self._CachedFeed = _CachedFeed
+        self._store: dict[str, _CachedFeed] = {}
 
-    async def store(self, key: str, items: list[str], ttl_seconds: int = 600) -> None:
-        self._store[key] = items
+    async def store(
+        self,
+        key: str,
+        items: list[str],
+        scores: list[float] | None = None,
+        ttl_seconds: int = 600,
+    ) -> None:
+        self._store[key] = self._CachedFeed(items=items, diversity_scores=scores)
 
-    async def retrieve(self, key: str) -> list[str] | None:
+    async def retrieve(self, key: str):
         return self._store.get(key)
 
-    async def append(self, key: str, new_items: list[str]) -> list[str] | None:
+    async def append(
+        self,
+        key: str,
+        new_items: list[str],
+        new_scores: list[float] | None = None,
+    ):
         existing = self._store.get(key)
         if existing is None:
             return None
-        updated = existing + new_items
+        if existing.diversity_scores is not None and new_scores is not None:
+            updated_scores = existing.diversity_scores + new_scores
+        else:
+            updated_scores = None
+        updated = self._CachedFeed(
+            items=existing.items + new_items,
+            diversity_scores=updated_scores,
+        )
         self._store[key] = updated
         return updated
 
@@ -1800,3 +1821,112 @@ class TestGetFeedSkeletonProbe:
             headers={"X-Probe-Secret": self.PROBE_SECRET},
         )
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Diversity score metric
+# ---------------------------------------------------------------------------
+
+
+class FakeMetricCollector:
+    def __init__(self):
+        self.calls: list[tuple[str, float, dict]] = []
+
+    def record(self, name: str, value: float, **attributes: str) -> None:
+        self.calls.append((name, value, dict(attributes)))
+
+
+class TestDiversityScoreMetric:
+    @pytest.fixture(autouse=True)
+    def _mock_auth_and_session(self):
+        with (
+            patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"),
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock),
+            patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock),
+        ):
+            yield
+
+    def _make_scored_candidates(self, n: int) -> list[CandidatePost]:
+        """Candidates with diversity_score set, as mmr_rerank would produce."""
+        return [
+            CandidatePost(
+                at_uri=f"at://test/{i}",
+                score=1.0 - i * 0.1,
+                author_did=f"did:plc:{i}",
+                diversity_score=1.0 if i == 0 else 0.8,
+            )
+            for i in range(n)
+        ]
+
+    def test_metric_emitted_on_initial_request(self, monkeypatch):
+        collector = FakeMetricCollector()
+        set_metric_collector(collector)
+
+        candidates = self._make_scored_candidates(35)
+        with _patch_unranked_your_feed_generators(candidates):
+            client = TestClient(app)
+            resp = client.get(
+                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={FEED_URI_FROM_APPVIEW}&limit=5"
+            )
+
+        set_metric_collector(None)
+        assert resp.status_code == 200
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        assert len(metric_calls) == 1
+        name, value, attrs = metric_calls[0]
+        assert attrs["feed_name"] == FEED_RKEY
+        assert attrs["batch"] == "0"
+        assert 0.0 <= value <= 1.0
+
+    def test_metric_emitted_on_cursor_request(self, monkeypatch):
+        collector = FakeMetricCollector()
+        set_metric_collector(collector)
+
+        candidates = self._make_scored_candidates(35)
+        with _patch_unranked_your_feed_generators(candidates):
+            client = TestClient(app)
+            # Initial request
+            resp1 = client.get(
+                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={FEED_URI_FROM_APPVIEW}&limit=5"
+            )
+            assert resp1.status_code == 200
+            cursor = resp1.json().get("cursor")
+            assert cursor is not None
+
+            # Cursor follow-up
+            resp2 = client.get(
+                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={FEED_URI_FROM_APPVIEW}&limit=5&cursor={cursor}"
+            )
+
+        set_metric_collector(None)
+        assert resp2.status_code == 200
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        assert len(metric_calls) == 2
+        batches = [c[2]["batch"] for c in metric_calls]
+        assert "0" in batches
+        assert "1" in batches
+
+    def test_metric_not_emitted_when_no_scores(self, monkeypatch):
+        """When diversification is off (no diversity_score on candidates), no metric fires."""
+        collector = FakeMetricCollector()
+        set_metric_collector(collector)
+
+        # Use random feed — no diversification
+        candidates = [
+            CandidatePost(at_uri=f"at://test/{i}", score=float(i), author_did=f"did:plc:{i}")
+            for i in range(5)
+        ]
+        random_gen = AsyncMock()
+        random_gen.generate.return_value = CandidateResult(
+            generator_name="random_posts", candidates=candidates
+        )
+        with patch("app.lib.candidates.generate.get_generator", return_value=random_gen):
+            client = TestClient(app)
+            resp = client.get(
+                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={RANDOM_FEED_URI}&limit=5"
+            )
+
+        set_metric_collector(None)
+        assert resp.status_code == 200
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        assert len(metric_calls) == 0
