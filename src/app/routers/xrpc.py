@@ -45,6 +45,7 @@ from ..lib.firestore import (
     upsert_user,
     write_feed_debug,
 )
+from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
 from ..feeds import FEEDS
@@ -451,6 +452,8 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
         logger.exception("Failed to resolve username for %s in background", user_did)
         return
 
+    now = datetime.now(timezone.utc)
+
     try:
         await upsert_user(db, user_did, username)
     except Exception:
@@ -462,6 +465,11 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
         logger.exception(
             "Failed to record feed activity for user '%s', feed '%s'", user_did, feed_name
         )
+
+    try:
+        track_session(get_posthog_client(), user_did, username, feed_name, now)
+    except Exception:
+        logger.exception("Failed to track PostHog session for user '%s'", user_did)
 
 
 async def _resolve_handles(request: Request, dids: set[str]) -> dict[str, str]:
@@ -565,6 +573,21 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
             await record_interaction(db, doc)
         except Exception:
             logger.exception("Failed to record interaction for user '%s'", payload.did)
+
+        if event:
+            try:
+                track_interaction(
+                    get_posthog_client(),
+                    payload.did,
+                    event,
+                    payload.feed,
+                    ix.item,
+                    doc.created_at,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to track PostHog interaction '%s' for user '%s'", event, payload.did
+                )
 
     for did, uris in seen_by_user.items():
         try:
