@@ -73,6 +73,10 @@ class CandidatePost(BaseModel):
     external_uri: str | None = Field(
         default=None, description="URI of an external link embed, when present"
     )
+    diversity_score: float | None = Field(
+        default=None,
+        description="Per-item diversity score from MMR reranking (0=least diverse, 1=most diverse)",
+    )
 
 
 class GeneratorSpec(BaseModel):

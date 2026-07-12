@@ -27,7 +27,10 @@ def test_empty_input_returns_empty():
 def test_single_candidate_unchanged():
     c = _post("at://x/1", score=1.0, author_did="did:plc:alice")
     result = mmr_rerank([c])
-    assert result == [c]
+    assert len(result) == 1
+    assert result[0].at_uri == c.at_uri
+    assert result[0].score == c.score
+    assert result[0].diversity_score == 1.0
 
 
 def test_same_author_posts_spread_apart():
@@ -228,3 +231,57 @@ def test_raw_similarity_agrees_with_similarity_for_same_inputs():
         decode_float32_b64(a_emb),
         decode_float32_b64(b_emb),
     ) == pytest.approx(_similarity(a, b), rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Diversity score stamping tests
+# ---------------------------------------------------------------------------
+
+class TestMmrRerankDiversityScore:
+    def test_single_candidate_gets_score_1(self):
+        posts = [_post("at://a/1", 1.0, "did:plc:a")]
+        result = mmr_rerank(posts)
+        assert len(result) == 1
+        assert result[0].diversity_score == 1.0
+
+    def test_first_pick_always_scores_1(self):
+        posts = [
+            _post("at://a/1", 1.0, "did:plc:a"),
+            _post("at://b/1", 0.5, "did:plc:b"),
+        ]
+        result = mmr_rerank(posts)
+        assert result[0].diversity_score == 1.0
+
+    def test_same_author_reduces_diversity(self):
+        posts = [
+            _post("at://a/1", 1.0, "did:plc:a"),
+            _post("at://a/2", 0.9, "did:plc:a"),  # same author — high similarity penalty
+            _post("at://b/1", 0.5, "did:plc:b"),
+        ]
+        result = mmr_rerank(posts)
+        # The second pick from the same author should have a lower diversity score
+        # than a post from a different author.
+        scores_by_uri = {c.at_uri: c.diversity_score for c in result}
+        assert scores_by_uri["at://a/1"] == 1.0
+        same_author_score = scores_by_uri["at://a/2"]
+        diff_author_score = scores_by_uri["at://b/1"]
+        assert same_author_score is not None
+        assert diff_author_score is not None
+        assert same_author_score < diff_author_score
+
+    def test_all_scores_in_unit_range(self):
+        posts = [_post(f"at://a/{i}", float(i), "did:plc:a") for i in range(5)]
+        result = mmr_rerank(posts)
+        for c in result:
+            assert c.diversity_score is not None
+            assert 0.0 <= c.diversity_score <= 1.0
+
+    def test_scores_parallel_to_output_order(self):
+        posts = [
+            _post("at://a/1", 1.0, "did:plc:a"),
+            _post("at://b/1", 0.8, "did:plc:b"),
+            _post("at://c/1", 0.6, "did:plc:c"),
+        ]
+        result = mmr_rerank(posts)
+        assert all(c.diversity_score is not None for c in result)
+        assert len(result) == 3

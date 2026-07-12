@@ -12,7 +12,9 @@ AUTHOR_WEIGHT = 0.75
 
 def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     if len(candidates) <= 1:
-        return list(candidates)
+        return [
+            c.model_copy(update={"diversity_score": 1.0}) for c in candidates
+        ]
 
     n = len(candidates)
     raw_scores = [c.score or 0.0 for c in candidates]
@@ -48,9 +50,12 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     # the algorithm-agnostic diversification debug record.
     diag: list[tuple[str, float, float, float, float]] | None = [] if rec is not None else None
 
+    diversity_scores: list[float] = []
+
     while remaining:
         if not selected:
             best = max(remaining, key=lambda i: (1 - BETA) * norm_scores[i])
+            diversity = 1.0
             if diag is not None:
                 diag.append(
                     (
@@ -66,6 +71,7 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
                 remaining,
                 key=lambda i: (1 - BETA) * norm_scores[i] - BETA * max_sim[i],
             )
+            diversity = max(0.0, 1.0 - max_sim[best])
             if diag is not None:
                 author_match, cosine = max_components[best]
                 author_penalty = BETA * AUTHOR_WEIGHT * author_match
@@ -81,6 +87,7 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
                     )
                 )
 
+        diversity_scores.append(diversity)
         selected.append(best)
         remaining.remove(best)
 
@@ -95,7 +102,10 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     if rec is not None and diag is not None:
         rec.record_diversification(diag)
 
-    return [candidates[i] for i in selected]
+    return [
+        candidates[i].model_copy(update={"diversity_score": s})
+        for i, s in zip(selected, diversity_scores)
+    ]
 
 
 def _similarity_components(
