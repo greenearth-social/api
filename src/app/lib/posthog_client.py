@@ -29,7 +29,7 @@ def get_posthog_client() -> Posthog | None:
 
 
 def init_posthog_client(api_key: str, host: str) -> Posthog:
-    return Posthog(api_key=api_key, host=host)
+    return Posthog(project_api_key=api_key, host=host)
 
 
 def track_session(

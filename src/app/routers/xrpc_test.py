@@ -1941,22 +1941,19 @@ class TestPosthogTracking:
     @pytest.mark.asyncio
     async def test_record_interactions_calls_track_interaction(self):
         from unittest.mock import AsyncMock, MagicMock, patch
-        from datetime import datetime, timezone
 
-        from ..routers.xrpc import _record_interactions
+        from ..routers.xrpc import Interaction, _record_interactions
         from ..lib.feed_context import FeedContextPayload, encode_feed_context
 
         feed_context = encode_feed_context(
             FeedContextPayload(did="did:plc:abc", feed="your-feed", rid="reqid123", iat=0)
         )
 
-        class FakeInteraction:
-            feed_context = None
-            item = "at://did/post/1"
-            event = "app.bsky.feed.defs#interactionLike"
-
-        ix = FakeInteraction()
-        ix.feed_context = feed_context
+        ix = Interaction(
+            item="at://did/post/1",
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context=feed_context,
+        )
 
         db = AsyncMock()
         mock_client = MagicMock()

@@ -42,7 +42,7 @@ def test_init_posthog_client_creates_posthog():
         MockPosthog.return_value = MagicMock()
         client = init_posthog_client("phc_key", "https://us.i.posthog.com")
         MockPosthog.assert_called_once_with(
-            api_key="phc_key", host="https://us.i.posthog.com"
+            project_api_key="phc_key", host="https://us.i.posthog.com"
         )
         assert client is MockPosthog.return_value
 
