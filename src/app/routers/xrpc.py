@@ -324,6 +324,11 @@ async def _run_ranking_pipeline(
                 c.diversity_score for c in final if c.at_uri and c.diversity_score is not None
             ]
             if len(diversity_scores) != len(final_uris):
+                logger.warning(
+                    "diversity_score missing on some candidates (%d scores, %d uris); skipping metric",
+                    len(diversity_scores),
+                    len(final_uris),
+                )
                 diversity_scores = None
         else:
             diversity_scores = None
