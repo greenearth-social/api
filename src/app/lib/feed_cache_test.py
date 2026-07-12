@@ -193,7 +193,10 @@ class TestFirestoreFeedCacheAppend:
         result = await cache.append("key1", ["at://a/2", "at://a/3"])
         assert result is not None
         assert result.items == ["at://a/1", "at://a/2", "at://a/3"]
-        doc_ref.update.assert_awaited_once_with({"items": ["at://a/1", "at://a/2", "at://a/3"]})
+        doc_ref.update.assert_awaited_once_with({
+            "items": ["at://a/1", "at://a/2", "at://a/3"],
+            "diversity_scores": None,
+        })
 
     @pytest.mark.asyncio
     async def test_returns_none_when_document_missing(self):
