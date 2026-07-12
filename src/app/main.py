@@ -38,6 +38,7 @@ from .lib.feed_cache import FirestoreFeedCache
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
 from .lib.metrics import MetricCollector, set_metric_collector
+from .lib.posthog_client import get_posthog_client, init_posthog_client, set_posthog_client
 from .lib.profiling import install_profiling
 from .lib.request_context import (
     reset_endpoint,
@@ -86,6 +87,11 @@ async def lifespan(app: FastAPI):
     )
     set_metric_collector(metrics)
 
+    posthog_api_key = os.environ.get("GE_POSTHOG_API_KEY")
+    posthog_host = os.environ.get("GE_POSTHOG_HOST", "https://us.i.posthog.com")
+    if posthog_api_key:
+        set_posthog_client(init_posthog_client(posthog_api_key, posthog_host))
+
     app.state.es = SlowQueryLoggingES(es)
     app.state.id_resolver = init_id_resolver()
     app.state.firestore = init_firestore_client()
@@ -111,6 +117,13 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
         set_metric_collector(None)
+        try:
+            ph = get_posthog_client()
+            if ph is not None:
+                ph.shutdown()
+        except Exception:
+            pass
+        set_posthog_client(None)
 
 
 _DESCRIPTION = """\
