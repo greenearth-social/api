@@ -269,3 +269,68 @@ class FeedDebugDocument(BaseModel):
     )
     generated_at: datetime = Field(default_factory=_utcnow, description="When the feed was served")
     expires_at: datetime = Field(..., description="UTC expiration timestamp; drives native TTL")
+
+
+# ---------------------------------------------------------------------------
+# Feed snapshot — lightweight pipeline metadata stored for every feed load
+# ---------------------------------------------------------------------------
+
+
+class DiversificationMeta(BaseModel):
+    """Per-item diversification breakdown (lightweight, no content)."""
+
+    relevance: float
+    score: float
+    author_penalty: float = 0.0
+    content_penalty: float = 0.0
+
+
+class GeneratorMeta(BaseModel):
+    """Generator contribution for a single item or the feed legend."""
+
+    name: str
+    weight: float = 1.0
+    score: float | None = None
+
+
+class ModelScoreMeta(BaseModel):
+    """One rank model's normalized score for a single item."""
+
+    name: str
+    weight: float
+    score: float
+
+
+class PipelineItemMeta(BaseModel):
+    """Per-URI pipeline metadata — already joined so readers don't need to."""
+
+    at_uri: str
+    rank: int | None = None
+    rank_score: float | None = None
+    after_rank_position: int | None = None
+    generators: list[GeneratorMeta] = Field(default_factory=list)
+    model_scores: list[ModelScoreMeta] = Field(default_factory=list)
+    diversification: DiversificationMeta | None = None
+
+
+class FeedSnapshotDocument(BaseModel):
+    """Lightweight pipeline metadata stored for every feed load.
+
+    Written to ``users/{user_did}/feed_snapshots/{request_id}`` inline
+    (not background) so the transparency API can re-render any served feed
+    regardless of whether ``debug_feeds`` is enabled.
+
+    Separate from :class:`FeedDebugDocument` — that captures full
+    pipeline objects (content, author info, user features) for the CLI
+    debug tool and is only written for debug-flagged users.
+    """
+
+    request_id: str = Field(..., description="Feed-cache key / feedContext id (also the document ID)")
+    items: list[str] = Field(default_factory=list, description="AT URIs in final served order")
+    feed_name: str
+    generated_at: datetime
+    expires_at: datetime = Field(..., description="UTC expiration; drives native TTL")
+    ranker_model: str | None = None
+    diversify: bool = False
+    generator_legend: list[GeneratorMeta] = Field(default_factory=list)
+    items_meta: list[PipelineItemMeta] = Field(default_factory=list)

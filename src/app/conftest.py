@@ -19,6 +19,20 @@ def _default_api_key_override():
 
 
 @pytest.fixture(autouse=True)
+def _default_firebase_auth_override():
+    """Bypass Firebase auth in all tests by default.
+
+    Tests that need to test auth behaviour override verify_firebase_auth via
+    their own fixtures (same pattern as ``_default_api_key_override`` above).
+    """
+    from .lib.firebase_auth import verify_firebase_auth
+
+    app.dependency_overrides.setdefault(verify_firebase_auth, lambda: "test-user")
+    yield
+    app.dependency_overrides.pop(verify_firebase_auth, None)
+
+
+@pytest.fixture(autouse=True)
 def _set_perspective_api_key(monkeypatch):
     monkeypatch.setenv("GE_PERSPECTIVE_API_KEY", "test-dummy-key")
 

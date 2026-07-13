@@ -16,6 +16,7 @@ from google.cloud.firestore import ArrayUnion, AsyncClient, FieldFilter, Query  
 from ..documents import (
     FeedActivityDocument,
     FeedDebugDocument,
+    FeedSnapshotDocument,
     InteractionDocument,
     UserDocument,
 )
@@ -27,6 +28,7 @@ FEED_ACTIVITY_COLLECTION = "feed_activity"
 INTERACTIONS_COLLECTION = "interactions"
 SEEN_POSTS_COLLECTION = "seen_posts"
 FEED_DEBUG_COLLECTION = "feed_debug"
+FEED_SNAPSHOTS_COLLECTION = "feed_snapshots"
 
 # How long a seen-posts bucket lives before native Firestore TTL deletes it.
 SEEN_POSTS_RETENTION_DAYS = 5
@@ -359,3 +361,72 @@ async def get_feed_debug(
     if data is None:
         return None
     return FeedDebugDocument.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# Feed snapshots — lightweight pipeline metadata for every feed load
+# ---------------------------------------------------------------------------
+
+
+async def write_feed_snapshot(
+    db: AsyncClient, user_did: str, request_id: str, doc: FeedSnapshotDocument
+) -> None:
+    """Persist a feed snapshot under ``users/{user_did}/feed_snapshots/{request_id}``."""
+    ref = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(FEED_SNAPSHOTS_COLLECTION)
+        .document(request_id)
+    )
+    await ref.set(doc.model_dump())
+
+
+async def get_feed_snapshot(
+    db: AsyncClient, user_did: str, request_id: str
+) -> FeedSnapshotDocument | None:
+    """Fetch a single feed snapshot, or ``None`` if not found."""
+    doc = await (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(FEED_SNAPSHOTS_COLLECTION)
+        .document(request_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    data = doc.to_dict()
+    if data is None:
+        return None
+    return FeedSnapshotDocument.model_validate(data)
+
+
+async def get_recent_feed_snapshots(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    feed_name: str | None = None,
+    cutoff: datetime | None = None,
+    limit: int = 20,
+) -> list[FeedSnapshotDocument]:
+    """Return a user's most recent feed snapshots, newest first.
+
+    Optional *feed_name* and *cutoff* filters are pushed into the Firestore
+    query so callers don't get false-empty results from Python-side filtering
+    of a fixed-size result set.
+    """
+    query = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(FEED_SNAPSHOTS_COLLECTION)
+    )
+    if feed_name is not None:
+        query = query.where(filter=FieldFilter("feed_name", "==", feed_name))
+    if cutoff is not None:
+        query = query.where(filter=FieldFilter("generated_at", ">=", cutoff))
+    query = query.order_by("generated_at", direction=Query.DESCENDING).limit(limit)
+    docs: list[FeedSnapshotDocument] = []
+    async for doc in query.stream():
+        data = doc.to_dict()
+        if data is not None:
+            docs.append(FeedSnapshotDocument.model_validate(data))
+    return docs

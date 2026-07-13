@@ -44,6 +44,7 @@ from ..lib.firestore import (
     upsert_feed_activity,
     upsert_user,
     write_feed_debug,
+    write_feed_snapshot,
 )
 from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
 from ..lib.request_cache import request_cache_scope
@@ -58,6 +59,8 @@ router = APIRouter(tags=["xrpc"])
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+FEED_SNAPSHOT_RETENTION_SECONDS = 900  # 15 minutes
 
 
 def _get_service_did() -> str:
@@ -335,21 +338,42 @@ async def _run_pipeline_capturing(
     regenerated: bool,
     debug_enabled: bool,
 ) -> list[str]:
-    """Run the ranking pipeline, optionally capturing debug info for this user.
+    """Run the ranking pipeline, capturing a lightweight snapshot for every
+    feed load and a full debug document for debug-flagged users.
 
-    When ``debug_enabled``, a :class:`FeedDebugRecorder` is installed for the
-    duration of the pipeline and a background task persists the assembled
-    document afterwards (handle resolution + the Firestore write stay off the
-    hot path).
+    The snapshot is written inline (no handle resolution needed) so the
+    transparency API can re-render any served feed.  The full debug document
+    (for the CLI tool) is written in a background task only when
+    ``debug_enabled`` is true.
     """
-    if not debug_enabled:
-        return await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
-
     recorder = FeedDebugRecorder(feed_name=feed_name, regenerated=regenerated)
     generated_at = datetime.now(timezone.utc)
+
     with feed_debug_scope(recorder):
         uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
-    _spawn_background(_write_feed_debug(request, db, recorder, request_id, user_did, generated_at))
+
+    # Always write the lightweight snapshot inline.
+    expires_at = generated_at + timedelta(seconds=FEED_SNAPSHOT_RETENTION_SECONDS)
+    try:
+        snapshot = recorder.build_pipeline_metadata(
+            request_id=request_id,
+            generated_at=generated_at,
+            expires_at=expires_at,
+        )
+        await write_feed_snapshot(db, user_did, request_id, snapshot)
+    except Exception:
+        logger.exception(
+            "Failed to write feed snapshot for user '%s', request '%s'",
+            user_did,
+            request_id,
+        )
+
+    # Full debug document only for debug-flagged users, in background.
+    if debug_enabled:
+        _spawn_background(
+            _write_feed_debug(request, db, recorder, request_id, user_did, generated_at)
+        )
+
     return uris
 
 

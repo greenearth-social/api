@@ -443,15 +443,39 @@ Other useful `publish_feed.py` flags:
 Open [bsky.app](https://bsky.app), log in as the dev account, and navigate to
 the Feeds tab to find and open the published feed.
 
-### Debugging Feeds
+### Feed Transparency API
 
-Turn it on for your account like so:
+A web-based API (`/api/feeds`) surfaces pipeline observability for all users —
+every feed load writes lightweight pipeline metadata, and the detail endpoint
+returns it merged with hydrated Bluesky post data (author, media, engagement)
+from the public API.  This is available regardless of whether `debug_feeds` is
+enabled for the account.
+
+```bash
+# List recent feed loads for your account (within the 15-min cache window)
+curl http://localhost:8000/api/feeds \
+  -H "Authorization: Bearer <firebase-custom-token>"
+
+# Full detail for one feed load (snapshot + hydrated posts)
+curl http://localhost:8000/api/feeds/<request-id> \
+  -H "Authorization: Bearer <firebase-custom-token>"
+```
+
+Responses use camelCase — the frontend can consume them directly without mapping.
+
+Authentication uses Firebase custom tokens (`Authorization: Bearer <token>`)
+rather than API keys.  Token `uid` must be a `did:plc:…` — the prefix is
+stripped to form the Firestore document key.
+
+### Debugging Feeds (CLI)
+
+Turn on full pipeline capture for your account (stores full candidate/ranker data):
 
 ```bash
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --enable
 ```
 
-To see your pageloads:
+To see your feed loads:
 
 ```bash
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --list
@@ -463,7 +487,7 @@ To look at one:
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --show [id]
 ```
 
-Please disable it when you're done, since it stores a bunch of data for you and it's a waste if you're not looking at it:
+Disable when done (full capture has storage/perf cost):
 
 ```bash
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --disable
@@ -520,20 +544,41 @@ greenearth/api/
 ├── src/
 │   └── app/
 │       ├── __init__.py
-│       ├── main.py              # FastAPI application entry point
+│       ├── conftest.py             # Shared test fixtures (auth bypasses)
+│       ├── documents.py            # Firestore Pydantic document models
+│       ├── feeds.py                # Feed config definitions
+│       ├── main.py                 # FastAPI entry point
+│       ├── models.py               # Pipeline request/response models
+│       ├── models_feed_debug.py    # Feed-debug API response views
+│       ├── security.py             # X-API-Key auth
+│       ├── lib/
+│       │   ├── candidates/         # Candidate generators
+│       │   ├── rankers/            # Ranking models
+│       │   ├── diversify.py        # MMR reranking
+│       │   ├── feed_debug.py       # Per-request pipeline recorder
+│       │   ├── firebase_auth.py    # Firebase token verification
+│       │   ├── firestore.py        # Typed Firestore helpers
+│       │   ├── post_hydration.py   # Bluesky post metadata + cache
+│       │   └── ...                 # ES client, inference, metrics, etc.
 │       └── routers/
-│           ├── __init__.py
-│           └── health.py        # Healthcheck endpoint
+│           ├── candidates.py       # POST /candidates/generate
+│           ├── rank.py             # POST /rank/predict
+│           ├── diversify.py        # POST /diversify
+│           ├── skylight.py         # /skylight/search, /skylight/similar
+│           ├── xrpc.py             # AT Protocol feed generator XRPC
+│           ├── feed_debug.py       # GET /api/feeds, GET /api/feeds/{id}
+│           └── health.py           # GET /health
 ├── scripts/
-│   ├── deploy.sh                # Cloud Run deployment script
-│   ├── gcp_setup.sh             # GCP environment setup script
-│   └── publish_feed.py          # Publish/update feed generator records
-├── tests/
-│   ├── __init__.py
-│   └── test_health.py           # Healthcheck tests
-├── .gcloudignore                # Files to exclude from deployment
-├── .python-version              # Python version for pyenv
-├── Pipfile                      # pipenv dependencies
-├── Procfile                     # Process definition for buildpacks
-└── README.md                    # This file
+│   ├── deploy.sh                  # Cloud Run deployment
+│   ├── gcp_setup.sh               # GCP environment setup
+│   ├── apikeys.py                 # API key management
+│   ├── feed_debug.py              # CLI debug tool
+│   └── publish_feed.py            # Publish/update feed generator records
+├── firestore.rules                # Firestore security rules
+├── firestore.indexes.json         # Composite indexes
+├── .gcloudignore                  # Files to exclude from deployment
+├── .python-version
+├── Pipfile                        # pipenv dependencies
+├── Procfile                       # Process definition for buildpacks (prod)
+└── README.md
 ```
