@@ -175,7 +175,7 @@ async def get_cached_hydrated_posts(
     refs = [db.collection(HYDRATED_POSTS_COLLECTION).document(rkey) for rkey in uri_to_rkey.values()]
 
     try:
-        docs = await db.get_all(refs)
+        docs = [doc async for doc in db.get_all(refs)]
         rkey_to_doc = {doc.id: doc for doc in docs}
 
         for uri, rkey in uri_to_rkey.items():

@@ -35,6 +35,8 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+logger = logging.getLogger(__name__)
+
 from .routers import candidates, diversify, feed_debug, health, rank, skylight, xrpc
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
