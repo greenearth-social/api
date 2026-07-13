@@ -8,6 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+async def _async_iter(items):
+    for item in items:
+        yield item
+
+
 from .post_hydration import (
     _empty_hydration,
     _fetch_posts_batch,
@@ -228,7 +233,7 @@ async def test_get_cached_hydrated_posts_hit():
         "data": {"author": {"handle": "cached.bsky.social"}},
         "expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
     }
-    db.get_all = AsyncMock(return_value=[mock_doc])
+    db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
 
     cached, missing = await get_cached_hydrated_posts(db, [uri])
     assert uri in cached
@@ -248,7 +253,7 @@ async def test_get_cached_hydrated_posts_expired():
         "data": {"author": {"handle": "stale.bsky.social"}},
         "expires_at": datetime(2000, 1, 1, tzinfo=timezone.utc),
     }
-    db.get_all = AsyncMock(return_value=[mock_doc])
+    db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
 
     cached, missing = await get_cached_hydrated_posts(db, [uri])
     assert cached == {}
@@ -263,7 +268,7 @@ async def test_get_cached_hydrated_posts_miss():
     mock_doc = MagicMock()
     mock_doc.exists = False
     mock_doc.id = _post_rkey(uri)
-    db.get_all = AsyncMock(return_value=[mock_doc])
+    db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
 
     cached, missing = await get_cached_hydrated_posts(db, [uri])
     assert cached == {}
@@ -314,7 +319,7 @@ async def test_hydrate_posts_all_cached():
         "data": {"author": {"handle": "cached.bsky.social"}, "content": "cached content"},
         "expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
     }
-    db.get_all = AsyncMock(return_value=[mock_doc])
+    db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
 
     result = await hydrate_posts(db, [uri])
     assert result[uri]["author"]["handle"] == "cached.bsky.social"
