@@ -11,6 +11,11 @@ Usage:
     pipenv run python scripts/backfill_posthog.py --dry-run       # log only, no PostHog writes
     pipenv run python scripts/backfill_posthog.py --limit 500     # cap at 500 users for testing
 
+    # Deploying live PostHog logging: backfill only events strictly before the
+    # deployment time, so the live code and this script never double-emit the
+    # same event.
+    pipenv run python scripts/backfill_posthog.py --before 2026-07-12T18:30:00Z
+
 Requires in .env or environment:
     GE_POSTHOG_API_KEY   — PostHog project API key (pk_...)
     GE_POSTHOG_HOST      — optional, default https://us.i.posthog.com
@@ -24,6 +29,7 @@ import asyncio
 import logging
 import os
 import sys
+from datetime import UTC, datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -85,8 +91,13 @@ async def backfill_users(
     stream_feed_activity=None,
     dry_run: bool = False,
     limit: int | None = None,
+    before: datetime | None = None,
 ) -> int:
     """Emit feed_loaded events and user identification for all Firestore users.
+
+    When ``before`` is set, feed-activity records with ``first_seen_at`` at or
+    after that timestamp are skipped -- use this when backfilling up to a
+    deployment cutoff so live traffic after that point isn't double-emitted.
 
     Returns the total number of feed_loaded events that would be / were sent.
     """
@@ -119,6 +130,9 @@ async def backfill_users(
             feed_name = activity["feed_name"]
             first_seen_at = activity["first_seen_at"]
 
+            if before is not None and first_seen_at >= before:
+                continue
+
             event_count += 1
             logger.info(
                 "user=%s feed=%s first_seen_at=%s",
@@ -148,8 +162,13 @@ async def backfill_interactions(
     *,
     stream_interactions=None,
     dry_run: bool = False,
+    before: datetime | None = None,
 ) -> int:
     """Emit one PostHog event per Firestore interaction document.
+
+    When ``before`` is set, interactions with ``created_at`` at or after that
+    timestamp are skipped -- use this when backfilling up to a deployment
+    cutoff so live traffic after that point isn't double-emitted.
 
     Returns the total number of events that would be / were sent.
     """
@@ -170,6 +189,9 @@ async def backfill_interactions(
 
         if not user_did or not event or not created_at:
             logger.warning("Skipping interaction doc with missing fields: %s", data)
+            continue
+
+        if before is not None and created_at >= before:
             continue
 
         count += 1
@@ -195,7 +217,20 @@ async def backfill_interactions(
 # ---------------------------------------------------------------------------
 
 
-async def _run(dry_run: bool, limit: int | None) -> None:
+def _parse_before(value: str) -> datetime:
+    """Parse a --before value into a UTC-aware datetime.
+
+    Accepts ISO 8601 strings with or without a timezone offset (e.g.
+    "2026-07-12T18:30:00Z" or "2026-07-12T18:30:00"). Naive values are
+    assumed to already be UTC, matching how Firestore timestamps are stored.
+    """
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+async def _run(dry_run: bool, limit: int | None, before: datetime | None) -> None:
     db = init_firestore_client()
     api_key = os.environ.get("GE_POSTHOG_API_KEY")
     host = os.environ.get("GE_POSTHOG_HOST", "https://us.i.posthog.com")
@@ -206,8 +241,8 @@ async def _run(dry_run: bool, limit: int | None) -> None:
     ph = init_posthog_client(api_key, host)
 
     try:
-        await backfill_users(db, ph, dry_run=dry_run, limit=limit)
-        await backfill_interactions(db, ph, dry_run=dry_run)
+        await backfill_users(db, ph, dry_run=dry_run, limit=limit, before=before)
+        await backfill_interactions(db, ph, dry_run=dry_run, before=before)
     finally:
         if not dry_run:
             ph.shutdown()
@@ -229,9 +264,18 @@ def main() -> None:
         default=None,
         help="Cap the number of users processed (useful for testing against prod)",
     )
+    parser.add_argument(
+        "--before",
+        type=str,
+        default=None,
+        help="Only backfill events with a timestamp strictly before this ISO 8601 UTC "
+        "datetime (e.g. 2026-07-12T18:30:00Z). Use the deployment time of the live "
+        "PostHog logging changes to avoid duplicating events already captured live.",
+    )
     args = parser.parse_args()
 
-    asyncio.run(_run(dry_run=args.dry_run, limit=args.limit))
+    before = _parse_before(args.before) if args.before else None
+    asyncio.run(_run(dry_run=args.dry_run, limit=args.limit, before=before))
 
 
 if __name__ == "__main__":
