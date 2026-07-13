@@ -93,13 +93,13 @@ async def backfill_users(
     limit: int | None = None,
     before: datetime | None = None,
 ) -> int:
-    """Emit feed_loaded events and user identification for all Firestore users.
+    """Emit feedLoaded events and user identification for all Firestore users.
 
     When ``before`` is set, feed-activity records with ``first_seen_at`` at or
     after that timestamp are skipped -- use this when backfilling up to a
     deployment cutoff so live traffic after that point isn't double-emitted.
 
-    Returns the total number of feed_loaded events that would be / were sent.
+    Returns the total number of feedLoaded events that would be / were sent.
     """
     if stream_users is None:
         stream_users = lambda: _default_stream_users(db)  # noqa: E731
@@ -147,12 +147,12 @@ async def backfill_users(
                     set_props["posthog_created_at"] = created_at.isoformat()
                 ph.capture(
                     distinct_id=user_did,
-                    event="feed_loaded",
+                    event="feedLoaded",
                     properties={"feed_name": feed_name, "$set": set_props},
                     timestamp=first_seen_at,
                 )
 
-    logger.info("Users processed: %d | feed_loaded events queued: %d", user_count, event_count)
+    logger.info("Users processed: %d | feedLoaded events queued: %d", user_count, event_count)
     return event_count
 
 

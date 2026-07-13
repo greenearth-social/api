@@ -56,7 +56,7 @@ def test_track_session_captures_feed_loaded():
     track_session(mock, USER_DID, "alice.bsky.app", "your-feed", NOW)
     mock.capture.assert_called_once_with(
         distinct_id=USER_DID,
-        event="feed_loaded",
+        event="feedLoaded",
         properties={
             "feed_name": "your-feed",
             "$set": {"username": "alice.bsky.app"},

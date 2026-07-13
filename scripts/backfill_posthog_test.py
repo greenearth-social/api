@@ -88,7 +88,7 @@ async def test_backfill_users_emits_feed_loaded_per_feed():
 
     ph.capture.assert_called_once_with(
         distinct_id=USER_DID,
-        event="feed_loaded",
+        event="feedLoaded",
         properties={
             "feed_name": "your-feed",
             "$set": {

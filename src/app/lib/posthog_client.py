@@ -4,8 +4,11 @@ When ``GE_POSTHOG_API_KEY`` is not set the global client is ``None`` and
 all calls are silent no-ops — callers never need to guard against a missing
 client.
 
+Event names follow camelCase, matching the Bluesky interaction event names
+(e.g. ``interactionLike``, ``clickthroughItem``) forwarded from sendInteractions.
+
 PostHog events emitted:
-  feed_loaded      — one per getFeedSkeleton call (drives DAU/MAU/session counts)
+  feedLoaded       — one per getFeedSkeleton call (drives DAU/MAU/session counts)
   <interaction>    — behavioural events forwarded from sendInteractions
                      e.g. interactionLike, clickthroughItem, requestMore
 """
@@ -39,12 +42,12 @@ def track_session(
     feed_name: str,
     timestamp: datetime,
 ) -> None:
-    """Capture a feed_loaded event and update the user's person properties."""
+    """Capture a feedLoaded event and update the user's person properties."""
     if client is None:
         return
     client.capture(
         distinct_id=user_did,
-        event="feed_loaded",
+        event="feedLoaded",
         properties={
             "feed_name": feed_name,
             "$set": {"username": username},
@@ -61,7 +64,12 @@ def track_interaction(
     item_uri: str | None,
     timestamp: datetime,
 ) -> None:
-    """Capture a Bluesky interaction event."""
+    """Capture a Bluesky interaction event.
+
+    ``event`` should already be camelCase (e.g. ``interactionLike``) per the
+    module-level event naming convention -- callers pass through the event
+    name as-is, no case conversion happens here.
+    """
     if client is None:
         return
     properties: dict = {"feed_name": feed_name}
