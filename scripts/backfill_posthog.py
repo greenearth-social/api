@@ -29,7 +29,6 @@ import asyncio
 import logging
 import os
 import sys
-import uuid
 from datetime import UTC, datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -100,14 +99,6 @@ async def backfill_users(
     after that timestamp are skipped -- use this when backfilling up to a
     deployment cutoff so live traffic after that point isn't double-emitted.
 
-    Firestore's ``feed_activity`` collection only stores an aggregate
-    first/last-seen pair per (user, feed), not a per-request id, so each
-    emitted event gets its own freshly generated ``$session_id`` rather than
-    a historically accurate one -- there's no way to reconstruct the
-    original per-load sessions from this aggregate data. This at least
-    avoids every backfilled feedLoaded event collapsing into one PostHog
-    session, which is what happens if ``$session_id`` is omitted entirely.
-
     Returns the total number of feedLoaded events that would be / were sent.
     """
     if stream_users is None:
@@ -157,11 +148,7 @@ async def backfill_users(
                 ph.capture(
                     distinct_id=user_did,
                     event="feedLoaded",
-                    properties={
-                        "feed_name": feed_name,
-                        "$session_id": uuid.uuid4().hex,
-                        "$set": set_props,
-                    },
+                    properties={"feed_name": feed_name, "$set": set_props},
                     timestamp=first_seen_at,
                 )
 
@@ -198,7 +185,6 @@ async def backfill_interactions(
         event = data.get("event")
         feed_name = data.get("feed_name", "")
         item_uri = data.get("item_uri")
-        request_id = data.get("request_id")
         created_at = data.get("created_at")
 
         if not user_did or not event or not created_at:
@@ -213,8 +199,6 @@ async def backfill_interactions(
 
         if not dry_run:
             properties: dict = {"feed_name": feed_name}
-            if request_id:
-                properties["$session_id"] = request_id
             if item_uri:
                 properties["item_uri"] = item_uri
             ph.capture(

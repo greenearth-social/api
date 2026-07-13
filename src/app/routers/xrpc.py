@@ -439,24 +439,7 @@ async def _seen_exclusions(db, user_did: str, feed_cfg: FeedConfig) -> list[str]
         return []
 
 
-def _session_id_for_request(cursor: str | None) -> str:
-    """Derive the PostHog $session_id for a getFeedSkeleton call.
-
-    A cursor-based pagination request continues the session of its first page
-    (the feed-cache key decoded from the cursor); a request with no cursor, or
-    a malformed one, starts a new session.
-    """
-    if cursor is not None:
-        try:
-            return FeedCursor.decode(cursor).id
-        except ValueError:
-            pass
-    return uuid.uuid4().hex
-
-
-async def _record_session(
-    request: Request, user_did: str, feed_name: str, db, session_id: str
-) -> None:
+async def _record_session(request: Request, user_did: str, feed_name: str, db) -> None:
     """Resolve the caller's handle and upsert user + feed-activity docs.
 
     Runs as a background task so the user-facing latency of getFeedSkeleton
@@ -484,7 +467,7 @@ async def _record_session(
         )
 
     try:
-        track_session(get_posthog_client(), user_did, username, feed_name, now, session_id)
+        track_session(get_posthog_client(), user_did, username, feed_name, now)
     except Exception:
         logger.exception("Failed to track PostHog session for user '%s'", user_did)
 
@@ -600,7 +583,6 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
                     payload.feed,
                     ix.item,
                     doc.created_at,
-                    payload.rid,
                 )
             except Exception:
                 logger.exception(
@@ -732,8 +714,7 @@ async def get_feed_skeleton(
         logger.error("Firestore client not initialized")
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
-    session_id = _session_id_for_request(cursor)
-    _spawn_background(_record_session(request, user_did, feed_name, db, session_id))
+    _spawn_background(_record_session(request, user_did, feed_name, db))
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
@@ -838,11 +819,8 @@ async def get_feed_skeleton(
 
         # The request id identifies this response; when we cache a batch it doubles
         # as the cache key so the served order can be recovered from interactions.
-        # Generated up front so it can key the debug record too. Reuses the PostHog
-        # session id computed above when there was no cursor, so the feedLoaded event
-        # and this response's interactions share one session; a cursor whose cache
-        # entry expired gets a fresh id here since that's genuinely a new session.
-        request_id = session_id if cursor is None else uuid.uuid4().hex
+        # Generated up front so it can key the debug record too.
+        request_id = uuid.uuid4().hex
 
         all_uris = await _run_pipeline_capturing(
             request,

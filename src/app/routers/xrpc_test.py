@@ -1930,14 +1930,13 @@ class TestPosthogTracking:
         mock_client = MagicMock()
         with patch("app.routers.xrpc.get_posthog_client", return_value=mock_client):
             with patch("app.routers.xrpc.track_session") as mock_track:
-                await _record_session(request, "did:plc:abc", "your-feed", db, "reqid123")
+                await _record_session(request, "did:plc:abc", "your-feed", db)
                 mock_track.assert_called_once()
                 call_kwargs = mock_track.call_args
                 assert call_kwargs.args[0] is mock_client
                 assert call_kwargs.args[1] == "did:plc:abc"
                 assert call_kwargs.args[2] == "alice.bsky.app"
                 assert call_kwargs.args[3] == "your-feed"
-                assert call_kwargs.args[5] == "reqid123"
 
     @pytest.mark.asyncio
     async def test_record_interactions_calls_track_interaction(self):
@@ -1968,34 +1967,3 @@ class TestPosthogTracking:
                 assert call_kwargs.args[2] == "interactionLike"
                 assert call_kwargs.args[3] == "your-feed"
                 assert call_kwargs.args[4] == "at://did/post/1"
-                assert call_kwargs.args[6] == "reqid123"
-
-
-class TestSessionIdForRequest:
-    """Verify $session_id derivation for getFeedSkeleton calls."""
-
-    def test_no_cursor_generates_new_id(self):
-        from ..routers.xrpc import _session_id_for_request
-
-        result = _session_id_for_request(None)
-        assert isinstance(result, str)
-        assert len(result) > 0
-
-    def test_valid_cursor_reuses_its_id(self):
-        from ..models import FeedCursor
-        from ..routers.xrpc import _session_id_for_request
-
-        cursor = FeedCursor(id="cache-key-123", offset=30).encode()
-        assert _session_id_for_request(cursor) == "cache-key-123"
-
-    def test_invalid_cursor_generates_new_id(self):
-        from ..routers.xrpc import _session_id_for_request
-
-        result = _session_id_for_request("not-a-valid-cursor")
-        assert isinstance(result, str)
-        assert len(result) > 0
-
-    def test_no_cursor_generates_distinct_ids_across_calls(self):
-        from ..routers.xrpc import _session_id_for_request
-
-        assert _session_id_for_request(None) != _session_id_for_request(None)

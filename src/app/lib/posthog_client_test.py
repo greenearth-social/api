@@ -15,7 +15,6 @@ from app.lib.posthog_client import (
 
 NOW = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
 USER_DID = "did:plc:abc123"
-SESSION_ID = "request-id-abc123"
 
 
 @pytest.fixture(autouse=True)
@@ -49,18 +48,17 @@ def test_init_posthog_client_creates_posthog():
 
 
 def test_track_session_none_client_is_noop():
-    track_session(None, USER_DID, "alice.bsky.app", "your-feed", NOW, SESSION_ID)
+    track_session(None, USER_DID, "alice.bsky.app", "your-feed", NOW)
 
 
 def test_track_session_captures_feed_loaded():
     mock = MagicMock()
-    track_session(mock, USER_DID, "alice.bsky.app", "your-feed", NOW, SESSION_ID)
+    track_session(mock, USER_DID, "alice.bsky.app", "your-feed", NOW)
     mock.capture.assert_called_once_with(
         distinct_id=USER_DID,
         event="feedLoaded",
         properties={
             "feed_name": "your-feed",
-            "$session_id": SESSION_ID,
             "$set": {"username": "alice.bsky.app"},
         },
         timestamp=NOW,
@@ -68,35 +66,27 @@ def test_track_session_captures_feed_loaded():
 
 
 def test_track_interaction_none_client_is_noop():
-    track_interaction(
-        None, USER_DID, "interactionLike", "your-feed", "at://did/post/1", NOW, SESSION_ID
-    )
+    track_interaction(None, USER_DID, "interactionLike", "your-feed", "at://did/post/1", NOW)
 
 
 def test_track_interaction_captures_event_with_uri():
     mock = MagicMock()
-    track_interaction(
-        mock, USER_DID, "interactionLike", "your-feed", "at://did/post/1", NOW, SESSION_ID
-    )
+    track_interaction(mock, USER_DID, "interactionLike", "your-feed", "at://did/post/1", NOW)
     mock.capture.assert_called_once_with(
         distinct_id=USER_DID,
         event="interactionLike",
-        properties={
-            "feed_name": "your-feed",
-            "$session_id": SESSION_ID,
-            "item_uri": "at://did/post/1",
-        },
+        properties={"feed_name": "your-feed", "item_uri": "at://did/post/1"},
         timestamp=NOW,
     )
 
 
 def test_track_interaction_captures_event_without_uri():
     mock = MagicMock()
-    track_interaction(mock, USER_DID, "requestMore", "your-feed", None, NOW, SESSION_ID)
+    track_interaction(mock, USER_DID, "requestMore", "your-feed", None, NOW)
     mock.capture.assert_called_once_with(
         distinct_id=USER_DID,
         event="requestMore",
-        properties={"feed_name": "your-feed", "$session_id": SESSION_ID},
+        properties={"feed_name": "your-feed"},
         timestamp=NOW,
     )
 
