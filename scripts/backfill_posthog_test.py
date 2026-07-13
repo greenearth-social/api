@@ -3,7 +3,7 @@
 import importlib.util
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -78,19 +78,22 @@ async def test_backfill_users_emits_feed_loaded_per_feed():
     async def _stream_activity(user_did):
         yield activity_doc
 
-    await backfill.backfill_users(
-        db,
-        ph,
-        stream_users=_stream_users,
-        stream_feed_activity=_stream_activity,
-        dry_run=False,
-    )
+    with patch.object(backfill.uuid, "uuid4") as mock_uuid4:
+        mock_uuid4.return_value.hex = "generated-session-id"
+        await backfill.backfill_users(
+            db,
+            ph,
+            stream_users=_stream_users,
+            stream_feed_activity=_stream_activity,
+            dry_run=False,
+        )
 
     ph.capture.assert_called_once_with(
         distinct_id=USER_DID,
         event="feedLoaded",
         properties={
             "feed_name": "your-feed",
+            "$session_id": "generated-session-id",
             "$set": {
                 "username": "alice.bsky.app",
                 "posthog_created_at": NOW.isoformat(),
@@ -145,7 +148,11 @@ async def test_backfill_interactions_emits_one_event_per_doc():
     ph.capture.assert_called_once_with(
         distinct_id=USER_DID,
         event="interactionLike",
-        properties={"feed_name": "your-feed", "item_uri": "at://did/post/1"},
+        properties={
+            "feed_name": "your-feed",
+            "$session_id": "req123",
+            "item_uri": "at://did/post/1",
+        },
         timestamp=NOW,
     )
 
