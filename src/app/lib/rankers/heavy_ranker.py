@@ -94,13 +94,13 @@ class HeavyRanker(Ranker):
                 logger, "ranker_get_candidate_features", n_candidates=len(candidates_by_uri)
             ):
                 # Use embeddings already carried on CandidatePost when available (avoids an ES round-trip).
-                uris_embs_authors: list[tuple[str, list[float], str, int]] = []
+                uris_and_metadata: list[tuple[str, list[float], str, int]] = []
                 missing_uris: list[str] = []
                 for uri, candidate in candidates_by_uri.items():
                     if candidate.minilm_l12_embedding and candidate.author_did:
                         try:
                             vec = decode_float32_b64(candidate.minilm_l12_embedding)
-                            uris_embs_authors.append((uri, vec, candidate.author_did, candidate.like_count or 0))
+                            uris_and_metadata.append((uri, vec, candidate.author_did, candidate.like_count or 0))
                             continue
                         except Exception:
                             pass
@@ -108,24 +108,24 @@ class HeavyRanker(Ranker):
 
                 if missing_uris:
                     fetched = await fetch_post_embeddings_authors_and_like_counts(es, missing_uris, index="posts_recent")
-                    uris_embs_authors.extend(fetched)
+                    uris_and_metadata.extend(fetched)
 
-                if not uris_embs_authors:
+                if not uris_and_metadata:
                     return None
 
                 candidates_with_embeddings = [
                     candidates_by_uri[at_uri]
-                    for at_uri, _, _, _ in uris_embs_authors
+                    for at_uri, _, _, _ in uris_and_metadata
                     if at_uri in candidates_by_uri
                 ]
                 input_post_embeddings = [
-                    embedding for _, embedding, _, _ in uris_embs_authors
+                    embedding for _, embedding, _, _ in uris_and_metadata
                 ]
                 author_dids = [
-                    author_did for _, _, author_did, _ in uris_embs_authors
+                    author_did for _, _, author_did, _ in uris_and_metadata
                 ]
                 like_counts = [
-                    like_count for _, _, _, like_count in uris_embs_authors
+                    like_count for _, _, _, like_count in uris_and_metadata
                 ]
                 return candidates_with_embeddings, input_post_embeddings, author_dids, like_counts
         # end _get_candidate_features()
