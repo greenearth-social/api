@@ -19,7 +19,7 @@ CANDIDATE_SOURCE_FIELDS = [
     "image_count",          # media metadata (feed debugging)
     "video_count",          # media metadata (feed debugging)
     "external_embed",       # link embed metadata (feed debugging)
-    "like_count",           
+    "like_count",
 ]
 
 
