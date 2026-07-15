@@ -73,6 +73,9 @@ class CandidatePost(BaseModel):
     external_uri: str | None = Field(
         default=None, description="URI of an external link embed, when present"
     )
+    like_count: int | None = Field(
+        default=None, description="Number of likes the post has received"
+    )
 
 
 class GeneratorSpec(BaseModel):

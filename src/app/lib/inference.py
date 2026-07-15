@@ -159,8 +159,10 @@ async def predict_heavy_ranker_single_user(
     history_embeddings: list[list[float]],
     history_author_dids: list[str],
     history_liked_at_times: list[str],
+    history_like_counts: list[int],
     candidate_post_embeddings: list[list[float]],
     candidate_author_dids: list[str],
+    candidate_like_counts: list[int],
     *,
     base_url: str,
     api_key: str,
@@ -171,8 +173,10 @@ async def predict_heavy_ranker_single_user(
         "history_embeddings": history_embeddings,
         "history_author_dids": history_author_dids,
         "history_liked_at_times": history_liked_at_times,
+        "history_prior_cumulative_likes": history_like_counts,
         "candidate_post_embeddings": candidate_post_embeddings,
         "candidate_author_dids": candidate_author_dids,
+        "candidate_prior_cumulative_likes": candidate_like_counts,
     }
 
     client = get_http_client()
