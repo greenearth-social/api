@@ -1991,7 +1991,8 @@ class TestSocialRadiusOverride:
             yield
 
     @patch("app.routers.xrpc.get_user")
-    def test_applies_social_radius_preset_0(self, mock_get_user):
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_applies_social_radius_preset_0(self, mock_pipeline, mock_get_user):
         """social_radius=0 (Friends) → followed_users-heavy weights."""
         from ..documents import UserDocument
         from .xrpc import SOCIAL_RADIUS_PRESETS
@@ -2000,21 +2001,20 @@ class TestSocialRadiusOverride:
             user_did="did:plc:testuser",
             social_radius=0,
         )
-        preset = SOCIAL_RADIUS_PRESETS[0]
+        mock_pipeline.return_value = ["at://dummy/1", "at://dummy/2"]
 
-        with _patch_unranked_your_feed_generators(
-            _make_candidates("p", 3, "followed_users"),
-            infill_candidates=_make_candidates("infill", 3, "popularity"),
-        ):
-            resp = client.get(
-                "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": FEED_URI, "limit": 30},
-            )
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": RANKED_FEED_URI, "limit": 30},
+        )
 
         assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[0]
 
     @patch("app.routers.xrpc.get_user")
-    def test_applies_social_radius_preset_4(self, mock_get_user):
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_applies_social_radius_preset_4(self, mock_pipeline, mock_get_user):
         """social_radius=4 (Everyone) → popularity-heavy weights."""
         from ..documents import UserDocument
         from .xrpc import SOCIAL_RADIUS_PRESETS
@@ -2023,41 +2023,41 @@ class TestSocialRadiusOverride:
             user_did="did:plc:testuser",
             social_radius=4,
         )
-        preset = SOCIAL_RADIUS_PRESETS[4]
+        mock_pipeline.return_value = ["at://dummy/1", "at://dummy/2"]
 
-        with _patch_unranked_your_feed_generators(
-            _make_candidates("p", 3, "popularity"),
-            infill_candidates=_make_candidates("infill", 3, "popularity"),
-        ):
-            resp = client.get(
-                "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": FEED_URI, "limit": 30},
-            )
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": RANKED_FEED_URI, "limit": 30},
+        )
 
         assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[4]
 
     @patch("app.routers.xrpc.get_user")
-    def test_default_radius_when_missing(self, mock_get_user):
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_default_radius_when_missing(self, mock_pipeline, mock_get_user):
         """User doc without social_radius field → defaults to 2 (balanced)."""
         from ..documents import UserDocument
+        from .xrpc import SOCIAL_RADIUS_PRESETS
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
         )
+        mock_pipeline.return_value = ["at://dummy/1"]
 
-        with _patch_unranked_your_feed_generators(
-            _make_candidates("p", 3, "followed_users"),
-            infill_candidates=_make_candidates("infill", 3, "popularity"),
-        ):
-            resp = client.get(
-                "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": FEED_URI, "limit": 30},
-            )
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": RANKED_FEED_URI, "limit": 30},
+        )
 
         assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[2]
 
     @patch("app.routers.xrpc.get_user")
-    def test_no_override_for_non_your_feed(self, mock_get_user):
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_no_override_for_non_your_feed(self, mock_pipeline, mock_get_user):
         """best-of-friends is unaffected by social_radius."""
         from ..documents import UserDocument
 
@@ -2065,32 +2065,89 @@ class TestSocialRadiusOverride:
             user_did="did:plc:testuser",
             social_radius=0,
         )
+        mock_pipeline.return_value = ["at://dummy/1"]
 
-        with patch("app.lib.candidates.followed_users.FollowedUsersCandidateGenerator.generate") as mock_gen:
-            mock_gen.return_value = CandidateResult(
-                generator_name="followed_users",
-                candidates=_make_candidates("p", 5, "followed_users"),
-            )
-
-            resp = client.get(
-                "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": BEST_OF_FRIENDS_FEED_URI, "limit": 30},
-            )
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": BEST_OF_FRIENDS_FEED_URI, "limit": 30},
+        )
 
         assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert len(gen_request.generators) == 1
+        assert gen_request.generators[0].name == "followed_users"
+        assert gen_request.generators[0].weight == 1.0
 
     @patch("app.routers.xrpc.get_user")
-    def test_fallen_back_to_defaults_when_user_has_no_doc(self, mock_get_user):
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_fallen_back_to_defaults_when_user_has_no_doc(self, mock_pipeline, mock_get_user):
         """User doc is None → no override, defaults used."""
-        mock_get_user.return_value = None
+        from .xrpc import SOCIAL_RADIUS_PRESETS
 
-        with _patch_unranked_your_feed_generators(
-            _make_candidates("p", 3, "followed_users"),
-            infill_candidates=_make_candidates("infill", 3, "popularity"),
-        ):
-            resp = client.get(
-                "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": FEED_URI, "limit": 30},
-            )
+        mock_get_user.return_value = None
+        mock_pipeline.return_value = ["at://dummy/1"]
+
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": RANKED_FEED_URI, "limit": 30},
+        )
 
         assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[2]
+class TestPosthogTracking:
+    """Verify PostHog events are emitted from XRPC background handlers."""
+
+    @pytest.mark.asyncio
+    async def test_record_session_calls_track_session(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ..routers.xrpc import _record_session
+
+        db = AsyncMock()
+        request = MagicMock()
+        request.app.state.id_resolver = AsyncMock()
+        did_doc = MagicMock()
+        did_doc.get_handle.return_value = "alice.bsky.app"
+        request.app.state.id_resolver.did.resolve = AsyncMock(return_value=did_doc)
+
+        mock_client = MagicMock()
+        with patch("app.routers.xrpc.get_posthog_client", return_value=mock_client):
+            with patch("app.routers.xrpc.track_session") as mock_track:
+                await _record_session(request, "did:plc:abc", "your-feed", db)
+                mock_track.assert_called_once()
+                call_kwargs = mock_track.call_args
+                assert call_kwargs.args[0] is mock_client
+                assert call_kwargs.args[1] == "did:plc:abc"
+                assert call_kwargs.args[2] == "alice.bsky.app"
+                assert call_kwargs.args[3] == "your-feed"
+
+    @pytest.mark.asyncio
+    async def test_record_interactions_calls_track_interaction(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ..routers.xrpc import Interaction, _record_interactions
+        from ..lib.feed_context import FeedContextPayload, encode_feed_context
+
+        feed_context = encode_feed_context(
+            FeedContextPayload(did="did:plc:abc", feed="your-feed", rid="reqid123", iat=0)
+        )
+
+        ix = Interaction(
+            item="at://did/post/1",
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context=feed_context,
+        )
+
+        db = AsyncMock()
+        mock_client = MagicMock()
+        with patch("app.routers.xrpc.get_posthog_client", return_value=mock_client):
+            with patch("app.routers.xrpc.track_interaction") as mock_track:
+                await _record_interactions(db, [ix])
+                mock_track.assert_called_once()
+                call_kwargs = mock_track.call_args
+                assert call_kwargs.args[0] is mock_client
+                assert call_kwargs.args[1] == "did:plc:abc"
+                assert call_kwargs.args[2] == "interactionLike"
+                assert call_kwargs.args[3] == "your-feed"
+                assert call_kwargs.args[4] == "at://did/post/1"

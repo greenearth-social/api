@@ -431,22 +431,30 @@ async def get_recent_feed_snapshots(
     Requires a collection-group composite index on ``feed_snapshots`` with
     fields ``(feed_name ASC, generated_at DESC)`` — see ``firestore.indexes.json``.
     """
-    query = (
-        db.collection(USERS_COLLECTION)
-        .document(user_doc_id(user_did))
-        .collection(FEED_SNAPSHOTS_COLLECTION)
-    )
-    if feed_name is not None:
-        query = query.where(filter=FieldFilter("feed_name", "==", feed_name))
-    if cutoff is not None:
-        query = query.where(filter=FieldFilter("generated_at", ">=", cutoff))
-    query = query.order_by("generated_at", direction=Query.DESCENDING).limit(limit)
-    docs: list[FeedSnapshotDocument] = []
-    async for doc in query.stream():
-        data = doc.to_dict()
-        if data is not None:
-            docs.append(FeedSnapshotDocument.model_validate(data))
-    return docs
+    try:
+        query = (
+            db.collection(USERS_COLLECTION)
+            .document(user_doc_id(user_did))
+            .collection(FEED_SNAPSHOTS_COLLECTION)
+        )
+        if feed_name is not None:
+            query = query.where(filter=FieldFilter("feed_name", "==", feed_name))
+        if cutoff is not None:
+            query = query.where(filter=FieldFilter("generated_at", ">=", cutoff))
+        query = query.order_by("generated_at", direction=Query.DESCENDING).limit(limit)
+        docs: list[FeedSnapshotDocument] = []
+        async for doc in query.stream():
+            data = doc.to_dict()
+            if data is not None:
+                docs.append(FeedSnapshotDocument.model_validate(data))
+        return docs
+    except Exception:
+        logger.exception(
+            "Failed to query feed snapshots for user '%s' (feed_name=%s)",
+            user_did,
+            feed_name,
+        )
+        return []
 
 
 async def get_newer_feed_snapshot_uris(
@@ -462,19 +470,27 @@ async def get_newer_feed_snapshot_uris(
     appears in a more-recent snapshot for the same feed is excluded so the user
     only sees fresh posts.
     """
-    uris: set[str] = set()
-    query = (
-        db.collection(USERS_COLLECTION)
-        .document(user_doc_id(user_did))
-        .collection(FEED_SNAPSHOTS_COLLECTION)
-        .where(filter=FieldFilter("feed_name", "==", feed_name))
-        .where(filter=FieldFilter("generated_at", ">", newer_than))
-        .order_by("generated_at", direction=Query.DESCENDING)
-    )
-    async for doc in query.stream():
-        data = doc.to_dict()
-        if data is not None:
-            items = data.get("items", [])
-            if items:
-                uris.update(items)
-    return uris
+    try:
+        uris: set[str] = set()
+        query = (
+            db.collection(USERS_COLLECTION)
+            .document(user_doc_id(user_did))
+            .collection(FEED_SNAPSHOTS_COLLECTION)
+            .where(filter=FieldFilter("feed_name", "==", feed_name))
+            .where(filter=FieldFilter("generated_at", ">", newer_than))
+            .order_by("generated_at", direction=Query.DESCENDING)
+        )
+        async for doc in query.stream():
+            data = doc.to_dict()
+            if data is not None:
+                items = data.get("items", [])
+                if items:
+                    uris.update(items)
+        return uris
+    except Exception:
+        logger.exception(
+            "Failed to query newer feed snapshot URIs for user '%s' (feed_name=%s)",
+            user_did,
+            feed_name,
+        )
+        return set()

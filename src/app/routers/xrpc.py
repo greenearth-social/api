@@ -352,21 +352,16 @@ async def _run_pipeline_capturing(
     with feed_debug_scope(recorder):
         uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
 
-    # Always write the lightweight snapshot inline.
+    # Always write the lightweight snapshot in background.
     expires_at = generated_at + timedelta(seconds=FEED_SNAPSHOT_RETENTION_SECONDS)
-    try:
-        snapshot = recorder.build_pipeline_metadata(
-            request_id=request_id,
-            generated_at=generated_at,
-            expires_at=expires_at,
-        )
-        await write_feed_snapshot(db, user_did, request_id, snapshot)
-    except Exception:
-        logger.exception(
-            "Failed to write feed snapshot for user '%s', request '%s'",
-            user_did,
-            request_id,
-        )
+    snapshot = recorder.build_pipeline_metadata(
+        request_id=request_id,
+        generated_at=generated_at,
+        expires_at=expires_at,
+    )
+    _spawn_background(
+        _write_feed_snapshot_background(db, user_did, request_id, snapshot)
+    )
 
     # Full debug document only for debug-flagged users, in background.
     if debug_enabled:
@@ -517,6 +512,27 @@ async def _resolve_handles(request: Request, dids: set[str]) -> dict[str, str]:
 
     handles = await asyncio.gather(*(_one(did) for did in did_list))
     return {did: handle for did, handle in zip(did_list, handles) if handle}
+
+
+async def _write_feed_snapshot_background(
+    db,
+    user_did: str,
+    request_id: str,
+    snapshot,
+) -> None:
+    """Write the lightweight feed snapshot in a background task.
+
+    Separated from ``_run_pipeline_capturing`` so the Firestore write stays
+    off the feed-serving hot path. Failures are logged, never surfaced.
+    """
+    try:
+        await write_feed_snapshot(db, user_did, request_id, snapshot)
+    except Exception:
+        logger.exception(
+            "Failed to write feed snapshot for user '%s', request '%s'",
+            user_did,
+            request_id,
+        )
 
 
 async def _write_feed_debug(
@@ -752,10 +768,13 @@ async def get_feed_skeleton(
         logger.exception("Failed to read debug flag for user '%s'", user_did)
 
     # Apply social-radius preference override to your-feed generator weights.
+    # The override is computed once and threaded through model_copy in both
+    # generation paths so the shared module-level template is never mutated.
+    generators_override: dict = {}
     if feed_name == "your-feed" and user_doc is not None:
         preset = SOCIAL_RADIUS_PRESETS.get(user_doc.social_radius)
         if preset is not None:
-            feed_cfg.gen_request_template.generators = preset
+            generators_override = {"generators": preset}
 
     feed_cache = _get_feed_cache(request)
 
@@ -805,6 +824,7 @@ async def get_feed_skeleton(
                         "user_did": user_did,
                         "num_candidates": batch,
                         "exclude_uris": exclude_uris,
+                        **generators_override,
                     }
                 )
 
@@ -845,7 +865,12 @@ async def get_feed_skeleton(
         batch = _batch_size(limit)
         seen_uris = await _seen_exclusions(db, user_did, feed_cfg)
         gen_request = feed_cfg.gen_request_template.model_copy(
-            update={"user_did": user_did, "num_candidates": batch, "exclude_uris": seen_uris}
+            update={
+                "user_did": user_did,
+                "num_candidates": batch,
+                "exclude_uris": seen_uris,
+                **generators_override,
+            }
         )
 
         # The request id identifies this response; when we cache a batch it doubles

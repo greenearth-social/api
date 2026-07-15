@@ -28,6 +28,7 @@ CI runs `pyright` then `pytest -v`; lint is not enforced in CI but `ruff` is con
 - Shared libs: `src/app/lib/` (Firestore, ES client, inference, metrics, caching, firebase_auth, post_hydration, feed_debug).
 - Documents (Firestore Pydantic models): `src/app/documents.py`.
 - API response models: `src/app/models.py` (pipeline types), `src/app/models_feed_debug.py` (feed-debug API views).
+- `src/app/feeds.py` — canonical feed catalog (intentionally separate from the XRPC router so scripts like `publish_feed.py` can import it without pulling in FastAPI).
 - Scripts: `scripts/` (deploy, feed publishing, API key management, profiling). Deployed containers exclude `scripts/` via `.gcloudignore`.
 - Tests are co-located as `*_test.py` next to the files they test. `pyproject.toml` sets `pythonpath = ["src", "scripts"]`.
 
@@ -37,6 +38,7 @@ The app refuses to start without:
 
 - `GE_ELASTICSEARCH_API_KEY`
 - `GE_FEED_CONTEXT_SECRET`
+- `GE_POSTHOG_API_KEY` — **only required in stage/prod** (the lifespan handler enforces it in deployed envs; local dev runs without it silently)
 
 Other important variables:
 
@@ -68,7 +70,7 @@ The emulator does not persist data across restarts by default; add `--export-on-
 
 ## Tests
 
-Most tests are unit tests with mocks and do not require Elasticsearch, Firestore, or the emulator. The shared `src/app/conftest.py` bypasses **both** API-key auth and Firebase auth by default via `dependency_overrides`; `security_test.py` overrides the API-key fixture to test auth behavior.
+Most tests are unit tests with mocks and do not require Elasticsearch, Firestore, or the emulator. The shared `src/app/conftest.py` bypasses **both** API-key auth and Firebase auth by default via `dependency_overrides`; `security_test.py` overrides the API-key fixture to test auth behavior. The conftest also auto-sets `GE_PERSPECTIVE_API_KEY` to a dummy value and force-disables PostHog (so a stray prod key in the dev environment won't leak analytics from tests).
 
 ```bash
 # Run everything
@@ -136,6 +138,8 @@ GE_FIRESTORE_PROJECT=greenearth-471522 GE_FIRESTORE_DATABASE=greenearth-stage \
 **Deploy order matters:** generate at least one key in the target Firestore database *before* deploying, or every request returns 401.
 
 ## Deployment
+
+**First-time only:** run `./scripts/gcp_setup.sh` once per environment to create the service account and secrets before deploying.
 
 ```bash
 ./scripts/deploy.sh                  # stage
