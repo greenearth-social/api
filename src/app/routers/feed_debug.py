@@ -123,14 +123,21 @@ async def list_feeds(
     docs = await get_recent_feed_snapshots(
         db, user_doc_id, feed_name=TARGET_FEED_NAME, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT
     )
-    summaries = [
-        FeedSummary(
-            request_id=doc.request_id,
-            generated_at=doc.generated_at,
-            feed_name=doc.feed_name,
+
+    seen_uris: set[str] = set()
+    summaries: list[FeedSummary] = []
+    for doc in docs:
+        if set(doc.items).issubset(seen_uris):
+            continue
+        seen_uris.update(doc.items)
+        summaries.append(
+            FeedSummary(
+                request_id=doc.request_id,
+                generated_at=doc.generated_at,
+                feed_name=doc.feed_name,
+            )
         )
-        for doc in docs
-    ]
+
     return FeedListResponse(feeds=summaries)
 
 

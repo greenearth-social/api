@@ -90,9 +90,17 @@ def _snapshot_doc(
 @patch("app.routers.feed_debug.get_recent_feed_snapshots")
 def test_list_feeds_returns_summaries(mock_query, client):
     mock_query.return_value = [
-        _snapshot_doc(request_id="req-1", generated_at=datetime.now(timezone.utc)),
         _snapshot_doc(
-            request_id="req-2", generated_at=datetime.now(timezone.utc) - timedelta(minutes=5)
+            request_id="req-1",
+            generated_at=datetime.now(timezone.utc),
+            items=["at://a"],
+            items_meta=[PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)],
+        ),
+        _snapshot_doc(
+            request_id="req-2",
+            generated_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            items=["at://b"],
+            items_meta=[PipelineItemMeta(at_uri="at://b", rank=1, rank_score=1.0, after_rank_position=1)],
         ),
     ]
 
@@ -123,6 +131,97 @@ def test_list_feeds_returns_401_without_auth():
         assert response.status_code == 401
     finally:
         app.dependency_overrides.setdefault(verify_firebase_auth, lambda: "test-user")
+
+
+@patch("app.routers.feed_debug.get_recent_feed_snapshots")
+def test_list_feeds_skips_fully_deduped_snapshots(mock_query, client):
+    now = datetime.now(timezone.utc)
+    newer = _snapshot_doc(
+        request_id="req-1",
+        generated_at=now,
+        items=["at://a", "at://b"],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1),
+            PipelineItemMeta(at_uri="at://b", rank=2, rank_score=0.9, after_rank_position=2),
+        ],
+    )
+    older = _snapshot_doc(
+        request_id="req-2",
+        generated_at=now - timedelta(minutes=5),
+        items=["at://a", "at://b"],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1),
+            PipelineItemMeta(at_uri="at://b", rank=2, rank_score=0.9, after_rank_position=2),
+        ],
+    )
+    mock_query.return_value = [newer, older]
+
+    response = client.get("/api/feeds")
+    data = response.json()
+    assert len(data["feeds"]) == 1
+    assert data["feeds"][0]["requestId"] == "req-1"
+
+
+@patch("app.routers.feed_debug.get_recent_feed_snapshots")
+def test_list_feeds_newest_first_order(mock_query, client):
+    now = datetime.now(timezone.utc)
+    newest = _snapshot_doc(
+        request_id="req-3", generated_at=now,
+        items=["at://c"],
+        items_meta=[PipelineItemMeta(at_uri="at://c", rank=1, rank_score=1.0, after_rank_position=1)],
+    )
+    middle = _snapshot_doc(
+        request_id="req-2", generated_at=now - timedelta(minutes=3),
+        items=["at://b"],
+        items_meta=[PipelineItemMeta(at_uri="at://b", rank=1, rank_score=1.0, after_rank_position=1)],
+    )
+    oldest = _snapshot_doc(
+        request_id="req-1", generated_at=now - timedelta(minutes=6),
+        items=["at://a"],
+        items_meta=[PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)],
+    )
+    mock_query.return_value = [newest, middle, oldest]
+
+    response = client.get("/api/feeds")
+    data = response.json()
+    assert len(data["feeds"]) == 3
+    assert data["feeds"][0]["requestId"] == "req-3"
+    assert data["feeds"][1]["requestId"] == "req-2"
+    assert data["feeds"][2]["requestId"] == "req-1"
+
+
+@patch("app.routers.feed_debug.get_recent_feed_snapshots")
+def test_list_feeds_skips_middle_when_fully_deduped(mock_query, client):
+    now = datetime.now(timezone.utc)
+    newest = _snapshot_doc(
+        request_id="req-3", generated_at=now,
+        items=["at://a", "at://b", "at://c"],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1),
+            PipelineItemMeta(at_uri="at://b", rank=2, rank_score=0.9, after_rank_position=2),
+            PipelineItemMeta(at_uri="at://c", rank=3, rank_score=0.8, after_rank_position=3),
+        ],
+    )
+    middle = _snapshot_doc(
+        request_id="req-2", generated_at=now - timedelta(minutes=3),
+        items=["at://a", "at://b"],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1),
+            PipelineItemMeta(at_uri="at://b", rank=2, rank_score=0.9, after_rank_position=2),
+        ],
+    )
+    oldest = _snapshot_doc(
+        request_id="req-1", generated_at=now - timedelta(minutes=6),
+        items=["at://d"],
+        items_meta=[PipelineItemMeta(at_uri="at://d", rank=1, rank_score=1.0, after_rank_position=1)],
+    )
+    mock_query.return_value = [newest, middle, oldest]
+
+    response = client.get("/api/feeds")
+    data = response.json()
+    assert len(data["feeds"]) == 2
+    assert data["feeds"][0]["requestId"] == "req-3"
+    assert data["feeds"][1]["requestId"] == "req-1"
 
 
 # ---------------------------------------------------------------------------
