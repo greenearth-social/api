@@ -13,11 +13,13 @@ from ..documents import FeedDebugDocument, InteractionDocument, UserDocument
 from ..models import CandidateGenerateRequest, GeneratorSpec
 from ..lib.firestore import (
     FEED_DEBUG_COLLECTION,
+    FEED_SNAPSHOTS_COLLECTION,
     INTERACTIONS_COLLECTION,
     SEEN_POSTS_COLLECTION,
     USERS_COLLECTION,
     get_feed_activity,
     get_feed_debug,
+    get_newer_feed_snapshot_uris,
     get_recent_feed_debug,
     get_recent_seen_uris,
     get_user,
@@ -620,3 +622,61 @@ class TestGetFeedDebug:
         doc_ref.get.return_value = _mock_doc_snapshot(False)
 
         assert await get_feed_debug(db, USER_DID, REQUEST_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# get_newer_feed_snapshot_uris
+# ---------------------------------------------------------------------------
+
+
+class TestGetNewerFeedSnapshotUris:
+    @pytest.mark.asyncio
+    async def test_returns_uris_from_newer_snapshots(self):
+        now = datetime.now(timezone.utc)
+        db = MagicMock()
+        snap1 = _mock_doc_snapshot(True, {"items": ["at://a", "at://b"]})
+        snap2 = _mock_doc_snapshot(True, {"items": ["at://c"]})
+        query = MagicMock()
+        query.stream.return_value = _async_iter([snap1, snap2])
+        (
+            db.collection.return_value.document.return_value.collection.return_value.where.return_value.where.return_value.order_by.return_value
+        ) = query
+
+        uris = await get_newer_feed_snapshot_uris(
+            db, USER_DID, feed_name="your-feed", newer_than=now - timedelta(minutes=10)
+        )
+
+        assert uris == {"at://a", "at://b", "at://c"}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_newer_snapshots(self):
+        now = datetime.now(timezone.utc)
+        db = MagicMock()
+        query = MagicMock()
+        query.stream.return_value = _async_iter([])
+        (
+            db.collection.return_value.document.return_value.collection.return_value.where.return_value.where.return_value.order_by.return_value
+        ) = query
+
+        uris = await get_newer_feed_snapshot_uris(
+            db, USER_DID, feed_name="your-feed", newer_than=now
+        )
+
+        assert uris == set()
+
+    @pytest.mark.asyncio
+    async def test_allows_empty_items_lists(self):
+        now = datetime.now(timezone.utc)
+        db = MagicMock()
+        snap = _mock_doc_snapshot(True, {"items": []})
+        query = MagicMock()
+        query.stream.return_value = _async_iter([snap])
+        (
+            db.collection.return_value.document.return_value.collection.return_value.where.return_value.where.return_value.order_by.return_value
+        ) = query
+
+        uris = await get_newer_feed_snapshot_uris(
+            db, USER_DID, feed_name="your-feed", newer_than=now - timedelta(minutes=1)
+        )
+
+        assert uris == set()

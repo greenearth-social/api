@@ -336,6 +336,65 @@ def test_get_feed_detail_multiple_items(mock_get_snapshot, mock_hydrate, client)
 
 
 # ---------------------------------------------------------------------------
+# GET / PUT /api/feeds/preferences
+# ---------------------------------------------------------------------------
+
+
+@patch("app.routers.feed_debug.get_user")
+def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
+    from ..documents import UserDocument
+
+    mock_get_user.return_value = UserDocument(
+        user_did="did:plc:test-user",
+        username="test.bsky.social",
+    )
+
+    response = client.get("/api/feeds/preferences")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["socialRadius"] == 2  # default
+
+
+@patch("app.routers.feed_debug.get_user")
+def test_get_preferences_returns_stored_value(mock_get_user, client):
+    from ..documents import UserDocument
+
+    mock_get_user.return_value = UserDocument(
+        user_did="did:plc:test-user",
+        username="test.bsky.social",
+        social_radius=0,
+    )
+
+    response = client.get("/api/feeds/preferences")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["socialRadius"] == 0
+
+
+@patch("app.routers.feed_debug.set_user_social_radius")
+def test_put_preferences_updates_value(mock_set_radius, client):
+    response = client.put("/api/feeds/preferences", json={"socialRadius": 3})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["socialRadius"] == 3
+    mock_set_radius.assert_awaited_once()
+
+
+@patch("app.routers.feed_debug.set_user_social_radius")
+def test_put_preferences_rejects_out_of_range(mock_set_radius, client):
+    response = client.put("/api/feeds/preferences", json={"socialRadius": 10})
+    assert response.status_code == 422
+
+
+@patch("app.routers.feed_debug.set_user_social_radius")
+def test_put_preferences_creates_user_doc_if_missing(mock_set_radius, client):
+    response = client.put("/api/feeds/preferences", json={"socialRadius": 1})
+    assert response.status_code == 200
+    assert response.json()["socialRadius"] == 1
+    mock_set_radius.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # _at_uri_to_bsky_url
 # ---------------------------------------------------------------------------
 
@@ -353,3 +412,169 @@ def test_at_uri_to_bsky_url():
     )
     assert _at_uri_to_bsky_url("at://did:plc:abc/app.bsky.feed.like/xyz") is None
     assert _at_uri_to_bsky_url("not-a-uri") is None
+
+
+# ---------------------------------------------------------------------------
+# GET /api/feeds/{requestId} — deduplication across newer snapshots
+# ---------------------------------------------------------------------------
+
+
+def _hydrated(uri: str, handle: str = "alice.bsky.social") -> dict:
+    return {
+        uri: {
+            "author": {"handle": handle, "display_name": None, "avatar_url": None},
+            "content": "",
+            "created_at": None,
+            "media": {
+                "image_urls": [],
+                "video_url": None,
+                "link_card_url": None,
+                "link_card_title": None,
+                "link_card_description": None,
+                "labels": [],
+            },
+            "engagement": {"reply_count": 0, "repost_count": 0, "like_count": 0},
+        }
+    }
+
+
+@patch("app.routers.feed_debug.hydrate_posts")
+@patch("app.routers.feed_debug.get_newer_feed_snapshot_uris")
+@patch("app.routers.feed_debug.get_feed_snapshot")
+def test_get_feed_detail_excludes_items_seen_in_newer_snapshots(
+    mock_get_snapshot, mock_newer, mock_hydrate, client
+):
+    uri1 = "at://did:plc:a/app.bsky.feed.post/p1"
+    uri2 = "at://did:plc:b/app.bsky.feed.post/p2"
+    doc = _snapshot_doc(
+        items_meta=[
+            PipelineItemMeta(
+                at_uri=uri1, rank=1, rank_score=0.92, after_rank_position=1,
+                generators=[GeneratorMeta(name="two_tower", score=0.85)],
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92)],
+            ),
+            PipelineItemMeta(
+                at_uri=uri2, rank=2, rank_score=0.88, after_rank_position=2,
+                generators=[GeneratorMeta(name="popularity", score=0.80)],
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.88)],
+            ),
+        ],
+        items=[uri1, uri2],
+    )
+    mock_get_snapshot.return_value = doc
+    mock_newer.return_value = {uri1}
+    mock_hydrate.return_value = {**_hydrated(uri2, "bob.bsky.social")}
+
+    response = client.get("/api/feeds/req-abc")
+    data = response.json()
+
+    assert response.status_code == 200
+    assert len(data["items"]) == 1
+    assert data["items"][0]["atUri"] == uri2
+
+
+@patch("app.routers.feed_debug.hydrate_posts")
+@patch("app.routers.feed_debug.get_newer_feed_snapshot_uris")
+@patch("app.routers.feed_debug.get_feed_snapshot")
+def test_get_feed_detail_returns_all_when_no_newer_snapshots(
+    mock_get_snapshot, mock_newer, mock_hydrate, client
+):
+    uri1 = "at://did:plc:a/app.bsky.feed.post/p1"
+    uri2 = "at://did:plc:b/app.bsky.feed.post/p2"
+    doc = _snapshot_doc(
+        items_meta=[
+            PipelineItemMeta(
+                at_uri=uri1, rank=1, rank_score=0.92, after_rank_position=1,
+                generators=[GeneratorMeta(name="two_tower", score=0.85)],
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92)],
+            ),
+            PipelineItemMeta(
+                at_uri=uri2, rank=2, rank_score=0.88, after_rank_position=2,
+                generators=[GeneratorMeta(name="popularity", score=0.80)],
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.88)],
+            ),
+        ],
+        items=[uri1, uri2],
+    )
+    mock_get_snapshot.return_value = doc
+    mock_newer.return_value = set()
+    mock_hydrate.return_value = {**_hydrated(uri1), **_hydrated(uri2, "bob.bsky.social")}
+
+    response = client.get("/api/feeds/req-abc")
+    data = response.json()
+
+    assert response.status_code == 200
+    assert len(data["items"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# GET /api/feeds/{requestId} — diverse pipeline metadata
+# ---------------------------------------------------------------------------
+
+
+@patch("app.routers.feed_debug.hydrate_posts")
+@patch("app.routers.feed_debug.get_newer_feed_snapshot_uris")
+@patch("app.routers.feed_debug.get_feed_snapshot")
+def test_get_feed_detail_diverse_pipeline_metadata(
+    mock_get_snapshot, mock_newer, mock_hydrate, client
+):
+    uri = "at://did:plc:author/app.bsky.feed.post/post1"
+    doc = _snapshot_doc(
+        items_meta=[
+            PipelineItemMeta(
+                at_uri=uri,
+                rank=1,
+                rank_score=0.92,
+                after_rank_position=1,
+                generators=[
+                    GeneratorMeta(name="two_tower", score=0.85),
+                    GeneratorMeta(name="followed_users", score=0.70),
+                    GeneratorMeta(name="popularity", score=0.60),
+                ],
+                model_scores=[
+                    ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92),
+                    ModelScoreMeta(name="perspective", weight=1.0, score=-0.15),
+                ],
+            )
+        ],
+        generator_legend=[
+            GeneratorMeta(name="two_tower", weight=0.35),
+            GeneratorMeta(name="followed_users", weight=0.35),
+            GeneratorMeta(name="popularity", weight=0.3),
+        ],
+        ranker_model="heavy_ranker, perspective",
+    )
+    mock_get_snapshot.return_value = doc
+    mock_newer.return_value = set()
+    mock_hydrate.return_value = {
+        uri: {
+            "author": {"handle": "alice.bsky.social", "display_name": "Alice", "avatar_url": None},
+            "content": "hello",
+            "created_at": None,
+            "media": {
+                "image_urls": [],
+                "video_url": None,
+                "link_card_url": None,
+                "link_card_title": None,
+                "link_card_description": None,
+                "labels": [],
+            },
+            "engagement": {"reply_count": 0, "repost_count": 0, "like_count": 0},
+        }
+    }
+
+    response = client.get("/api/feeds/req-abc")
+    data = response.json()
+
+    assert response.status_code == 200
+    item = data["items"][0]
+
+    gen_names = [g["name"] for g in item["generators"]]
+    assert gen_names == ["two_tower", "followed_users", "popularity"]
+
+    model_names = [m["name"] for m in item["modelScores"]]
+    assert model_names == ["heavy_ranker", "perspective"]
+    assert item["modelScores"][0]["weight"] == 1.0
+    assert item["modelScores"][0]["score"] == 0.92
+    assert item["modelScores"][1]["weight"] == 1.0
+    assert item["modelScores"][1]["score"] == -0.15

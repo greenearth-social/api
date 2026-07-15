@@ -1969,3 +1969,128 @@ class TestPosthogTracking:
                 assert call_kwargs.args[2] == "interactionLike"
                 assert call_kwargs.args[3] == "your-feed"
                 assert call_kwargs.args[4] == "at://did/post/1"
+
+
+# ---------------------------------------------------------------------------
+# Social-radius override
+# ---------------------------------------------------------------------------
+
+
+class TestSocialRadiusOverride:
+    """Generator weights are overridden based on user_doc.social_radius."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_auth(self):
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_upsert(self):
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), \
+             patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
+            yield
+
+    @patch("app.routers.xrpc.get_user")
+    def test_applies_social_radius_preset_0(self, mock_get_user):
+        """social_radius=0 (Friends) → followed_users-heavy weights."""
+        from ..documents import UserDocument
+        from .xrpc import SOCIAL_RADIUS_PRESETS
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=0,
+        )
+        preset = SOCIAL_RADIUS_PRESETS[0]
+
+        with _patch_unranked_your_feed_generators(
+            _make_candidates("p", 3, "followed_users"),
+            infill_candidates=_make_candidates("infill", 3, "popularity"),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 30},
+            )
+
+        assert resp.status_code == 200
+
+    @patch("app.routers.xrpc.get_user")
+    def test_applies_social_radius_preset_4(self, mock_get_user):
+        """social_radius=4 (Everyone) → popularity-heavy weights."""
+        from ..documents import UserDocument
+        from .xrpc import SOCIAL_RADIUS_PRESETS
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=4,
+        )
+        preset = SOCIAL_RADIUS_PRESETS[4]
+
+        with _patch_unranked_your_feed_generators(
+            _make_candidates("p", 3, "popularity"),
+            infill_candidates=_make_candidates("infill", 3, "popularity"),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 30},
+            )
+
+        assert resp.status_code == 200
+
+    @patch("app.routers.xrpc.get_user")
+    def test_default_radius_when_missing(self, mock_get_user):
+        """User doc without social_radius field → defaults to 2 (balanced)."""
+        from ..documents import UserDocument
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+        )
+
+        with _patch_unranked_your_feed_generators(
+            _make_candidates("p", 3, "followed_users"),
+            infill_candidates=_make_candidates("infill", 3, "popularity"),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 30},
+            )
+
+        assert resp.status_code == 200
+
+    @patch("app.routers.xrpc.get_user")
+    def test_no_override_for_non_your_feed(self, mock_get_user):
+        """best-of-friends is unaffected by social_radius."""
+        from ..documents import UserDocument
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=0,
+        )
+
+        with patch("app.lib.candidates.followed_users.FollowedUsersCandidateGenerator.generate") as mock_gen:
+            mock_gen.return_value = CandidateResult(
+                generator_name="followed_users",
+                candidates=_make_candidates("p", 5, "followed_users"),
+            )
+
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": BEST_OF_FRIENDS_FEED_URI, "limit": 30},
+            )
+
+        assert resp.status_code == 200
+
+    @patch("app.routers.xrpc.get_user")
+    def test_fallen_back_to_defaults_when_user_has_no_doc(self, mock_get_user):
+        """User doc is None → no override, defaults used."""
+        mock_get_user.return_value = None
+
+        with _patch_unranked_your_feed_generators(
+            _make_candidates("p", 3, "followed_users"),
+            infill_candidates=_make_candidates("infill", 3, "popularity"),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 30},
+            )
+
+        assert resp.status_code == 200

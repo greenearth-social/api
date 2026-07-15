@@ -20,6 +20,37 @@ from .models import (
     RankPredictRequest,
 )
 
+# Social-radius preset generator weights for your-feed.
+# Index 2 (balanced) matches the default weights defined in the "your-feed"
+# FeedConfig below — keep them in sync when tuning.
+SOCIAL_RADIUS_PRESETS: dict[int, list[GeneratorSpec]] = {
+    0: [  # Friends — mostly from people you follow
+        GeneratorSpec(name="followed_users", weight=0.70),
+        GeneratorSpec(name="two_tower", weight=0.20),
+        GeneratorSpec(name="popularity", weight=0.10),
+    ],
+    1: [  # Closer
+        GeneratorSpec(name="followed_users", weight=0.50),
+        GeneratorSpec(name="two_tower", weight=0.30),
+        GeneratorSpec(name="popularity", weight=0.20),
+    ],
+    2: [  # Balanced — same as your-feed defaults
+        GeneratorSpec(name="two_tower", weight=0.35),
+        GeneratorSpec(name="followed_users", weight=0.35),
+        GeneratorSpec(name="popularity", weight=0.30),
+    ],
+    3: [  # Broader
+        GeneratorSpec(name="followed_users", weight=0.25),
+        GeneratorSpec(name="two_tower", weight=0.30),
+        GeneratorSpec(name="popularity", weight=0.45),
+    ],
+    4: [  # Everyone — mostly discovery
+        GeneratorSpec(name="popularity", weight=0.55),
+        GeneratorSpec(name="two_tower", weight=0.25),
+        GeneratorSpec(name="followed_users", weight=0.20),
+    ],
+}
+
 # NOTE: display_name is limited to 24 chars, including the prefix ("GreenEarth, GE Dev, or GE Stg")
 FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(

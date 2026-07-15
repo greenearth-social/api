@@ -49,7 +49,7 @@ from ..lib.firestore import (
 from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
-from ..feeds import FEEDS
+from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
 
 logger = logging.getLogger(__name__)
 
@@ -744,11 +744,18 @@ async def get_feed_skeleton(
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
     # to no-debug rather than breaking feed serving.
     debug_enabled = False
+    user_doc = None
     try:
         user_doc = await get_user(db, user_did)
         debug_enabled = bool(user_doc and user_doc.debug_feeds)
     except Exception:
         logger.exception("Failed to read debug flag for user '%s'", user_did)
+
+    # Apply social-radius preference override to your-feed generator weights.
+    if feed_name == "your-feed" and user_doc is not None:
+        preset = SOCIAL_RADIUS_PRESETS.get(user_doc.social_radius)
+        if preset is not None:
+            feed_cfg.gen_request_template.generators = preset
 
     feed_cache = _get_feed_cache(request)
 

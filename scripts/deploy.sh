@@ -201,6 +201,26 @@ deploy_firestore_config() {
         log_error "Failed to deploy Firestore rules/indexes"
         exit 1
     fi
+
+    # Deploy the collection-group composite index explicitly for the target
+    # database.  ``firebase deploy`` may only target the (default) database;
+    # ``gcloud`` is database-aware and handles named databases correctly.
+    local firestore_database="greenearth-stage"
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        firestore_database="greenearth-prod"
+    fi
+
+    log_info "Deploying collection-group index for feed_snapshots on ${firestore_database}..."
+    gcloud firestore indexes composite create \
+        --collection-group=feed_snapshots \
+        --query-scope=COLLECTION_GROUP \
+        --field-config=field-path=feed_name,order=ASCENDING \
+        --field-config=field-path=generated_at,order=DESCENDING \
+        --project="$PROJECT_ID" \
+        --database="$firestore_database" \
+        --quiet 2>&1 || true  # idempotent — index may already exist
+
+    log_info "✓ Collection-group index creation requested (may take a few minutes to build)"
 }
 
 deploy_api_service() {

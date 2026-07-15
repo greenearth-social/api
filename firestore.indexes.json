@@ -2,7 +2,7 @@
   "indexes": [
     {
       "collectionGroup": "feed_snapshots",
-      "queryScope": "COLLECTION",
+      "queryScope": "COLLECTION_GROUP",
       "fields": [
         {"fieldPath": "feed_name", "order": "ASCENDING"},
         {"fieldPath": "generated_at", "order": "DESCENDING"}

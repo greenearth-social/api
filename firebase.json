@@ -1,7 +1,17 @@
 {
   "firestore": {
     "rules": "firestore.rules",
-    "indexes": "firestore.indexes.json"
+    "indexes": "firestore.indexes.json",
+    "databases": {
+      "greenearth-stage": {
+        "rules": "firestore.rules",
+        "indexes": "firestore.indexes.json"
+      },
+      "greenearth-prod": {
+        "rules": "firestore.rules",
+        "indexes": "firestore.indexes.json"
+      }
+    }
   },
   "emulators": {
     "firestore": {

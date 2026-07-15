@@ -100,3 +100,12 @@ class FeedDetailResponse(CamelModel):
     request_id: str
     generated_at: datetime
     items: list[FeedItemView]
+
+
+# ---------------------------------------------------------------------------
+# GET / PUT /api/feeds/preferences
+# ---------------------------------------------------------------------------
+
+
+class SocialRadiusPreference(CamelModel):
+    social_radius: int = Field(default=2, ge=0, le=4)

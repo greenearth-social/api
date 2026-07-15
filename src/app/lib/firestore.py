@@ -163,6 +163,20 @@ async def set_user_debug_flag(db: AsyncClient, user_did: str, enabled: bool) -> 
     await ref.update({"debug_feeds": enabled, "updated_at": datetime.now(timezone.utc)})
 
 
+async def set_user_social_radius(db: AsyncClient, user_did: str, social_radius: int) -> None:
+    """Set the ``social_radius`` preference on a user document.
+
+    Uses ``merge=True`` so the preference is created alongside a minimal
+    user document when the user has not yet loaded a feed in Bluesky.
+    The full user document is filled in later by ``upsert_user``.
+    """
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    await ref.set(
+        {"user_did": user_did, "social_radius": social_radius},
+        merge=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Feed activity
 # ---------------------------------------------------------------------------
@@ -413,6 +427,9 @@ async def get_recent_feed_snapshots(
     Optional *feed_name* and *cutoff* filters are pushed into the Firestore
     query so callers don't get false-empty results from Python-side filtering
     of a fixed-size result set.
+
+    Requires a collection-group composite index on ``feed_snapshots`` with
+    fields ``(feed_name ASC, generated_at DESC)`` — see ``firestore.indexes.json``.
     """
     query = (
         db.collection(USERS_COLLECTION)
@@ -430,3 +447,34 @@ async def get_recent_feed_snapshots(
         if data is not None:
             docs.append(FeedSnapshotDocument.model_validate(data))
     return docs
+
+
+async def get_newer_feed_snapshot_uris(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    feed_name: str,
+    newer_than: datetime,
+) -> set[str]:
+    """Return all AT URIs from snapshots newer than *newer_than* for *feed_name*.
+
+    Used for deduplication when viewing a feed snapshot: any post that already
+    appears in a more-recent snapshot for the same feed is excluded so the user
+    only sees fresh posts.
+    """
+    uris: set[str] = set()
+    query = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(FEED_SNAPSHOTS_COLLECTION)
+        .where(filter=FieldFilter("feed_name", "==", feed_name))
+        .where(filter=FieldFilter("generated_at", ">", newer_than))
+        .order_by("generated_at", direction=Query.DESCENDING)
+    )
+    async for doc in query.stream():
+        data = doc.to_dict()
+        if data is not None:
+            items = data.get("items", [])
+            if items:
+                uris.update(items)
+    return uris

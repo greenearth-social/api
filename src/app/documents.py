@@ -49,6 +49,13 @@ class UserDocument(BaseModel):
         description="When True, feed loads for this user capture pipeline debugging "
         "information into the feed_debug subcollection (has a perf cost).",
     )
+    social_radius: int = Field(
+        default=2,
+        ge=0,
+        le=4,
+        description="Social radius preference: 0=friends only, 2=balanced, 4=everyone.  "
+        "Used to override the generator weights in your-feed.",
+    )
 
 
 class FeedCacheDocument(BaseModel):

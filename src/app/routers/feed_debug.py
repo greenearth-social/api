@@ -15,7 +15,13 @@ from google.cloud.firestore import AsyncClient
 
 from ..documents import FeedSnapshotDocument
 from ..lib.firebase_auth import FirebaseUser
-from ..lib.firestore import get_feed_snapshot, get_recent_feed_snapshots
+from ..lib.firestore import (
+    get_feed_snapshot,
+    get_newer_feed_snapshot_uris,
+    get_recent_feed_snapshots,
+    get_user,
+    set_user_social_radius,
+)
 from ..lib.post_hydration import hydrate_posts
 from ..models_feed_debug import (
     AuthorView,
@@ -28,6 +34,7 @@ from ..models_feed_debug import (
     GeneratorView,
     MediaView,
     ModelScoreView,
+    SocialRadiusPreference,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,6 +134,36 @@ async def list_feeds(
     return FeedListResponse(feeds=summaries)
 
 
+# ---------------------------------------------------------------------------
+# GET / PUT /api/feeds/preferences  (must precede /{request_id})
+# ---------------------------------------------------------------------------
+
+
+@router.get("/preferences", response_model=SocialRadiusPreference)
+async def get_preferences(
+    request: Request,
+    user_doc_id: FirebaseUser,
+) -> SocialRadiusPreference:
+    """Return the current social-radius preference for the authenticated user."""
+    db: AsyncClient = request.app.state.firestore
+    user_doc = await get_user(db, f"did:plc:{user_doc_id}")
+    if user_doc is None:
+        return SocialRadiusPreference()
+    return SocialRadiusPreference(social_radius=user_doc.social_radius)
+
+
+@router.put("/preferences", response_model=SocialRadiusPreference)
+async def put_preferences(
+    request: Request,
+    body: SocialRadiusPreference,
+    user_doc_id: FirebaseUser,
+) -> SocialRadiusPreference:
+    """Update the social-radius preference for the authenticated user."""
+    db: AsyncClient = request.app.state.firestore
+    await set_user_social_radius(db, f"did:plc:{user_doc_id}", body.social_radius)
+    return body
+
+
 @router.get("/{request_id}", response_model=FeedDetailResponse)
 async def get_feed_detail(
     request: Request,
@@ -141,6 +178,20 @@ async def get_feed_detail(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Feed snapshot not found",
+        )
+
+    newer_uris = await get_newer_feed_snapshot_uris(
+        db,
+        user_doc_id,
+        feed_name=snapshot.feed_name,
+        newer_than=snapshot.generated_at,
+    )
+    if newer_uris:
+        snapshot = snapshot.model_copy(
+            update={
+                "items": [u for u in snapshot.items if u not in newer_uris],
+                "items_meta": [m for m in snapshot.items_meta if m.at_uri not in newer_uris],
+            }
         )
 
     hydrated = await hydrate_posts(db, snapshot.items)
