@@ -24,7 +24,7 @@ from .models import (
 FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(
         display_name="Unranked YF",
-        description="Development feed — same as your-feed but without ranking.",
+        description="Development feed — same as green-earth but without ranking.",
         internal_rkey="e2-s",
         internal_display_name="e2 S",
         avatar="assets/icons/unranked-your-feed.png",
@@ -59,12 +59,12 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
     "your-feed": FeedConfig(
-        display_name="Your Feed",
+        display_name="GreenEarth",
         description="Posts ranked and personalized just for you.",
         public=True,
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
-        avatar="assets/icons/your-feed.png",
+        avatar="assets/icons/green-earth.png",
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5utph3ka26",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
