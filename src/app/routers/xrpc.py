@@ -43,7 +43,7 @@ from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
 from ..lib.config import fail_fast
 from ..lib.diversify import mmr_rerank
-from ..lib.elasticsearch import fetch_post_embeddings
+from ..lib.elasticsearch import fetch_post_embeddings_and_metadata
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
@@ -343,7 +343,7 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
 
     try:
         async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
-            pairs = await fetch_post_embeddings(es, missing, index="posts_recent")
+            hydrated_candidates = await fetch_post_embeddings_and_metadata(es, missing, index="posts_recent")
     except Exception:
         # If the refetch fails, MMR falls back to author-only similarity
         # and the two-tower ranker has its own refetch path. Don't fail
@@ -355,7 +355,7 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
         return candidates
 
     encoded: dict[str, str] = {}
-    for uri, vec in pairs:
+    for uri, vec, _, _ in hydrated_candidates:
         try:
             encoded[uri] = encode_float32_b64(vec)
         except Exception:

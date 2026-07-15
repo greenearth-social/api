@@ -11,7 +11,7 @@ Generates candidates by finding posts similar to a user's recent likes:
 import logging
 
 from .base import CandidateGenerator, CandidateResult
-from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings
+from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings_and_metadata
 from ..feed_debug import current_recorder
 from ..embeddings import MINILM_L12_EMBEDDING_FIELD
 from .es_candidates import knn_search_posts
@@ -64,12 +64,12 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
             return CandidateResult(generator_name=self.name, candidates=[])
 
         # 2. Fetch embeddings for those posts
-        embedding_pairs = await fetch_post_embeddings(es, liked_uris)
+        hydrated_posts = await fetch_post_embeddings_and_metadata(es, liked_uris)
 
         if rec is not None:
-            rec.record_user_features(self.name, liked_uris, len(embedding_pairs))
+            rec.record_user_features(self.name, liked_uris, len(hydrated_posts))
 
-        if not embedding_pairs:
+        if not hydrated_posts:
             logger.info(
                 "No embeddings found for %d liked posts of user %s",
                 len(liked_uris),
@@ -78,7 +78,7 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
             return CandidateResult(generator_name=self.name, candidates=[])
 
         # 3. Average the embedding vectors
-        vectors = [embedding for _, embedding in embedding_pairs]
+        vectors = [embedding for _, embedding, _, _ in hydrated_posts]
         avg_vector = average_vectors(vectors)
 
         # 4. kNN search for similar posts

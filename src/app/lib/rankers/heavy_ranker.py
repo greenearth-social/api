@@ -7,7 +7,7 @@ import logging
 from ...models import RankedCandidate, CandidatePost, RankPredictResult
 from .base import Ranker, RankerResult
 from ..elasticsearch import (
-    fetch_post_embeddings_authors_and_like_counts,
+    fetch_post_embeddings_and_metadata,
     fetch_recent_liked_post_uris_and_times,
 )
 from ..embeddings import decode_float32_b64
@@ -59,7 +59,7 @@ class HeavyRanker(Ranker):
                     if rec is not None:
                         rec.record_user_features(HEAVY_RANKER_MODEL_NAME, [], 0)
                 else:
-                    user_history_hydrated_posts: list[tuple[str, list[float], str, int]] = await fetch_post_embeddings_authors_and_like_counts(
+                    user_history_hydrated_posts: list[tuple[str, list[float], str, int]] = await fetch_post_embeddings_and_metadata(
                         es, user_history_liked_uris,
                     )
                     if rec is not None:
@@ -107,7 +107,7 @@ class HeavyRanker(Ranker):
                     missing_uris.append(uri)
 
                 if missing_uris:
-                    fetched = await fetch_post_embeddings_authors_and_like_counts(es, missing_uris, index="posts_recent")
+                    fetched = await fetch_post_embeddings_and_metadata(es, missing_uris, index="posts_recent")
                     uris_and_metadata.extend(fetched)
 
                 if not uris_and_metadata:
