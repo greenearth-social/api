@@ -42,17 +42,17 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
         assert user_did == "did:plc:user1"
         return ["at://liked/a", "at://liked/b", "at://liked/c"], liked_times
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index="posts"):
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         seen.setdefault("fetch_calls", []).append((list(at_uris), index))
         if at_uris == ["at://liked/a", "at://liked/b", "at://liked/c"]:
             return [
-                ("at://liked/a", [1.0, 0.0], "did:plc:liked-a"),
-                ("at://liked/c", [0.0, 1.0], "did:plc:liked-c"),
+                ("at://liked/a", [1.0, 0.0], "did:plc:liked-a", 5),
+                ("at://liked/c", [0.0, 1.0], "did:plc:liked-c", 7),
             ]
         if at_uris == ["at://post/a", "at://post/b", "at://post/missing"]:
             return [
-                ("at://post/b", [0.0, 1.0], "did:plc:b"),
-                ("at://post/a", [1.0, 0.0], "did:plc:a"),
+                ("at://post/b", [0.0, 1.0], "did:plc:b", 20),
+                ("at://post/a", [1.0, 0.0], "did:plc:a", 10),
             ]
         raise AssertionError(f"unexpected at_uris: {at_uris}")
 
@@ -60,8 +60,10 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
         history_embeddings,
         history_author_dids,
         history_liked_at_times,
+        history_like_counts,
         candidate_post_embeddings,
         candidate_author_dids,
+        candidate_like_counts,
         *,
         base_url,
         api_key,
@@ -70,8 +72,10 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
             "history_embeddings": history_embeddings,
             "history_author_dids": history_author_dids,
             "history_liked_at_times": history_liked_at_times,
+            "history_like_counts": history_like_counts,
             "candidate_post_embeddings": candidate_post_embeddings,
             "candidate_author_dids": candidate_author_dids,
+            "candidate_like_counts": candidate_like_counts,
             "base_url": base_url,
             "api_key": api_key,
         }
@@ -84,8 +88,8 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
     )
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_post_embeddings_and_authors",
-        fake_fetch_post_embeddings_and_authors,
+        "fetch_post_embeddings_and_metadata",
+        fake_fetch_post_embeddings_and_metadata,
     )
     monkeypatch.setattr(
         heavy_ranker_module,
@@ -113,8 +117,10 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
         "history_embeddings": [[1.0, 0.0], [0.0, 1.0]],
         "history_author_dids": ["did:plc:liked-a", "did:plc:liked-c"],
         "history_liked_at_times": [_time(1), _time(3)],
+        "history_like_counts": [5, 7],
         "candidate_post_embeddings": [[0.0, 1.0], [1.0, 0.0]],
         "candidate_author_dids": ["did:plc:b", "did:plc:a"],
+        "candidate_like_counts": [20, 10],
         "base_url": "https://example.com",
         "api_key": "secret",
     }
@@ -136,17 +142,19 @@ def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates
     async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
         return [], []
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index="posts"):
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         seen["fetched_candidate_uris"] = list(at_uris)
         seen["fetched_candidate_index"] = index
-        return [("at://post/fetched", [0.0, 1.0], "did:plc:fetched")]
+        return [("at://post/fetched", [0.0, 1.0], "did:plc:fetched", 8)]
 
     async def fake_predict_heavy_ranker_single_user(
         history_embeddings,
         history_author_dids,
         history_liked_at_times,
+        history_like_counts,
         candidate_post_embeddings,
         candidate_author_dids,
+        candidate_like_counts,
         *,
         base_url,
         api_key,
@@ -155,8 +163,10 @@ def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates
             "history_embeddings": history_embeddings,
             "history_author_dids": history_author_dids,
             "history_liked_at_times": history_liked_at_times,
+            "history_like_counts": history_like_counts,
             "candidate_post_embeddings": candidate_post_embeddings,
             "candidate_author_dids": candidate_author_dids,
+            "candidate_like_counts": candidate_like_counts,
         }
         return [0.4, 0.7]
 
@@ -167,8 +177,8 @@ def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates
     )
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_post_embeddings_and_authors",
-        fake_fetch_post_embeddings_and_authors,
+        "fetch_post_embeddings_and_metadata",
+        fake_fetch_post_embeddings_and_metadata,
     )
     monkeypatch.setattr(
         heavy_ranker_module,
@@ -185,6 +195,7 @@ def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates
                     at_uri="at://post/embedded",
                     minilm_l12_embedding=encode_float32_b64([1.0, 0.0]),
                     author_did="did:plc:embedded",
+                    like_count=6,
                 ),
                 CandidatePost(at_uri="at://post/fetched"),
             ],
@@ -197,8 +208,10 @@ def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates
         "history_embeddings": [],
         "history_author_dids": [],
         "history_liked_at_times": [],
+        "history_like_counts": [],
         "candidate_post_embeddings": [[1.0, 0.0], [0.0, 1.0]],
         "candidate_author_dids": ["did:plc:embedded", "did:plc:fetched"],
+        "candidate_like_counts": [6, 8],
     }
     assert [ranking.model_dump() for ranking in result.result.rankings] == [
         {"at_uri": "at://post/fetched", "rank": 1, "rank_score": 0.7},
@@ -217,17 +230,19 @@ def test_predict_calls_ranker_with_empty_history_when_likes_have_no_embeddings(m
     async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
         return ["at://liked/a"], [_time(1)]
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index="posts"):
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         if at_uris == ["at://liked/a"]:
             return []
-        return [("at://post/a", [1.0, 0.0], "did:plc:a")]
+        return [("at://post/a", [1.0, 0.0], "did:plc:a", 12)]
 
     async def fake_predict_heavy_ranker_single_user(
         history_embeddings,
         history_author_dids,
         history_liked_at_times,
+        history_like_counts,
         candidate_post_embeddings,
         candidate_author_dids,
+        candidate_like_counts,
         *,
         base_url,
         api_key,
@@ -235,6 +250,7 @@ def test_predict_calls_ranker_with_empty_history_when_likes_have_no_embeddings(m
         seen["history_embeddings"] = history_embeddings
         seen["history_author_dids"] = history_author_dids
         seen["history_liked_at_times"] = history_liked_at_times
+        seen["history_like_counts"] = history_like_counts
         return [0.5]
 
     monkeypatch.setattr(
@@ -244,8 +260,8 @@ def test_predict_calls_ranker_with_empty_history_when_likes_have_no_embeddings(m
     )
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_post_embeddings_and_authors",
-        fake_fetch_post_embeddings_and_authors,
+        "fetch_post_embeddings_and_metadata",
+        fake_fetch_post_embeddings_and_metadata,
     )
     monkeypatch.setattr(
         heavy_ranker_module,
@@ -265,6 +281,7 @@ def test_predict_calls_ranker_with_empty_history_when_likes_have_no_embeddings(m
         "history_embeddings": [],
         "history_author_dids": [],
         "history_liked_at_times": [],
+        "history_like_counts": [],
     }
     assert [ranking.model_dump() for ranking in result.result.rankings] == [
         {"at_uri": "at://post/a", "rank": 1, "rank_score": 0.5},
@@ -281,7 +298,7 @@ def test_predict_returns_unscored_candidates_when_candidate_features_are_missing
     async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
         return [], []
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index="posts"):
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         return []
 
     async def fake_predict_heavy_ranker_single_user(*args, **kwargs):
@@ -294,8 +311,8 @@ def test_predict_returns_unscored_candidates_when_candidate_features_are_missing
     )
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_post_embeddings_and_authors",
-        fake_fetch_post_embeddings_and_authors,
+        "fetch_post_embeddings_and_metadata",
+        fake_fetch_post_embeddings_and_metadata,
     )
     monkeypatch.setattr(
         heavy_ranker_module,
@@ -330,10 +347,10 @@ def test_predict_returns_unscored_candidates_when_output_count_mismatches(monkey
     async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
         return [], []
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index="posts"):
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         return [
-            ("at://post/a", [1.0, 0.0], "did:plc:a"),
-            ("at://post/b", [0.0, 1.0], "did:plc:b"),
+            ("at://post/a", [1.0, 0.0], "did:plc:a", 1),
+            ("at://post/b", [0.0, 1.0], "did:plc:b", 2),
         ]
 
     async def fake_predict_heavy_ranker_single_user(*args, **kwargs):
@@ -346,8 +363,8 @@ def test_predict_returns_unscored_candidates_when_output_count_mismatches(monkey
     )
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_post_embeddings_and_authors",
-        fake_fetch_post_embeddings_and_authors,
+        "fetch_post_embeddings_and_metadata",
+        fake_fetch_post_embeddings_and_metadata,
     )
     monkeypatch.setattr(
         heavy_ranker_module,
