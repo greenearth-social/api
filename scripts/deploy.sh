@@ -186,41 +186,52 @@ deploy_firestore_config() {
         exit 1
     fi
 
-    if [ ! -f "firebase.json" ] || [ ! -f "firestore.rules" ] || [ ! -f "firestore.indexes.json" ]; then
-        log_error "Missing firebase.json, firestore.rules, or firestore.indexes.json in $(pwd)"
+    if [ ! -f "firebase.json" ] || [ ! -f "firestore.rules" ]; then
+        log_error "Missing firebase.json or firestore.rules in $(pwd)"
         log_error "Run this script from the api/ directory where Firebase config lives"
         exit 1
     fi
 
-    # Deploy Firestore config idempotently: applies rules and creates/updates indexes as needed.
-    firebase deploy --only firestore --project "$PROJECT_ID"
+    # Deploy Firestore rules only. Indexes are managed via gcloud below because
+    # firebase deploy does not support named databases — it targets only the
+    # default database, which causes spurious "index not in file" warnings for
+    # the named stage/prod databases.
+    firebase deploy --only firestore:rules --project "$PROJECT_ID"
 
     if [ $? -eq 0 ]; then
-        log_info "✓ Firestore rules and indexes deployed successfully"
+        log_info "✓ Firestore rules deployed successfully"
     else
-        log_error "Failed to deploy Firestore rules/indexes"
+        log_error "Failed to deploy Firestore rules"
         exit 1
     fi
 
-    # Deploy the collection-group composite index explicitly for the target
-    # database.  ``firebase deploy`` may only target the (default) database;
-    # ``gcloud`` is database-aware and handles named databases correctly.
     local firestore_database="greenearth-stage"
     if [ "$ENVIRONMENT" = "prod" ]; then
         firestore_database="greenearth-prod"
     fi
 
     log_info "Deploying collection-group index for feed_snapshots on ${firestore_database}..."
-    gcloud firestore indexes composite create \
+    local index_output
+    local index_exit
+    # set -e would abort on non-zero exit from command substitution, so capture
+    # the exit code separately without letting the shell treat failure as fatal.
+    index_output=$(gcloud firestore indexes composite create \
         --collection-group=feed_snapshots \
         --query-scope=COLLECTION_GROUP \
         --field-config=field-path=feed_name,order=ASCENDING \
         --field-config=field-path=generated_at,order=DESCENDING \
         --project="$PROJECT_ID" \
         --database="$firestore_database" \
-        --quiet 2>&1 || true  # idempotent — index may already exist
+        --quiet 2>&1) && index_exit=0 || index_exit=$?
 
-    log_info "✓ Collection-group index creation requested (may take a few minutes to build)"
+    if [ $index_exit -eq 0 ]; then
+        log_info "✓ Collection-group index creation requested (may take a few minutes to build)"
+    elif echo "$index_output" | grep -q "ALREADY_EXISTS"; then
+        log_info "✓ Collection-group index already exists, skipping"
+    else
+        log_error "Failed to create collection-group index: $index_output"
+        exit 1
+    fi
 }
 
 deploy_api_service() {
