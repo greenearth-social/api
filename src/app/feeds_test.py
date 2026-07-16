@@ -1,4 +1,6 @@
-from app.feeds import FEEDS
+import pytest
+
+from app.feeds import FEEDS, SOCIAL_RADIUS_PRESETS
 
 CANDIDATE_ONLY_FEEDS = {
     "post-similarity": "post_similarity",
@@ -10,6 +12,18 @@ CANDIDATE_ONLY_FEEDS = {
 
 
 class TestFeedsRegistry:
+    def test_social_radius_splits_everyone_weight_evenly(self):
+        for generators in SOCIAL_RADIUS_PRESETS.values():
+            weights = {generator.name: generator.weight for generator in generators}
+            assert weights["two_tower"] == pytest.approx(weights["popularity"])
+            assert sum(weights.values()) == pytest.approx(1.0)
+
+    def test_balanced_social_radius_matches_your_feed_defaults(self):
+        assert (
+            FEEDS["your-feed"].gen_request_template.generators
+            == SOCIAL_RADIUS_PRESETS[2]
+        )
+
     def test_no_collision_between_internal_rkeys_and_primary_rkeys(self):
         primary_rkeys = set(FEEDS.keys())
         internal_rkeys = {

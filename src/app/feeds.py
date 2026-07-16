@@ -26,28 +26,28 @@ from .models import (
 SOCIAL_RADIUS_PRESETS: dict[int, list[GeneratorSpec]] = {
     0: [  # Friends — mostly from people you follow
         GeneratorSpec(name="followed_users", weight=0.70),
-        GeneratorSpec(name="two_tower", weight=0.20),
-        GeneratorSpec(name="popularity", weight=0.10),
+        GeneratorSpec(name="two_tower", weight=0.15),
+        GeneratorSpec(name="popularity", weight=0.15),
     ],
     1: [  # Closer
         GeneratorSpec(name="followed_users", weight=0.50),
-        GeneratorSpec(name="two_tower", weight=0.30),
-        GeneratorSpec(name="popularity", weight=0.20),
+        GeneratorSpec(name="two_tower", weight=0.25),
+        GeneratorSpec(name="popularity", weight=0.25),
     ],
     2: [  # Balanced — same as your-feed defaults
-        GeneratorSpec(name="two_tower", weight=0.35),
-        GeneratorSpec(name="followed_users", weight=0.35),
+        GeneratorSpec(name="followed_users", weight=0.40),
+        GeneratorSpec(name="two_tower", weight=0.30),
         GeneratorSpec(name="popularity", weight=0.30),
     ],
     3: [  # Broader
-        GeneratorSpec(name="followed_users", weight=0.25),
-        GeneratorSpec(name="two_tower", weight=0.30),
-        GeneratorSpec(name="popularity", weight=0.45),
+        GeneratorSpec(name="followed_users", weight=0.30),
+        GeneratorSpec(name="two_tower", weight=0.35),
+        GeneratorSpec(name="popularity", weight=0.35),
     ],
     4: [  # Everyone — mostly discovery
-        GeneratorSpec(name="popularity", weight=0.55),
-        GeneratorSpec(name="two_tower", weight=0.25),
         GeneratorSpec(name="followed_users", weight=0.20),
+        GeneratorSpec(name="two_tower", weight=0.40),
+        GeneratorSpec(name="popularity", weight=0.40),
     ],
 }
 
@@ -99,9 +99,9 @@ FEEDS: dict[str, FeedConfig] = {
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5utph3ka26",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="two_tower", weight=0.35),
-                GeneratorSpec(name="followed_users", weight=0.35),
-                GeneratorSpec(name="popularity", weight=0.3),
+                GeneratorSpec(name="followed_users", weight=0.40),
+                GeneratorSpec(name="two_tower", weight=0.30),
+                GeneratorSpec(name="popularity", weight=0.30),
             ],
             infill="popularity",
             num_candidates=30,
@@ -225,4 +225,3 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
 }
-
