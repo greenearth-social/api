@@ -9,11 +9,12 @@ import pytest
 
 from google.cloud.firestore import ArrayUnion
 
-from ..documents import FeedDebugDocument, InteractionDocument, UserDocument
+from ..documents import FeedDebugDocument, FeedSnapshotDocument, InteractionDocument, PipelineItemMeta, UserDocument
 from ..models import CandidateGenerateRequest, GeneratorSpec
 from ..lib.firestore import (
     FEED_DEBUG_COLLECTION,
     FEED_SNAPSHOTS_COLLECTION,
+    MAX_FEED_SNAPSHOT_ITEMS,
     INTERACTIONS_COLLECTION,
     SEEN_POSTS_COLLECTION,
     USERS_COLLECTION,
@@ -24,7 +25,9 @@ from ..lib.firestore import (
     get_recent_seen_uris,
     get_user,
     get_user_by_username,
+    _merge_feed_snapshots,
     init_firestore_client,
+    merge_feed_snapshot,
     record_interaction,
     record_seen_posts,
     set_user_debug_flag,
@@ -89,6 +92,17 @@ def _mock_doc_snapshot(exists: bool, data: dict | None = None) -> MagicMock:
     snap.exists = exists
     snap.to_dict.return_value = data
     return snap
+
+
+def _feed_snapshot(request_id: str, generated_at: datetime, items: list[str], *, expires_at: datetime | None = None) -> FeedSnapshotDocument:
+    return FeedSnapshotDocument(
+        request_id=request_id,
+        items=items,
+        items_meta=[PipelineItemMeta(at_uri=uri, rank=i) for i, uri in enumerate(items, 1)],
+        feed_name="your-feed",
+        generated_at=generated_at,
+        expires_at=expires_at or generated_at + timedelta(minutes=15),
+    )
 
 
 def _mock_firestore_client() -> tuple[MagicMock, MagicMock, AsyncMock]:
@@ -680,3 +694,79 @@ class TestGetNewerFeedSnapshotUris:
         )
 
         assert uris == set()
+
+
+class TestMergeFeedSnapshots:
+    def test_appends_regeneration_and_extends_expiration(self):
+        now = datetime.now(timezone.utc)
+        initial = _feed_snapshot("session-1", now, ["at://a", "at://b"])
+        regenerated = _feed_snapshot(
+            "session-1", now + timedelta(minutes=2), ["at://c"],
+            expires_at=now + timedelta(minutes=17),
+        )
+
+        merged, truncated = _merge_feed_snapshots(initial, regenerated)
+
+        assert merged.items == ["at://a", "at://b", "at://c"]
+        assert merged.generated_at == now
+        assert merged.expires_at == now + timedelta(minutes=17)
+        assert truncated is False
+
+    def test_deduplicates_and_uses_newer_metadata(self):
+        now = datetime.now(timezone.utc)
+        initial = _feed_snapshot("session-1", now, ["at://a", "at://b"])
+        regenerated = _feed_snapshot("session-1", now + timedelta(minutes=1), ["at://b", "at://c"])
+        regenerated.items_meta[0] = PipelineItemMeta(at_uri="at://b", rank=99)
+
+        merged, _ = _merge_feed_snapshots(initial, regenerated)
+
+        assert merged.items == ["at://a", "at://b", "at://c"]
+        assert next(m for m in merged.items_meta if m.at_uri == "at://b").rank == 99
+
+    def test_orders_out_of_order_background_writes(self):
+        now = datetime.now(timezone.utc)
+        later = _feed_snapshot("session-1", now + timedelta(minutes=1), ["at://c"])
+        earlier = _feed_snapshot("session-1", now, ["at://a", "at://b"])
+
+        merged, _ = _merge_feed_snapshots(later, earlier)
+
+        assert merged.items == ["at://a", "at://b", "at://c"]
+        assert merged.generated_at == now
+
+    def test_caps_session_at_item_limit(self):
+        now = datetime.now(timezone.utc)
+        initial = _feed_snapshot(
+            "session-1", now,
+            [f"at://post/{i}" for i in range(MAX_FEED_SNAPSHOT_ITEMS)],
+        )
+        later = _feed_snapshot("session-1", now + timedelta(minutes=1), ["at://overflow"])
+
+        merged, truncated = _merge_feed_snapshots(initial, later)
+
+        assert len(merged.items) == MAX_FEED_SNAPSHOT_ITEMS
+        assert "at://overflow" not in merged.items
+        assert truncated is True
+
+    @pytest.mark.asyncio
+    async def test_creates_snapshot_in_transaction(self):
+        now = datetime.now(timezone.utc)
+        doc = _feed_snapshot("session-1", now, ["at://a"])
+        db, doc_ref = _mock_feed_activity_client()
+        transaction = MagicMock()
+        db.transaction.return_value = transaction
+        doc_ref.get.return_value = _mock_doc_snapshot(False)
+
+        with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+            truncated = await merge_feed_snapshot(db, USER_DID, "session-1", doc)
+
+        assert truncated is False
+        doc_ref.get.assert_awaited_once_with(transaction=transaction)
+        transaction.set.assert_called_once_with(doc_ref, doc.model_dump())
+
+    @pytest.mark.asyncio
+    async def test_empty_batch_skips_transaction(self):
+        doc = _feed_snapshot("session-1", datetime.now(timezone.utc), [])
+        db = MagicMock()
+
+        assert await merge_feed_snapshot(db, USER_DID, "session-1", doc) is False
+        db.transaction.assert_not_called()

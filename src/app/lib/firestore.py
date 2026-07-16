@@ -11,7 +11,13 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from google.cloud.firestore import ArrayUnion, AsyncClient, FieldFilter, Query  # type: ignore[import-untyped]
+from google.cloud.firestore import (  # type: ignore[import-untyped]
+    ArrayUnion,
+    AsyncClient,
+    FieldFilter,
+    Query,
+    async_transactional,
+)
 
 from ..documents import (
     FeedActivityDocument,
@@ -29,6 +35,7 @@ INTERACTIONS_COLLECTION = "interactions"
 SEEN_POSTS_COLLECTION = "seen_posts"
 FEED_DEBUG_COLLECTION = "feed_debug"
 FEED_SNAPSHOTS_COLLECTION = "feed_snapshots"
+MAX_FEED_SNAPSHOT_ITEMS = 500
 
 # How long a seen-posts bucket lives before native Firestore TTL deletes it.
 SEEN_POSTS_RETENTION_DAYS = 5
@@ -109,7 +116,9 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str) -> UserDocu
     if doc.exists:
         data = doc.to_dict()
         if data is None:
-            raise ValueError(f"Firestore document exists but to_dict() returned None for {user_did}")
+            raise ValueError(
+                f"Firestore document exists but to_dict() returned None for {user_did}"
+            )
 
         update_fields: dict[str, object] = {"last_seen_at": now}
         if data.get("username") != username:
@@ -177,12 +186,41 @@ async def set_user_social_radius(db: AsyncClient, user_did: str, social_radius: 
     )
 
 
+async def set_user_preferences(
+    db: AsyncClient,
+    user_did: str,
+    social_radius: int,
+    freshness: int,
+    politics: float,
+    purpose: float,
+) -> None:
+    """Set all preferences on a user document.
+
+    Uses ``merge=True`` so the preference is created alongside a minimal
+    user document when the user has not yet loaded a feed in Bluesky.
+    The full user document is filled in later by ``upsert_user``.
+    """
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    await ref.set(
+        {
+            "user_did": user_did,
+            "social_radius": social_radius,
+            "freshness": freshness,
+            "politics": politics,
+            "purpose": purpose,
+        },
+        merge=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Feed activity
 # ---------------------------------------------------------------------------
 
 
-async def get_feed_activity(db: AsyncClient, user_did: str, feed_name: str) -> FeedActivityDocument | None:
+async def get_feed_activity(
+    db: AsyncClient, user_did: str, feed_name: str
+) -> FeedActivityDocument | None:
     """Fetch a feed activity document, or return ``None`` if not found."""
     doc = await (
         db.collection(USERS_COLLECTION)
@@ -199,7 +237,9 @@ async def get_feed_activity(db: AsyncClient, user_did: str, feed_name: str) -> F
     return FeedActivityDocument.model_validate(data)
 
 
-async def upsert_feed_activity(db: AsyncClient, user_did: str, feed_name: str) -> FeedActivityDocument:
+async def upsert_feed_activity(
+    db: AsyncClient, user_did: str, feed_name: str
+) -> FeedActivityDocument:
     """Record that a user loaded a feed.
 
     On first visit creates the document with both timestamps set to now.
@@ -382,17 +422,83 @@ async def get_feed_debug(
 # ---------------------------------------------------------------------------
 
 
-async def write_feed_snapshot(
+def _merge_feed_snapshots(
+    existing: FeedSnapshotDocument,
+    incoming: FeedSnapshotDocument,
+) -> tuple[FeedSnapshotDocument, bool]:
+    """Merge two batches for one feed session in chronological order."""
+    incoming_is_earlier = incoming.generated_at < existing.generated_at
+    earlier, later = (incoming, existing) if incoming_is_earlier else (existing, incoming)
+
+    ordered_items = list(dict.fromkeys([*earlier.items, *later.items]))
+    truncated = len(ordered_items) > MAX_FEED_SNAPSHOT_ITEMS
+    ordered_items = ordered_items[:MAX_FEED_SNAPSHOT_ITEMS]
+    # Later metadata wins for a URI without changing its first position.
+    meta_by_uri = {meta.at_uri: meta for meta in earlier.items_meta}
+    meta_by_uri.update({meta.at_uri: meta for meta in later.items_meta})
+    items_meta = [meta_by_uri[uri] for uri in ordered_items if uri in meta_by_uri]
+
+    return (
+        earlier.model_copy(
+            update={
+                "items": ordered_items,
+                "items_meta": items_meta,
+                "expires_at": max(existing.expires_at, incoming.expires_at),
+            }
+        ),
+        truncated,
+    )
+
+
+async def merge_feed_snapshot(
     db: AsyncClient, user_did: str, request_id: str, doc: FeedSnapshotDocument
-) -> None:
-    """Persist a feed snapshot under ``users/{user_did}/feed_snapshots/{request_id}``."""
+) -> bool:
+    """Atomically create or extend a feed-session snapshot.
+
+    Returns ``True`` when the merged session exceeded the item safety limit and
+    was truncated. Empty batches are ignored.
+    """
+    if not doc.items:
+        return False
+
+    if len(doc.items) > MAX_FEED_SNAPSHOT_ITEMS:
+        included_items = doc.items[:MAX_FEED_SNAPSHOT_ITEMS]
+        included = set(included_items)
+        doc = doc.model_copy(
+            update={
+                "items": included_items,
+                "items_meta": [meta for meta in doc.items_meta if meta.at_uri in included],
+            }
+        )
+        initial_truncated = True
+    else:
+        initial_truncated = False
+
     ref = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
         .collection(FEED_SNAPSHOTS_COLLECTION)
         .document(request_id)
     )
-    await ref.set(doc.model_dump())
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _merge(transaction) -> bool:
+        snapshot = await ref.get(transaction=transaction)
+        if not snapshot.exists:
+            transaction.set(ref, doc.model_dump())
+            return initial_truncated
+
+        data = snapshot.to_dict()
+        if data is None:
+            transaction.set(ref, doc.model_dump())
+            return initial_truncated
+
+        merged, truncated = _merge_feed_snapshots(FeedSnapshotDocument.model_validate(data), doc)
+        transaction.set(ref, merged.model_dump())
+        return truncated
+
+    return await _merge(transaction)
 
 
 async def get_feed_snapshot(

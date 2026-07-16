@@ -1,4 +1,4 @@
-"""Tests for feed-debug transparency API endpoints."""
+"""Tests for feed-transparency API endpoints."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ def _snapshot_doc(
 # ---------------------------------------------------------------------------
 
 
-@patch("app.routers.feed_debug.get_recent_feed_snapshots")
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_returns_summaries(mock_query, client):
     mock_query.return_value = [
         _snapshot_doc(
@@ -108,11 +108,11 @@ def test_list_feeds_returns_summaries(mock_query, client):
     assert response.status_code == 200
     data = response.json()
     assert len(data["feeds"]) == 2
-    assert data["feeds"][0]["requestId"] == "req-1"
-    assert data["feeds"][0]["feedName"] == "your-feed"
+    assert data["feeds"][0]["request_id"] == "req-1"
+    assert data["feeds"][0]["feed_name"] == "your-feed"
 
 
-@patch("app.routers.feed_debug.get_recent_feed_snapshots")
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_empty(mock_query, client):
     mock_query.return_value = []
 
@@ -133,7 +133,7 @@ def test_list_feeds_returns_401_without_auth():
         app.dependency_overrides.setdefault(verify_firebase_auth, lambda: "test-user")
 
 
-@patch("app.routers.feed_debug.get_recent_feed_snapshots")
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_skips_fully_deduped_snapshots(mock_query, client):
     now = datetime.now(timezone.utc)
     newer = _snapshot_doc(
@@ -159,10 +159,10 @@ def test_list_feeds_skips_fully_deduped_snapshots(mock_query, client):
     response = client.get("/api/feeds")
     data = response.json()
     assert len(data["feeds"]) == 1
-    assert data["feeds"][0]["requestId"] == "req-1"
+    assert data["feeds"][0]["request_id"] == "req-1"
 
 
-@patch("app.routers.feed_debug.get_recent_feed_snapshots")
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_newest_first_order(mock_query, client):
     now = datetime.now(timezone.utc)
     newest = _snapshot_doc(
@@ -185,12 +185,12 @@ def test_list_feeds_newest_first_order(mock_query, client):
     response = client.get("/api/feeds")
     data = response.json()
     assert len(data["feeds"]) == 3
-    assert data["feeds"][0]["requestId"] == "req-3"
-    assert data["feeds"][1]["requestId"] == "req-2"
-    assert data["feeds"][2]["requestId"] == "req-1"
+    assert data["feeds"][0]["request_id"] == "req-3"
+    assert data["feeds"][1]["request_id"] == "req-2"
+    assert data["feeds"][2]["request_id"] == "req-1"
 
 
-@patch("app.routers.feed_debug.get_recent_feed_snapshots")
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_skips_middle_when_fully_deduped(mock_query, client):
     now = datetime.now(timezone.utc)
     newest = _snapshot_doc(
@@ -220,17 +220,17 @@ def test_list_feeds_skips_middle_when_fully_deduped(mock_query, client):
     response = client.get("/api/feeds")
     data = response.json()
     assert len(data["feeds"]) == 2
-    assert data["feeds"][0]["requestId"] == "req-3"
-    assert data["feeds"][1]["requestId"] == "req-1"
+    assert data["feeds"][0]["request_id"] == "req-3"
+    assert data["feeds"][1]["request_id"] == "req-1"
 
 
 # ---------------------------------------------------------------------------
-# GET /api/feeds/{requestId}
+# GET /api/feeds/{request_id}
 # ---------------------------------------------------------------------------
 
 
-@patch("app.routers.feed_debug.hydrate_posts")
-@patch("app.routers.feed_debug.get_feed_snapshot")
+@patch("app.routers.feed_transparency.hydrate_posts")
+@patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_returns_merged_data(mock_get_snapshot, mock_hydrate, client):
     uri = "at://did:plc:author/app.bsky.feed.post/post1"
     doc = _snapshot_doc()
@@ -259,28 +259,28 @@ def test_get_feed_detail_returns_merged_data(mock_get_snapshot, mock_hydrate, cl
     response = client.get("/api/feeds/req-abc")
     assert response.status_code == 200
     data = response.json()
-    assert data["requestId"] == "req-abc"
+    assert data["request_id"] == "req-abc"
     assert len(data["items"]) == 1
 
     item = data["items"][0]
-    assert item["atUri"] == uri
+    assert item["at_uri"] == uri
     assert item["rank"] == 1
-    assert item["rankScore"] == 0.92
+    assert item["rank_score"] == 0.92
     assert item["author"]["handle"] == "alice.bsky.social"
-    assert item["author"]["displayName"] == "Alice Chen"
+    assert item["author"]["display_name"] == "Alice Chen"
     assert item["content"] == "Hello world"
-    assert item["postUrl"] == "https://bsky.app/profile/alice.bsky.social/post/post1"
-    assert item["engagement"]["replyCount"] == 3
+    assert item["post_url"] == "https://bsky.app/profile/alice.bsky.social/post/post1"
+    assert item["engagement"]["reply_count"] == 3
     assert len(item["generators"]) == 1
     assert item["generators"][0]["name"] == "two_tower"
     assert item["generators"][0]["score"] == 0.85
-    assert len(item["modelScores"]) == 1
-    assert item["modelScores"][0]["name"] == "two_tower"
-    assert item["modelScores"][0]["score"] == 0.92
+    assert len(item["model_scores"]) == 1
+    assert item["model_scores"][0]["name"] == "two_tower"
+    assert item["model_scores"][0]["score"] == 0.92
     assert item["diversification"]["relevance"] == 0.95
 
 
-@patch("app.routers.feed_debug.get_feed_snapshot")
+@patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_not_found(mock_get_snapshot, client):
     mock_get_snapshot.return_value = None
 
@@ -288,9 +288,9 @@ def test_get_feed_detail_not_found(mock_get_snapshot, client):
     assert response.status_code == 404
 
 
-@patch("app.routers.feed_debug.hydrate_posts")
-@patch("app.routers.feed_debug.get_feed_snapshot")
-def test_get_feed_detail_camel_case_keys(mock_get_snapshot, mock_hydrate, client):
+@patch("app.routers.feed_transparency.hydrate_posts")
+@patch("app.routers.feed_transparency.get_feed_snapshot")
+def test_get_feed_detail_uses_snake_case_keys(mock_get_snapshot, mock_hydrate, client):
     uri = "at://did:plc:author/app.bsky.feed.post/post1"
     doc = _snapshot_doc()
     mock_get_snapshot.return_value = doc
@@ -314,19 +314,19 @@ def test_get_feed_detail_camel_case_keys(mock_get_snapshot, mock_hydrate, client
     response = client.get("/api/feeds/req-abc")
     data = response.json()
 
-    for key in data:
-        assert "_" not in key, f"Top-level key {key} has snake_case"
-
+    assert "request_id" in data
+    assert "requestId" not in data
     item = data["items"][0]
-    assert "atUri" in item
-    assert "rankScore" in item
-    assert "afterRankPosition" in item
-    assert "modelScores" in item
-    assert "postUrl" in item
+    assert "at_uri" in item
+    assert "rank_score" in item
+    assert "after_rank_position" in item
+    assert "model_scores" in item
+    assert "post_url" in item
+    assert "atUri" not in item
 
 
-@patch("app.routers.feed_debug.hydrate_posts")
-@patch("app.routers.feed_debug.get_feed_snapshot")
+@patch("app.routers.feed_transparency.hydrate_posts")
+@patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_diversification_null_when_absent(mock_get_snapshot, mock_hydrate, client):
     uri = "at://did:plc:author/app.bsky.feed.post/post1"
     doc = _snapshot_doc(
@@ -366,8 +366,8 @@ def test_get_feed_detail_diversification_null_when_absent(mock_get_snapshot, moc
     assert data["items"][0]["diversification"] is None
 
 
-@patch("app.routers.feed_debug.hydrate_posts")
-@patch("app.routers.feed_debug.get_feed_snapshot")
+@patch("app.routers.feed_transparency.hydrate_posts")
+@patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_multiple_items(mock_get_snapshot, mock_hydrate, client):
     uri1 = "at://did:plc:a/app.bsky.feed.post/p1"
     uri2 = "at://did:plc:b/app.bsky.feed.post/p2"
@@ -428,9 +428,9 @@ def test_get_feed_detail_multiple_items(mock_get_snapshot, mock_hydrate, client)
     response = client.get("/api/feeds/req-abc")
     data = response.json()
     assert len(data["items"]) == 2
-    assert data["items"][0]["atUri"] == uri1
+    assert data["items"][0]["at_uri"] == uri1
     assert data["items"][0]["content"] == "first"
-    assert data["items"][1]["atUri"] == uri2
+    assert data["items"][1]["at_uri"] == uri2
     assert data["items"][1]["content"] == "second"
 
 
@@ -439,7 +439,7 @@ def test_get_feed_detail_multiple_items(mock_get_snapshot, mock_hydrate, client)
 # ---------------------------------------------------------------------------
 
 
-@patch("app.routers.feed_debug.get_user")
+@patch("app.routers.feed_transparency.get_user")
 def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
     from ..documents import UserDocument
 
@@ -451,10 +451,13 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
     response = client.get("/api/feeds/preferences")
     assert response.status_code == 200
     data = response.json()
-    assert data["socialRadius"] == 2  # default
+    assert data["social_radius"] == 2  # default
+    assert data["freshness"] == 2  # default
+    assert data["politics"] == 1.0  # default
+    assert data["purpose"] == 0.5  # default
 
 
-@patch("app.routers.feed_debug.get_user")
+@patch("app.routers.feed_transparency.get_user")
 def test_get_preferences_returns_stored_value(mock_get_user, client):
     from ..documents import UserDocument
 
@@ -462,35 +465,84 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
         user_did="did:plc:test-user",
         username="test.bsky.social",
         social_radius=0,
+        freshness=3,
+        politics=1.25,
+        purpose=0.65,
     )
 
     response = client.get("/api/feeds/preferences")
     assert response.status_code == 200
     data = response.json()
-    assert data["socialRadius"] == 0
+    assert data["social_radius"] == 0
+    assert data["freshness"] == 3
+    assert data["politics"] == 1.25
+    assert data["purpose"] == 0.65
 
 
-@patch("app.routers.feed_debug.set_user_social_radius")
-def test_put_preferences_updates_value(mock_set_radius, client):
-    response = client.put("/api/feeds/preferences", json={"socialRadius": 3})
+@patch("app.routers.feed_transparency.set_user_preferences")
+def test_put_preferences_updates_value(mock_set_prefs, client):
+    response = client.put(
+        "/api/feeds/preferences",
+        json={
+            "social_radius": 3,
+            "freshness": 4,
+            "politics": 1.5,
+            "purpose": 0.8,
+        },
+    )
     assert response.status_code == 200
     data = response.json()
-    assert data["socialRadius"] == 3
-    mock_set_radius.assert_awaited_once()
+    assert data["social_radius"] == 3
+    assert data["freshness"] == 4
+    assert data["politics"] == 1.5
+    assert data["purpose"] == 0.8
+    mock_set_prefs.assert_awaited_once()
 
 
-@patch("app.routers.feed_debug.set_user_social_radius")
-def test_put_preferences_rejects_out_of_range(mock_set_radius, client):
-    response = client.put("/api/feeds/preferences", json={"socialRadius": 10})
+@patch("app.routers.feed_transparency.set_user_preferences")
+def test_put_preferences_rejects_out_of_range(mock_set_prefs, client):
+    response = client.put(
+        "/api/feeds/preferences",
+        json={
+            "social_radius": 10,
+            "freshness": 2,
+            "politics": 1.0,
+            "purpose": 0.5,
+        },
+    )
     assert response.status_code == 422
 
 
-@patch("app.routers.feed_debug.set_user_social_radius")
-def test_put_preferences_creates_user_doc_if_missing(mock_set_radius, client):
-    response = client.put("/api/feeds/preferences", json={"socialRadius": 1})
+@patch("app.routers.feed_transparency.set_user_preferences")
+def test_put_preferences_rejects_camel_case_body(mock_set_prefs, client):
+    response = client.put(
+        "/api/feeds/preferences",
+        json={
+            "socialRadius": 3,
+            "freshness": 2,
+            "politics": 1.0,
+            "purpose": 0.5,
+        },
+    )
+
+    assert response.status_code == 422
+    mock_set_prefs.assert_not_awaited()
+
+
+@patch("app.routers.feed_transparency.set_user_preferences")
+def test_put_preferences_creates_user_doc_if_missing(mock_set_prefs, client):
+    response = client.put(
+        "/api/feeds/preferences",
+        json={
+            "social_radius": 1,
+            "freshness": 2,
+            "politics": 1.0,
+            "purpose": 0.5,
+        },
+    )
     assert response.status_code == 200
-    assert response.json()["socialRadius"] == 1
-    mock_set_radius.assert_awaited_once()
+    assert response.json()["social_radius"] == 1
+    mock_set_prefs.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +551,7 @@ def test_put_preferences_creates_user_doc_if_missing(mock_set_radius, client):
 
 
 def test_at_uri_to_bsky_url():
-    from .feed_debug import _at_uri_to_bsky_url
+    from .feed_transparency import _at_uri_to_bsky_url
 
     assert (
         _at_uri_to_bsky_url("at://did:plc:abc/app.bsky.feed.post/post1")
@@ -514,7 +566,7 @@ def test_at_uri_to_bsky_url():
 
 
 # ---------------------------------------------------------------------------
-# GET /api/feeds/{requestId} — deduplication across newer snapshots
+# GET /api/feeds/{request_id} — deduplication across newer snapshots
 # ---------------------------------------------------------------------------
 
 
@@ -537,9 +589,9 @@ def _hydrated(uri: str, handle: str = "alice.bsky.social") -> dict:
     }
 
 
-@patch("app.routers.feed_debug.hydrate_posts")
-@patch("app.routers.feed_debug.get_newer_feed_snapshot_uris")
-@patch("app.routers.feed_debug.get_feed_snapshot")
+@patch("app.routers.feed_transparency.hydrate_posts")
+@patch("app.routers.feed_transparency.get_newer_feed_snapshot_uris")
+@patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_excludes_items_seen_in_newer_snapshots(
     mock_get_snapshot, mock_newer, mock_hydrate, client
 ):
@@ -569,12 +621,12 @@ def test_get_feed_detail_excludes_items_seen_in_newer_snapshots(
 
     assert response.status_code == 200
     assert len(data["items"]) == 1
-    assert data["items"][0]["atUri"] == uri2
+    assert data["items"][0]["at_uri"] == uri2
 
 
-@patch("app.routers.feed_debug.hydrate_posts")
-@patch("app.routers.feed_debug.get_newer_feed_snapshot_uris")
-@patch("app.routers.feed_debug.get_feed_snapshot")
+@patch("app.routers.feed_transparency.hydrate_posts")
+@patch("app.routers.feed_transparency.get_newer_feed_snapshot_uris")
+@patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_returns_all_when_no_newer_snapshots(
     mock_get_snapshot, mock_newer, mock_hydrate, client
 ):
@@ -607,13 +659,13 @@ def test_get_feed_detail_returns_all_when_no_newer_snapshots(
 
 
 # ---------------------------------------------------------------------------
-# GET /api/feeds/{requestId} — diverse pipeline metadata
+# GET /api/feeds/{request_id} — diverse pipeline metadata
 # ---------------------------------------------------------------------------
 
 
-@patch("app.routers.feed_debug.hydrate_posts")
-@patch("app.routers.feed_debug.get_newer_feed_snapshot_uris")
-@patch("app.routers.feed_debug.get_feed_snapshot")
+@patch("app.routers.feed_transparency.hydrate_posts")
+@patch("app.routers.feed_transparency.get_newer_feed_snapshot_uris")
+@patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_diverse_pipeline_metadata(
     mock_get_snapshot, mock_newer, mock_hydrate, client
 ):
@@ -671,9 +723,9 @@ def test_get_feed_detail_diverse_pipeline_metadata(
     gen_names = [g["name"] for g in item["generators"]]
     assert gen_names == ["two_tower", "followed_users", "popularity"]
 
-    model_names = [m["name"] for m in item["modelScores"]]
+    model_names = [m["name"] for m in item["model_scores"]]
     assert model_names == ["heavy_ranker", "perspective"]
-    assert item["modelScores"][0]["weight"] == 1.0
-    assert item["modelScores"][0]["score"] == 0.92
-    assert item["modelScores"][1]["weight"] == 1.0
-    assert item["modelScores"][1]["score"] == -0.15
+    assert item["model_scores"][0]["weight"] == 1.0
+    assert item["model_scores"][0]["score"] == 0.92
+    assert item["model_scores"][1]["weight"] == 1.0
+    assert item["model_scores"][1]["score"] == -0.15

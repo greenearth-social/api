@@ -1,16 +1,16 @@
-"""Feed-debug transparency API endpoints.
+"""Feed-transparency API endpoints.
 
 GET  /api/feeds              — list recent feed snapshots (summary)
-GET  /api/feeds/{requestId}  — full detail with pipeline metadata + hydrated posts
+GET  /api/feeds/{request_id} — full detail with pipeline metadata + hydrated posts
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, status
 from google.cloud.firestore import AsyncClient
 
 from ..documents import FeedSnapshotDocument
@@ -20,10 +20,10 @@ from ..lib.firestore import (
     get_newer_feed_snapshot_uris,
     get_recent_feed_snapshots,
     get_user,
-    set_user_social_radius,
+    set_user_preferences,
 )
 from ..lib.post_hydration import hydrate_posts
-from ..models_feed_debug import (
+from ..models_feed_transparency import (
     AuthorView,
     DiversificationView,
     EngagementView,
@@ -34,12 +34,12 @@ from ..models_feed_debug import (
     GeneratorView,
     MediaView,
     ModelScoreView,
-    SocialRadiusPreference,
+    Preferences,
 )
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["feed-debug"], prefix="/api/feeds")
+router = APIRouter(tags=["feed-transparency"], prefix="/api/feeds")
 
 CACHE_WINDOW_MINUTES = 15
 TARGET_FEED_NAME = "your-feed"
@@ -118,7 +118,7 @@ async def list_feeds(
 ) -> FeedListResponse:
     """Return recent feed snapshots within the cache window."""
     db: AsyncClient = request.app.state.firestore
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=CACHE_WINDOW_MINUTES)
+    cutoff = datetime.now(UTC) - timedelta(minutes=CACHE_WINDOW_MINUTES)
 
     docs = await get_recent_feed_snapshots(
         db, user_doc_id, feed_name=TARGET_FEED_NAME, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT
@@ -146,28 +146,40 @@ async def list_feeds(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/preferences", response_model=SocialRadiusPreference)
+@router.get("/preferences", response_model=Preferences)
 async def get_preferences(
     request: Request,
     user_doc_id: FirebaseUser,
-) -> SocialRadiusPreference:
-    """Return the current social-radius preference for the authenticated user."""
+) -> Preferences:
+    """Return the current preferences for the authenticated user."""
     db: AsyncClient = request.app.state.firestore
     user_doc = await get_user(db, f"did:plc:{user_doc_id}")
     if user_doc is None:
-        return SocialRadiusPreference()
-    return SocialRadiusPreference(social_radius=user_doc.social_radius)
+        return Preferences()
+    return Preferences(
+        social_radius=user_doc.social_radius,
+        freshness=user_doc.freshness,
+        politics=user_doc.politics,
+        purpose=user_doc.purpose,
+    )
 
 
-@router.put("/preferences", response_model=SocialRadiusPreference)
+@router.put("/preferences", response_model=Preferences)
 async def put_preferences(
     request: Request,
-    body: SocialRadiusPreference,
+    body: Preferences,
     user_doc_id: FirebaseUser,
-) -> SocialRadiusPreference:
-    """Update the social-radius preference for the authenticated user."""
+) -> Preferences:
+    """Update the preferences for the authenticated user."""
     db: AsyncClient = request.app.state.firestore
-    await set_user_social_radius(db, f"did:plc:{user_doc_id}", body.social_radius)
+    await set_user_preferences(
+        db,
+        f"did:plc:{user_doc_id}",
+        social_radius=body.social_radius,
+        freshness=body.freshness,
+        politics=body.politics,
+        purpose=body.purpose,
+    )
     return body
 
 

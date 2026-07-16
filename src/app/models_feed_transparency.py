@@ -1,9 +1,4 @@
-"""Pydantic response models for the feed-debug transparency API.
-
-All models use camelCase JSON serialisation via ``CamelModel`` so the API
-responses match TypeScript conventions without the frontend needing a
-separate snake_case→camelCase mapping layer.
-"""
+"""Pydantic response models for the feed-transparency API."""
 
 from __future__ import annotations
 
@@ -11,61 +6,51 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-
-def _to_camel(s: str) -> str:
-    parts = s.split("_")
-    return parts[0] + "".join(p.title() for p in parts[1:])
-
-
-class CamelModel(BaseModel):
-    model_config = {"alias_generator": _to_camel, "populate_by_name": True}
-
-
 # ---------------------------------------------------------------------------
 # GET /api/feeds
 # ---------------------------------------------------------------------------
 
 
-class FeedSummary(CamelModel):
+class FeedSummary(BaseModel):
     request_id: str
     generated_at: datetime
     feed_name: str
 
 
-class FeedListResponse(CamelModel):
+class FeedListResponse(BaseModel):
     feeds: list[FeedSummary]
 
 
 # ---------------------------------------------------------------------------
-# GET /api/feeds/{requestId}
+# GET /api/feeds/{request_id}
 # ---------------------------------------------------------------------------
 
 
-class AuthorView(CamelModel):
+class AuthorView(BaseModel):
     handle: str | None = None
     display_name: str | None = None
     avatar_url: str | None = None
 
 
-class GeneratorView(CamelModel):
+class GeneratorView(BaseModel):
     name: str
     score: float | None = None
 
 
-class ModelScoreView(CamelModel):
+class ModelScoreView(BaseModel):
     name: str
     weight: float
     score: float
 
 
-class DiversificationView(CamelModel):
+class DiversificationView(BaseModel):
     relevance: float
     score: float
     author_penalty: float = 0.0
     content_penalty: float = 0.0
 
 
-class MediaView(CamelModel):
+class MediaView(BaseModel):
     image_urls: list[str] = Field(default_factory=list)
     video_url: str | None = None
     link_card_url: str | None = None
@@ -74,13 +59,13 @@ class MediaView(CamelModel):
     labels: list[str] = Field(default_factory=list)
 
 
-class EngagementView(CamelModel):
+class EngagementView(BaseModel):
     reply_count: int = 0
     repost_count: int = 0
     like_count: int = 0
 
 
-class FeedItemView(CamelModel):
+class FeedItemView(BaseModel):
     at_uri: str
     rank: int | None = None
     rank_score: float | None = None
@@ -96,7 +81,7 @@ class FeedItemView(CamelModel):
     post_url: str | None = None
 
 
-class FeedDetailResponse(CamelModel):
+class FeedDetailResponse(BaseModel):
     request_id: str
     generated_at: datetime
     items: list[FeedItemView]
@@ -107,5 +92,10 @@ class FeedDetailResponse(CamelModel):
 # ---------------------------------------------------------------------------
 
 
-class SocialRadiusPreference(CamelModel):
+class Preferences(BaseModel):
+    model_config = {"extra": "forbid"}
+
     social_radius: int = Field(default=2, ge=0, le=4)
+    freshness: int = Field(default=2, ge=0, le=5)
+    politics: float = Field(default=1.0, ge=0.5, le=1.5)
+    purpose: float = Field(default=0.5, ge=0.2, le=0.8)

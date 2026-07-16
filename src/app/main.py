@@ -37,7 +37,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-from .routers import candidates, diversify, feed_debug, health, rank, skylight, xrpc
+from .routers import candidates, diversify, feed_transparency, health, rank, skylight, xrpc
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
 from .lib.firebase_auth import init_firebase_auth
@@ -112,7 +112,9 @@ async def lifespan(app: FastAPI):
     try:
         init_firebase_auth()
     except Exception:
-        logger.warning("Firebase Admin SDK initialization failed; feed-debug endpoints will return 500")
+        logger.warning(
+            "Firebase Admin SDK initialization failed; feed-transparency endpoints will return 500"
+        )
     init_http_client()
     try:
         yield
@@ -318,7 +320,7 @@ async def request_id_mw(request: Request, call_next):
 
 app.include_router(candidates.router)
 app.include_router(diversify.router)
-app.include_router(feed_debug.router)
+app.include_router(feed_transparency.router)
 app.include_router(health.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)

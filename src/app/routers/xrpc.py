@@ -39,13 +39,14 @@ from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     get_recent_seen_uris,
     get_user,
+    merge_feed_snapshot,
     record_interaction,
     record_seen_posts,
     upsert_feed_activity,
     upsert_user,
     write_feed_debug,
-    write_feed_snapshot,
 )
+from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
@@ -352,7 +353,8 @@ async def _run_pipeline_capturing(
     with feed_debug_scope(recorder):
         uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
 
-    # Always write the lightweight snapshot in background.
+    # Create or extend the lightweight snapshot in the background. Cursor
+    # regeneration reuses request_id, so all batches remain one feed session.
     expires_at = generated_at + timedelta(seconds=FEED_SNAPSHOT_RETENTION_SECONDS)
     snapshot = recorder.build_pipeline_metadata(
         request_id=request_id,
@@ -520,13 +522,27 @@ async def _write_feed_snapshot_background(
     request_id: str,
     snapshot,
 ) -> None:
-    """Write the lightweight feed snapshot in a background task.
+    """Create or extend the lightweight feed snapshot in a background task.
 
     Separated from ``_run_pipeline_capturing`` so the Firestore write stays
     off the feed-serving hot path. Failures are logged, never surfaced.
     """
+    if not snapshot.items:
+        return
     try:
-        await write_feed_snapshot(db, user_did, request_id, snapshot)
+        truncated = await merge_feed_snapshot(db, user_did, request_id, snapshot)
+        if truncated:
+            logger.warning(
+                "Feed snapshot reached item limit for user '%s', request '%s'",
+                user_did,
+                request_id,
+                extra={"user_did": user_did, "request_id": request_id},
+            )
+            collector = get_metric_collector()
+            if collector is not None:
+                collector.record(
+                    "feed.snapshot.truncated_count", 1, feed_name=snapshot.feed_name
+                )
     except Exception:
         logger.exception(
             "Failed to write feed snapshot for user '%s', request '%s'",

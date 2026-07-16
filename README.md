@@ -44,10 +44,11 @@ pipenv run uvicorn src.app.main:app --reload
 The API will be available at `http://localhost:8000`.
 
 > **Note**: The server refuses to start without `GE_ELASTICSEARCH_API_KEY` and
-> `GE_FEED_CONTEXT_SECRET` environment variables. For local development set
-> these to dummy values (e.g. `dummy`). See [`.env.example`](.env.example) for the
-> full set of configuration variables. In stage/prod, `GE_POSTHOG_API_KEY` is
-> also required — the lifespan handler enforces it only in deployed environments.
+> `GE_FEED_CONTEXT_SECRET`. Most local development queries Elasticsearch and
+> therefore requires a valid Elasticsearch API key; a dummy key is suitable
+> only for tests or paths that do not access Elasticsearch. The feed-context
+> secret may use a local dummy value. See [`.env.example`](.env.example) for the
+> full configuration. In stage/prod, `GE_POSTHOG_API_KEY` is also required.
 
 ## Running Tests
 
@@ -209,6 +210,11 @@ This script will:
 - Configure the Elasticsearch connection using `GE_ELASTICSEARCH_URL` as non-secret config and `GE_ELASTICSEARCH_API_KEY` as a Secret Manager secret
 - Create Secret Manager secrets for `GE_FEED_CONTEXT_SECRET` (auto-generated), `GE_POSTHOG_API_KEY`, `GE_PERSPECTIVE_API_KEY`, and `GE_BSKY_APP_PASSWORD`
 - Verify VPC connector for internal network access
+- Ensure Firestore TTL policies for cache, debug, seen-post, and feed-snapshot data
+
+Existing stage and production environments must rerun `gcp_setup.sh` once after
+the feed-transparency rollout so the `feed_snapshots.expires_at` TTL policy is
+created; deploying the application alone does not enable that policy.
 
 Before API deployment in stage/prod, run the inference setup script so domain mapping
 and DNS are in place for stable inference hostnames:

@@ -56,6 +56,27 @@ class UserDocument(BaseModel):
         description="Social radius preference: 0=friends only, 2=balanced, 4=everyone.  "
         "Used to override the generator weights in your-feed.",
     )
+    freshness: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description="Freshness preference: 0=6h, 1=12h, 2=24h, 3=48h, 4=72h, 5=7d.  "
+        "Used to filter posts by age.",
+    )
+    politics: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=1.5,
+        description="Politics multiplier: 0.5-1.5.  "
+        "Applied to political content scores.",
+    )
+    purpose: float = Field(
+        default=0.5,
+        ge=0.2,
+        le=0.8,
+        description="Purpose preference: 0.2=engaging, 0.5=balanced, 0.8=constructive.  "
+        "Used to weight engaging vs constructive content.",
+    )
 
 
 class FeedCacheDocument(BaseModel):
@@ -323,8 +344,8 @@ class PipelineItemMeta(BaseModel):
 class FeedSnapshotDocument(BaseModel):
     """Lightweight pipeline metadata stored for every feed load.
 
-    Written to ``users/{user_did}/feed_snapshots/{request_id}`` inline
-    (not background) so the transparency API can re-render any served feed
+    Written to ``users/{user_did}/feed_snapshots/{request_id}`` in a background
+    task so the transparency API can re-render any served feed
     regardless of whether ``debug_feeds`` is enabled.
 
     Separate from :class:`FeedDebugDocument` — that captures full

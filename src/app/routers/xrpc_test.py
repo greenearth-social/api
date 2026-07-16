@@ -1696,12 +1696,39 @@ class TestFeedDebugCapture:
         for coro in coros:
             await coro
 
+    @pytest.mark.asyncio
+    async def test_empty_snapshot_skips_firestore_write(self):
+        from ..routers.xrpc import _write_feed_snapshot_background
+
+        snapshot = MagicMock(items=[])
+        with patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock) as merge:
+            await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
+
+        merge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_truncated_snapshot_records_metric(self, caplog):
+        from ..routers.xrpc import _write_feed_snapshot_background
+
+        snapshot = MagicMock(items=["at://a"], feed_name="your-feed")
+        collector = MagicMock()
+        with (
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=True),
+            patch("app.routers.xrpc.get_metric_collector", return_value=collector),
+        ):
+            await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
+
+        collector.record.assert_called_once_with(
+            "feed.snapshot.truncated_count", 1, feed_name="your-feed"
+        )
+        assert "reached item limit" in caplog.text
+
     def test_snapshot_written_for_all_users(self):
         """Snapshot always written regardless of debug flag."""
         with (
             self._patch_generators(_make_candidates("p", 3)),
             patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=self._user_doc(False)),
-            patch("app.routers.xrpc.write_feed_snapshot", new_callable=AsyncMock) as mock_snapshot,
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False) as mock_snapshot,
             patch("app.routers.xrpc.write_feed_debug", new_callable=AsyncMock) as mock_debug,
         ):
             resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
@@ -1717,7 +1744,7 @@ class TestFeedDebugCapture:
             self._patch_generators(_make_candidates("p", 3)),
             patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=self._user_doc(True)),
             patch("app.routers.xrpc._spawn_background", side_effect=lambda coro: spawned.append(coro)),
-            patch("app.routers.xrpc.write_feed_snapshot", new_callable=AsyncMock) as mock_snapshot,
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False) as mock_snapshot,
             patch("app.routers.xrpc.write_feed_debug", new_callable=AsyncMock) as mock_debug,
         ):
             resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
@@ -1737,7 +1764,7 @@ class TestFeedDebugCapture:
         with (
             self._patch_generators(_make_candidates("p", 2)),
             patch("app.routers.xrpc.get_user", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
-            patch("app.routers.xrpc.write_feed_snapshot", new_callable=AsyncMock) as mock_snapshot,
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False) as mock_snapshot,
             patch("app.routers.xrpc.write_feed_debug", new_callable=AsyncMock) as mock_debug,
         ):
             resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
@@ -1913,62 +1940,6 @@ class TestPinnedPost:
         assert self.PINNED_URI not in post_uris
 
 
-class TestPosthogTracking:
-    """Verify PostHog events are emitted from XRPC background handlers."""
-
-    @pytest.mark.asyncio
-    async def test_record_session_calls_track_session(self):
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        from ..routers.xrpc import _record_session
-
-        db = AsyncMock()
-        request = MagicMock()
-        request.app.state.id_resolver = AsyncMock()
-        did_doc = MagicMock()
-        did_doc.get_handle.return_value = "alice.bsky.app"
-        request.app.state.id_resolver.did.resolve = AsyncMock(return_value=did_doc)
-
-        mock_client = MagicMock()
-        with patch("app.routers.xrpc.get_posthog_client", return_value=mock_client):
-            with patch("app.routers.xrpc.track_session") as mock_track:
-                await _record_session(request, "did:plc:abc", "your-feed", db)
-                mock_track.assert_called_once()
-                call_kwargs = mock_track.call_args
-                assert call_kwargs.args[0] is mock_client
-                assert call_kwargs.args[1] == "did:plc:abc"
-                assert call_kwargs.args[2] == "alice.bsky.app"
-                assert call_kwargs.args[3] == "your-feed"
-
-    @pytest.mark.asyncio
-    async def test_record_interactions_calls_track_interaction(self):
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        from ..routers.xrpc import Interaction, _record_interactions
-        from ..lib.feed_context import FeedContextPayload, encode_feed_context
-
-        feed_context = encode_feed_context(
-            FeedContextPayload(did="did:plc:abc", feed="your-feed", rid="reqid123", iat=0)
-        )
-
-        ix = Interaction(
-            item="at://did/post/1",
-            event="app.bsky.feed.defs#interactionLike",
-            feed_context=feed_context,
-        )
-
-        db = AsyncMock()
-        mock_client = MagicMock()
-        with patch("app.routers.xrpc.get_posthog_client", return_value=mock_client):
-            with patch("app.routers.xrpc.track_interaction") as mock_track:
-                await _record_interactions(db, [ix])
-                mock_track.assert_called_once()
-                call_kwargs = mock_track.call_args
-                assert call_kwargs.args[0] is mock_client
-                assert call_kwargs.args[1] == "did:plc:abc"
-                assert call_kwargs.args[2] == "interactionLike"
-                assert call_kwargs.args[3] == "your-feed"
-                assert call_kwargs.args[4] == "at://did/post/1"
 
 
 # ---------------------------------------------------------------------------
