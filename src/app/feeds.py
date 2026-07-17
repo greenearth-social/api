@@ -20,6 +20,37 @@ from .models import (
     RankPredictRequest,
 )
 
+# Social-radius preset generator weights for your-feed.
+# Index 2 (balanced) matches the default weights defined in the "your-feed"
+# FeedConfig below — keep them in sync when tuning.
+SOCIAL_RADIUS_PRESETS: dict[int, list[GeneratorSpec]] = {
+    0: [  # Friends — mostly from people you follow
+        GeneratorSpec(name="followed_users", weight=0.70),
+        GeneratorSpec(name="two_tower", weight=0.15),
+        GeneratorSpec(name="popularity", weight=0.15),
+    ],
+    1: [  # Closer
+        GeneratorSpec(name="followed_users", weight=0.50),
+        GeneratorSpec(name="two_tower", weight=0.25),
+        GeneratorSpec(name="popularity", weight=0.25),
+    ],
+    2: [  # Balanced — same as your-feed defaults
+        GeneratorSpec(name="followed_users", weight=0.40),
+        GeneratorSpec(name="two_tower", weight=0.30),
+        GeneratorSpec(name="popularity", weight=0.30),
+    ],
+    3: [  # Broader
+        GeneratorSpec(name="followed_users", weight=0.30),
+        GeneratorSpec(name="two_tower", weight=0.35),
+        GeneratorSpec(name="popularity", weight=0.35),
+    ],
+    4: [  # Everyone — mostly discovery
+        GeneratorSpec(name="followed_users", weight=0.20),
+        GeneratorSpec(name="two_tower", weight=0.40),
+        GeneratorSpec(name="popularity", weight=0.40),
+    ],
+}
+
 # NOTE: display_name is limited to 24 chars, including the prefix ("GreenEarth, GE Dev, or GE Stg")
 FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(
@@ -68,9 +99,9 @@ FEEDS: dict[str, FeedConfig] = {
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5utph3ka26",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="two_tower", weight=0.35),
-                GeneratorSpec(name="followed_users", weight=0.35),
-                GeneratorSpec(name="popularity", weight=0.3),
+                GeneratorSpec(name="followed_users", weight=0.40),
+                GeneratorSpec(name="two_tower", weight=0.30),
+                GeneratorSpec(name="popularity", weight=0.30),
             ],
             infill="popularity",
             num_candidates=30,
@@ -194,4 +225,3 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
 }
-

@@ -265,3 +265,157 @@ class TestDiversificationCapture:
         )
         out = mmr_rerank([a, b])  # no active recorder -> must not raise
         assert [c.at_uri for c in out] == ["at://a", "at://b"]
+
+
+# ---------------------------------------------------------------------------
+# build_pipeline_metadata
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPipelineMetadata:
+    def test_includes_generator_legend(self):
+        rec = FeedDebugRecorder(feed_name="your-feed", regenerated=False)
+        rec.set_generate_request(
+            CandidateGenerateRequest(
+                generators=[
+                    GeneratorSpec(name="two_tower", weight=0.5),
+                    GeneratorSpec(name="followed_users", weight=0.5),
+                ],
+                user_did="did:plc:user",
+                num_candidates=30,
+                video_only=False,
+                infill=None,
+            )
+        )
+        rec.final_order = ["at://a"]
+        rec.order_after_rank = ["at://a"]
+
+        now = datetime(2026, 7, 12, 15, 30, tzinfo=timezone.utc)
+        expires = now + timedelta(minutes=15)
+        snap = rec.build_pipeline_metadata(request_id="req-1", generated_at=now, expires_at=expires)
+
+        assert snap.request_id == "req-1"
+        assert snap.feed_name == "your-feed"
+        assert snap.generated_at == now
+        assert len(snap.generator_legend) == 2
+        assert snap.generator_legend[0].name == "two_tower"
+        assert snap.generator_legend[0].weight == 0.5
+        assert snap.generator_legend[0].score is None
+
+    def test_per_uri_generators(self):
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        rec.set_generate_request(
+            CandidateGenerateRequest(
+                generators=[GeneratorSpec(name="two_tower", weight=1.0)],
+                user_did="did:plc:user",
+                num_candidates=30,
+                video_only=False,
+                infill=None,
+            )
+        )
+        rec.generator_outputs = [
+            CandidateResult(
+                generator_name="two_tower",
+                candidates=[
+                    CandidatePost(at_uri="at://a", score=0.85, content="post a"),
+                    CandidatePost(at_uri="at://b", score=0.70, content="post b"),
+                ],
+            )
+        ]
+        rec.final_order = ["at://a", "at://b"]
+        rec.order_after_rank = ["at://a", "at://b"]
+
+        now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+        snap = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
+
+        assert len(snap.items_meta) == 2
+        gen_a = snap.items_meta[0].generators
+        assert len(gen_a) == 1
+        assert gen_a[0].name == "two_tower"
+        assert gen_a[0].score == 0.85
+
+    def test_per_uri_rank_and_model_scores(self):
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        rec.set_generate_request(
+            CandidateGenerateRequest(
+                generators=[GeneratorSpec(name="two_tower", weight=1.0)],
+                user_did="did:plc:user",
+                num_candidates=30,
+                video_only=False,
+                infill=None,
+            )
+        )
+        rec.record_ranking(
+            RankPredictResult(
+                rankings=[
+                    RankedCandidate(at_uri="at://a", rank=1, rank_score=0.92),
+                    RankedCandidate(at_uri="at://b", rank=2, rank_score=0.88),
+                ]
+            )
+        )
+        rec.record_model_scores("two_tower", 1.0, {"at://a": 0.92, "at://b": 0.88})
+        rec.ranker_model = "two_tower"
+        rec.final_order = ["at://a", "at://b"]
+        rec.order_after_rank = ["at://a", "at://b"]
+
+        now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+        snap = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
+
+        assert snap.ranker_model == "two_tower"
+        item = snap.items_meta[0]
+        assert item.rank == 1
+        assert item.rank_score == 0.92
+        assert len(item.model_scores) == 1
+        assert item.model_scores[0].name == "two_tower"
+        assert item.model_scores[0].weight == 1.0
+        assert item.model_scores[0].score == 0.92
+
+    def test_diversification_metadata(self):
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        rec.set_generate_request(
+            CandidateGenerateRequest(
+                generators=[GeneratorSpec(name="two_tower", weight=1.0)],
+                user_did="did:plc:user",
+                num_candidates=30,
+                video_only=False,
+                infill=None,
+            )
+        )
+        rec.diversify = True
+        rec.diversification = [
+            ("at://a", 1.0, 0.80, 0.15, 0.05),
+        ]
+        rec.final_order = ["at://a"]
+        rec.order_after_rank = ["at://a"]
+
+        now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+        snap = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
+
+        assert snap.diversify is True
+        div = snap.items_meta[0].diversification
+        assert div is not None
+        assert div.relevance == 1.0
+        assert div.score == 0.80
+        assert div.author_penalty == 0.15
+        assert div.content_penalty == 0.05
+
+    def test_diversification_none_when_not_diversified(self):
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        rec.set_generate_request(
+            CandidateGenerateRequest(
+                generators=[GeneratorSpec(name="two_tower", weight=1.0)],
+                user_did="did:plc:user",
+                num_candidates=30,
+                video_only=False,
+                infill=None,
+            )
+        )
+        rec.diversify = False
+        rec.final_order = ["at://a"]
+        rec.order_after_rank = ["at://a"]
+
+        now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+        snap = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
+
+        assert snap.diversify is False
+        assert snap.items_meta[0].diversification is None

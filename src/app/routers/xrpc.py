@@ -37,19 +37,21 @@ from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCu
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
+    get_feed_snapshot,
     get_recent_seen_uris,
     get_user,
+    merge_feed_snapshot,
     record_interaction,
     record_seen_posts,
     upsert_feed_activity,
     upsert_user,
     write_feed_debug,
 )
+from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
 from ..lib.request_cache import request_cache_scope
-from ..lib.metrics import get_metric_collector
 from ..lib.telemetry import timed
-from ..feeds import FEEDS
+from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,8 @@ router = APIRouter(tags=["xrpc"])
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+FEED_SNAPSHOT_RETENTION_SECONDS = 900  # 15 minutes
 
 
 def _get_service_did() -> str:
@@ -251,7 +255,7 @@ async def _run_ranking_pipeline(
     feed_cfg: FeedConfig,
     gen_request: CandidateGenerateRequest,
     es,
-) -> tuple[list[str], list[float] | None]:
+) -> tuple[list[str], dict[str, float]]:
     """Generate candidates, optionally rank them, then diversify with MMR.
 
     Runs inside a per-request cache scope so that identical ES queries
@@ -279,7 +283,7 @@ async def _run_ranking_pipeline(
         candidates = result.candidates
 
         if not candidates:
-            return [], None
+            return [], {}
 
         # Generators fetch lightweight candidates (no embedding); ranker and
         # MMR need embeddings, so backfill in one batched ES call now that
@@ -289,7 +293,7 @@ async def _run_ranking_pipeline(
         if feed_cfg.rank_request_template is not None:
             candidates = [c for c in candidates if c.minilm_l12_embedding]
             if not candidates:
-                return [], None
+                return [], {}
 
             rank_req = feed_cfg.rank_request_template.model_copy(
                 update={"candidates": candidates, "user_did": gen_request.user_did}
@@ -321,20 +325,12 @@ async def _run_ranking_pipeline(
         final_uris = [c.at_uri for c in final if c.at_uri]
         if rec is not None:
             rec.record_final_order(final_uris)
-        if feed_cfg.diversify:
-            diversity_scores: list[float] | None = [
-                c.diversity_score for c in final if c.at_uri and c.diversity_score is not None
-            ]
-            if len(diversity_scores) != len(final_uris):
-                logger.warning(
-                    "diversity_score missing on some candidates (%d scores, %d uris); skipping metric",
-                    len(diversity_scores),
-                    len(final_uris),
-                )
-                diversity_scores = None
-        else:
-            diversity_scores = None
-        return final_uris, diversity_scores
+        scores_by_uri = {
+            c.at_uri: c.diversity_score
+            for c in final
+            if c.at_uri and c.diversity_score is not None
+        }
+        return final_uris, scores_by_uri
 
 
 async def _run_pipeline_capturing(
@@ -348,22 +344,39 @@ async def _run_pipeline_capturing(
     request_id: str,
     regenerated: bool,
     debug_enabled: bool,
-) -> tuple[list[str], list[float] | None]:
-    """Run the ranking pipeline, optionally capturing debug info for this user.
+) -> tuple[list[str], dict[str, float]]:
+    """Run the ranking pipeline, capturing a lightweight snapshot for every
+    feed load and a full debug document for debug-flagged users.
 
-    When ``debug_enabled``, a :class:`FeedDebugRecorder` is installed for the
-    duration of the pipeline and a background task persists the assembled
-    document afterwards (handle resolution + the Firestore write stay off the
-    hot path).
+    The snapshot is written inline (no handle resolution needed) so the
+    transparency API can re-render any served feed.  The full debug document
+    (for the CLI tool) is written in a background task only when
+    ``debug_enabled`` is true.
     """
-    if not debug_enabled:
-        return await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
-
     recorder = FeedDebugRecorder(feed_name=feed_name, regenerated=regenerated)
     generated_at = datetime.now(timezone.utc)
+
     with feed_debug_scope(recorder):
         uris, scores = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
-    _spawn_background(_write_feed_debug(request, db, recorder, request_id, user_did, generated_at))
+
+    # Create or extend the lightweight snapshot in the background. Cursor
+    # regeneration reuses request_id, so all batches remain one feed session.
+    expires_at = generated_at + timedelta(seconds=FEED_SNAPSHOT_RETENTION_SECONDS)
+    snapshot = recorder.build_pipeline_metadata(
+        request_id=request_id,
+        generated_at=generated_at,
+        expires_at=expires_at,
+    )
+    _spawn_background(
+        _write_feed_snapshot_background(db, user_did, request_id, snapshot)
+    )
+
+    # Full debug document only for debug-flagged users, in background.
+    if debug_enabled:
+        _spawn_background(
+            _write_feed_debug(request, db, recorder, request_id, user_did, generated_at)
+        )
+
     return uris, scores
 
 
@@ -389,8 +402,18 @@ def _get_feed_cache(request: Request) -> FeedCache:
     return cache
 
 
-def _record_diversity_metric(scores: list[float], feed_name: str, batch: int) -> None:
-    from ..lib.metrics import get_metric_collector
+def _record_diversity_metric(
+    page_uris: list[str],
+    scores_by_uri: dict[str, float],
+    feed_name: str,
+    batch: int,
+    exclude_uri: str | None = None,
+) -> None:
+    scores = [
+        scores_by_uri[uri]
+        for uri in page_uris
+        if uri in scores_by_uri and uri != exclude_uri
+    ]
     if not scores:
         return
     mc = get_metric_collector()
@@ -404,17 +427,28 @@ def _record_diversity_metric(scores: list[float], feed_name: str, batch: int) ->
     )
 
 
-def _log_diversity_metric(
-    scores: list[float] | None,
-    all_items: list[str],
-    page_offset: int,
-    page_len: int,
-    feed_name: str,
-    batch: int,
-) -> None:
-    if scores is None or len(scores) != len(all_items) or page_len == 0:
-        return
-    _record_diversity_metric(scores[page_offset : page_offset + page_len], feed_name, batch)
+async def _diversity_scores_for_request(db, user_did: str, request_id: str) -> dict[str, float]:
+    """Fetch per-URI diversity scores from the feed snapshot for *request_id*.
+
+    Used when serving a cursor page directly from ``FeedCache`` (no pipeline
+    call this request) — the scores were already captured into the snapshot
+    when the batch was originally generated. Fail-soft: any error means the
+    metric is skipped for this page, not that serving fails.
+    """
+    try:
+        snapshot = await get_feed_snapshot(db, user_did, request_id)
+    except Exception:
+        logger.exception(
+            "Failed to read feed snapshot for user '%s', request '%s'", user_did, request_id
+        )
+        return {}
+    if snapshot is None:
+        return {}
+    return {
+        item.at_uri: item.diversification.diversity_score
+        for item in snapshot.items_meta
+        if item.diversification is not None
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -442,30 +476,13 @@ def _skeleton_items(uris: list[str], feed_context: str) -> list[SkeletonItem]:
     return [SkeletonItem(post=uri, feed_context=feed_context) for uri in uris]
 
 
-def _prepend_pinned(
-    pinned_uri: str,
-    uris: list[str],
-    scores: list[float] | None,
-    limit: int,
-) -> tuple[list[str], list[float] | None]:
+def _prepend_pinned(pinned_uri: str, uris: list[str], limit: int) -> list[str]:
     """Prepend the pinned URI and cap the result at limit.
 
     Removes the pinned URI from the generated list first to avoid duplication.
-    Returns the page alongside diversity scores for the organically-ranked
-    items only — the pinned post is forced to the front regardless of its
-    diversity score, so it's excluded from the returned scores to keep the
-    mean-diversity metric representative of the ranking algorithm's output.
     """
-    if scores is not None and len(scores) == len(uris):
-        pairs = [(u, s) for u, s in zip(uris, scores) if u != pinned_uri]
-        deduped = [u for u, _ in pairs]
-        deduped_scores: list[float] | None = [s for _, s in pairs][: limit - 1]
-    else:
-        deduped = [u for u in uris if u != pinned_uri]
-        deduped_scores = None
-
-    page = [pinned_uri] + deduped[: limit - 1]
-    return page, deduped_scores
+    deduped = [u for u in uris if u != pinned_uri]
+    return [pinned_uri] + deduped[: limit - 1]
 
 
 # Fire-and-forget background tasks (Firestore session writes, …). Keeping a
@@ -552,6 +569,41 @@ async def _resolve_handles(request: Request, dids: set[str]) -> dict[str, str]:
 
     handles = await asyncio.gather(*(_one(did) for did in did_list))
     return {did: handle for did, handle in zip(did_list, handles) if handle}
+
+
+async def _write_feed_snapshot_background(
+    db,
+    user_did: str,
+    request_id: str,
+    snapshot,
+) -> None:
+    """Create or extend the lightweight feed snapshot in a background task.
+
+    Separated from ``_run_pipeline_capturing`` so the Firestore write stays
+    off the feed-serving hot path. Failures are logged, never surfaced.
+    """
+    if not snapshot.items:
+        return
+    try:
+        truncated = await merge_feed_snapshot(db, user_did, request_id, snapshot)
+        if truncated:
+            logger.warning(
+                "Feed snapshot reached item limit for user '%s', request '%s'",
+                user_did,
+                request_id,
+                extra={"user_did": user_did, "request_id": request_id},
+            )
+            collector = get_metric_collector()
+            if collector is not None:
+                collector.record(
+                    "feed.snapshot.truncated_count", 1, feed_name=snapshot.feed_name
+                )
+    except Exception:
+        logger.exception(
+            "Failed to write feed snapshot for user '%s', request '%s'",
+            user_did,
+            request_id,
+        )
 
 
 async def _write_feed_debug(
@@ -781,11 +833,21 @@ async def get_feed_skeleton(
         # costs one extra Firestore read per request; fail-soft so a hiccup degrades
         # to no-debug rather than breaking feed serving.
         debug_enabled = False
+        user_doc = None
         try:
             user_doc = await get_user(db, user_did)
             debug_enabled = bool(user_doc and user_doc.debug_feeds)
         except Exception:
             logger.exception("Failed to read debug flag for user '%s'", user_did)
+
+        # Apply social-radius preference override to your-feed generator weights.
+        # The override is computed once and threaded through model_copy in both
+        # generation paths so the shared module-level template is never mutated.
+        generators_override: dict = {}
+        if feed_name == "your-feed" and user_doc is not None:
+            preset = SOCIAL_RADIUS_PRESETS.get(user_doc.social_radius)
+            if preset is not None:
+                generators_override = {"generators": preset}
 
         feed_cache = _get_feed_cache(request)
 
@@ -805,10 +867,8 @@ async def get_feed_skeleton(
                     raise HTTPException(status_code=400, detail="Invalid cursor")
 
                 async with timed(logger, "feedcache_retrieve", cache_id=parsed.id):
-                    cached = await feed_cache.retrieve(parsed.id)
-                if cached is not None:
-                    cached_uris = cached.items
-                    cached_scores = cached.diversity_scores
+                    cached_uris = await feed_cache.retrieve(parsed.id)
+                if cached_uris is not None:
                     if parsed.offset < len(cached_uris):
                         # Serve from the existing cached batch.
                         page = cached_uris[parsed.offset : parsed.offset + limit]
@@ -820,13 +880,9 @@ async def get_feed_skeleton(
                             # next request will fall into the regeneration branch
                             # below, which fetches fresh candidates.
                             next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
-                        _log_diversity_metric(
-                            cached_scores,
-                            cached_uris,
-                            parsed.offset,
-                            len(page),
-                            feed_name,
-                            batch=parsed.offset // limit,
+                        scores_by_uri = await _diversity_scores_for_request(db, user_did, parsed.id)
+                        _record_diversity_metric(
+                            page, scores_by_uri, feed_name, batch=parsed.offset // limit
                         )
                         feed_context = _make_feed_context(user_did, feed_name, parsed.id)
                         return FeedSkeletonResponse(
@@ -845,6 +901,7 @@ async def get_feed_skeleton(
                             "user_did": user_did,
                             "num_candidates": batch,
                             "exclude_uris": exclude_uris,
+                            **generators_override,
                         }
                     )
 
@@ -861,16 +918,11 @@ async def get_feed_skeleton(
                     )
                     if new_uris:
                         async with timed(logger, "feedcache_append", cache_id=parsed.id):
-                            updated = await feed_cache.append(parsed.id, new_uris, new_scores)
+                            updated = await feed_cache.append(parsed.id, new_uris)
                         if updated is not None:
                             page = new_uris[:limit]
-                            _log_diversity_metric(
-                                new_scores,
-                                new_uris,
-                                0,
-                                len(page),
-                                feed_name,
-                                batch=parsed.offset // limit,
+                            _record_diversity_metric(
+                                page, new_scores, feed_name, batch=parsed.offset // limit
                             )
                             next_offset = parsed.offset + len(page)
                             next_cursor = None
@@ -893,7 +945,12 @@ async def get_feed_skeleton(
             batch = _batch_size(limit)
             seen_uris = await _seen_exclusions(db, user_did, feed_cfg)
             gen_request = feed_cfg.gen_request_template.model_copy(
-                update={"user_did": user_did, "num_candidates": batch, "exclude_uris": seen_uris}
+                update={
+                    "user_did": user_did,
+                    "num_candidates": batch,
+                    "exclude_uris": seen_uris,
+                    **generators_override,
+                }
             )
 
             # The request id identifies this response; when we cache a batch it doubles
@@ -915,20 +972,19 @@ async def get_feed_skeleton(
 
             # First page to return immediately. Prepend the pinned post if configured.
             if feed_cfg.pinned_post_uri:
-                page, page_scores = _prepend_pinned(
-                    feed_cfg.pinned_post_uri, all_uris, all_scores, limit
+                page = _prepend_pinned(feed_cfg.pinned_post_uri, all_uris, limit)
+                _record_diversity_metric(
+                    page, all_scores, feed_name, batch=0, exclude_uri=feed_cfg.pinned_post_uri
                 )
-                if page_scores is not None:
-                    _record_diversity_metric(page_scores, feed_name, batch=0)
             else:
                 page = all_uris[:limit]
-                _log_diversity_metric(all_scores, all_uris, 0, len(page), feed_name, batch=0)
+                _record_diversity_metric(page, all_scores, feed_name, batch=0)
 
             # Store the full batch and issue a cursor only when there are more pages.
             next_cursor = None
             if len(all_uris) > limit:
                 async with timed(logger, "feedcache_store", cache_id=request_id):
-                    await feed_cache.store(request_id, all_uris, all_scores)
+                    await feed_cache.store(request_id, all_uris)
                 next_cursor = FeedCursor(id=request_id, offset=limit).encode()
 
             feed_context = _make_feed_context(user_did, feed_name, request_id)

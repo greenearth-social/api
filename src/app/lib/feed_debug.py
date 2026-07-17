@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..documents import FeedDebugDocument
+    from ..documents import FeedDebugDocument, FeedSnapshotDocument
     from ..models import (
         CandidateGenerateRequest,
         CandidatePost,
@@ -205,6 +205,97 @@ class FeedDebugRecorder:
             diversification=diversification,
             generated_at=generated_at,
             expires_at=expires_at,
+        )
+
+    def build_pipeline_metadata(
+        self,
+        *,
+        request_id: str,
+        generated_at: datetime,
+        expires_at: datetime,
+    ) -> "FeedSnapshotDocument":
+        """Assemble a lightweight :class:`FeedSnapshotDocument` with only the
+        per-URI pipeline metadata needed by the transparency API.
+
+        No post content, author info, or user features — just enough to
+        render the generator badges, rank chart, and diversification
+        penalties alongside hydrated Bluesky post data.
+        """
+        from ..documents import (
+            DiversificationMeta,
+            FeedSnapshotDocument,
+            GeneratorMeta,
+            ModelScoreMeta,
+            PipelineItemMeta,
+        )
+
+        # Generator legend (weights only, no scores).
+        generator_legend = [
+            GeneratorMeta(name=g.name, weight=g.weight)
+            for g in (self.generate_request.generators if self.generate_request else [])
+        ]
+
+        # Per-URI generator contributions.
+        gens_by_uri: dict[str, list[GeneratorMeta]] = {}
+        for result in self.generator_outputs:
+            for c in result.candidates:
+                if c.at_uri:
+                    gens_by_uri.setdefault(c.at_uri, []).append(
+                        GeneratorMeta(name=result.generator_name, score=c.score)
+                    )
+
+        # Per-URI rank.
+        rank_by_uri: dict[str, tuple[int | None, float | None]] = {}
+        if self.ranking:
+            for r in self.ranking.rankings:
+                rank_by_uri[r.at_uri] = (r.rank, r.rank_score)
+
+        # Per-URI model scores.
+        model_scores_by_uri: dict[str, list[ModelScoreMeta]] = {}
+        for model_name, weight, scores in self.model_scores:
+            for at_uri, score in scores.items():
+                model_scores_by_uri.setdefault(at_uri, []).append(
+                    ModelScoreMeta(name=model_name, weight=weight, score=score)
+                )
+
+        # Per-URI position after ranking.
+        after_rank_pos = {uri: i for i, uri in enumerate(self.order_after_rank, start=1)}
+
+        # Per-URI diversification.
+        div_by_uri: dict[str, DiversificationMeta] = {}
+        for at_uri, relevance, score, author_penalty, content_penalty in self.diversification:
+            div_by_uri[at_uri] = DiversificationMeta(
+                relevance=relevance,
+                score=score,
+                author_penalty=author_penalty,
+                content_penalty=content_penalty,
+            )
+
+        items_meta = []
+        for pos, at_uri in enumerate(self.final_order):
+            rank, rank_score = rank_by_uri.get(at_uri, (pos + 1, None))
+            items_meta.append(
+                PipelineItemMeta(
+                    at_uri=at_uri,
+                    rank=rank,
+                    rank_score=rank_score,
+                    after_rank_position=after_rank_pos.get(at_uri, pos + 1),
+                    generators=gens_by_uri.get(at_uri, []),
+                    model_scores=model_scores_by_uri.get(at_uri, []),
+                    diversification=div_by_uri.get(at_uri),
+                )
+            )
+
+        return FeedSnapshotDocument(
+            request_id=request_id,
+            items=self.final_order,
+            feed_name=self.feed_name,
+            generated_at=generated_at,
+            expires_at=expires_at,
+            ranker_model=self.ranker_model,
+            diversify=self.diversify,
+            generator_legend=generator_legend,
+            items_meta=items_meta,
         )
 
     def author_dids(self) -> set[str]:

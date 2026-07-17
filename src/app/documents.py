@@ -49,6 +49,34 @@ class UserDocument(BaseModel):
         description="When True, feed loads for this user capture pipeline debugging "
         "information into the feed_debug subcollection (has a perf cost).",
     )
+    social_radius: int = Field(
+        default=2,
+        ge=0,
+        le=4,
+        description="Social radius preference: 0=friends only, 2=balanced, 4=everyone.  "
+        "Used to override the generator weights in your-feed.",
+    )
+    freshness: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description="Freshness preference: 0=6h, 1=12h, 2=24h, 3=48h, 4=72h, 5=7d.  "
+        "Used to filter posts by age.",
+    )
+    politics: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=1.5,
+        description="Politics multiplier: 0.5-1.5.  "
+        "Applied to political content scores.",
+    )
+    purpose: float = Field(
+        default=0.5,
+        ge=0.2,
+        le=0.8,
+        description="Purpose preference: 0.2=engaging, 0.5=balanced, 0.8=constructive.  "
+        "Used to weight engaging vs constructive content.",
+    )
 
 
 class FeedCacheDocument(BaseModel):
@@ -273,3 +301,68 @@ class FeedDebugDocument(BaseModel):
     )
     generated_at: datetime = Field(default_factory=_utcnow, description="When the feed was served")
     expires_at: datetime = Field(..., description="UTC expiration timestamp; drives native TTL")
+
+
+# ---------------------------------------------------------------------------
+# Feed snapshot — lightweight pipeline metadata stored for every feed load
+# ---------------------------------------------------------------------------
+
+
+class DiversificationMeta(BaseModel):
+    """Per-item diversification breakdown (lightweight, no content)."""
+
+    relevance: float
+    score: float
+    author_penalty: float = 0.0
+    content_penalty: float = 0.0
+
+
+class GeneratorMeta(BaseModel):
+    """Generator contribution for a single item or the feed legend."""
+
+    name: str
+    weight: float = 1.0
+    score: float | None = None
+
+
+class ModelScoreMeta(BaseModel):
+    """One rank model's normalized score for a single item."""
+
+    name: str
+    weight: float
+    score: float
+
+
+class PipelineItemMeta(BaseModel):
+    """Per-URI pipeline metadata — already joined so readers don't need to."""
+
+    at_uri: str
+    rank: int | None = None
+    rank_score: float | None = None
+    after_rank_position: int | None = None
+    generators: list[GeneratorMeta] = Field(default_factory=list)
+    model_scores: list[ModelScoreMeta] = Field(default_factory=list)
+    diversification: DiversificationMeta | None = None
+
+
+class FeedSnapshotDocument(BaseModel):
+    """Lightweight pipeline metadata stored for every feed load.
+
+    Written to ``users/{user_did}/feed_snapshots/{request_id}`` in a background
+    task so the transparency API can re-render any served feed
+    regardless of whether ``debug_feeds`` is enabled.
+
+    Separate from :class:`FeedDebugDocument` — that captures full
+    pipeline objects (content, author info, user features) for the CLI
+    debug tool and is only written for debug-flagged users.
+    """
+
+    request_id: str = Field(..., description="Feed-cache key / feedContext id (also the document ID)")
+    items: list[str] = Field(default_factory=list, description="AT URIs in final served order")
+    feed_name: str
+    generated_at: datetime
+    expires_at: datetime = Field(..., description="UTC expiration; drives native TTL")
+    ranker_model: str | None = None
+    diversify: bool = False
+    generator_legend: list[GeneratorMeta] = Field(default_factory=list)
+    items_meta: list[PipelineItemMeta] = Field(default_factory=list)
