@@ -86,10 +86,6 @@ class FeedCacheDocument(BaseModel):
     """
 
     items: list[str] = Field(default_factory=list, description="Cached AT URI list")
-    diversity_scores: list[float] | None = Field(
-        default=None,
-        description="Per-item MMR diversity scores parallel to items; None when diversification was disabled",
-    )
     expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")
 
 
@@ -232,6 +228,10 @@ class FeedDebugDiversificationEntry(BaseModel):
     content_penalty: float = Field(
         default=0.0, description="Penalty from embedding (content) similarity to selected items"
     )
+    diversity_score: float = Field(
+        default=0.0,
+        description="Diversity score for this item (0=least diverse, 1=most diverse)",
+    )
 
 
 class FeedDebugDocument(BaseModel):
@@ -315,6 +315,7 @@ class DiversificationMeta(BaseModel):
     score: float
     author_penalty: float = 0.0
     content_penalty: float = 0.0
+    diversity_score: float = 0.0
 
 
 class GeneratorMeta(BaseModel):

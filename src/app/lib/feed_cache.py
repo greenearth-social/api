@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
@@ -22,45 +21,24 @@ FEED_CACHE_COLLECTION = "feed_cache"
 DEFAULT_TTL_SECONDS = 600  # 10 minutes
 
 
-@dataclass
-class CachedFeed:
-    """Items and optional diversity scores retrieved from the cache."""
-
-    items: list[str]
-    diversity_scores: list[float] | None = field(default=None)
-
-
 class FeedCache(ABC):
     """Backend-agnostic interface for storing and retrieving feed pages."""
 
     @abstractmethod
-    async def store(
-        self,
-        key: str,
-        items: list[str],
-        scores: list[float] | None = None,
-        ttl_seconds: int = DEFAULT_TTL_SECONDS,
-    ) -> None:
-        """Persist *items* (AT URIs) and optional *scores* under *key* with the given TTL."""
+    async def store(self, key: str, items: list[str], ttl_seconds: int = DEFAULT_TTL_SECONDS) -> None:
+        """Persist *items* (AT URIs) under *key* with the given TTL."""
         ...
 
     @abstractmethod
-    async def retrieve(self, key: str) -> CachedFeed | None:
-        """Fetch the cached feed for *key*, or ``None`` if missing/expired."""
+    async def retrieve(self, key: str) -> list[str] | None:
+        """Fetch the cached item list for *key*, or ``None`` if missing/expired."""
         ...
 
     @abstractmethod
-    async def append(
-        self,
-        key: str,
-        new_items: list[str],
-        new_scores: list[float] | None = None,
-    ) -> CachedFeed | None:
-        """Append *new_items* (and optionally *new_scores*) to an existing entry.
+    async def append(self, key: str, new_items: list[str]) -> list[str] | None:
+        """Append *new_items* to an existing cache entry and return the full list.
 
-        Returns the full updated :class:`CachedFeed`, or ``None`` if the entry
-        is missing or expired.  When either the existing or new scores are
-        ``None``, the merged ``diversity_scores`` is also ``None``.
+        Returns ``None`` if the entry is missing or expired.
         """
         ...
 
@@ -77,22 +55,16 @@ class FirestoreFeedCache(FeedCache):
     def __init__(self, db: AsyncClient) -> None:
         self._db = db
 
-    async def store(
-        self,
-        key: str,
-        items: list[str],
-        scores: list[float] | None = None,
-        ttl_seconds: int = DEFAULT_TTL_SECONDS,
-    ) -> None:
+    async def store(self, key: str, items: list[str], ttl_seconds: int = DEFAULT_TTL_SECONDS) -> None:
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
-        cache_doc = FeedCacheDocument(items=items, diversity_scores=scores, expires_at=expires_at)
+        cache_doc = FeedCacheDocument(items=items, expires_at=expires_at)
         await (
             self._db.collection(FEED_CACHE_COLLECTION)
             .document(key)
             .set(cache_doc.model_dump())
         )
 
-    async def retrieve(self, key: str) -> CachedFeed | None:
+    async def retrieve(self, key: str) -> list[str] | None:
         doc = await self._db.collection(FEED_CACHE_COLLECTION).document(key).get()
         if not doc.exists:
             return None
@@ -107,19 +79,15 @@ class FirestoreFeedCache(FeedCache):
             return None
 
         expires_at = cache_doc.expires_at
+        # Firestore may return naive datetimes; treat them as UTC.
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if datetime.now(timezone.utc) >= expires_at:
             return None
 
-        return CachedFeed(items=cache_doc.items, diversity_scores=cache_doc.diversity_scores)
+        return cache_doc.items
 
-    async def append(
-        self,
-        key: str,
-        new_items: list[str],
-        new_scores: list[float] | None = None,
-    ) -> CachedFeed | None:
+    async def append(self, key: str, new_items: list[str]) -> list[str] | None:
         ref = self._db.collection(FEED_CACHE_COLLECTION).document(key)
         doc = await ref.get()
         if not doc.exists:
@@ -141,11 +109,5 @@ class FirestoreFeedCache(FeedCache):
             return None
 
         updated_items = cache_doc.items + new_items
-        if cache_doc.diversity_scores is not None and new_scores is not None:
-            updated_scores: list[float] | None = cache_doc.diversity_scores + new_scores
-        else:
-            updated_scores = None
-
-        update_data: dict = {"items": updated_items, "diversity_scores": updated_scores}
-        await ref.update(update_data)
-        return CachedFeed(items=updated_items, diversity_scores=updated_scores)
+        await ref.update({"items": updated_items})
+        return updated_items

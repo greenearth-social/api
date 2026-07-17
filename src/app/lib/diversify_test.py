@@ -62,12 +62,13 @@ def test_author_penalty_decays_after_intervening_selection():
     uris = [c.at_uri for c in result]
 
     assert uris == ["at://alice/1", "at://bob/1", "at://alice/2"]
-    _, rel, score, author_pen, content_pen = rec.diversification[2]
+    _, rel, score, author_pen, content_pen, diversity_score = rec.diversification[2]
     expected_author_penalty = BETA * AUTHOR_WEIGHT * math.exp(-1 / DECAY_TAU)
     assert rel == pytest.approx(1.0)
     assert author_pen == pytest.approx(expected_author_penalty)
     assert content_pen == pytest.approx(0.0)
     assert score == pytest.approx((1 - BETA) * 1.0 - expected_author_penalty)
+    assert diversity_score == pytest.approx(1.0 - expected_author_penalty / BETA)
 
 
 def test_missing_author_dids_do_not_count_as_same_author():
@@ -184,12 +185,13 @@ def test_content_penalty_decays_after_intervening_selection():
     uris = [c.at_uri for c in result]
 
     assert uris == ["at://topic/1", "at://other/1", "at://topic/2"]
-    _, rel, score, author_pen, content_pen = rec.diversification[2]
+    _, rel, score, author_pen, content_pen, diversity_score = rec.diversification[2]
     expected_content_penalty = BETA * (1 - AUTHOR_WEIGHT) * math.exp(-1 / DECAY_TAU)
     assert rel == pytest.approx(1.0)
     assert author_pen == pytest.approx(0.0)
     assert content_pen == pytest.approx(expected_content_penalty)
     assert score == pytest.approx((1 - BETA) * 1.0 - expected_content_penalty)
+    assert diversity_score == pytest.approx(1.0 - expected_content_penalty / BETA)
 
 
 def test_cosine_similarity_value_matches_manual_calculation():

@@ -53,9 +53,11 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     decayed_same_author_counts = [0] * n
 
     rec = current_recorder()
-    # (at_uri, relevance, score, author_penalty, content_penalty) per pick, for
-    # the algorithm-agnostic diversification debug record.
-    diag: list[tuple[str, float, float, float, float]] | None = [] if rec is not None else None
+    # (at_uri, relevance, score, author_penalty, content_penalty, diversity_score)
+    # per pick, for the algorithm-agnostic diversification debug record.
+    diag: list[tuple[str, float, float, float, float, float]] | None = (
+        [] if rec is not None else None
+    )
 
     def _calculate_author_penalty(i: int) -> float:
         return BETA * AUTHOR_WEIGHT * decayed_same_author_counts[i]
@@ -84,6 +86,7 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
                         (1 - BETA) * norm_scores[best],
                         0.0,
                         0.0,
+                        diversity,
                     )
                 )
         else:
@@ -106,6 +109,7 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
                         penalized_score,
                         author_penalty,
                         content_penalty,
+                        diversity,
                     )
                 )
 
