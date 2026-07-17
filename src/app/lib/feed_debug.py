@@ -67,6 +67,11 @@ class FeedDebugRecorder:
         # (at_uri, relevance, score, author_penalty, content_penalty) in final
         # selection order; populated only when diversification runs.
         self.diversification: list[tuple[str, float, float, float, float]] = []
+        # Candidates retrieved by generation (post-dedup), the denominator for
+        # the slate-cutoff share.
+        self.n_retrieved: int = 0
+        # reason -> URIs removed by that slate cutoff (rank_score / mmr_score / share).
+        self.cutoff_uris: dict[str, list[str]] = {}
 
     # -- recording -------------------------------------------------------
 
@@ -106,6 +111,13 @@ class FeedDebugRecorder:
         """Record per-item diversification breakdown: (at_uri, relevance, score,
         author_penalty, content_penalty) in final selection order."""
         self.diversification = list(entries)
+
+    def record_n_retrieved(self, n: int) -> None:
+        self.n_retrieved = n
+
+    def record_cutoff(self, reason: str, uris: list[str]) -> None:
+        """Record the URIs a slate cutoff removed, keyed by cutoff reason."""
+        self.cutoff_uris[reason] = list(uris)
 
     # -- assembly --------------------------------------------------------
 
@@ -203,6 +215,8 @@ class FeedDebugRecorder:
             order_after_rank=self.order_after_rank,
             final_order=self.final_order,
             diversification=diversification,
+            n_retrieved=self.n_retrieved,
+            cutoff_uris=self.cutoff_uris,
             generated_at=generated_at,
             expires_at=expires_at,
         )

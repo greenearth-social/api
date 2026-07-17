@@ -26,10 +26,16 @@ USERS_COLLECTION = "users"
 FEED_ACTIVITY_COLLECTION = "feed_activity"
 INTERACTIONS_COLLECTION = "interactions"
 SEEN_POSTS_COLLECTION = "seen_posts"
+DISCARDED_POSTS_COLLECTION = "discarded_posts"
 FEED_DEBUG_COLLECTION = "feed_debug"
 
 # How long a seen-posts bucket lives before native Firestore TTL deletes it.
 SEEN_POSTS_RETENTION_DAYS = 5
+
+# How long a discarded-posts bucket lives before native Firestore TTL deletes
+# it. Shorter than seen posts: the candidate pool refreshes quickly and ranker
+# scores are only stable short-term.
+DISCARDED_POSTS_RETENTION_DAYS = 3
 
 # How long a feed-debug record lives before native Firestore TTL deletes it.
 FEED_DEBUG_RETENTION_DAYS = 7
@@ -234,30 +240,36 @@ async def record_interaction(db: AsyncClient, interaction: InteractionDocument) 
 
 
 # ---------------------------------------------------------------------------
-# Seen posts
+# Seen / discarded posts (per-user daily URI buckets)
 # ---------------------------------------------------------------------------
 
 
-async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
-    """Append seen post URIs to the user's bucket for the current UTC day.
+async def _record_daily_bucket_uris(
+    db: AsyncClient,
+    user_did: str,
+    collection: str,
+    post_uris: list[str],
+    retention_days: int,
+) -> None:
+    """Append post URIs to the user's ``collection`` bucket for the current UTC day.
 
-    Buckets are keyed by ``YYYY-MM-DD`` under the user's ``seen_posts``
-    subcollection.  ``ArrayUnion`` appends without duplicating within the bucket,
-    and ``expires_at`` (re-stamped on each write) drives the native Firestore TTL
-    so the bucket self-deletes ~``SEEN_POSTS_RETENTION_DAYS`` days after its last
-    update.  No-op when there is nothing to record.
+    Buckets are keyed by ``YYYY-MM-DD`` under the user's subcollection.
+    ``ArrayUnion`` appends without duplicating within the bucket, and
+    ``expires_at`` (re-stamped on each write) drives the native Firestore TTL
+    so the bucket self-deletes ~``retention_days`` days after its last update.
+    No-op when there is nothing to record.
     """
     if not post_uris:
         return
 
     now = datetime.now(timezone.utc)
     bucket_id = now.strftime("%Y-%m-%d")
-    expires_at = now + timedelta(days=SEEN_POSTS_RETENTION_DAYS)
+    expires_at = now + timedelta(days=retention_days)
 
     ref = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
-        .collection(SEEN_POSTS_COLLECTION)
+        .collection(collection)
         .document(bucket_id)
     )
     await ref.set(
@@ -266,10 +278,10 @@ async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]
     )
 
 
-async def get_recent_seen_uris(
-    db: AsyncClient, user_did: str, *, max_uris: int = 1000
+async def _get_recent_bucket_uris(
+    db: AsyncClient, user_did: str, collection: str, max_uris: int
 ) -> list[str]:
-    """Return the user's most-recently-seen post URIs, de-duped and capped.
+    """Return the user's most-recent ``collection`` post URIs, de-duped and capped.
 
     Reads the non-expired daily buckets (filtering on ``expires_at`` so buckets
     not yet reaped by TTL are still excluded once stale) and walks them
@@ -281,7 +293,7 @@ async def get_recent_seen_uris(
     query = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
-        .collection(SEEN_POSTS_COLLECTION)
+        .collection(collection)
         .where("expires_at", ">", now)
     )
 
@@ -301,6 +313,38 @@ async def get_recent_seen_uris(
             if len(result) >= max_uris:
                 return result
     return result
+
+
+async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+    """Append seen post URIs to the user's bucket for the current UTC day."""
+    await _record_daily_bucket_uris(
+        db, user_did, SEEN_POSTS_COLLECTION, post_uris, SEEN_POSTS_RETENTION_DAYS
+    )
+
+
+async def get_recent_seen_uris(
+    db: AsyncClient, user_did: str, *, max_uris: int = 1000
+) -> list[str]:
+    """Return the user's most-recently-seen post URIs, de-duped and capped."""
+    return await _get_recent_bucket_uris(db, user_did, SEEN_POSTS_COLLECTION, max_uris)
+
+
+async def record_discarded_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+    """Append low-ranker-score post URIs to the user's bucket for the current UTC day.
+
+    Discarded posts scored below a feed's ``min_rank_score`` and will never be
+    displayed, so future candidate generation excludes them.
+    """
+    await _record_daily_bucket_uris(
+        db, user_did, DISCARDED_POSTS_COLLECTION, post_uris, DISCARDED_POSTS_RETENTION_DAYS
+    )
+
+
+async def get_recent_discarded_uris(
+    db: AsyncClient, user_did: str, *, max_uris: int = 1000
+) -> list[str]:
+    """Return the user's most-recently-discarded post URIs, de-duped and capped."""
+    return await _get_recent_bucket_uris(db, user_did, DISCARDED_POSTS_COLLECTION, max_uris)
 
 
 # ---------------------------------------------------------------------------

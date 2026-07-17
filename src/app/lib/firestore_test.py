@@ -12,17 +12,20 @@ from google.cloud.firestore import ArrayUnion
 from ..documents import FeedDebugDocument, InteractionDocument, UserDocument
 from ..models import CandidateGenerateRequest, GeneratorSpec
 from ..lib.firestore import (
+    DISCARDED_POSTS_COLLECTION,
     FEED_DEBUG_COLLECTION,
     INTERACTIONS_COLLECTION,
     SEEN_POSTS_COLLECTION,
     USERS_COLLECTION,
     get_feed_activity,
     get_feed_debug,
+    get_recent_discarded_uris,
     get_recent_feed_debug,
     get_recent_seen_uris,
     get_user,
     get_user_by_username,
     init_firestore_client,
+    record_discarded_posts,
     record_interaction,
     record_seen_posts,
     set_user_debug_flag,
@@ -488,6 +491,71 @@ class TestGetRecentSeenUris:
         assert len(uris) == 1000
         assert uris[0] == "at://post/0"
         assert uris[-1] == "at://post/999"
+
+
+# ---------------------------------------------------------------------------
+# record_discarded_posts / get_recent_discarded_uris
+# ---------------------------------------------------------------------------
+
+
+class TestDiscardedPosts:
+    """The discarded-posts bucket store mirrors seen posts under its own subcollection."""
+
+    @pytest.mark.asyncio
+    async def test_writes_today_bucket_under_discarded_collection(self):
+        db, doc_ref = _mock_seen_posts_write_client()
+
+        await record_discarded_posts(db, USER_DID, ["at://post/1", "at://post/2"])
+
+        db.collection.assert_called_with(USERS_COLLECTION)
+        db.collection.return_value.document.return_value.collection.assert_called_with(
+            DISCARDED_POSTS_COLLECTION
+        )
+        bucket_id = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        db.collection.return_value.document.return_value.collection.return_value.document.assert_called_with(
+            bucket_id
+        )
+
+        doc_ref.set.assert_called_once()
+        written, kwargs = doc_ref.set.call_args
+        payload = written[0]
+        assert kwargs == {"merge": True}
+        assert isinstance(payload["post_uris"], ArrayUnion)
+        assert payload["post_uris"].values == ["at://post/1", "at://post/2"]
+        assert payload["expires_at"] > datetime.now(timezone.utc)
+
+    @pytest.mark.asyncio
+    async def test_noop_on_empty(self):
+        db, doc_ref = _mock_seen_posts_write_client()
+
+        await record_discarded_posts(db, USER_DID, [])
+
+        doc_ref.set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reads_buckets_newest_first_and_dedups(self):
+        buckets = [
+            _mock_bucket("2026-06-01", ["at://a", "at://b"]),
+            _mock_bucket("2026-06-02", ["at://b", "at://c"]),
+        ]
+        db, _ = _mock_seen_posts_query_client(buckets)
+
+        uris = await get_recent_discarded_uris(db, USER_DID)
+
+        assert uris == ["at://b", "at://c", "at://a"]
+        db.collection.return_value.document.return_value.collection.assert_called_with(
+            DISCARDED_POSTS_COLLECTION
+        )
+
+    @pytest.mark.asyncio
+    async def test_caps_at_max_uris(self):
+        many = [f"at://post/{i}" for i in range(1500)]
+        buckets = [_mock_bucket("2026-06-02", many)]
+        db, _ = _mock_seen_posts_query_client(buckets)
+
+        uris = await get_recent_discarded_uris(db, USER_DID, max_uris=1000)
+
+        assert len(uris) == 1000
 
 
 # ---------------------------------------------------------------------------

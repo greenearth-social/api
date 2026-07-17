@@ -218,6 +218,27 @@ class FeedConfig(BaseModel):
         None,
         description="AT URI of a post to pin at the top of the first page of this feed.",
     )
+    max_render_share: float | None = Field(
+        None,
+        gt=0.0,
+        le=1.0,
+        description="Cap on the share of retrieved candidates that may be rendered "
+        "(e.g. 0.5 → at most 50% of the retrieved candidates are returned per slate). "
+        "None disables the cap.",
+    )
+    min_rank_score: float | None = Field(
+        None,
+        description="Combined rank-score floor in [-1, 1]. Candidates scoring below it "
+        "are cut from the slate and recorded as discarded so future generation "
+        "excludes them. Only applies when rank_request_template is set. None disables.",
+    )
+    min_mmr_score: float | None = Field(
+        None,
+        description="MMR per-pick penalized-score floor. The slate is cut at the first "
+        "pick scoring below it. MMR relevance is normalized per slate, so this "
+        "threshold is slate-relative rather than an absolute quality bar. Only "
+        "applies when diversify is True. None disables.",
+    )
     avatar: str | None = Field(
         None,
         description="Path to avatar image relative to repo root (e.g. 'assets/icons/your-feed.png'). "

@@ -37,3 +37,18 @@ class TestFeedsRegistry:
             assert [
                 spec.name for spec in cfg.rank_request_template.models
             ] == ["heavy_ranker", "perspective"]
+
+    def test_ranked_feeds_have_slate_cutoffs(self):
+        for feed_name in ("your-feed", "best-of-friends"):
+            cfg = FEEDS[feed_name]
+            assert cfg.max_render_share is not None
+            assert cfg.min_rank_score is not None
+            assert cfg.min_mmr_score is not None
+
+    def test_unranked_feeds_have_no_slate_cutoffs(self):
+        for feed_name, cfg in FEEDS.items():
+            if cfg.rank_request_template is not None:
+                continue
+            assert cfg.max_render_share is None, feed_name
+            assert cfg.min_rank_score is None, feed_name
+            assert cfg.min_mmr_score is None, feed_name

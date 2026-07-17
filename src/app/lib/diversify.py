@@ -16,9 +16,18 @@ AUTHOR_WEIGHT = 0.5
 DECAY_TAU = 15.0
 
 
-def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
+def mmr_rerank(candidates: list[CandidatePost]) -> list[tuple[CandidatePost, float]]:
+    """Rerank candidates by MMR, returning (candidate, penalized_pick_score) pairs.
+
+    Pairs are in selection order. The pick score is the penalized MMR score the
+    candidate was selected on: ``(1-BETA) * norm_score - penalties``. Relevance is
+    normalized per slate, so pick scores are comparable within one call only.
+    Successive pick scores are not guaranteed non-increasing (penalties decay
+    with position).
+    """
     if len(candidates) <= 1:
-        return list(candidates)
+        # A lone candidate normalizes to relevance 1.0 and carries no penalties.
+        return [(c, 1 - BETA) for c in candidates]
 
     n = len(candidates)
     raw_scores = [c.score or 0.0 for c in candidates]
@@ -41,6 +50,7 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     author_dids = [c.author_did for c in candidates]
     remaining = list(range(n))
     selected: list[int] = []
+    pick_scores: list[float] = []
 
     # tracks the highest decayed (content) similarity candidate i has to
     # any selected candidate so far. Updated incrementally — one new comparison per
@@ -71,33 +81,27 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     while remaining:
         if not selected:
             best = max(remaining, key=lambda i: (1 - BETA) * norm_scores[i])
-            if diag is not None:
-                diag.append(
-                    (
-                        candidates[best].at_uri or "",
-                        norm_scores[best],
-                        (1 - BETA) * norm_scores[best],
-                        0.0,
-                        0.0,
-                    )
-                )
+            pick_score = (1 - BETA) * norm_scores[best]
+            author_penalty = 0.0
+            content_penalty = 0.0
         else:
             best = max(remaining, key=_calculate_penalized_score)
-            if diag is not None:
-                author_penalty = _calculate_author_penalty(best)
-                content_penalty = _calculate_content_penalty(best)
-                norm_score = norm_scores[best]
-                penalized_score = _calculate_penalized_score(best)
-                diag.append(
-                    (
-                        candidates[best].at_uri or "",
-                        norm_score,
-                        penalized_score,
-                        author_penalty,
-                        content_penalty,
-                    )
-                )
+            pick_score = _calculate_penalized_score(best)
+            author_penalty = _calculate_author_penalty(best)
+            content_penalty = _calculate_content_penalty(best)
 
+        if diag is not None:
+            diag.append(
+                (
+                    candidates[best].at_uri or "",
+                    norm_scores[best],
+                    pick_score,
+                    author_penalty,
+                    content_penalty,
+                )
+            )
+
+        pick_scores.append(pick_score)
         selected.append(best)
         remaining.remove(best)
 
@@ -116,7 +120,7 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     if rec is not None and diag is not None:
         rec.record_diversification(diag)
 
-    return [candidates[i] for i in selected]
+    return [(candidates[i], score) for i, score in zip(selected, pick_scores, strict=True)]
 
 
 def _calculate_content_sim(

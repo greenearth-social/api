@@ -264,4 +264,4 @@ class TestDiversificationCapture:
             at_uri="at://b", score=0.5, author_did="did:plc:x", minilm_l12_embedding=None
         )
         out = mmr_rerank([a, b])  # no active recorder -> must not raise
-        assert [c.at_uri for c in out] == ["at://a", "at://b"]
+        assert [c.at_uri for c, _ in out] == ["at://a", "at://b"]
