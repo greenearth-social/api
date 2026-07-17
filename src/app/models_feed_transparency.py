@@ -112,7 +112,7 @@ class FeedDetailResponse(BaseModel):
 class Preferences(BaseModel):
     model_config = {"extra": "forbid"}
 
-    social_radius: int = Field(default=2, ge=0, le=4)
+    social_radius: int = Field(default=3, ge=0, le=4)
     freshness: int = Field(default=2, ge=0, le=5)
     politics: float = Field(default=1.0, ge=0.5, le=1.5)
     purpose: float = Field(default=0.5, ge=0.2, le=0.8)

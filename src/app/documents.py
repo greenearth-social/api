@@ -50,10 +50,10 @@ class UserDocument(BaseModel):
         "information into the feed_debug subcollection (has a perf cost).",
     )
     social_radius: int = Field(
-        default=2,
+        default=3,
         ge=0,
         le=4,
-        description="Social radius preference: 0=friends only, 2=balanced, 4=everyone.  "
+        description="Social radius preference: 0=friends only, 3=balanced, 4=everyone.  "
         "Used to override the generator weights in your-feed.",
     )
     freshness: int = Field(

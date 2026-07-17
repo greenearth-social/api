@@ -15,13 +15,20 @@ class TestFeedsRegistry:
     def test_social_radius_splits_everyone_weight_evenly(self):
         for generators in SOCIAL_RADIUS_PRESETS.values():
             weights = {generator.name: generator.weight for generator in generators}
-            assert weights["two_tower"] == pytest.approx(weights["popularity"])
+            assert weights.get("two_tower", 0.0) == pytest.approx(
+                weights.get("popularity", 0.0)
+            )
             assert sum(weights.values()) == pytest.approx(1.0)
+
+    def test_friends_social_radius_has_no_everyone_generators(self):
+        assert [(generator.name, generator.weight) for generator in SOCIAL_RADIUS_PRESETS[0]] == [
+            ("followed_users", 1.0)
+        ]
 
     def test_balanced_social_radius_matches_your_feed_defaults(self):
         assert (
             FEEDS["your-feed"].gen_request_template.generators
-            == SOCIAL_RADIUS_PRESETS[2]
+            == SOCIAL_RADIUS_PRESETS[3]
         )
 
     def test_no_collision_between_internal_rkeys_and_primary_rkeys(self):

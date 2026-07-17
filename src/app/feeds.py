@@ -21,28 +21,26 @@ from .models import (
 )
 
 # Social-radius preset generator weights for your-feed.
-# Index 2 (balanced) matches the default weights defined in the "your-feed"
+# Index 3 (balanced) matches the default weights defined in the "your-feed"
 # FeedConfig below — keep them in sync when tuning.
 SOCIAL_RADIUS_PRESETS: dict[int, list[GeneratorSpec]] = {
-    0: [  # Friends — mostly from people you follow
-        GeneratorSpec(name="followed_users", weight=0.70),
-        GeneratorSpec(name="two_tower", weight=0.15),
-        GeneratorSpec(name="popularity", weight=0.15),
+    0: [  # Friends — only from people you follow
+        GeneratorSpec(name="followed_users", weight=1.00),
     ],
     1: [  # Closer
-        GeneratorSpec(name="followed_users", weight=0.50),
-        GeneratorSpec(name="two_tower", weight=0.25),
-        GeneratorSpec(name="popularity", weight=0.25),
+        GeneratorSpec(name="followed_users", weight=0.80),
+        GeneratorSpec(name="two_tower", weight=0.10),
+        GeneratorSpec(name="popularity", weight=0.10),
     ],
-    2: [  # Balanced — same as your-feed defaults
+    2: [
+        GeneratorSpec(name="followed_users", weight=0.60),
+        GeneratorSpec(name="two_tower", weight=0.20),
+        GeneratorSpec(name="popularity", weight=0.20),
+    ],
+    3: [  # Balanced — same as your-feed defaults
         GeneratorSpec(name="followed_users", weight=0.40),
         GeneratorSpec(name="two_tower", weight=0.30),
         GeneratorSpec(name="popularity", weight=0.30),
-    ],
-    3: [  # Broader
-        GeneratorSpec(name="followed_users", weight=0.30),
-        GeneratorSpec(name="two_tower", weight=0.35),
-        GeneratorSpec(name="popularity", weight=0.35),
     ],
     4: [  # Everyone — mostly discovery
         GeneratorSpec(name="followed_users", weight=0.20),

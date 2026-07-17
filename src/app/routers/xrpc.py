@@ -899,7 +899,7 @@ async def get_feed_skeleton(
     generators_override: dict = {}
     applied_social_radius: int | None = None
     if feed_name == "your-feed":
-        applied_social_radius = user_doc.social_radius if user_doc is not None else 2
+        applied_social_radius = user_doc.social_radius if user_doc is not None else 3
         preset = SOCIAL_RADIUS_PRESETS.get(applied_social_radius)
         if preset is not None:
             generators_override = {"generators": preset}

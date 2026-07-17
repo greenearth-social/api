@@ -2140,7 +2140,7 @@ class TestSocialRadiusOverride:
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_default_radius_when_missing(self, mock_pipeline, mock_get_user):
-        """User doc without social_radius field → defaults to 2 (balanced)."""
+        """User doc without social_radius field → defaults to 3 (balanced)."""
         from ..documents import UserDocument
         from .xrpc import SOCIAL_RADIUS_PRESETS
 
@@ -2156,7 +2156,7 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[2]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
@@ -2197,7 +2197,7 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[2]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
 class TestPosthogTracking:
     """Verify PostHog events are emitted from XRPC background handlers."""
 

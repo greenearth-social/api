@@ -453,7 +453,7 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
     response = client.get("/api/feeds/preferences")
     assert response.status_code == 200
     data = response.json()
-    assert data["social_radius"] == 2  # default
+    assert data["social_radius"] == 3  # default
     assert data["freshness"] == 2  # default
     assert data["politics"] == 1.0  # default
     assert data["purpose"] == 0.5  # default
