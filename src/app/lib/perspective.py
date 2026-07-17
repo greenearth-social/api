@@ -276,18 +276,6 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
                 c.at_uri,
             )
             return None
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429:
-                logger.warning("Perspective API rate limited for post %s; using missing score", c.at_uri)
-                return None
-            logger.exception("Perspective API scoring failed for post %s", c.at_uri)
-            if fail_fast():
-                raise
-            return None
-        except (httpx.ConnectError, httpx.TimeoutException):
-            logger.exception("Perspective API connection/timeout error for post %s", c.at_uri)
-            if fail_fast():
-                raise
         except aiohttp.ClientResponseError as exc:
             if exc.status == 429:
                 logger.warning(
