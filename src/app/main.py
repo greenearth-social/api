@@ -42,6 +42,7 @@ from .lib.es_client import SlowQueryLoggingES
 from .lib.feed_cache import FirestoreFeedCache
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
+from .lib.perspective import close_perspective_client
 from .lib.metrics import MetricCollector, set_metric_collector
 from .lib.posthog_client import get_posthog_client, init_posthog_client, set_posthog_client
 from .lib.profiling import install_profiling
@@ -120,6 +121,10 @@ async def lifespan(app: FastAPI):
             pass
         try:
             await close_http_client()
+        except Exception:
+            pass
+        try:
+            await close_perspective_client()
         except Exception:
             pass
         try:

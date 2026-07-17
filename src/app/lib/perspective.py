@@ -7,7 +7,7 @@ import logging
 import os
 import time
 
-import httpx
+import aiohttp
 
 from ..models import CandidatePost
 from .config import fail_fast
@@ -16,7 +16,15 @@ from .telemetry import timed
 
 logger = logging.getLogger(__name__)
 
-_PERSPECTIVE_URL = "https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze"
+_PERSPECTIVE_HOST_DEFAULT = "https://commentanalyzer.googleapis.com"
+_SCORE_TIMEOUT_SECONDS = 1.0
+_SCORE_ATTEMPTS = 2
+
+
+def _perspective_url() -> str:
+    """Perspective API endpoint URL, overridable via GE_PERSPECTIVE_HOST for local profiling."""
+    host = os.environ.get("GE_PERSPECTIVE_HOST", _PERSPECTIVE_HOST_DEFAULT)
+    return f"{host}/v1alpha1/comments:analyze"
 
 
 class PerspectiveLanguageNotSupportedError(Exception):
@@ -102,45 +110,102 @@ class PerspectiveClient:
         if not key:
             raise RuntimeError("GE_PERSPECTIVE_API_KEY environment variable is not set")
         self._api_key = key
+        self._session: aiohttp.ClientSession | None = None
 
-    async def score(self, content: str) -> float:
-        """Return the PRC score for the given text content."""
-        payload = {
-            "comment": {"text": content},
-            "requestedAttributes": _REQUESTED_ATTRIBUTES,
-        }
-        client = get_http_client()
-        async with timed(logger, "perspective.score.duration_ms", record_metric=True):
-            response = await client.post(
-                _PERSPECTIVE_URL,
-                params={"key": self._api_key},
-                json=payload,
+    def _get_session(self) -> aiohttp.ClientSession:
+        """Lazily build the dedicated aiohttp session.
+
+        Constructed lazily (not in __init__) because aiohttp.ClientSession()
+        requires a running event loop, which isn't available at
+        PerspectiveClient() construction time (e.g. module import, pytest
+        collection). limit=0/limit_per_host=0 removes the connection-pool cap
+        that caused head-of-line blocking under concurrent asyncio.gather
+        scoring bursts (issue #250); keepalive_timeout=45 matches the PRC
+        reference implementation.
+        """
+        if self._session is None:
+            connector = aiohttp.TCPConnector(
+                limit=0,
+                limit_per_host=0,
+                enable_cleanup_closed=True,
+                keepalive_timeout=45,
             )
-        if not response.is_success:
-            if response.status_code == 400:
-                try:
-                    details = response.json().get("error", {}).get("details", [])
-                    if details and details[0].get("errorType") == "LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE":
-                        lang_error = details[0].get("languageNotSupportedByAttributeError", {})
-                        detected = (lang_error.get("detectedLanguages") or [None])[0]
-                        raise PerspectiveLanguageNotSupportedError(detected)
-                except PerspectiveLanguageNotSupportedError:
-                    raise
-                except Exception:
-                    pass
-            logger.warning(
-                "Perspective API %s for content %.80r: %s",
-                response.status_code,
-                content,
-                response.text,
-            )
-            response.raise_for_status()
-        data = response.json()
+            self._session = aiohttp.ClientSession(connector=connector)
+        return self._session
+
+    async def close(self) -> None:
+        """Close the session, if one was ever opened."""
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def _handle_error_response(self, response: aiohttp.ClientResponse, content: str) -> None:
+        if response.status == 400:
+            try:
+                body = await response.json()
+                details = body.get("error", {}).get("details", [])
+                if details and details[0].get("errorType") == "LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE":
+                    lang_error = details[0].get("languageNotSupportedByAttributeError", {})
+                    detected = (lang_error.get("detectedLanguages") or [None])[0]
+                    raise PerspectiveLanguageNotSupportedError(detected)
+            except PerspectiveLanguageNotSupportedError:
+                raise
+            except Exception:
+                pass
+        text = await response.text()
+        logger.warning(
+            "Perspective API %s for content %.80r: %s",
+            response.status,
+            content,
+            text,
+        )
+        response.raise_for_status()
+
+    @staticmethod
+    def _extract_score(data: dict) -> float:
         attr_scores = {
             name: data["attributeScores"][name]["summaryScore"]["value"]
             for name in _REQUESTED_ATTRIBUTES
         }
         return _prc_score(attr_scores)
+
+    async def score(self, content: str) -> float:
+        """Return the PRC score for the given text content.
+
+        Retries once on a per-request timeout (2 total attempts), matching
+        the PRC reference implementation
+        (https://github.com/HumanCompatibleAI/ranking-challenge-perspective/blob/main/perspective_ranker.py#L329).
+        """
+        payload = {
+            "comment": {"text": content},
+            "requestedAttributes": _REQUESTED_ATTRIBUTES,
+        }
+        session = self._get_session()
+        timeout = aiohttp.ClientTimeout(total=_SCORE_TIMEOUT_SECONDS)
+
+        for attempt in range(_SCORE_ATTEMPTS):
+            try:
+                async with timed(logger, "perspective.score.duration_ms", record_metric=True):
+                    async with session.post(
+                        _perspective_url(),
+                        params={"key": self._api_key},
+                        json=payload,
+                        timeout=timeout,
+                    ) as response:
+                        if response.status != 200:
+                            await self._handle_error_response(response, content)
+                        data = await response.json()
+                return self._extract_score(data)
+            except TimeoutError:
+                if attempt == _SCORE_ATTEMPTS - 1:
+                    raise
+                logger.warning(
+                    "Perspective API timeout (%ss) scoring content %.80r; retrying",
+                    _SCORE_TIMEOUT_SECONDS,
+                    content,
+                )
+
+        raise AssertionError("unreachable: loop above always returns or raises")
 
 
 # Client-side rate limiter tracking usage within the current calendar-minute
@@ -174,6 +239,14 @@ def _get_client() -> PerspectiveClient:
     if _client is None:
         _client = PerspectiveClient()
     return _client
+
+
+async def close_perspective_client() -> None:
+    """Close the singleton PerspectiveClient's aiohttp session, if one was created."""
+    global _client
+    if _client is not None:
+        await _client.close()
+        _client = None
 
 
 async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float | None]:
@@ -215,6 +288,13 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
             logger.exception("Perspective API connection/timeout error for post %s", c.at_uri)
             if fail_fast():
                 raise
+        except aiohttp.ClientResponseError as exc:
+            if exc.status == 429:
+                logger.warning(
+                    "Perspective API rate limited for post %s; using missing score", c.at_uri
+                )
+            else:
+                logger.exception("Perspective API scoring failed for post %s", c.at_uri)
             return None
         except Exception:
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)

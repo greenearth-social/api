@@ -1,5 +1,7 @@
 """Tests for MetricCollector."""
 
+from unittest.mock import patch
+
 import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
@@ -170,6 +172,29 @@ def test_same_instrument_reused_across_calls():
                     # Both values should be in the same histogram
                     dp = metric.data.data_points[0]
                     assert dp.count == 2
+
+
+# ---------------------------------------------------------------------------
+# GCP exporter construction
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("env", ["stage", "prod"])
+def test_gcp_exporter_uses_unique_identifier(env):
+    """Cloud Run scales greenearth-api to multiple concurrent instances, each
+    running its own exporter. Without a unique identifier per exporter, two
+    instances exporting the same metric+label combination in the same
+    interval collide on GCP's cumulative point ordering and the whole batch
+    write is rejected (see issue #263)."""
+    with patch(
+        "opentelemetry.exporter.cloud_monitoring.CloudMonitoringMetricsExporter"
+    ) as mock_exporter_cls:
+        MetricCollector(
+            service_name="test-svc",
+            env=env,
+            export_interval_sec=60,
+        )
+    _, kwargs = mock_exporter_cls.call_args
+    assert kwargs.get("add_unique_identifier") is True
 
 
 # ---------------------------------------------------------------------------
