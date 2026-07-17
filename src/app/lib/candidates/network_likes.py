@@ -18,6 +18,7 @@ from typing import Any
 
 from ...models import CandidatePost
 from ..bsky import FollowedUsersLookupError, get_followed_user_dids
+from ..config import fail_fast
 from ..elasticsearch import unwrap_es_response
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
@@ -164,6 +165,8 @@ async def network_likes_search(
             user_did,
             exc,
         )
+        if fail_fast():
+            raise
         return []
 
     if not followed_dids:

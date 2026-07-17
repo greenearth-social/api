@@ -51,6 +51,7 @@ from ..lib.firestore import (
 )
 from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
+from ..lib.config import fail_fast
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
 from ..feeds import FEEDS
@@ -63,7 +64,6 @@ router = APIRouter(tags=["xrpc"])
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
 
 def _get_service_did() -> str:
     """Return the DID of this feed generator service.
@@ -227,10 +227,9 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
         async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
             pairs = await fetch_post_embeddings(es, missing, index="posts_recent")
     except Exception:
-        # If the refetch fails, MMR falls back to author-only similarity
-        # and the two-tower ranker has its own refetch path. Don't fail
-        # the request over a hydration hiccup.
-        logger.exception("Embedding hydration failed; continuing without")
+        logger.exception("Embedding hydration failed")
+        if fail_fast():
+            raise
         return candidates
 
     encoded: dict[str, str] = {}
@@ -315,7 +314,7 @@ async def _run_ranking_pipeline(
             num_candidates=gen_request.num_candidates,
             n_generators=len(gen_request.generators),
         ):
-            result = await run_generate(gen_request, es, swallow_errors=True)
+            result = await run_generate(gen_request, es)
         candidates = result.candidates
 
         n_retrieved = len(candidates)

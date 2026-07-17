@@ -18,6 +18,7 @@ from ...models import (
     GeneratorSpec,
 )
 from .base import CandidateGenerator, CandidateResult, get_generator
+from ..config import fail_fast
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
 from ..telemetry import timed
@@ -98,8 +99,6 @@ class GeneratorError(Exception):
 async def run_generate(
     request: CandidateGenerateRequest,
     es,
-    *,
-    swallow_errors: bool = False,
 ) -> CandidateGenerateResult:
     """Execute a candidate-generation pipeline described by *request*.
 
@@ -109,12 +108,13 @@ async def run_generate(
         The generation configuration.
     es:
         An ``AsyncElasticsearch`` client.
-    swallow_errors:
-        If ``True``, generator failures are logged but do not raise.
-        Missing generators still raise ``GeneratorNotFoundError``.
-        This is useful for feed-skeleton endpoints that should return
-        partial results rather than 5xx.
+
+    Generator failures are swallowed (empty candidates) or re-raised according
+    to ``fail_fast()`` / ``GE_FAIL_FAST``. All call sites use that env var
+    rather than a per-call override, consistent with ``score_candidates`` and
+    ``_hydrate_embeddings``.
     """
+    _swallow = not fail_fast()
     counts = allocate_counts(request.generators, request.num_candidates)
 
     # Resolve generators up front so missing-name errors raise deterministically
@@ -165,7 +165,7 @@ async def run_generate(
                     outcome="timeout",
                     is_infill="false",
                 )
-            if swallow_errors:
+            if _swallow:
                 return CandidateResult(generator_name=spec.name, candidates=[])
             raise GeneratorError(spec.name, exc) from exc
         except Exception as exc:
@@ -178,7 +178,7 @@ async def run_generate(
                     outcome="error",
                     is_infill="false",
                 )
-            if swallow_errors:
+            if _swallow:
                 return CandidateResult(generator_name=spec.name, candidates=[])
             raise GeneratorError(spec.name, exc) from exc
 
@@ -244,7 +244,7 @@ async def run_generate(
                     outcome="timeout",
                     is_infill="true",
                 )
-            if swallow_errors:
+            if _swallow:
                 infill_result = CandidateResult(generator_name=request.infill, candidates=[])
             else:
                 raise GeneratorError(request.infill, exc, is_infill=True) from exc
@@ -258,7 +258,7 @@ async def run_generate(
                     outcome="error",
                     is_infill="true",
                 )
-            if swallow_errors:
+            if _swallow:
                 infill_result = CandidateResult(generator_name=request.infill, candidates=[])
             else:
                 raise GeneratorError(request.infill, exc, is_infill=True) from exc
