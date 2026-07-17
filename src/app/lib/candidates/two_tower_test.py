@@ -7,6 +7,7 @@ import pytest
 from ...models import CandidatePost
 from ..candidates import get_generator, list_generators
 from ..candidates.two_tower import (
+    MIN_LIKE_COUNT,
     TWO_TOWER_GENERATOR_NAME,
     TwoTowerCandidateGenerator,
 )
@@ -96,6 +97,7 @@ class TestTwoTowerCandidateGenerator:
             video_only=True,
             exclude_uris=["at://old/1", "at://old/2"],
             ge_post_embedding_model_uuid="post-tower-uuid",
+            min_like_count=MIN_LIKE_COUNT,
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == candidates
@@ -134,6 +136,7 @@ class TestTwoTowerCandidateGenerator:
             video_only=False,
             exclude_uris=None,
             ge_post_embedding_model_uuid="post-tower-uuid",
+            min_like_count=MIN_LIKE_COUNT,
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == []
@@ -172,6 +175,7 @@ class TestTwoTowerCandidateGenerator:
             video_only=False,
             exclude_uris=None,
             ge_post_embedding_model_uuid="post-tower-uuid",
+            min_like_count=MIN_LIKE_COUNT,
         )
         assert result.candidates == []
 

@@ -520,9 +520,9 @@ class TestGetFeedSkeleton:
                 params={"feed": FEED_URI, "limit": 5},
             ).json()
         assert len(data["feed"]) == 5
-        # Infill generator's generate method should not have been called
-        infill_gen = mock_get.side_effect("popularity")
-        infill_gen.generate.assert_not_called()
+        # popularity is a primary generator for this feed; no extra infill call should happen.
+        popularity_gen = mock_get.side_effect("popularity")
+        popularity_gen.generate.assert_awaited_once()
 
     def test_unranked_your_feed_uses_followed_users_generator(self):
         two_tower = _make_candidates("tower", 3, "two_tower")
@@ -2017,3 +2017,61 @@ class TestGetFeedSkeletonMetrics:
         assert resp.status_code == 400
         success_calls = [c for c in self.mc.calls if c[0] == "feed.render.success_count"]
         assert success_calls == []
+
+
+class TestPosthogTracking:
+    """Verify PostHog events are emitted from XRPC background handlers."""
+
+    @pytest.mark.asyncio
+    async def test_record_session_calls_track_session(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ..routers.xrpc import _record_session
+
+        db = AsyncMock()
+        request = MagicMock()
+        request.app.state.id_resolver = AsyncMock()
+        did_doc = MagicMock()
+        did_doc.get_handle.return_value = "alice.bsky.app"
+        request.app.state.id_resolver.did.resolve = AsyncMock(return_value=did_doc)
+
+        mock_client = MagicMock()
+        with patch("app.routers.xrpc.get_posthog_client", return_value=mock_client):
+            with patch("app.routers.xrpc.track_session") as mock_track:
+                await _record_session(request, "did:plc:abc", "your-feed", db)
+                mock_track.assert_called_once()
+                call_kwargs = mock_track.call_args
+                assert call_kwargs.args[0] is mock_client
+                assert call_kwargs.args[1] == "did:plc:abc"
+                assert call_kwargs.args[2] == "alice.bsky.app"
+                assert call_kwargs.args[3] == "your-feed"
+
+    @pytest.mark.asyncio
+    async def test_record_interactions_calls_track_interaction(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ..routers.xrpc import Interaction, _record_interactions
+        from ..lib.feed_context import FeedContextPayload, encode_feed_context
+
+        feed_context = encode_feed_context(
+            FeedContextPayload(did="did:plc:abc", feed="your-feed", rid="reqid123", iat=0)
+        )
+
+        ix = Interaction(
+            item="at://did/post/1",
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context=feed_context,
+        )
+
+        db = AsyncMock()
+        mock_client = MagicMock()
+        with patch("app.routers.xrpc.get_posthog_client", return_value=mock_client):
+            with patch("app.routers.xrpc.track_interaction") as mock_track:
+                await _record_interactions(db, [ix])
+                mock_track.assert_called_once()
+                call_kwargs = mock_track.call_args
+                assert call_kwargs.args[0] is mock_client
+                assert call_kwargs.args[1] == "did:plc:abc"
+                assert call_kwargs.args[2] == "interactionLike"
+                assert call_kwargs.args[3] == "your-feed"
+                assert call_kwargs.args[4] == "at://did/post/1"

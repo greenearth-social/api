@@ -218,3 +218,8 @@ class FeedConfig(BaseModel):
         None,
         description="AT URI of a post to pin at the top of the first page of this feed.",
     )
+    avatar: str | None = Field(
+        None,
+        description="Path to avatar image relative to repo root (e.g. 'assets/icons/your-feed.png'). "
+        "Used by publish_feed.py at publish time; not read at runtime.",
+    )

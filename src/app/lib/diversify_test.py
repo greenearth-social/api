@@ -1,10 +1,13 @@
 """Tests for MMR-based feed diversification."""
 
+import math
+
 import pytest
 
 from ..models import CandidatePost
-from .diversify import AUTHOR_WEIGHT, _cosine_similarity, _raw_similarity, _similarity, mmr_rerank
+from .diversify import AUTHOR_WEIGHT, BETA, DECAY_TAU, _cosine_similarity, mmr_rerank
 from .embeddings import encode_float32_b64
+from .feed_debug import FeedDebugRecorder, feed_debug_scope
 
 
 def _post(uri: str, score: float, author_did: str | None = None) -> CandidatePost:
@@ -42,6 +45,38 @@ def test_same_author_posts_spread_apart():
 
     assert uris[0] == "at://alice/1"
     assert uris.index("at://bob/1") < uris.index("at://alice/2")
+
+
+def test_author_penalty_decays_after_intervening_selection():
+    """A repeated author should be penalized less after one intervening pick."""
+    a1 = _post("at://alice/1", score=1.0, author_did="did:plc:alice")
+    a2 = _post("at://alice/2", score=1.0, author_did="did:plc:alice")
+    b1 = _post("at://bob/1", score=0.5, author_did="did:plc:bob")
+
+    rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+    with feed_debug_scope(rec):
+        result = mmr_rerank([a1, a2, b1])
+    uris = [c.at_uri for c in result]
+
+    assert uris == ["at://alice/1", "at://bob/1", "at://alice/2"]
+    _, rel, score, author_pen, content_pen = rec.diversification[2]
+    expected_author_penalty = BETA * AUTHOR_WEIGHT * math.exp(-1 / DECAY_TAU)
+    assert rel == pytest.approx(1.0)
+    assert author_pen == pytest.approx(expected_author_penalty)
+    assert content_pen == pytest.approx(0.0)
+    assert score == pytest.approx((1 - BETA) * 1.0 - expected_author_penalty)
+
+
+def test_missing_author_dids_do_not_count_as_same_author():
+    """Unknown authors should not be treated as matching each other."""
+    p1 = _post("at://unknown/1", score=1.0, author_did=None)
+    p2 = _post("at://unknown/2", score=0.9, author_did=None)
+    b1 = _post("at://bob/1", score=0.5, author_did="did:plc:bob")
+
+    result = mmr_rerank([p1, p2, b1])
+    uris = [c.at_uri for c in result]
+
+    assert uris == ["at://unknown/1", "at://unknown/2", "at://bob/1"]
 
 
 def test_all_different_authors_order_preserved_by_relevance():
@@ -116,39 +151,6 @@ def test_cosine_zero_vector_b_returns_zero():
 
 
 # ---------------------------------------------------------------------------
-# _similarity with embeddings (AUTHOR_WEIGHT < 1.0 path)
-# ---------------------------------------------------------------------------
-
-def test_similarity_different_authors_identical_embeddings():
-    """Cosine=1.0 for identical vecs; no author match → similarity = (1-AUTHOR_WEIGHT)."""
-    a = _post_with_embed("at://a/1", 1.0, "did:plc:alice", [1.0, 0.0])
-    b = _post_with_embed("at://b/1", 0.9, "did:plc:bob", [1.0, 0.0])
-    assert _similarity(a, b) == pytest.approx((1 - AUTHOR_WEIGHT) * 1.0)
-
-
-def test_similarity_different_authors_orthogonal_embeddings():
-    """Cosine=0 for orthogonal vecs; no author match → similarity = 0."""
-    a = _post_with_embed("at://a/1", 1.0, "did:plc:alice", [1.0, 0.0])
-    b = _post_with_embed("at://b/1", 0.9, "did:plc:bob", [0.0, 1.0])
-    assert _similarity(a, b) == pytest.approx(0.0)
-
-
-def test_similarity_same_author_with_embeddings():
-    """Same author contributes AUTHOR_WEIGHT; cosine contributes (1-AUTHOR_WEIGHT)."""
-    a = _post_with_embed("at://a/1", 1.0, "did:plc:alice", [1.0, 0.0])
-    b = _post_with_embed("at://a/2", 0.9, "did:plc:alice", [1.0, 0.0])
-    expected = AUTHOR_WEIGHT * 1.0 + (1 - AUTHOR_WEIGHT) * 1.0
-    assert _similarity(a, b) == pytest.approx(expected)
-
-
-def test_similarity_missing_one_embedding_skips_cosine():
-    """If one post has no embedding, cosine is 0 and only author_match counts."""
-    a = _post_with_embed("at://a/1", 1.0, "did:plc:alice", [1.0, 0.0])
-    b = CandidatePost(at_uri="at://b/1", score=0.9, author_did="did:plc:bob")
-    assert _similarity(a, b) == pytest.approx(0.0)
-
-
-# ---------------------------------------------------------------------------
 # mmr_rerank with cosine similarity active
 # ---------------------------------------------------------------------------
 
@@ -167,64 +169,30 @@ def test_cosine_penalizes_topically_similar_cross_author_post():
     assert uris.index("at://carol/1") < uris.index("at://bob/1")
 
 
+def test_content_penalty_decays_after_intervening_selection():
+    """A matching older post should contribute less after one intervening pick."""
+    p1 = _post_with_embed("at://topic/1", score=1.0, author_did="did:plc:a", vec=[1.0, 0.0])
+    p2 = _post_with_embed("at://topic/2", score=1.0, author_did="did:plc:b", vec=[1.0, 0.0])
+    p3 = _post_with_embed("at://other/1", score=0.5, author_did="did:plc:c", vec=[0.0, 1.0])
+
+    rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+    with feed_debug_scope(rec):
+        result = mmr_rerank([p1, p2, p3])
+    uris = [c.at_uri for c in result]
+
+    assert uris == ["at://topic/1", "at://other/1", "at://topic/2"]
+    _, rel, score, author_pen, content_pen = rec.diversification[2]
+    expected_content_penalty = BETA * (1 - AUTHOR_WEIGHT) * math.exp(-1 / DECAY_TAU)
+    assert rel == pytest.approx(1.0)
+    assert author_pen == pytest.approx(0.0)
+    assert content_pen == pytest.approx(expected_content_penalty)
+    assert score == pytest.approx((1 - BETA) * 1.0 - expected_content_penalty)
+
+
 def test_cosine_similarity_value_matches_manual_calculation():
-    """Verify the combined similarity formula: AUTHOR_WEIGHT*author + (1-AUTHOR_WEIGHT)*cosine."""
+    """Verify a non-trivial cosine value against manual calculation."""
     vec_a = [3.0, 4.0]
     vec_b = [4.0, 3.0]
     # cosine([3,4],[4,3]) = (12+12)/(5*5) = 24/25
     expected_cosine = 24 / 25
-    a = _post_with_embed("at://a/1", 1.0, "did:plc:alice", vec_a)
-    b = _post_with_embed("at://b/1", 0.9, "did:plc:bob", vec_b)
-    expected = (1 - AUTHOR_WEIGHT) * expected_cosine
-    assert _similarity(a, b) == pytest.approx(expected, rel=1e-5)
-
-
-# ---------------------------------------------------------------------------
-# _raw_similarity — same logic as _similarity but accepts pre-decoded vectors
-# ---------------------------------------------------------------------------
-
-def test_raw_similarity_matches_similarity_different_authors_identical_embeddings():
-    vec = [1.0, 0.0]
-    result = _raw_similarity("did:plc:alice", "did:plc:bob", vec, vec)
-    assert result == pytest.approx((1 - AUTHOR_WEIGHT) * 1.0)
-
-
-def test_raw_similarity_matches_similarity_orthogonal_embeddings():
-    result = _raw_similarity("did:plc:alice", "did:plc:bob", [1.0, 0.0], [0.0, 1.0])
-    assert result == pytest.approx(0.0)
-
-
-def test_raw_similarity_same_author_full_score():
-    vec = [1.0, 0.0]
-    result = _raw_similarity("did:plc:alice", "did:plc:alice", vec, vec)
-    expected = AUTHOR_WEIGHT * 1.0 + (1 - AUTHOR_WEIGHT) * 1.0
-    assert result == pytest.approx(expected)
-
-
-def test_raw_similarity_none_vec_skips_cosine():
-    result = _raw_similarity("did:plc:alice", "did:plc:bob", None, [1.0, 0.0])
-    assert result == pytest.approx(0.0)
-
-
-def test_raw_similarity_none_author_no_match():
-    vec = [1.0, 0.0]
-    result = _raw_similarity(None, None, vec, vec)
-    # author_did=None on both — treated as no match; cosine still applies
-    assert result == pytest.approx((1 - AUTHOR_WEIGHT) * 1.0)
-
-
-def test_raw_similarity_agrees_with_similarity_for_same_inputs():
-    """_raw_similarity and _similarity must return the same value for equivalent inputs."""
-    vec_a = [3.0, 4.0]
-    vec_b = [4.0, 3.0]
-    a = _post_with_embed("at://a/1", 1.0, "did:plc:alice", vec_a)
-    b = _post_with_embed("at://b/1", 0.9, "did:plc:bob", vec_b)
-    a_emb = a.minilm_l12_embedding
-    b_emb = b.minilm_l12_embedding
-    assert a_emb is not None and b_emb is not None
-    from .embeddings import decode_float32_b64
-    assert _raw_similarity(
-        a.author_did, b.author_did,
-        decode_float32_b64(a_emb),
-        decode_float32_b64(b_emb),
-    ) == pytest.approx(_similarity(a, b), rel=1e-6)
+    assert _cosine_similarity(vec_a, vec_b) == pytest.approx(expected_cosine, rel=1e-5)

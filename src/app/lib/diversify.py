@@ -6,8 +6,14 @@ from .embeddings import decode_float32_b64
 from .feed_debug import current_recorder
 from ..models import CandidatePost
 
-BETA = 0.5
-AUTHOR_WEIGHT = 0.75
+# Global diversity weight (relevance weight is 1-BETA)
+BETA = 0.7
+
+# Author weight (content weight is 1-AUTHOR_WEIGHT)
+AUTHOR_WEIGHT = 0.5
+
+# Decay tau for position-based decay of author and content penalties
+DECAY_TAU = 15.0
 
 
 def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
@@ -35,18 +41,32 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     author_dids = [c.author_did for c in candidates]
     remaining = list(range(n))
     selected: list[int] = []
-    # max_sim[i] tracks the highest similarity candidate i has to any selected
-    # candidate so far. Updated incrementally — one new comparison per remaining
-    # item each round instead of recomputing the full max from scratch.
-    max_sim = [-math.inf] * n
-    # Author/content split of the neighbour that currently drives max_sim[i], so
-    # the diversification penalty can be attributed when debugging is enabled.
-    max_components: list[tuple[float, float]] = [(0.0, 0.0)] * n
+
+    # tracks the highest decayed (content) similarity candidate i has to
+    # any selected candidate so far. Updated incrementally — one new comparison per
+    # remaining item each round instead of recomputing the full max from scratch.
+    decayed_max_content_sims = [-math.inf] * n
+    # for each remaining post, keep track of the decayed number of times that post's author
+    # has already been selected in the result set
+    decayed_same_author_counts = [0] * n
 
     rec = current_recorder()
     # (at_uri, relevance, score, author_penalty, content_penalty) per pick, for
     # the algorithm-agnostic diversification debug record.
     diag: list[tuple[str, float, float, float, float]] | None = [] if rec is not None else None
+
+    def _calculate_author_penalty(i: int) -> float:
+        return BETA * AUTHOR_WEIGHT * decayed_same_author_counts[i]
+
+    def _calculate_content_penalty(i: int) -> float:
+        return BETA * (1 - AUTHOR_WEIGHT) * decayed_max_content_sims[i]
+
+    def _calculate_penalized_score(i: int) -> float:
+        total_penalty = _calculate_author_penalty(i) + _calculate_content_penalty(i)
+        return (1 - BETA) * norm_scores[i] - total_penalty
+
+    # We incrementally decay the counts and similarities after each selection
+    single_decay_factor = math.exp(-1 / DECAY_TAU)
 
     while remaining:
         if not selected:
@@ -62,20 +82,17 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
                     )
                 )
         else:
-            best = max(
-                remaining,
-                key=lambda i: (1 - BETA) * norm_scores[i] - BETA * max_sim[i],
-            )
+            best = max(remaining, key=_calculate_penalized_score)
             if diag is not None:
-                author_match, cosine = max_components[best]
-                author_penalty = BETA * AUTHOR_WEIGHT * author_match
-                content_penalty = BETA * (1 - AUTHOR_WEIGHT) * cosine
-                score = (1 - BETA) * norm_scores[best] - BETA * max_sim[best]
+                author_penalty = _calculate_author_penalty(best)
+                content_penalty = _calculate_content_penalty(best)
+                norm_score = norm_scores[best]
+                penalized_score = _calculate_penalized_score(best)
                 diag.append(
                     (
                         candidates[best].at_uri or "",
-                        norm_scores[best],
-                        score,
+                        norm_score,
+                        penalized_score,
                         author_penalty,
                         content_penalty,
                     )
@@ -84,13 +101,17 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
         selected.append(best)
         remaining.remove(best)
 
+        # position-decay same author counts and content similarities:
+        decayed_same_author_counts = [c * single_decay_factor for c in decayed_same_author_counts]
+        decayed_max_content_sims = [s * single_decay_factor for s in decayed_max_content_sims]
+
         for i in remaining:
-            s, author_match, cosine = _similarity_components(
-                author_dids[i], author_dids[best], vecs[i], vecs[best]
-            )
-            if s > max_sim[i]:
-                max_sim[i] = s
-                max_components[i] = (author_match, cosine)
+            if author_dids[i] is not None and author_dids[best] is not None:
+                if author_dids[i] == author_dids[best]:
+                    decayed_same_author_counts[i] += 1
+            content_sim = _calculate_content_sim(vecs[i], vecs[best])
+            if content_sim > decayed_max_content_sims[i]:
+                decayed_max_content_sims[i] = content_sim
 
     if rec is not None and diag is not None:
         rec.record_diversification(diag)
@@ -98,52 +119,14 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[CandidatePost]:
     return [candidates[i] for i in selected]
 
 
-def _similarity_components(
-    author_a: str | None,
-    author_b: str | None,
-    vec_a: list[float] | None,
-    vec_b: list[float] | None,
-) -> tuple[float, float, float]:
-    """Return (combined_similarity, author_match, cosine) from pre-decoded inputs.
-
-    The combined value is what MMR penalises; the author_match/cosine parts let
-    the penalty be attributed to author vs. content diversity when debugging.
-    """
-    author_match = 1.0 if (author_a is not None and author_a == author_b) else 0.0
-    if AUTHOR_WEIGHT < 1.0 and vec_a is not None and vec_b is not None:
-        cosine = _cosine_similarity(vec_a, vec_b)
-    else:
-        cosine = 0.0
-    combined = AUTHOR_WEIGHT * author_match + (1 - AUTHOR_WEIGHT) * cosine
-    return combined, author_match, cosine
-
-
-def _raw_similarity(
-    author_a: str | None,
-    author_b: str | None,
+def _calculate_content_sim(
     vec_a: list[float] | None,
     vec_b: list[float] | None,
 ) -> float:
-    """Compute similarity from pre-decoded components; no CandidatePost needed."""
-    combined, _, _ = _similarity_components(author_a, author_b, vec_a, vec_b)
-    return combined
-
-
-def _similarity(a: CandidatePost, b: CandidatePost) -> float:
-    """Public similarity helper used by tests; decodes embeddings on each call."""
-    vec_a = None
-    vec_b = None
-    if a.minilm_l12_embedding is not None:
-        try:
-            vec_a = decode_float32_b64(a.minilm_l12_embedding)
-        except Exception:
-            pass
-    if b.minilm_l12_embedding is not None:
-        try:
-            vec_b = decode_float32_b64(b.minilm_l12_embedding)
-        except Exception:
-            pass
-    return _raw_similarity(a.author_did, b.author_did, vec_a, vec_b)
+    if AUTHOR_WEIGHT < 1.0 and vec_a is not None and vec_b is not None:
+        return _cosine_similarity(vec_a, vec_b)
+    else:
+        return 0.0
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:

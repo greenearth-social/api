@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import pathlib
 import sys
 from typing import Literal
 
@@ -199,6 +200,46 @@ def _list_records(
     return resp.json().get("records", [])
 
 
+def _upload_blob(
+    client: httpx.Client,
+    pds: str,
+    access_jwt: str,
+    avatar_path: str | None,
+) -> dict | None:
+    """Upload an image file as an AT Proto blob and return the blob reference.
+
+    Returns None when avatar_path is None or the file does not exist (warning
+    printed).  Exits if the format is unsupported or the upload API returns an error.
+    """
+    if not avatar_path:
+        return None
+    path = pathlib.Path(avatar_path)
+    if not path.exists():
+        print(f"[warn] Avatar file not found, skipping: {avatar_path}", file=sys.stderr)
+        return None
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        encoding = "image/png"
+    elif suffix in (".jpg", ".jpeg"):
+        encoding = "image/jpeg"
+    else:
+        print(f"Unsupported avatar format: {suffix} (use .png or .jpg)", file=sys.stderr)
+        sys.exit(1)
+    resp = client.post(
+        f"{pds}/xrpc/com.atproto.repo.uploadBlob",
+        headers={"Authorization": f"Bearer {access_jwt}", "Content-Type": encoding},
+        content=path.read_bytes(),
+    )
+    if resp.status_code != 200:
+        print(f"uploadBlob failed ({resp.status_code}): {resp.text}", file=sys.stderr)
+        sys.exit(1)
+    blob = resp.json().get("blob")
+    if not blob:
+        print(f"uploadBlob response missing 'blob' key: {resp.text}", file=sys.stderr)
+        sys.exit(1)
+    return blob
+
+
 def publish_feed(
     *,
     handle: str,
@@ -239,6 +280,7 @@ def publish_feed(
 
         from datetime import datetime, timezone
 
+        avatar_blob = _upload_blob(client, pds, access_jwt, feed_cfg.avatar if feed_cfg else None)
         record: dict = {
             "$type": "app.bsky.feed.generator",
             "did": generator_did,
@@ -247,6 +289,8 @@ def publish_feed(
             "acceptsInteractions": True,
             "createdAt": datetime.now(timezone.utc).isoformat(),
         }
+        if avatar_blob is not None:
+            record["avatar"] = avatar_blob
 
         result = _put_record(
             client, pds, access_jwt, repo_did, feed_name, record
@@ -425,6 +469,7 @@ def sync_feeds(
                 rkey, feed_cfg, normalized_env
             )
             desired_rkeys.add(published_rkey)
+            avatar_blob = _upload_blob(client, pds, access_jwt, feed_cfg.avatar)
             record: dict = {
                 "$type": "app.bsky.feed.generator",
                 "did": generator_did,
@@ -433,6 +478,8 @@ def sync_feeds(
                 "acceptsInteractions": True,
                 "createdAt": datetime.now(timezone.utc).isoformat(),
             }
+            if avatar_blob is not None:
+                record["avatar"] = avatar_blob
             _put_record(client, pds, access_jwt, repo_did, published_rkey, record)
             print(f"  Published: {rkey} ({display_name})")
 
