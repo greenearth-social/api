@@ -52,6 +52,15 @@ class MetricCollector:
             )
             exporter = CloudMonitoringMetricsExporter(
                 prefix="custom.googleapis.com/greenearth-api",
+                # Cloud Run scales this service to multiple concurrent
+                # instances, each running its own exporter. GCP's generic_node
+                # monitored resource doesn't distinguish between instances, so
+                # without a per-exporter unique identifier, two instances
+                # exporting the same metric+label combination in the same
+                # interval collide on GCP's cumulative-point ordering check
+                # and the entire batch write is rejected -- silently dropping
+                # metrics for every series in that batch (see issue #263).
+                add_unique_identifier=True,
             )
             reader: Any | None = PeriodicExportingMetricReader(
                 exporter,
