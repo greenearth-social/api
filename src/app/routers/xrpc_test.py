@@ -95,6 +95,14 @@ def _patch_unranked_your_feed_generators(
     return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator)
 
 
+class FakeMetricCollector:
+    def __init__(self):
+        self.calls: list[tuple[str, float, dict]] = []
+
+    def record(self, name: str, value: float, **attributes: str) -> None:
+        self.calls.append((name, value, dict(attributes)))
+
+
 class InMemoryFeedCache(FeedCache):
     """Trivial in-memory feed cache for tests."""
 
@@ -1839,14 +1847,6 @@ class TestGetFeedSkeletonProbe:
 # ---------------------------------------------------------------------------
 
 
-class FakeMetricCollector:
-    def __init__(self):
-        self.calls: list[tuple[str, float, dict]] = []
-
-    def record(self, name: str, value: float, **attributes: str) -> None:
-        self.calls.append((name, value, dict(attributes)))
-
-
 class TestDiversityScoreMetric:
     @pytest.fixture(autouse=True)
     def _mock_auth_and_session(self):
@@ -2096,6 +2096,105 @@ class TestPinnedPost:
         assert resp.status_code == 200
         post_uris = [item["post"] for item in resp.json()["feed"]]
         assert self.PINNED_URI not in post_uris
+
+
+# ---------------------------------------------------------------------------
+# feed.render success/failure metrics
+# ---------------------------------------------------------------------------
+
+
+class TestGetFeedSkeletonMetrics:
+    """feed.render.{success,failure}_count are recorded on every getFeedSkeleton call."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_metric_collector(self):
+        from typing import cast
+        self.mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, self.mc))
+        yield
+        set_metric_collector(None)
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), \
+             patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
+            yield
+
+    def test_success_records_success_count(self):
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 2)),
+            patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:user"),
+        ):
+            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
+
+        assert resp.status_code == 200
+        success_calls = [c for c in self.mc.calls if c[0] == "feed.render.success_count"]
+        assert len(success_calls) == 1
+        _, value, attrs = success_calls[0]
+        assert value == 1
+        assert attrs["feed_name"] == FEED_RKEY
+
+    def test_success_records_no_failure_count(self):
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 2)),
+            patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:user"),
+        ):
+            client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
+
+        failure_calls = [c for c in self.mc.calls if c[0] == "feed.render.failure_count"]
+        assert failure_calls == []
+
+    def test_unknown_feed_records_failure_count_400(self):
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/nonexistent"},
+        )
+
+        assert resp.status_code == 400
+        failure_calls = [c for c in self.mc.calls if c[0] == "feed.render.failure_count"]
+        assert len(failure_calls) == 1
+        _, value, attrs = failure_calls[0]
+        assert value == 1
+        assert attrs["status_code"] == "400"
+        assert attrs["feed_name"] == "unknown"
+
+    def test_auth_failure_records_failure_count_401(self):
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value=None):
+            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
+
+        assert resp.status_code == 401
+        failure_calls = [c for c in self.mc.calls if c[0] == "feed.render.failure_count"]
+        assert len(failure_calls) == 1
+        _, value, attrs = failure_calls[0]
+        assert value == 1
+        assert attrs["status_code"] == "401"
+        assert attrs["feed_name"] == FEED_RKEY
+
+    def test_firestore_unavailable_records_failure_count_500(self):
+        with (
+            patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:user"),
+        ):
+            app.state.firestore = None
+            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
+            app.state.firestore = AsyncMock()
+
+        assert resp.status_code == 500
+        failure_calls = [c for c in self.mc.calls if c[0] == "feed.render.failure_count"]
+        assert len(failure_calls) == 1
+        _, value, attrs = failure_calls[0]
+        assert value == 1
+        assert attrs["status_code"] == "500"
+        assert attrs["feed_name"] == FEED_RKEY
+
+    def test_failure_records_no_success_count(self):
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/nonexistent"},
+        )
+
+        assert resp.status_code == 400
+        success_calls = [c for c in self.mc.calls if c[0] == "feed.render.success_count"]
+        assert success_calls == []
 
 
 class TestPosthogTracking:
