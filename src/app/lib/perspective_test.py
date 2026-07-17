@@ -4,7 +4,6 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
-import httpx
 import pytest
 
 from ..models import CandidatePost
@@ -405,9 +404,7 @@ class TestScoreCandidates:
             _make_candidate("at://a/1", content="some content"),
             _make_candidate("at://a/2", content="other content"),
         ]
-        rate_limit_response = MagicMock()
-        rate_limit_response.status_code = 429
-        rate_limit_exc = httpx.HTTPStatusError("429", request=MagicMock(), response=rate_limit_response)
+        rate_limit_exc = aiohttp.ClientResponseError(request_info=MagicMock(), history=(), status=429)
         fake = MagicMock()
         fake.score = AsyncMock(side_effect=[rate_limit_exc, 0.7])
 
@@ -440,3 +437,29 @@ class TestScoreCandidates:
             result = asyncio.run(score_candidates(candidates))
 
         assert len(result) == 5
+
+
+class TestClosePerspectiveClient:
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        perspective_module._client = None
+        yield
+        perspective_module._client = None
+
+    def test_closes_singleton_and_resets_module_state(self):
+        import asyncio
+
+        fake_client = MagicMock()
+        fake_client.close = AsyncMock()
+        perspective_module._client = fake_client
+
+        asyncio.run(perspective_module.close_perspective_client())
+
+        fake_client.close.assert_awaited_once()
+        assert perspective_module._client is None
+
+    def test_noop_when_no_singleton_created(self):
+        import asyncio
+
+        perspective_module._client = None
+        asyncio.run(perspective_module.close_perspective_client())  # must not raise

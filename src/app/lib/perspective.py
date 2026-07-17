@@ -8,7 +8,6 @@ import os
 import time
 
 import aiohttp
-import httpx
 
 from ..models import CandidatePost
 from .telemetry import timed
@@ -240,6 +239,14 @@ def _get_client() -> PerspectiveClient:
     return _client
 
 
+async def close_perspective_client() -> None:
+    """Close the singleton PerspectiveClient's aiohttp session, if one was created."""
+    global _client
+    if _client is not None:
+        await _client.close()
+        _client = None
+
+
 async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float | None]:
     """Return PRC scores for *candidates*, keyed by ``at_uri``.
 
@@ -267,8 +274,8 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
                 c.at_uri,
             )
             return None
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429:
+        except aiohttp.ClientResponseError as exc:
+            if exc.status == 429:
                 logger.warning("Perspective API rate limited for post %s; using missing score", c.at_uri)
             else:
                 logger.exception("Perspective API scoring failed for post %s", c.at_uri)
