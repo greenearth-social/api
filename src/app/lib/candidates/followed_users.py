@@ -8,6 +8,7 @@ from ...models import CandidatePost
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 from ..bsky import get_followed_user_dids, FollowedUsersLookupError
+from ..config import fail_fast
 from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,8 @@ async def followed_users_search(
             user_did,
             exc,
         )
+        if fail_fast():
+            raise
         return []
 
     if not followed_dids:
