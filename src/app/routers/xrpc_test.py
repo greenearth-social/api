@@ -1,6 +1,7 @@
 """Tests for the XRPC feed generator endpoints."""
 
 import asyncio
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,7 +13,7 @@ from ..models import CandidatePost, FeedCursor, RankedCandidate, RankPredictResu
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import FeedCache
-from ..lib.metrics import set_metric_collector
+from ..lib.metrics import MetricCollector, set_metric_collector
 
 
 # ---------------------------------------------------------------------------
@@ -1870,7 +1871,7 @@ class TestDiversityScoreMetric:
 
     def test_metric_emitted_on_initial_request(self, monkeypatch):
         collector = FakeMetricCollector()
-        set_metric_collector(collector)
+        set_metric_collector(cast(MetricCollector, collector))
 
         candidates = self._make_scored_candidates(35)
         with _patch_unranked_your_feed_generators(candidates):
@@ -1890,7 +1891,7 @@ class TestDiversityScoreMetric:
 
     def test_metric_emitted_on_cursor_request(self, monkeypatch):
         collector = FakeMetricCollector()
-        set_metric_collector(collector)
+        set_metric_collector(cast(MetricCollector, collector))
 
         candidates = self._make_scored_candidates(35)
         with _patch_unranked_your_feed_generators(candidates):
@@ -1919,7 +1920,7 @@ class TestDiversityScoreMetric:
     def test_metric_not_emitted_when_no_scores(self, monkeypatch):
         """When diversification is off (no diversity_score on candidates), no metric fires."""
         collector = FakeMetricCollector()
-        set_metric_collector(collector)
+        set_metric_collector(cast(MetricCollector, collector))
 
         # Use random feed — no diversification
         candidates = [
@@ -1947,7 +1948,7 @@ class TestDiversityScoreMetric:
         from app.routers import xrpc as xrpc_mod
 
         collector = FakeMetricCollector()
-        set_metric_collector(collector)
+        set_metric_collector(cast(MetricCollector, collector))
 
         pinned_uri = "at://did:plc:pinauthor/app.bsky.feed.post/pinnedpost"
         candidates = [
