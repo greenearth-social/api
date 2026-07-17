@@ -388,6 +388,21 @@ def _get_feed_cache(request: Request) -> FeedCache:
     return cache
 
 
+def _record_diversity_metric(scores: list[float], feed_name: str, batch: int) -> None:
+    from ..lib.metrics import get_metric_collector
+    if not scores:
+        return
+    mc = get_metric_collector()
+    if mc is None:
+        return
+    mc.record(
+        "feed.mean_diversity_score",
+        sum(scores) / len(scores),
+        feed_name=feed_name,
+        batch=str(batch),
+    )
+
+
 def _log_diversity_metric(
     scores: list[float] | None,
     all_items: list[str],
@@ -396,20 +411,9 @@ def _log_diversity_metric(
     feed_name: str,
     batch: int,
 ) -> None:
-    from ..lib.metrics import get_metric_collector
     if scores is None or len(scores) != len(all_items) or page_len == 0:
         return
-    mc = get_metric_collector()
-    if mc is None:
-        return
-    page_scores = scores[page_offset : page_offset + page_len]
-    if page_scores:
-        mc.record(
-            "feed.mean_diversity_score",
-            sum(page_scores) / len(page_scores),
-            feed_name=feed_name,
-            batch=str(batch),
-        )
+    _record_diversity_metric(scores[page_offset : page_offset + page_len], feed_name, batch)
 
 
 # ---------------------------------------------------------------------------
@@ -437,13 +441,30 @@ def _skeleton_items(uris: list[str], feed_context: str) -> list[SkeletonItem]:
     return [SkeletonItem(post=uri, feed_context=feed_context) for uri in uris]
 
 
-def _prepend_pinned(pinned_uri: str, uris: list[str], limit: int) -> list[str]:
+def _prepend_pinned(
+    pinned_uri: str,
+    uris: list[str],
+    scores: list[float] | None,
+    limit: int,
+) -> tuple[list[str], list[float] | None]:
     """Prepend the pinned URI and cap the result at limit.
 
     Removes the pinned URI from the generated list first to avoid duplication.
+    Returns the page alongside diversity scores for the organically-ranked
+    items only — the pinned post is forced to the front regardless of its
+    diversity score, so it's excluded from the returned scores to keep the
+    mean-diversity metric representative of the ranking algorithm's output.
     """
-    deduped = [u for u in uris if u != pinned_uri]
-    return [pinned_uri] + deduped[: limit - 1]
+    if scores is not None and len(scores) == len(uris):
+        pairs = [(u, s) for u, s in zip(uris, scores) if u != pinned_uri]
+        deduped = [u for u, _ in pairs]
+        deduped_scores: list[float] | None = [s for _, s in pairs][: limit - 1]
+    else:
+        deduped = [u for u in uris if u != pinned_uri]
+        deduped_scores = None
+
+    page = [pinned_uri] + deduped[: limit - 1]
+    return page, deduped_scores
 
 
 # Fire-and-forget background tasks (Firestore session writes, …). Keeping a
@@ -891,10 +912,14 @@ async def get_feed_skeleton(
 
         # First page to return immediately. Prepend the pinned post if configured.
         if feed_cfg.pinned_post_uri:
-            page = _prepend_pinned(feed_cfg.pinned_post_uri, all_uris, limit)
+            page, page_scores = _prepend_pinned(
+                feed_cfg.pinned_post_uri, all_uris, all_scores, limit
+            )
+            if page_scores is not None:
+                _record_diversity_metric(page_scores, feed_name, batch=0)
         else:
             page = all_uris[:limit]
-        _log_diversity_metric(all_scores, all_uris, 0, len(page), feed_name, batch=0)
+            _log_diversity_metric(all_scores, all_uris, 0, len(page), feed_name, batch=0)
 
         # Store the full batch and issue a cursor only when there are more pages.
         next_cursor = None

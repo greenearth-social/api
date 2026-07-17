@@ -1941,6 +1941,62 @@ class TestDiversityScoreMetric:
         metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
         assert len(metric_calls) == 0
 
+    def test_metric_excludes_pinned_post_from_mean(self):
+        """The pinned post is forced to the front regardless of its diversity
+        score, so it must not be averaged into the mean-diversity metric."""
+        from app.routers import xrpc as xrpc_mod
+
+        collector = FakeMetricCollector()
+        set_metric_collector(collector)
+
+        pinned_uri = "at://did:plc:pinauthor/app.bsky.feed.post/pinnedpost"
+        candidates = [
+            CandidatePost(
+                at_uri=f"at://test/{i}",
+                score=1.0 - i * 0.1,
+                author_did=f"did:plc:{i}",
+                diversity_score=1.0 - i * 0.1,
+            )
+            for i in range(6)
+        ]
+        random_gen = AsyncMock()
+        random_gen.generate.return_value = CandidateResult(
+            generator_name="random_posts", candidates=candidates
+        )
+
+        def fake_get_generator(name):
+            return random_gen if name == "random_posts" else None
+
+        pinned_cfg = FEEDS["random"].model_copy(
+            update={"pinned_post_uri": pinned_uri, "diversify": True}
+        )
+        patched_feeds = {"random": pinned_cfg, **{k: v for k, v in FEEDS.items() if k != "random"}}
+
+        with (
+            patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator),
+            patch.object(xrpc_mod, "FEEDS", patched_feeds),
+            patch.object(xrpc_mod, "mmr_rerank", return_value=candidates),
+        ):
+            client = TestClient(app)
+            resp = client.get(
+                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={RANDOM_FEED_URI}&limit=5"
+            )
+
+        set_metric_collector(None)
+        assert resp.status_code == 200
+        post_uris = [item["post"] for item in resp.json()["feed"]]
+        assert post_uris[0] == pinned_uri
+        assert len(post_uris) == 5
+
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        assert len(metric_calls) == 1
+        _, value, attrs = metric_calls[0]
+        assert attrs["batch"] == "0"
+        # Only the 4 non-pinned served items (scores 1.0, 0.9, 0.8, 0.7) should
+        # contribute to the mean. Including the pinned post as a 0-score
+        # fifth entry would instead yield 0.8.
+        assert value == pytest.approx(0.85)
+
 
 # ---------------------------------------------------------------------------
 # Pinned post
