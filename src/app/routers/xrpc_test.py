@@ -1529,6 +1529,7 @@ class TestSlateCutoffs:
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/0", "at://p/1", "at://p/2"]
         discarded.assert_awaited_once()
+        assert discarded.await_args
         assert discarded.await_args.args[1] == "did:plc:testuser"
         assert discarded.await_args.args[2] == ["at://p/3"]
 
@@ -1582,6 +1583,7 @@ class TestSlateCutoffs:
         assert posts == ["at://p/0", "at://p/1", "at://p/2"]
         # Still recorded as discarded so the next session stops retrieving them.
         discarded.assert_awaited_once()
+        assert discarded.await_args
         assert discarded.await_args.args[2] == ["at://p/0", "at://p/1", "at://p/2"]
 
     def test_fail_closed_returns_empty_feed_when_constant_flipped(self, monkeypatch):
@@ -1657,7 +1659,9 @@ class TestSlateCutoffs:
             self._get_feed(candidates, self._rank_result([0.5, 0.2, 0.0, -0.3]))
 
             metrics = {}
-            for rm in reader.get_metrics_data().resource_metrics:
+            metrics_data = reader.get_metrics_data()
+            assert metrics_data is not None
+            for rm in metrics_data.resource_metrics:
                 for sm in rm.scope_metrics:
                     for metric in sm.metrics:
                         metrics[metric.name] = metric
