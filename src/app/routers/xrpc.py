@@ -273,7 +273,7 @@ async def _run_ranking_pipeline(
             num_candidates=gen_request.num_candidates,
             n_generators=len(gen_request.generators),
         ):
-            result = await run_generate(gen_request, es, swallow_errors=not fail_fast())
+            result = await run_generate(gen_request, es)
         candidates = result.candidates
 
         if not candidates:
