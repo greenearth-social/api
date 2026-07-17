@@ -3,6 +3,7 @@
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import httpx
 import pytest
 
@@ -132,59 +133,192 @@ def _fake_client(scores: list[float]) -> MagicMock:
     return client
 
 
+class _FakeResponseCM:
+    """Async context manager mimicking aiohttp's ClientSession.post() return value."""
+
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _TimeoutCM:
+    """Async context manager that raises TimeoutError on entry, simulating a
+    request that blew past aiohttp.ClientTimeout."""
+
+    async def __aenter__(self):
+        raise TimeoutError()
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def _fake_response(
+    status: int = 200, json_body: dict | None = None, text_body: str = ""
+) -> MagicMock:
+    response = MagicMock()
+    response.status = status
+    response.json = AsyncMock(return_value=json_body or {})
+    response.text = AsyncMock(return_value=text_body)
+    if status >= 400:
+        response.raise_for_status = MagicMock(
+            side_effect=aiohttp.ClientResponseError(
+                request_info=MagicMock(), history=(), status=status
+            )
+        )
+    else:
+        response.raise_for_status = MagicMock()
+    return response
+
+
+_SUCCESS_ATTR_SCORES = {name: {"summaryScore": {"value": 0.5}} for name in _ALL_PRC_ATTRS}
+_SUCCESS_BODY = {"attributeScores": _SUCCESS_ATTR_SCORES}
+
+
 class TestPerspectiveClientScore:
     def test_language_not_supported_raises_specific_error(self):
         """A 400 LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE response should raise
-        PerspectiveLanguageNotSupportedError, not a generic HTTPStatusError,
+        PerspectiveLanguageNotSupportedError, not a generic ClientResponseError,
         so callers can handle it gracefully without treating it as an API bug."""
         import asyncio
-        import json
 
         from .perspective import PerspectiveClient
 
-        body = json.dumps({"error": {"code": 400, "details": [{"errorType": "LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE"}]}})
-        mock_response = MagicMock()
-        mock_response.is_success = False
-        mock_response.status_code = 400
-        mock_response.text = body
-        mock_response.json.return_value = json.loads(body)
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError("400", request=MagicMock(), response=mock_response)
+        body = {
+            "error": {
+                "code": 400,
+                "details": [
+                    {
+                        "errorType": "LANGUAGE_NOT_SUPPORTED_BY_ATTRIBUTE",
+                        "languageNotSupportedByAttributeError": {"detectedLanguages": ["ja"]},
+                    }
+                ],
+            }
+        }
+        response = _fake_response(status=400, json_body=body)
+        session = MagicMock()
+        session.post = MagicMock(return_value=_FakeResponseCM(response))
 
-        mock_client = MagicMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
+        with patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}):
+            client = PerspectiveClient()
 
-        with (
-            patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}),
-            patch("app.lib.perspective.get_http_client", return_value=mock_client),
-        ):
+        with patch.object(PerspectiveClient, "_get_session", return_value=session):
             with pytest.raises(PerspectiveLanguageNotSupportedError):
-                asyncio.run(PerspectiveClient().score("にじほ"))
+                asyncio.run(client.score("にじほ"))
 
-    def test_other_400_still_raises_http_error(self):
-        """Non-language 400s should still propagate as HTTPStatusError."""
+    def test_other_400_still_raises_client_response_error(self):
+        """Non-language 400s should still propagate as aiohttp.ClientResponseError."""
         import asyncio
-        import json
 
         from .perspective import PerspectiveClient
 
-        body = json.dumps({"error": {"code": 400, "details": [{"errorType": "SOME_OTHER_ERROR"}]}})
-        mock_response = MagicMock()
-        mock_response.is_success = False
-        mock_response.status_code = 400
-        mock_response.text = body
-        mock_response.json.return_value = json.loads(body)
-        exc = httpx.HTTPStatusError("400", request=MagicMock(), response=mock_response)
-        mock_response.raise_for_status.side_effect = exc
+        body = {"error": {"code": 400, "details": [{"errorType": "SOME_OTHER_ERROR"}]}}
+        response = _fake_response(status=400, json_body=body)
+        session = MagicMock()
+        session.post = MagicMock(return_value=_FakeResponseCM(response))
 
-        mock_client = MagicMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
+        with patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}):
+            client = PerspectiveClient()
 
-        with (
-            patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}),
-            patch("app.lib.perspective.get_http_client", return_value=mock_client),
-        ):
-            with pytest.raises(httpx.HTTPStatusError):
-                asyncio.run(PerspectiveClient().score("bad request"))
+        with patch.object(PerspectiveClient, "_get_session", return_value=session):
+            with pytest.raises(aiohttp.ClientResponseError):
+                asyncio.run(client.score("bad request"))
+
+    def test_timeout_retries_once_then_succeeds(self):
+        """A single timeout should be retried (2 total attempts), matching the
+        PRC reference implementation's retry-once behavior."""
+        import asyncio
+
+        from .perspective import PerspectiveClient
+
+        response = _fake_response(status=200, json_body=_SUCCESS_BODY)
+        session = MagicMock()
+        session.post = MagicMock(side_effect=[_TimeoutCM(), _FakeResponseCM(response)])
+
+        with patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}):
+            client = PerspectiveClient()
+
+        with patch.object(PerspectiveClient, "_get_session", return_value=session):
+            score = asyncio.run(client.score("hello"))
+
+        assert score == pytest.approx(_prc_score({name: 0.5 for name in _ALL_PRC_ATTRS}))
+        assert session.post.call_count == 2
+
+    def test_timeout_exhausts_retries_raises(self):
+        """Two consecutive timeouts should give up and raise, not retry forever."""
+        import asyncio
+
+        from .perspective import PerspectiveClient
+
+        session = MagicMock()
+        session.post = MagicMock(side_effect=[_TimeoutCM(), _TimeoutCM()])
+
+        with patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}):
+            client = PerspectiveClient()
+
+        with patch.object(PerspectiveClient, "_get_session", return_value=session):
+            with pytest.raises(TimeoutError):
+                asyncio.run(client.score("hello"))
+
+        assert session.post.call_count == 2
+
+    def test_session_uses_unlimited_connection_pool(self):
+        """The Perspective client's connector must set limit=0/limit_per_host=0
+        so a burst of concurrent scoring calls can't be starved by a default
+        pool size -- the root cause investigated in issue #250."""
+        import asyncio
+
+        from .perspective import PerspectiveClient
+
+        with patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}):
+            client = PerspectiveClient()
+
+        async def _build():
+            with (
+                patch("app.lib.perspective.aiohttp.TCPConnector") as mock_connector,
+                patch("app.lib.perspective.aiohttp.ClientSession") as mock_session_cls,
+            ):
+                client._get_session()
+                mock_connector.assert_called_once_with(
+                    limit=0,
+                    limit_per_host=0,
+                    enable_cleanup_closed=True,
+                    keepalive_timeout=45,
+                )
+                mock_session_cls.assert_called_once_with(connector=mock_connector.return_value)
+
+        asyncio.run(_build())
+
+    def test_close_closes_session_and_resets(self):
+        import asyncio
+
+        from .perspective import PerspectiveClient
+
+        with patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}):
+            client = PerspectiveClient()
+
+        fake_session = MagicMock()
+        fake_session.close = AsyncMock()
+        client._session = fake_session
+
+        asyncio.run(client.close())
+
+        fake_session.close.assert_awaited_once()
+        assert client._session is None
+
+    def test_close_is_noop_when_never_opened(self):
+        import asyncio
+
+        from .perspective import PerspectiveClient
+
+        with patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}):
+            client = PerspectiveClient()
+
+        asyncio.run(client.close())  # must not raise
 
 
 class TestScoreCandidates:
