@@ -15,7 +15,13 @@ from .telemetry import timed
 
 logger = logging.getLogger(__name__)
 
-_PERSPECTIVE_URL = "https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze"
+_PERSPECTIVE_HOST_DEFAULT = "https://commentanalyzer.googleapis.com"
+
+
+def _perspective_url() -> str:
+    """Perspective API endpoint URL, overridable via GE_PERSPECTIVE_HOST for local profiling."""
+    host = os.environ.get("GE_PERSPECTIVE_HOST", _PERSPECTIVE_HOST_DEFAULT)
+    return f"{host}/v1alpha1/comments:analyze"
 
 
 class PerspectiveLanguageNotSupportedError(Exception):
@@ -111,7 +117,7 @@ class PerspectiveClient:
         client = get_http_client()
         async with timed(logger, "perspective.score.duration_ms", record_metric=True):
             response = await client.post(
-                _PERSPECTIVE_URL,
+                _perspective_url(),
                 params={"key": self._api_key},
                 json=payload,
             )

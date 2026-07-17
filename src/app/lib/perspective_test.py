@@ -1,5 +1,6 @@
 """Tests for PRC scoring and Perspective API candidate scoring."""
 
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -18,6 +19,28 @@ def _reset_rate_limiter():
     yield
     perspective_module._rate_bucket_minute = -1
     perspective_module._rate_count = 0
+
+
+# ---------------------------------------------------------------------------
+# _perspective_url
+# ---------------------------------------------------------------------------
+
+
+class TestPerspectiveUrl:
+    def test_default_host(self):
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("GE_PERSPECTIVE_HOST", None)
+            assert (
+                perspective_module._perspective_url()
+                == "https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze"
+            )
+
+    def test_custom_host_override(self):
+        with patch.dict("os.environ", {"GE_PERSPECTIVE_HOST": "http://127.0.0.1:8099"}):
+            assert (
+                perspective_module._perspective_url()
+                == "http://127.0.0.1:8099/v1alpha1/comments:analyze"
+            )
 
 
 # ---------------------------------------------------------------------------
