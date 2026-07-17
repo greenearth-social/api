@@ -437,12 +437,53 @@ def _merge_feed_snapshots(
     meta_by_uri = {meta.at_uri: meta for meta in earlier.items_meta}
     meta_by_uri.update({meta.at_uri: meta for meta in later.items_meta})
     items_meta = [meta_by_uri[uri] for uri in ordered_items if uri in meta_by_uri]
+    existing_diag = {
+        (diag.name, diag.mode): diag for diag in existing.generator_diagnostics
+    }
+    incoming_diag = {
+        (diag.name, diag.mode): diag for diag in incoming.generator_diagnostics
+    }
+    incoming_new = set(incoming.items) - set(existing.items)
+    diagnostics = []
+    for key in dict.fromkeys([*existing_diag, *incoming_diag]):
+        name, _mode = key
+        old = existing_diag.get(key)
+        new = incoming_diag.get(key)
+        if old is None and new is not None:
+            diagnostics.append(new)
+            continue
+        if new is None and old is not None:
+            diagnostics.append(old)
+            continue
+        assert old is not None and new is not None
+        is_new_generation = incoming.generated_at > existing.generated_at
+        added = sum(
+            1
+            for meta in incoming.items_meta
+            if meta.at_uri in incoming_new
+            and any(generator.name == name for generator in meta.generators)
+        )
+        diagnostics.append(
+            old.model_copy(
+                update={
+                    "returned_count": (
+                        old.returned_count + new.returned_count
+                        if is_new_generation
+                        else max(old.returned_count, new.returned_count)
+                    ),
+                    "contributed_count": old.contributed_count + added,
+                    "status": new.status if old.status != "success" else old.status,
+                    "reason": new.reason if old.reason is None else old.reason,
+                }
+            )
+        )
 
     return (
         earlier.model_copy(
             update={
                 "items": ordered_items,
                 "items_meta": items_meta,
+                "generator_diagnostics": diagnostics,
                 "expires_at": max(existing.expires_at, incoming.expires_at),
             }
         ),

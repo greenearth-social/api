@@ -12,11 +12,21 @@ from ..models import CandidatePost, FeedCursor, RankedCandidate, RankPredictResu
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import FeedCache
+from ..lib.feed_context import decode_feed_context
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_initial_request_reuse():
+    from ..routers.xrpc import _clear_initial_request_cache
+
+    _clear_initial_request_cache()
+    yield
+    _clear_initial_request_cache()
 
 SERVICE_DID = "did:web:test.example.com"
 PUBLISHER_DID = "did:plc:publisherabc123"
@@ -397,6 +407,53 @@ class TestGetFeedSkeleton:
         rids = {p.rid for p in payloads if p is not None}
         assert len(rids) == 1
 
+    def test_identical_initial_requests_within_window_reuse_response(self):
+        candidates = _make_candidates("p", 8)
+        with (
+            self._patch_generators(candidates) as mock_get,
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as snapshot_write,
+        ):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            )
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            )
+
+        assert first.json() == second.json()
+        mock_get.side_effect("two_tower").generate.assert_awaited_once()
+        snapshot_write.assert_awaited_once()
+
+    def test_initial_request_after_reuse_window_gets_new_session(self):
+        from app.routers import xrpc as xrpc_mod
+
+        candidates = _make_candidates("p", 8)
+        with self._patch_generators(candidates):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            ).json()
+            key = ("did:plc:testuser", FEED_RKEY, 3)
+            xrpc_mod._initial_requests[key].created_at -= (
+                xrpc_mod.INITIAL_REQUEST_REUSE_SECONDS + 1
+            )
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            ).json()
+
+        first_context = decode_feed_context(first["feed"][0]["feedContext"])
+        second_context = decode_feed_context(second["feed"][0]["feedContext"])
+        assert first_context is not None
+        assert second_context is not None
+        assert first_context.rid != second_context.rid
+
     # --- rkey matching ---
 
     def test_matches_feed_by_rkey_regardless_of_did(self):
@@ -450,8 +507,8 @@ class TestGetFeedSkeleton:
     # --- cursor is excluded when None ---
 
     def test_cursor_omitted_when_none(self):
-        """AT Protocol requires cursor to be absent, not null."""
-        with self._patch_generators(_make_candidates("p", 1)):
+        """Empty feeds omit the optional cursor rather than serializing null."""
+        with self._patch_generators([]):
             resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
         assert "cursor" not in resp.json()
 
@@ -701,7 +758,7 @@ class TestFeedSkeletonCursor:
         parsed = FeedCursor.decode(data["cursor"])
         assert parsed.offset == 3
 
-    def test_no_cursor_when_all_results_fit_in_one_page(self):
+    def test_short_initial_page_keeps_cursor_for_regeneration(self):
         candidates = _make_candidates("p", 3)
         with self._patch_generators(candidates):
             data = client.get(
@@ -709,7 +766,8 @@ class TestFeedSkeletonCursor:
                 params={"feed": FEED_URI, "limit": 5},
             ).json()
         assert len(data["feed"]) == 3
-        assert "cursor" not in data
+        assert "cursor" in data
+        assert FeedCursor.decode(data["cursor"]).offset == 3
 
     def test_second_page_via_cursor(self):
         candidates = _make_candidates("p", 10)
@@ -1737,6 +1795,24 @@ class TestFeedDebugCapture:
         mock_snapshot.assert_awaited_once()
         mock_debug.assert_not_awaited()
 
+    def test_snapshot_contains_only_posts_returned_on_initial_page(self):
+        candidates = _make_candidates("p", 8)
+        with (
+            self._patch_generators(candidates),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=self._user_doc(False)),
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False) as mock_snapshot,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            )
+
+        returned = [item["post"] for item in response.json()["feed"]]
+        snapshot = mock_snapshot.await_args.args[3]
+        assert snapshot.items == returned
+        assert snapshot.items == ["at://p/0", "at://p/1", "at://p/2"]
+        assert [meta.at_uri for meta in snapshot.items_meta] == snapshot.items
+
     def test_full_debug_record_when_enabled(self):
         """Full debug record written in background when debug_feeds is on."""
         spawned: list = []
@@ -1813,6 +1889,23 @@ class TestGetFeedSkeletonProbe:
             )
         assert resp.status_code == 200
 
+    def test_probe_does_not_write_observability_snapshot(self):
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 3)),
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot",
+                new_callable=AsyncMock,
+            ) as snapshot_write,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers={"X-Probe-Secret": self.PROBE_SECRET},
+            )
+
+        assert resp.status_code == 200
+        snapshot_write.assert_not_awaited()
+
     def test_wrong_probe_secret_returns_401(self):
         """Wrong X-Probe-Secret still 401s (no bypass)."""
         resp = client.get(
@@ -1880,6 +1973,45 @@ class TestPinnedPost:
 
         assert resp.status_code == 200
         assert resp.json()["feed"][0]["post"] == self.PINNED_URI
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None)
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    def test_pinned_post_is_excluded_from_observability_snapshot(self, *mocks):
+        from app.routers import xrpc as xrpc_mod
+
+        candidates = _make_candidates("did:plc:a", 5, "random_posts")
+        random_gen = AsyncMock()
+        random_gen.generate.return_value = CandidateResult(
+            generator_name="random_posts", candidates=candidates
+        )
+        patched_feeds = self._make_random_feed_with_pin()
+        with (
+            patch(
+                "app.lib.candidates.generate.get_generator",
+                return_value=random_gen,
+            ),
+            patch.object(xrpc_mod, "FEEDS", patched_feeds),
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as snapshot_write,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 3},
+            )
+
+        assert response.json()["feed"][0]["post"] == self.PINNED_URI
+        snapshot = snapshot_write.await_args.args[3]
+        assert self.PINNED_URI not in snapshot.items
+        assert snapshot.items == [
+            "at://did:plc:a/0",
+            "at://did:plc:a/1",
+        ]
+        assert all(meta.at_uri != self.PINNED_URI for meta in snapshot.items_meta)
 
     @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None)

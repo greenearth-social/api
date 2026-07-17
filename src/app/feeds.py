@@ -103,7 +103,7 @@ FEEDS: dict[str, FeedConfig] = {
                 GeneratorSpec(name="two_tower", weight=0.30),
                 GeneratorSpec(name="popularity", weight=0.30),
             ],
-            infill="popularity",
+            infill=None,
             num_candidates=30,
             video_only=False,
             exclude_uris=[],

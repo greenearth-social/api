@@ -182,6 +182,41 @@ class TestBuildDocument:
         assert rec.author_dids() == {"did:plc:a", "did:plc:b"}
 
 
+def test_snapshot_diagnostics_keep_friend_fallback_modes_separate():
+    rec = FeedDebugRecorder(feed_name="your-feed", regenerated=False)
+    rec.set_generate_request(
+        CandidateGenerateRequest(
+            generators=[GeneratorSpec(name="followed_users", weight=1.0)],
+            user_did="did:plc:user",
+            num_candidates=3,
+            video_only=False,
+        )
+    )
+    recent = _candidate("at://p/recent")
+    older = _candidate("at://p/older")
+    rec.record_generator_output(CandidateResult(
+        generator_name="followed_users", candidates=[recent],
+        mode="direct_friends_recent",
+    ))
+    rec.record_generator_output(CandidateResult(
+        generator_name="followed_users", candidates=[older],
+        mode="direct_friends_7d",
+    ))
+    rec.record_final_candidates([recent, older])
+    rec.record_final_order(["at://p/recent", "at://p/older"])
+    now = datetime.now(timezone.utc)
+
+    snapshot = rec.build_pipeline_metadata(
+        request_id="req", generated_at=now, expires_at=now + timedelta(minutes=15)
+    )
+
+    assert [diagnostic.mode for diagnostic in snapshot.generator_diagnostics] == [
+        "direct_friends_recent", "direct_friends_7d"
+    ]
+    assert [diagnostic.requested_count for diagnostic in snapshot.generator_diagnostics] == [3, 2]
+    assert [diagnostic.contributed_count for diagnostic in snapshot.generator_diagnostics] == [1, 1]
+
+
 class TestModelScoreCapture:
     """`record_model_scores` accumulates one entry per rank model, in call order."""
 
@@ -332,7 +367,11 @@ class TestBuildPipelineMetadata:
         gen_a = snap.items_meta[0].generators
         assert len(gen_a) == 1
         assert gen_a[0].name == "two_tower"
-        assert gen_a[0].score == 0.85
+        assert gen_a[0].score == 1.0
+        assert snap.items_meta[1].generators[0].score == 0.0
+        assert snap.generator_diagnostics[0].requested_count == 30
+        assert snap.generator_diagnostics[0].returned_count == 2
+        assert snap.generator_diagnostics[0].contributed_count == 2
 
     def test_per_uri_rank_and_model_scores(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)

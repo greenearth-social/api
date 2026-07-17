@@ -24,6 +24,7 @@ BSKY_GET_POSTS_URL = "https://public.api.bsky.app/xrpc/app.bsky.feed.getPosts"
 BSKY_BATCH_LIMIT = 25
 HYDRATION_CACHE_TTL_HOURS = 1
 HYDRATED_POSTS_COLLECTION = "hydrated_posts"
+HYDRATION_CACHE_VERSION = 2
 
 _GET_POSTS_TIMEOUT = httpx.Timeout(5.0, connect=1.0, read=5.0, write=2.0, pool=1.0)
 
@@ -87,6 +88,21 @@ def _parse_bsky_post(post: dict) -> tuple[str, dict]:
         "avatar_url": author_data.get("avatar"),
     }
 
+    def label_values(raw_labels) -> list[str]:
+        if not isinstance(raw_labels, list):
+            return []
+        return [
+            value
+            for label in raw_labels
+            if isinstance(label, dict)
+            and isinstance((value := label.get("val")), str)
+        ]
+
+    moderation = {
+        "post_labels": label_values(post.get("labels")),
+        "author_labels": label_values(author_data.get("labels")),
+    }
+
     image_urls: list[str] = []
     video_url: str | None = None
     link_card_url: str | None = None
@@ -143,6 +159,7 @@ def _parse_bsky_post(post: dict) -> tuple[str, dict]:
             "labels": labels,
         },
         "engagement": engagement,
+        "moderation": moderation,
     }
 
 
@@ -160,6 +177,7 @@ def _empty_hydration() -> dict:
             "labels": [],
         },
         "engagement": {"reply_count": 0, "repost_count": 0, "like_count": 0},
+        "moderation": {"post_labels": [], "author_labels": []},
     }
 
 
@@ -184,7 +202,11 @@ async def get_cached_hydrated_posts(
                 data = doc.to_dict()
                 if data is not None:
                     expires = data.get("expires_at")
-                    if isinstance(expires, datetime) and expires > now:
+                    if (
+                        data.get("version") == HYDRATION_CACHE_VERSION
+                        and isinstance(expires, datetime)
+                        and expires > now
+                    ):
                         cached[uri] = data["data"]
                         continue
             missing.append(uri)
@@ -203,7 +225,11 @@ async def cache_hydrated_posts(db: AsyncClient, posts: dict[str, dict]) -> None:
     batch = db.batch()
     for uri, data in posts.items():
         ref = db.collection(HYDRATED_POSTS_COLLECTION).document(_post_rkey(uri))
-        batch.set(ref, {"data": data, "expires_at": expires})
+        batch.set(ref, {
+            "data": data,
+            "expires_at": expires,
+            "version": HYDRATION_CACHE_VERSION,
+        })
     try:
         await batch.commit()
     except Exception:

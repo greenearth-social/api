@@ -15,10 +15,23 @@ class FeedSummary(BaseModel):
     request_id: str
     generated_at: datetime
     feed_name: str
+    applied_social_radius: int | None = None
+    generator_diagnostics: list["GeneratorDiagnosticView"] = Field(default_factory=list)
 
 
 class FeedListResponse(BaseModel):
     feeds: list[FeedSummary]
+
+
+class GeneratorDiagnosticView(BaseModel):
+    name: str
+    weight: float
+    requested_count: int
+    returned_count: int
+    contributed_count: int
+    status: str
+    reason: str | None = None
+    mode: str = "primary"
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +98,10 @@ class FeedDetailResponse(BaseModel):
     request_id: str
     generated_at: datetime
     items: list[FeedItemView]
+    stored_item_count: int = 0
+    displayed_item_count: int = 0
+    publicly_filtered_count: int = 0
+    unavailable_count: int = 0
 
 
 # ---------------------------------------------------------------------------

@@ -87,6 +87,11 @@ class FeedCacheDocument(BaseModel):
 
     items: list[str] = Field(default_factory=list, description="Cached AT URI list")
     expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")
+    items_meta: list["PipelineItemMeta"] = Field(default_factory=list)
+    generator_diagnostics: list["GeneratorDiagnostic"] = Field(default_factory=list)
+    applied_social_radius: int | None = None
+    feed_name: str | None = None
+    generated_at: datetime | None = None
 
 
 class SeenPostsDocument(BaseModel):
@@ -321,6 +326,19 @@ class GeneratorMeta(BaseModel):
     score: float | None = None
 
 
+class GeneratorDiagnostic(BaseModel):
+    """Snapshot-level outcome for one configured candidate generator."""
+
+    name: str
+    weight: float
+    requested_count: int
+    returned_count: int
+    contributed_count: int = 0
+    status: str = "success"
+    reason: str | None = None
+    mode: str = "primary"
+
+
 class ModelScoreMeta(BaseModel):
     """One rank model's normalized score for a single item."""
 
@@ -361,4 +379,6 @@ class FeedSnapshotDocument(BaseModel):
     ranker_model: str | None = None
     diversify: bool = False
     generator_legend: list[GeneratorMeta] = Field(default_factory=list)
+    generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
+    applied_social_radius: int | None = None
     items_meta: list[PipelineItemMeta] = Field(default_factory=list)
