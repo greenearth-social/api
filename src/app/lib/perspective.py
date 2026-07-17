@@ -276,7 +276,9 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
             return None
         except aiohttp.ClientResponseError as exc:
             if exc.status == 429:
-                logger.warning("Perspective API rate limited for post %s; using missing score", c.at_uri)
+                logger.warning(
+                    "Perspective API rate limited for post %s; using missing score", c.at_uri
+                )
             else:
                 logger.exception("Perspective API scoring failed for post %s", c.at_uri)
             return None

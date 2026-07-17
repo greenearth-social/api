@@ -404,7 +404,9 @@ class TestScoreCandidates:
             _make_candidate("at://a/1", content="some content"),
             _make_candidate("at://a/2", content="other content"),
         ]
-        rate_limit_exc = aiohttp.ClientResponseError(request_info=MagicMock(), history=(), status=429)
+        rate_limit_exc = aiohttp.ClientResponseError(
+            request_info=MagicMock(), history=(), status=429
+        )
         fake = MagicMock()
         fake.score = AsyncMock(side_effect=[rate_limit_exc, 0.7])
 
