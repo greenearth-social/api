@@ -20,6 +20,11 @@ GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 # Inference configuration
 GE_INFERENCE_BASE_URL=""
 
+# PostHog configuration. Each environment is a separate PostHog project (separate
+# API key, provisioned via scripts/gcp_setup.sh), but all projects live on the same
+# PostHog Cloud host, so the host is a constant here rather than a per-env secret.
+GE_POSTHOG_HOST="https://us.i.posthog.com"
+
 # Service configuration
 API_INSTANCES_MIN="1"
 API_INSTANCES_MAX="10"
@@ -210,6 +215,7 @@ deploy_api_service() {
     local feed_context_secret="feed-context-secret-stage"
     local probe_secret="probe-secret-stage"
     local perspective_api_key_secret="perspective-api-key-stage"
+    local posthog_api_key_secret="posthog-api-key-stage"
     local firestore_database="greenearth-stage"
     if [ "$ENVIRONMENT" = "prod" ]; then
         es_api_key_secret="elasticsearch-api-key-readonly-prod"
@@ -218,6 +224,7 @@ deploy_api_service() {
         feed_context_secret="feed-context-secret-prod"
         probe_secret="probe-secret-prod"
         perspective_api_key_secret="perspective-api-key-prod"
+        posthog_api_key_secret="posthog-api-key-prod"
         firestore_database="greenearth-prod"
     fi
 
@@ -241,7 +248,8 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_PROBE_USER_DID=did:plc:s4tl2ajfsnstzuxtegl7r33g"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=5"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=15"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_POSTHOG_HOST=$GE_POSTHOG_HOST"
 
     if [ -n "$GE_INFERENCE_BASE_URL" ]; then
         deploy_cmd="$deploy_cmd --set-env-vars=GE_INFERENCE_BASE_URL=$GE_INFERENCE_BASE_URL"
@@ -254,6 +262,7 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-secrets=GE_FEED_CONTEXT_SECRET=$feed_context_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_PROBE_SECRET=$probe_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_PERSPECTIVE_API_KEY=$perspective_api_key_secret:latest"
+    deploy_cmd="$deploy_cmd --set-secrets=GE_POSTHOG_API_KEY=$posthog_api_key_secret:latest"
 
     # Resource and scaling configuration
     deploy_cmd="$deploy_cmd --min-instances=$API_INSTANCES_MIN"

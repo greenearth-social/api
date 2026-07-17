@@ -50,6 +50,7 @@ from app.lib.firestore import (
 )
 
 console = Console()
+HEAVY_RANKER_MODEL_NAME = "heavy_ranker"
 
 # GCP project + Firestore database per environment. Both environments live in
 # the same project and are separated by database (see scripts/gcp_setup.sh).
@@ -131,6 +132,85 @@ def _model_specs_str(doc: FeedDebugDocument) -> str:
     if doc.model_scores:
         return ", ".join(f"{m.model_name}({m.weight:g})" for m in doc.model_scores)
     return doc.ranker_model or "(none)"
+
+
+def _generator_candidate_groups(doc: FeedDebugDocument) -> dict[str, list]:
+    """Raw candidates grouped by primary/infill generator label."""
+    req = doc.generate_request
+    primary_remaining: dict[str, int] = {}
+    groups: dict[str, list] = {}
+
+    def ensure(label: str) -> None:
+        if label not in groups:
+            groups[label] = []
+
+    for spec in req.generators:
+        primary_remaining[spec.name] = primary_remaining.get(spec.name, 0) + 1
+        ensure(spec.name)
+    if req.infill:
+        ensure(f"infill {req.infill}")
+
+    for result in doc.generator_outputs:
+        name = result.generator_name
+        if primary_remaining.get(name, 0) > 0:
+            label = name
+            primary_remaining[name] -= 1
+        elif req.infill and name == req.infill:
+            label = f"infill {name}"
+        else:
+            label = name
+            ensure(label)
+        groups[label].extend(result.candidates)
+
+    return groups
+
+
+def _candidate_stats_rows(doc: FeedDebugDocument) -> list[tuple[str, str, str, str, str]]:
+    """Candidate stats by generator.
+
+    Rows are label, count, placement, heavy ranker, author penalty averages.
+    """
+    groups = _generator_candidate_groups(doc)
+    final_ranks = {uri: i + 1 for i, uri in enumerate(doc.final_order)}
+    author_penalties = {entry.at_uri: entry.author_penalty for entry in doc.diversification}
+    heavy_scores: dict[str, float] = {}
+    for entry in doc.model_scores:
+        if entry.model_name == HEAVY_RANKER_MODEL_NAME:
+            heavy_scores = {score.at_uri: score.score for score in entry.scores}
+            break
+
+    def fmt_avg(values: list[float], precision: int) -> str:
+        if not values:
+            return "—"
+        return f"{sum(values) / len(values):.{precision}f}"
+
+    rows = []
+    for label, candidates in groups.items():
+        placements = [
+            final_ranks[c.at_uri]
+            for c in candidates
+            if c.at_uri in final_ranks
+        ]
+        ranker_scores = [
+            heavy_scores[c.at_uri]
+            for c in candidates
+            if c.at_uri in heavy_scores
+        ]
+        author_penalty_scores = [
+            author_penalties[c.at_uri]
+            for c in candidates
+            if c.at_uri in author_penalties
+        ]
+        rows.append(
+            (
+                label,
+                str(len(candidates)),
+                fmt_avg(placements, 1),
+                fmt_avg(ranker_scores, 2),
+                fmt_avg(author_penalty_scores, 3),
+            )
+        )
+    return rows
 
 
 def _media_summary(c) -> Text | None:
@@ -247,7 +327,6 @@ def _header_panel(doc: FeedDebugDocument) -> Panel:
         body.append(f"   excluded={len(req.exclude_uris)}", style="dim")
 
     if doc.user_features:
-        body.append("\n")
         for uf in doc.user_features:
             body.append("\nuser feats  ", style="dim")
             body.append(
@@ -264,6 +343,26 @@ def _header_panel(doc: FeedDebugDocument) -> Panel:
         border_style="blue",
         padding=(0, 2),
     )
+
+
+def _candidate_stats_table(doc: FeedDebugDocument) -> Table:
+    table = Table(
+        box=box.SIMPLE,
+    )
+    table.add_column("generator", style="cyan")
+    table.add_column("count", justify="right", style="green")
+    table.add_column("placement", justify="right", style="yellow")
+    table.add_column("heavy_ranker", justify="right", style="white")
+    table.add_column("author_penalty", justify="right", style="magenta")
+    for (
+        label,
+        count,
+        avg_placement,
+        avg_ranker_score,
+        avg_author_penalty,
+    ) in _candidate_stats_rows(doc):
+        table.add_row(label, count, avg_placement, avg_ranker_score, avg_author_penalty)
+    return table
 
 
 def _item_panel(
@@ -425,6 +524,9 @@ def _render_show(doc: FeedDebugDocument) -> None:
             "[-1, 1], with its configured weight — the inputs to the combined "
             "(model) score above[/dim]"
         )
+    console.print()
+    console.print("[bold]average candidate stats[/bold]")
+    console.print(_candidate_stats_table(doc))
     console.print()
     for pos, uri in enumerate(doc.final_order):
         console.print(

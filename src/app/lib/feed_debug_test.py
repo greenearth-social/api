@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from .candidates.base import CandidateResult
-from .diversify import BETA, mmr_rerank
+from .diversify import BETA, mmr_rerank, AUTHOR_WEIGHT
 from .embeddings import encode_float32_b64
 from .feed_debug import (
     CONTENT_SNIPPET_MAX,
@@ -231,12 +231,12 @@ class TestDiversificationCapture:
         assert score == pytest.approx((1 - BETA) * 1.0)
         assert author_pen == pytest.approx(0.0)
         assert content_pen == pytest.approx(0.0)
-        # Second pick: author_penalty = BETA * AUTHOR_WEIGHT * 1 = 0.5 * 0.75.
+        # Second pick: author_penalty = BETA * AUTHOR_WEIGHT * 1.
         _, rel, score, author_pen, content_pen = rec.diversification[1]
         assert rel == pytest.approx(0.5)
-        assert author_pen == pytest.approx(0.375)
+        assert author_pen == pytest.approx(BETA * AUTHOR_WEIGHT * 1)
         assert content_pen == pytest.approx(0.0)
-        assert score == pytest.approx(0.5 * 0.5 - 0.375)
+        assert score == pytest.approx((1 - BETA) * 0.5 - author_pen - content_pen)
 
     def test_content_penalty_recorded(self):
         # Different authors, identical embeddings -> penalty is purely content.
@@ -252,9 +252,9 @@ class TestDiversificationCapture:
             mmr_rerank([a, b])
 
         _, _, _, author_pen, content_pen = rec.diversification[1]
-        # content_penalty = BETA * (1 - AUTHOR_WEIGHT) * cosine(=1) = 0.5 * 0.25.
+        # content_penalty = BETA * (1 - AUTHOR_WEIGHT) * cosine(=1).
         assert author_pen == pytest.approx(0.0)
-        assert content_pen == pytest.approx(0.125)
+        assert content_pen == pytest.approx(BETA * (1 - AUTHOR_WEIGHT) * 1.0)
 
     def test_no_recording_without_recorder(self):
         a = CandidatePost(

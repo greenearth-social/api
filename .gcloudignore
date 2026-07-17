@@ -53,5 +53,8 @@ docs/
 # Scripts (we don't need these in the container)
 scripts/
 
+# Assets are only needed locally at publish time (uploaded to AT Proto as blobs)
+assets/
+
 # Pipenv lock (requirements.txt is used instead)
 Pipfile.lock

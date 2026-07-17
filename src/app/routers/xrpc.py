@@ -45,6 +45,7 @@ from ..lib.firestore import (
     upsert_user,
     write_feed_debug,
 )
+from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
 from ..feeds import FEEDS
@@ -436,6 +437,15 @@ def _skeleton_items(uris: list[str], feed_context: str) -> list[SkeletonItem]:
     return [SkeletonItem(post=uri, feed_context=feed_context) for uri in uris]
 
 
+def _prepend_pinned(pinned_uri: str, uris: list[str], limit: int) -> list[str]:
+    """Prepend the pinned URI and cap the result at limit.
+
+    Removes the pinned URI from the generated list first to avoid duplication.
+    """
+    deduped = [u for u in uris if u != pinned_uri]
+    return [pinned_uri] + deduped[: limit - 1]
+
+
 # Fire-and-forget background tasks (Firestore session writes, …). Keeping a
 # strong reference here prevents the event loop from garbage-collecting them
 # mid-flight; the done callback removes them once they complete.
@@ -479,6 +489,8 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
         logger.exception("Failed to resolve username for %s in background", user_did)
         return
 
+    now = datetime.now(timezone.utc)
+
     try:
         await upsert_user(db, user_did, username)
     except Exception:
@@ -490,6 +502,11 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
         logger.exception(
             "Failed to record feed activity for user '%s', feed '%s'", user_did, feed_name
         )
+
+    try:
+        track_session(get_posthog_client(), user_did, username, feed_name, now)
+    except Exception:
+        logger.exception("Failed to track PostHog session for user '%s'", user_did)
 
 
 async def _resolve_handles(request: Request, dids: set[str]) -> dict[str, str]:
@@ -593,6 +610,21 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
             await record_interaction(db, doc)
         except Exception:
             logger.exception("Failed to record interaction for user '%s'", payload.did)
+
+        if event:
+            try:
+                track_interaction(
+                    get_posthog_client(),
+                    payload.did,
+                    event,
+                    payload.feed,
+                    ix.item,
+                    doc.created_at,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to track PostHog interaction '%s' for user '%s'", event, payload.did
+                )
 
     for did, uris in seen_by_user.items():
         try:
@@ -857,8 +889,11 @@ async def get_feed_skeleton(
             debug_enabled=debug_enabled,
         )
 
-        # First page to return immediately.
-        page = all_uris[:limit]
+        # First page to return immediately. Prepend the pinned post if configured.
+        if feed_cfg.pinned_post_uri:
+            page = _prepend_pinned(feed_cfg.pinned_post_uri, all_uris, limit)
+        else:
+            page = all_uris[:limit]
         _log_diversity_metric(all_scores, all_uris, 0, len(page), feed_name, batch=0)
 
         # Store the full batch and issue a cursor only when there are more pages.

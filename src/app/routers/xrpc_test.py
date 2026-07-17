@@ -532,9 +532,9 @@ class TestGetFeedSkeleton:
                 params={"feed": FEED_URI, "limit": 5},
             ).json()
         assert len(data["feed"]) == 5
-        # Infill generator's generate method should not have been called
-        infill_gen = mock_get.side_effect("popularity")
-        infill_gen.generate.assert_not_called()
+        # popularity is a primary generator for this feed; no extra infill call should happen.
+        popularity_gen = mock_get.side_effect("popularity")
+        popularity_gen.generate.assert_awaited_once()
 
     def test_unranked_your_feed_uses_followed_users_generator(self):
         two_tower = _make_candidates("tower", 3, "two_tower")
@@ -1290,6 +1290,11 @@ class TestRankedFeed:
              patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
             yield
 
+    @pytest.fixture(autouse=True)
+    def _clear_pinned_post(self, monkeypatch):
+        """Isolate ranking tests from the pinned post — that's tested in TestPinnedPost."""
+        monkeypatch.setattr(FEEDS["your-feed"], "pinned_post_uri", None)
+
     def _patch_generators(self, candidates):
         primary_gen = AsyncMock()
         primary_gen.generate.return_value = CandidateResult(
@@ -1442,6 +1447,11 @@ class TestBestOfFriendsFeed:
         with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), \
              patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
             yield
+
+    @pytest.fixture(autouse=True)
+    def _clear_pinned_post(self, monkeypatch):
+        """Isolate ranking tests from the pinned post — that's tested in TestPinnedPost."""
+        monkeypatch.setattr(FEEDS["best-of-friends"], "pinned_post_uri", None)
 
     def _patch_generators(self, candidates):
         primary_gen = AsyncMock()
@@ -1930,3 +1940,160 @@ class TestDiversityScoreMetric:
         assert resp.status_code == 200
         metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
         assert len(metric_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Pinned post
+# ---------------------------------------------------------------------------
+
+
+class TestPinnedPost:
+    PINNED_URI = "at://did:plc:pinauthor/app.bsky.feed.post/pinnedpost"
+
+    def _make_random_feed_with_pin(self):
+        cfg = FEEDS["random"].model_copy(update={"pinned_post_uri": self.PINNED_URI})
+        return {"random": cfg, **{k: v for k, v in FEEDS.items() if k != "random"}}
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None)
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    def test_pinned_post_is_first_on_first_page(self, *mocks):
+        """Pinned post appears as the first item when no cursor is sent."""
+        from app.routers import xrpc as xrpc_mod
+
+        candidates = _make_candidates("did:plc:a", 5, "random_posts")
+        random_gen = AsyncMock()
+        random_gen.generate.return_value = CandidateResult(
+            generator_name="random_posts", candidates=candidates
+        )
+
+        def fake_get_generator(name):
+            return random_gen if name == "random_posts" else None
+
+        patched_feeds = self._make_random_feed_with_pin()
+        with patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator), \
+             patch.object(xrpc_mod, "FEEDS", patched_feeds):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 10},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["feed"][0]["post"] == self.PINNED_URI
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None)
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    def test_pinned_post_not_duplicated_if_in_candidates(self, *mocks):
+        """If the pinned URI is already in generated candidates, it appears only once."""
+        from app.routers import xrpc as xrpc_mod
+
+        candidates = [
+            CandidatePost(at_uri=self.PINNED_URI, content="pinned", score=None, generator_name="random_posts"),
+            *_make_candidates("did:plc:a", 4, "random_posts"),
+        ]
+        random_gen = AsyncMock()
+        random_gen.generate.return_value = CandidateResult(
+            generator_name="random_posts", candidates=candidates
+        )
+
+        def fake_get_generator(name):
+            return random_gen if name == "random_posts" else None
+
+        patched_feeds = self._make_random_feed_with_pin()
+        with patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator), \
+             patch.object(xrpc_mod, "FEEDS", patched_feeds):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 10},
+            )
+
+        assert resp.status_code == 200
+        post_uris = [item["post"] for item in resp.json()["feed"]]
+        assert post_uris.count(self.PINNED_URI) == 1
+        assert post_uris[0] == self.PINNED_URI
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None)
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    def test_pinned_post_not_on_subsequent_pages(self, *mocks):
+        """Pinned post does not appear when a cursor is sent (subsequent pages)."""
+        from app.routers import xrpc as xrpc_mod
+
+        patched_feeds = self._make_random_feed_with_pin()
+        cache = InMemoryFeedCache()
+        cached_uris = [f"at://did:plc:a/{i}" for i in range(20)]
+        cache._store["testcacheid"] = cache._CachedFeed(items=cached_uris)
+        app.state.feed_cache = cache
+
+        cursor = FeedCursor(id="testcacheid", offset=10).encode()
+        with patch.object(xrpc_mod, "FEEDS", patched_feeds):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 10, "cursor": cursor},
+            )
+
+        assert resp.status_code == 200
+        post_uris = [item["post"] for item in resp.json()["feed"]]
+        assert self.PINNED_URI not in post_uris
+
+
+class TestPosthogTracking:
+    """Verify PostHog events are emitted from XRPC background handlers."""
+
+    @pytest.mark.asyncio
+    async def test_record_session_calls_track_session(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ..routers.xrpc import _record_session
+
+        db = AsyncMock()
+        request = MagicMock()
+        request.app.state.id_resolver = AsyncMock()
+        did_doc = MagicMock()
+        did_doc.get_handle.return_value = "alice.bsky.app"
+        request.app.state.id_resolver.did.resolve = AsyncMock(return_value=did_doc)
+
+        mock_client = MagicMock()
+        with patch("app.routers.xrpc.get_posthog_client", return_value=mock_client):
+            with patch("app.routers.xrpc.track_session") as mock_track:
+                await _record_session(request, "did:plc:abc", "your-feed", db)
+                mock_track.assert_called_once()
+                call_kwargs = mock_track.call_args
+                assert call_kwargs.args[0] is mock_client
+                assert call_kwargs.args[1] == "did:plc:abc"
+                assert call_kwargs.args[2] == "alice.bsky.app"
+                assert call_kwargs.args[3] == "your-feed"
+
+    @pytest.mark.asyncio
+    async def test_record_interactions_calls_track_interaction(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ..routers.xrpc import Interaction, _record_interactions
+        from ..lib.feed_context import FeedContextPayload, encode_feed_context
+
+        feed_context = encode_feed_context(
+            FeedContextPayload(did="did:plc:abc", feed="your-feed", rid="reqid123", iat=0)
+        )
+
+        ix = Interaction(
+            item="at://did/post/1",
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context=feed_context,
+        )
+
+        db = AsyncMock()
+        mock_client = MagicMock()
+        with patch("app.routers.xrpc.get_posthog_client", return_value=mock_client):
+            with patch("app.routers.xrpc.track_interaction") as mock_track:
+                await _record_interactions(db, [ix])
+                mock_track.assert_called_once()
+                call_kwargs = mock_track.call_args
+                assert call_kwargs.args[0] is mock_client
+                assert call_kwargs.args[1] == "did:plc:abc"
+                assert call_kwargs.args[2] == "interactionLike"
+                assert call_kwargs.args[3] == "your-feed"
+                assert call_kwargs.args[4] == "at://did/post/1"

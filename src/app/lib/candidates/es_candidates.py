@@ -20,6 +20,7 @@ async def knn_search_posts(
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
     ge_post_embedding_model_uuid: str | None = None,
+    min_like_count: int | None = None,
 ) -> list[CandidatePost]:
     """Run a kNN search against the ``posts_recent`` index and return candidate posts.
 
@@ -33,6 +34,9 @@ async def knn_search_posts(
 
     if ge_post_embedding_model_uuid:
         filters.append({"term": {"ge_post_embedding_model_uuid": ge_post_embedding_model_uuid}})
+
+    if min_like_count is not None:
+        filters.append({"range": {"like_count": {"gte": min_like_count}}})
 
     must_not: list[dict] = []
     if exclude_uris:

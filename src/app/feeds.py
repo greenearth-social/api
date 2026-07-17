@@ -24,13 +24,15 @@ from .models import (
 FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(
         display_name="Unranked YF",
-        description="Development feed — post-similarity and followed-users candidate with popularity infill. No ranking.",
+        description="Development feed — same as green-earth but without ranking.",
         internal_rkey="e2-s",
         internal_display_name="e2 S",
+        avatar="assets/icons/unranked-your-feed.png",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="two_tower", weight=0.5),
-                GeneratorSpec(name="followed_users", weight=0.5),
+                GeneratorSpec(name="two_tower", weight=0.35),
+                GeneratorSpec(name="followed_users", weight=0.35),
+                GeneratorSpec(name="popularity", weight=0.3),
             ],
             infill="popularity",
             num_candidates=30,
@@ -44,8 +46,10 @@ FEEDS: dict[str, FeedConfig] = {
         public=True,
         internal_rkey="67-r",
         internal_display_name="67 R",
+        avatar="assets/icons/random.png",
         diversify=False,
         exclude_seen_posts=False,
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5uvuzydy2o",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="random_posts", weight=1.0)],
             infill=None,
@@ -55,15 +59,18 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
     "your-feed": FeedConfig(
-        display_name="Your Feed",
+        display_name="GreenEarth",
         description="Posts ranked and personalized just for you.",
         public=True,
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
+        avatar="assets/icons/green-earth.png",
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5utph3ka26",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="two_tower", weight=0.5),
-                GeneratorSpec(name="followed_users", weight=0.5),
+                GeneratorSpec(name="two_tower", weight=0.35),
+                GeneratorSpec(name="followed_users", weight=0.35),
+                GeneratorSpec(name="popularity", weight=0.3),
             ],
             infill="popularity",
             num_candidates=30,
@@ -83,6 +90,8 @@ FEEDS: dict[str, FeedConfig] = {
         public=True,
         internal_rkey="fd-bof",
         internal_display_name="fd BOF",
+        avatar="assets/icons/best-of-friends.png",
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5uvi4exl2s",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="followed_users", weight=1.0)],
             infill=None,
@@ -104,6 +113,7 @@ FEEDS: dict[str, FeedConfig] = {
         description="Development feed — post-similarity candidates only.",
         internal_rkey="gh-ps",
         internal_display_name="gh PS",
+        avatar="assets/icons/post-similarity.png",
         diversify=False,
         exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
@@ -120,6 +130,7 @@ FEEDS: dict[str, FeedConfig] = {
         description="Development feed — followed-users candidates only.",
         internal_rkey="ij-fu",
         internal_display_name="ij FU",
+        avatar="assets/icons/followed-users.png",
         diversify=False,
         exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
@@ -136,6 +147,7 @@ FEEDS: dict[str, FeedConfig] = {
         description="Development feed — network-likes candidates only.",
         internal_rkey="kl-nl",
         internal_display_name="kl NL",
+        avatar="assets/icons/network-likes.png",
         diversify=False,
         exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
@@ -152,6 +164,7 @@ FEEDS: dict[str, FeedConfig] = {
         description="Development feed — popularity candidates only.",
         internal_rkey="mn-p",
         internal_display_name="mn P",
+        avatar="assets/icons/popularity.png",
         diversify=False,
         exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
@@ -168,6 +181,7 @@ FEEDS: dict[str, FeedConfig] = {
         description="Development feed — two-tower candidates only.",
         internal_rkey="op-tt",
         internal_display_name="op TT",
+        avatar="assets/icons/two-tower.png",
         diversify=False,
         exclude_seen_posts=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
