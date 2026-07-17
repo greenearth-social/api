@@ -10,6 +10,7 @@ import time
 import httpx
 
 from ..models import CandidatePost
+from .config import fail_fast
 from .http_client import get_http_client
 from .telemetry import timed
 
@@ -205,8 +206,15 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
                 logger.warning("Perspective API rate limited for post %s; using missing score", c.at_uri)
-            else:
-                logger.exception("Perspective API scoring failed for post %s", c.at_uri)
+                return None
+            logger.exception("Perspective API scoring failed for post %s", c.at_uri)
+            if fail_fast():
+                raise
+            return None
+        except (httpx.ConnectError, httpx.TimeoutException):
+            logger.exception("Perspective API connection/timeout error for post %s", c.at_uri)
+            if fail_fast():
+                raise
             return None
         except Exception:
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)

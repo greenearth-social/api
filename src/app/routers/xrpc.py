@@ -46,6 +46,7 @@ from ..lib.firestore import (
     write_feed_debug,
 )
 from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
+from ..lib.config import fail_fast
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
 from ..feeds import FEEDS
@@ -58,15 +59,6 @@ router = APIRouter(tags=["xrpc"])
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
-def _fail_fast() -> bool:
-    """When True, any pipeline component failure raises instead of being swallowed.
-
-    Controlled by the GE_FAIL_FAST env var (default: false).
-    Set to "true" to disable degraded-feed serving and fail on any component error.
-    """
-    return os.environ.get("GE_FAIL_FAST", "false").lower() in ("true", "1", "yes")
-
 
 def _get_service_did() -> str:
     """Return the DID of this feed generator service.
@@ -231,7 +223,7 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
             pairs = await fetch_post_embeddings(es, missing, index="posts_recent")
     except Exception:
         logger.exception("Embedding hydration failed")
-        if _fail_fast():
+        if fail_fast():
             raise
         return candidates
 
@@ -281,7 +273,7 @@ async def _run_ranking_pipeline(
             num_candidates=gen_request.num_candidates,
             n_generators=len(gen_request.generators),
         ):
-            result = await run_generate(gen_request, es, swallow_errors=not _fail_fast())
+            result = await run_generate(gen_request, es, swallow_errors=not fail_fast())
         candidates = result.candidates
 
         if not candidates:
