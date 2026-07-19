@@ -441,6 +441,45 @@ create_service_account() {
     log_info "IAM roles granted successfully"
 }
 
+ensure_frontend_deployer_roles() {
+    # The frontend repo (greenearth-social/frontend) deploys Cloud Functions,
+    # Firebase Hosting, and Firebase Rules via this service account. Stage
+    # deploys don't touch Cloud Functions, so these roles are only needed
+    # for prod. See https://github.com/greenearth-social/api/issues/273
+    local deployer_sa="firebase-adminsdk-fbsvc@$PROJECT_ID.iam.gserviceaccount.com"
+    local runtime_sa="21637448064-compute@developer.gserviceaccount.com"
+    local cloudbuild_sa="21637448064@cloudbuild.gserviceaccount.com"
+
+    log_info "Granting frontend deployer roles to $deployer_sa..."
+
+    local project_roles=(
+        "roles/serviceusage.serviceUsageViewer"
+        "roles/serviceusage.apiKeysViewer"
+        "roles/firebasehosting.admin"
+        "roles/cloudfunctions.admin"
+        "roles/firebaserules.admin"
+    )
+
+    for role in "${project_roles[@]}"; do
+        gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+            --member="serviceAccount:$deployer_sa" \
+            --role="$role" \
+            --condition=None > /dev/null
+    done
+
+    gcloud iam service-accounts add-iam-policy-binding "$runtime_sa" \
+        --member="serviceAccount:$deployer_sa" \
+        --role="roles/iam.serviceAccountUser" \
+        --project="$PROJECT_ID" > /dev/null
+
+    gcloud iam service-accounts add-iam-policy-binding "$cloudbuild_sa" \
+        --member="serviceAccount:$deployer_sa" \
+        --role="roles/iam.serviceAccountUser" \
+        --project="$PROJECT_ID" > /dev/null
+
+    log_info "Frontend deployer roles granted successfully"
+}
+
 setup_secrets() {
     log_info "Setting up secrets in Secret Manager..."
 
@@ -769,6 +808,10 @@ main() {
     setup_posthog_secret
     check_vpc_connector
     setup_feed_probe_cloud_scheduler
+
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        ensure_frontend_deployer_roles
+    fi
 
     echo ""
     log_info "✓ GCP setup complete!"
