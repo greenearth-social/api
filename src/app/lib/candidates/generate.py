@@ -17,11 +17,12 @@ from ...models import (
     CandidatePost,
     GeneratorSpec,
 )
-from .base import CandidateGenerator, CandidateResult, get_generator
-from .followed_users import FollowedUsersCandidateGenerator
+from ..config import fail_fast
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
 from ..telemetry import timed
+from .base import CandidateGenerator, CandidateResult, get_generator
+from .followed_users import FollowedUsersCandidateGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +100,6 @@ class GeneratorError(Exception):
 async def run_generate(
     request: CandidateGenerateRequest,
     es,
-    *,
-    swallow_errors: bool = False,
 ) -> CandidateGenerateResult:
     """Execute a candidate-generation pipeline described by *request*.
 
@@ -110,12 +109,10 @@ async def run_generate(
         The generation configuration.
     es:
         An ``AsyncElasticsearch`` client.
-    swallow_errors:
-        If ``True``, generator failures are logged but do not raise.
-        Missing generators still raise ``GeneratorNotFoundError``.
-        This is useful for feed-skeleton endpoints that should return
-        partial results rather than 5xx.
+    Generator failures are swallowed or re-raised according to
+    ``fail_fast()`` / ``GE_FAIL_FAST``.
     """
+    swallow_errors = not fail_fast()
     counts = allocate_counts(request.generators, request.num_candidates)
 
     # Resolve generators up front so missing-name errors raise deterministically

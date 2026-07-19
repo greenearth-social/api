@@ -6,14 +6,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from ..main import app
 from ..feeds import FEEDS
-from ..models import CandidatePost, FeedCursor, RankedCandidate, RankPredictResult
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import FeedCache
 from ..lib.feed_context import decode_feed_context
-
+from ..lib.metrics import MetricCollector, set_metric_collector
+from ..main import app
+from ..models import CandidatePost, FeedCursor, RankedCandidate, RankPredictResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -101,6 +101,14 @@ def _patch_unranked_your_feed_generators(
         return None
 
     return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator)
+
+
+class FakeMetricCollector:
+    def __init__(self):
+        self.calls: list[tuple[str, float, dict[str, str]]] = []
+
+    def record(self, name: str, value: float, **attributes: str) -> None:
+        self.calls.append((name, value, dict(attributes)))
 
 
 class InMemoryFeedCache(FeedCache):
@@ -1808,6 +1816,7 @@ class TestFeedDebugCapture:
             )
 
         returned = [item["post"] for item in response.json()["feed"]]
+        assert mock_snapshot.await_args is not None
         snapshot = mock_snapshot.await_args.args[3]
         assert snapshot.items == returned
         assert snapshot.items == ["at://p/0", "at://p/1", "at://p/2"]
@@ -2005,6 +2014,7 @@ class TestPinnedPost:
             )
 
         assert response.json()["feed"][0]["post"] == self.PINNED_URI
+        assert snapshot_write.await_args is not None
         snapshot = snapshot_write.await_args.args[3]
         assert self.PINNED_URI not in snapshot.items
         assert snapshot.items == [
@@ -2198,6 +2208,100 @@ class TestSocialRadiusOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
+
+
+class TestGetFeedSkeletonMetrics:
+    """Feed renders emit exactly one success or failure counter."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_metric_collector(self):
+        from typing import cast
+
+        self.mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, self.mc))
+        yield
+        set_metric_collector(None)
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), patch(
+            "app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock
+        ):
+            yield
+
+    def test_success_records_success_count(self):
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 2)),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value="did:plc:user",
+            ),
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+
+        assert response.status_code == 200
+        success_calls = [
+            call for call in self.mc.calls if call[0] == "feed.render.success_count"
+        ]
+        assert len(success_calls) == 1
+        assert success_calls[0][2]["feed_name"] == FEED_RKEY
+
+    def test_unknown_feed_records_failure_count_400(self):
+        response = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={
+                "feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/nonexistent"
+            },
+        )
+
+        assert response.status_code == 400
+        failure_calls = [
+            call for call in self.mc.calls if call[0] == "feed.render.failure_count"
+        ]
+        assert len(failure_calls) == 1
+        assert failure_calls[0][2] == {
+            "feed_name": "unknown",
+            "status_code": "400",
+        }
+
+    def test_auth_failure_records_failure_count_401(self):
+        with patch(
+            "app.routers.xrpc.verify_auth_header",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+
+        assert response.status_code == 401
+        failure_calls = [
+            call for call in self.mc.calls if call[0] == "feed.render.failure_count"
+        ]
+        assert len(failure_calls) == 1
+        assert failure_calls[0][2] == {
+            "feed_name": FEED_RKEY,
+            "status_code": "401",
+        }
+
+    def test_failure_records_no_success_count(self):
+        client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={
+                "feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/nonexistent"
+            },
+        )
+
+        assert [
+            call for call in self.mc.calls if call[0] == "feed.render.success_count"
+        ] == []
+
+
 class TestPosthogTracking:
     """Verify PostHog events are emitted from XRPC background handlers."""
 
@@ -2229,8 +2333,8 @@ class TestPosthogTracking:
     async def test_record_interactions_calls_track_interaction(self):
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        from ..routers.xrpc import Interaction, _record_interactions
         from ..lib.feed_context import FeedContextPayload, encode_feed_context
+        from ..routers.xrpc import Interaction, _record_interactions
 
         feed_context = encode_feed_context(
             FeedContextPayload(did="did:plc:abc", feed="your-feed", rid="reqid123", iat=0)

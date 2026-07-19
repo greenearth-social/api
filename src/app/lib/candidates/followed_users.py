@@ -5,10 +5,11 @@ Returns the last N posts from users that the requesting user follows"""
 import logging
 
 from ...models import CandidatePost
+from ..bsky import FollowedUsersLookupError, get_followed_user_dids
+from ..config import fail_fast
+from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
-from ..bsky import get_followed_user_dids, FollowedUsersLookupError
-from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,8 @@ async def followed_users_search(
         )
         return candidates
     except FollowedUsersLookupError:
+        if fail_fast():
+            raise
         return []
 
 
@@ -80,7 +83,9 @@ async def _followed_users_search_details(
                 user_did,
                 exc,
             )
-            raise
+            if fail_fast():
+                raise
+            return [], "follow_lookup_failed"
 
     if not followed_dids:
         return [], "no_followed_users"
@@ -149,6 +154,8 @@ class FollowedUsersCandidateGenerator(CandidateGenerator):
                     limit=MAX_FOLLOWED_USERS,
                 )
         except FollowedUsersLookupError:
+            if fail_fast():
+                raise
             return [
                 CandidateResult(
                     generator_name=self.name,
@@ -194,10 +201,12 @@ class FollowedUsersCandidateGenerator(CandidateGenerator):
         if shortfall <= 0:
             return results
 
-        older_exclusions = list(dict.fromkeys([
-            *(exclude_uris or []),
-            *(candidate.at_uri for candidate in recent if candidate.at_uri),
-        ]))
+        recent_uris = [
+            candidate.at_uri for candidate in recent if candidate.at_uri is not None
+        ]
+        older_exclusions: list[str] = list(
+            dict.fromkeys([*(exclude_uris or []), *recent_uris])
+        )
         older, older_reason = await _followed_users_search_details(
             es,
             user_did,

@@ -190,6 +190,7 @@ def test_snapshot_diagnostics_keep_friend_fallback_modes_separate():
             user_did="did:plc:user",
             num_candidates=3,
             video_only=False,
+            infill=None,
         )
     )
     recent = _candidate("at://p/recent")

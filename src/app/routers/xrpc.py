@@ -14,15 +14,17 @@ See: https://docs.bsky.app/docs/starter-templates/custom-feeds
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import Future
-from dataclasses import dataclass
 import hmac
 import logging
 import os
-from threading import Lock
 import time
 import uuid
+from collections.abc import Awaitable, Callable
+from concurrent.futures import Future
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
+from threading import Lock
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -34,17 +36,16 @@ from ..documents import (
     InteractionDocument,
     PipelineItemMeta,
 )
+from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
+from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
+from ..lib.config import fail_fast
 from ..lib.diversify import mmr_rerank
 from ..lib.elasticsearch import fetch_post_embeddings
 from ..lib.embeddings import encode_float32_b64
-from ..lib.feed_cache import FeedCache, DEFAULT_TTL_SECONDS
+from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
-from ..lib.rankers import run_predict
-from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
-
-from ..lib.atproto_auth import verify_auth_header
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     get_recent_seen_uris,
@@ -58,9 +59,10 @@ from ..lib.firestore import (
 )
 from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
+from ..lib.rankers import run_predict
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
-from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
+from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
 
 logger = logging.getLogger(__name__)
 
@@ -357,7 +359,7 @@ async def _run_ranking_pipeline(
             num_candidates=gen_request.num_candidates,
             n_generators=len(gen_request.generators),
         ):
-            result = await run_generate(gen_request, es, swallow_errors=True)
+            result = await run_generate(gen_request, es)
         candidates = result.candidates
 
         if not candidates:
@@ -766,6 +768,60 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _feed_name_for_metrics(feed: object) -> str:
+    if not isinstance(feed, str):
+        return "unknown"
+    try:
+        rkey = feed.split("/")[-1]
+        collection = feed.split("/")[-2] if feed.count("/") >= 4 else ""
+    except Exception:
+        return "unknown"
+    if collection != "app.bsky.feed.generator":
+        return "unknown"
+    if rkey in FEEDS:
+        return rkey
+    for name, config in FEEDS.items():
+        if config.internal_rkey == rkey:
+            return name
+    return "unknown"
+
+
+def _record_feed_render_metrics(
+    endpoint: Callable[..., Awaitable[FeedSkeletonResponse]],
+) -> Callable[..., Awaitable[FeedSkeletonResponse]]:
+    """Record one success/failure counter around a feed render request."""
+
+    @wraps(endpoint)
+    async def wrapped(*args: object, **kwargs: object) -> FeedSkeletonResponse:
+        feed_name = _feed_name_for_metrics(kwargs.get("feed"))
+        outcome = "success"
+        try:
+            return await endpoint(*args, **kwargs)
+        except HTTPException as exc:
+            outcome = str(exc.status_code)
+            raise
+        except Exception:
+            outcome = "500"
+            raise
+        finally:
+            if collector := get_metric_collector():
+                if outcome == "success":
+                    collector.record(
+                        "feed.render.success_count",
+                        1,
+                        feed_name=feed_name,
+                    )
+                else:
+                    collector.record(
+                        "feed.render.failure_count",
+                        1,
+                        feed_name=feed_name,
+                        status_code=outcome,
+                    )
+
+    return wrapped
+
+
 @router.get("/.well-known/did.json", response_class=JSONResponse)
 async def well_known_did() -> JSONResponse:
     """Serve the DID document for ``did:web`` resolution.
@@ -809,6 +865,7 @@ async def describe_feed_generator() -> DescribeFeedGeneratorResponse:
     response_model=FeedSkeletonResponse,
     response_model_exclude_none=True,
 )
+@_record_feed_render_metrics
 async def get_feed_skeleton(
     request: Request,
     feed: str = Query(..., description="AT URI of the requested feed"),
