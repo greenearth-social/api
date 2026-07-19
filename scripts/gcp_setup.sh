@@ -448,9 +448,18 @@ ensure_frontend_deployer_roles() {
     # for prod. See https://github.com/greenearth-social/api/issues/273
     local deployer_sa="firebase-adminsdk-fbsvc@$PROJECT_ID.iam.gserviceaccount.com"
     local runtime_sa="21637448064-compute@developer.gserviceaccount.com"
-    local cloudbuild_sa="21637448064@cloudbuild.gserviceaccount.com"
 
     log_info "Granting frontend deployer roles to $deployer_sa..."
+
+    # The legacy Cloud Build service agent isn't provisioned until something
+    # triggers its creation (e.g. a build, or this identity call). Projects
+    # that have enabled the Cloud Build API but never run a build won't have
+    # it yet, so ensure it exists before granting a role on it.
+    local cloudbuild_sa
+    cloudbuild_sa=$(gcloud services identity create \
+        --service=cloudbuild.googleapis.com \
+        --project="$PROJECT_ID" \
+        --format="value(email)")
 
     local project_roles=(
         "roles/serviceusage.serviceUsageViewer"
