@@ -456,7 +456,7 @@ ensure_frontend_deployer_roles() {
     # that have enabled the Cloud Build API but never run a build won't have
     # it yet, so ensure it exists before granting a role on it.
     local cloudbuild_sa
-    cloudbuild_sa=$(gcloud services identity create \
+    cloudbuild_sa=$(gcloud beta services identity create \
         --service=cloudbuild.googleapis.com \
         --project="$PROJECT_ID" \
         --format="value(email)")
