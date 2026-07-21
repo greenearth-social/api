@@ -228,7 +228,7 @@ class FeedConfig(BaseModel):
     )
     min_rank_score: float | None = Field(
         None,
-        description="Combined rank-score floor in [-1, 1]. Candidates scoring below it "
+        description="Combined rank-score floor in [0, 1]. Candidates scoring below it "
         "are cut from the slate and recorded as discarded so future generation "
         "excludes them. Only applies when rank_request_template is set. None disables.",
     )

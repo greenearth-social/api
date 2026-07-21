@@ -558,7 +558,7 @@ def _render_show(doc: FeedDebugDocument) -> None:
     if doc.model_scores:
         console.print(
             "[dim]model scores = each rank model's per-candidate score normalized to "
-            "[-1, 1], with its configured weight — the inputs to the combined "
+            "[0, 1], with its configured weight — the inputs to the combined "
             "(model) score above[/dim]"
         )
     console.print()
