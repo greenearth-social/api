@@ -4,7 +4,6 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
-import httpx
 import pytest
 
 from ..models import CandidatePost
