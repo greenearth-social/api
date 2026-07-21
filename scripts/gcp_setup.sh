@@ -451,16 +451,6 @@ ensure_frontend_deployer_roles() {
 
     log_info "Granting frontend deployer roles to $deployer_sa..."
 
-    # The legacy Cloud Build service agent isn't provisioned until something
-    # triggers its creation (e.g. a build, or this identity call). Projects
-    # that have enabled the Cloud Build API but never run a build won't have
-    # it yet, so ensure it exists before granting a role on it.
-    local cloudbuild_sa
-    cloudbuild_sa=$(gcloud services identity create \
-        --service=cloudbuild.googleapis.com \
-        --project="$PROJECT_ID" \
-        --format="value(email)")
-
     local project_roles=(
         "roles/serviceusage.serviceUsageViewer"
         "roles/serviceusage.apiKeysViewer"
@@ -476,12 +466,13 @@ ensure_frontend_deployer_roles() {
             --condition=None > /dev/null
     done
 
+    # Cloud Build now defaults to the Compute Engine default service account
+    # for builds (Google rolled this out project-wide in May/June 2024), so
+    # granting serviceAccountUser here is sufficient. The legacy Cloud Build
+    # service account (PROJECT_NUMBER@cloudbuild.gserviceaccount.com) isn't
+    # provisioned for projects created after that change, and Google-managed
+    # accounts don't accept IAM policy bindings even if they did exist.
     gcloud iam service-accounts add-iam-policy-binding "$runtime_sa" \
-        --member="serviceAccount:$deployer_sa" \
-        --role="roles/iam.serviceAccountUser" \
-        --project="$PROJECT_ID" > /dev/null
-
-    gcloud iam service-accounts add-iam-policy-binding "$cloudbuild_sa" \
         --member="serviceAccount:$deployer_sa" \
         --role="roles/iam.serviceAccountUser" \
         --project="$PROJECT_ID" > /dev/null
