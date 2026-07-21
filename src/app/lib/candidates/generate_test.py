@@ -464,6 +464,7 @@ def _request(*generator_names: str) -> CandidateGenerateRequest:
         user_did="did:plc:user",
         num_candidates=10,
         video_only=False,
+        infill=None,
     )
 
 
@@ -477,7 +478,7 @@ class _FakeGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, *, es, user_did, num_candidates, video_only, exclude_uris):
+    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
         if self._fail:
             raise self._cause
         return CandidateResult(

@@ -487,7 +487,7 @@ class TestScoreCandidatesDegradation:
     async def test_unexpected_http_error_records_degradation(self, monkeypatch):
         mock_client = MagicMock()
         mock_client.score = AsyncMock(
-            side_effect=aiohttp.ClientResponseError(MagicMock(), [], status=500)
+            side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=500)
         )
         monkeypatch.setattr(perspective_module, "_client", mock_client)
 
@@ -534,7 +534,7 @@ class TestScoreCandidatesDegradation:
     async def test_rate_limit_429_does_not_record_degradation(self, monkeypatch):
         mock_client = MagicMock()
         mock_client.score = AsyncMock(
-            side_effect=aiohttp.ClientResponseError(MagicMock(), [], status=429)
+            side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=429)
         )
         monkeypatch.setattr(perspective_module, "_client", mock_client)
 
@@ -561,7 +561,7 @@ class TestScoreCandidatesDegradation:
         """Each failing post records its own event (may be noisy — by design for now)."""
         mock_client = MagicMock()
         mock_client.score = AsyncMock(
-            side_effect=aiohttp.ClientResponseError(MagicMock(), [], status=503)
+            side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=503)
         )
         monkeypatch.setattr(perspective_module, "_client", mock_client)
 
