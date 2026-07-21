@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
 
-from ..documents import FeedCacheDocument
+from ..documents import FeedCacheDocument, PipelineItemMeta
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,33 @@ class FeedCache(ABC):
         """
         ...
 
+    async def retrieve_document(self, key: str) -> FeedCacheDocument | None:
+        items = await self.retrieve(key)
+        if items is None:
+            return None
+        return FeedCacheDocument(
+            items=items,
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_TTL_SECONDS),
+        )
+
+    async def store_document(self, key: str, document: FeedCacheDocument) -> None:
+        await self.store(key, document.items)
+
+    async def append_document(
+        self,
+        key: str,
+        new_items: list[str],
+        new_items_meta: list[PipelineItemMeta],
+    ) -> FeedCacheDocument | None:
+        items = await self.append(key, new_items)
+        if items is None:
+            return None
+        return FeedCacheDocument(
+            items=items,
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_TTL_SECONDS),
+            items_meta=new_items_meta,
+        )
+
 
 class FirestoreFeedCache(FeedCache):
     """Firestore-backed feed cache.
@@ -65,6 +92,10 @@ class FirestoreFeedCache(FeedCache):
         )
 
     async def retrieve(self, key: str) -> list[str] | None:
+        document = await self.retrieve_document(key)
+        return document.items if document is not None else None
+
+    async def retrieve_document(self, key: str) -> FeedCacheDocument | None:
         doc = await self._db.collection(FEED_CACHE_COLLECTION).document(key).get()
         if not doc.exists:
             return None
@@ -85,9 +116,40 @@ class FirestoreFeedCache(FeedCache):
         if datetime.now(timezone.utc) >= expires_at:
             return None
 
-        return cache_doc.items
+        return cache_doc
+
+    async def store_document(self, key: str, document: FeedCacheDocument) -> None:
+        await self._db.collection(FEED_CACHE_COLLECTION).document(key).set(
+            document.model_dump()
+        )
 
     async def append(self, key: str, new_items: list[str]) -> list[str] | None:
+        ref = self._db.collection(FEED_CACHE_COLLECTION).document(key)
+        doc = await ref.get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict()
+        if data is None:
+            return None
+        try:
+            cache_doc = FeedCacheDocument.model_validate(data)
+        except Exception:
+            return None
+        expires_at = cache_doc.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= expires_at:
+            return None
+        updated_items = cache_doc.items + new_items
+        await ref.update({"items": updated_items})
+        return updated_items
+
+    async def append_document(
+        self,
+        key: str,
+        new_items: list[str],
+        new_items_meta: list[PipelineItemMeta],
+    ) -> FeedCacheDocument | None:
         ref = self._db.collection(FEED_CACHE_COLLECTION).document(key)
         doc = await ref.get()
         if not doc.exists:
@@ -108,6 +170,12 @@ class FirestoreFeedCache(FeedCache):
         if datetime.now(timezone.utc) >= expires_at:
             return None
 
-        updated_items = cache_doc.items + new_items
-        await ref.update({"items": updated_items})
-        return updated_items
+        updated_items = list(dict.fromkeys([*cache_doc.items, *new_items]))
+        meta_by_uri = {meta.at_uri: meta for meta in cache_doc.items_meta}
+        meta_by_uri.update({meta.at_uri: meta for meta in new_items_meta})
+        updated_meta = [meta_by_uri[uri] for uri in updated_items if uri in meta_by_uri]
+        updated = cache_doc.model_copy(
+            update={"items": updated_items, "items_meta": updated_meta}
+        )
+        await ref.set(updated.model_dump())
+        return updated

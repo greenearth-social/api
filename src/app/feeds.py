@@ -20,6 +20,35 @@ from .models import (
     RankPredictRequest,
 )
 
+# Social-radius preset generator weights for your-feed.
+# Index 3 (balanced) matches the default weights defined in the "your-feed"
+# FeedConfig below — keep them in sync when tuning.
+SOCIAL_RADIUS_PRESETS: dict[int, list[GeneratorSpec]] = {
+    0: [  # Friends — only from people you follow
+        GeneratorSpec(name="followed_users", weight=1.00),
+    ],
+    1: [  # Closer
+        GeneratorSpec(name="followed_users", weight=0.80),
+        GeneratorSpec(name="two_tower", weight=0.10),
+        GeneratorSpec(name="popularity", weight=0.10),
+    ],
+    2: [
+        GeneratorSpec(name="followed_users", weight=0.60),
+        GeneratorSpec(name="two_tower", weight=0.20),
+        GeneratorSpec(name="popularity", weight=0.20),
+    ],
+    3: [  # Balanced — same as your-feed defaults
+        GeneratorSpec(name="followed_users", weight=0.40),
+        GeneratorSpec(name="two_tower", weight=0.30),
+        GeneratorSpec(name="popularity", weight=0.30),
+    ],
+    4: [  # Everyone — mostly discovery
+        GeneratorSpec(name="followed_users", weight=0.20),
+        GeneratorSpec(name="two_tower", weight=0.40),
+        GeneratorSpec(name="popularity", weight=0.40),
+    ],
+}
+
 # NOTE: display_name is limited to 24 chars, including the prefix ("GreenEarth, GE Dev, or GE Stg")
 FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(
@@ -73,11 +102,11 @@ FEEDS: dict[str, FeedConfig] = {
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="two_tower", weight=0.35),
-                GeneratorSpec(name="followed_users", weight=0.35),
-                GeneratorSpec(name="popularity", weight=0.3),
+                GeneratorSpec(name="followed_users", weight=0.40),
+                GeneratorSpec(name="two_tower", weight=0.30),
+                GeneratorSpec(name="popularity", weight=0.30),
             ],
-            infill="popularity",
+            infill=None,
             num_candidates=30,
             video_only=False,
             exclude_uris=[],
@@ -204,4 +233,3 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
 }
-
