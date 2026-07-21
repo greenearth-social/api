@@ -584,12 +584,12 @@ class TestGetFeedSkeleton:
 
         assert resp.status_code == 500
 
-    def test_primary_failure_returns_500_without_pipeline_context(self, monkeypatch):
-        """Without a PipelineContext installed, generator failures always hard-fail (500).
+    def test_primary_failure_soft_fails_with_pipeline_context(self, monkeypatch):
+        """With a PipelineContext installed (fail_fast=False), a generator failure soft-fails.
 
-        Soft-fail / infill fallback requires a PipelineContext to be installed by the
-        XRPC handler (a later task). The old GE_FAIL_FAST=false behavior is replaced by
-        PipelineContext-driven degradation.
+        The XRPC handler installs a PipelineContext for every render, so a failing
+        primary generator is recorded as a degradation event and the feed is served
+        with partial results from the other generators.
         """
         primary_gen = AsyncMock()
         primary_gen.generate.side_effect = RuntimeError("ES down")
@@ -614,12 +614,14 @@ class TestGetFeedSkeleton:
             }.get(name)
 
         with patch("app.lib.candidates.generate.get_generator", side_effect=fake_get):
-            resp = TestClient(app, raise_server_exceptions=False).get(
+            resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": FEED_URI, "limit": 5},
             )
 
-        assert resp.status_code == 500
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert len(posts) > 0
 
     # --- empty feed ---
 
@@ -1446,18 +1448,20 @@ class TestRankedFeed:
         # Should follow rank_score order (p/2 first), not generator score (p/0 first).
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
-    def test_ranking_failure_returns_500(self):
-        """When ranking raises, the feed fails with a 500."""
+    def test_ranking_failure_soft_fails_to_unranked(self):
+        """When ranking raises, the feed soft-fails and returns candidates in unranked order."""
         candidates = _make_candidates("p", 3, with_embedding=True)
 
         with self._patch_generators(candidates), \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, side_effect=RuntimeError("inference down")):
-            resp = TestClient(app, raise_server_exceptions=False).get(
+            resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": RANKED_FEED_URI},
             )
 
-        assert resp.status_code == 500
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert len(posts) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1513,18 +1517,20 @@ class TestBestOfFriendsFeed:
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
-    def test_ranking_failure_returns_500(self):
-        """When the two-tower ranker raises, the feed returns HTTP 500."""
+    def test_ranking_failure_soft_fails_to_unranked(self):
+        """When the two-tower ranker raises, the feed soft-fails and returns candidates in unranked order."""
         candidates = _make_candidates("p", 3, with_embedding=True)
 
         with self._patch_generators(candidates), \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, side_effect=RuntimeError("inference down")):
-            resp = TestClient(app, raise_server_exceptions=False).get(
+            resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": BEST_OF_FRIENDS_FEED_URI},
             )
 
-        assert resp.status_code == 500
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert len(posts) == 3
 
 
 # ---------------------------------------------------------------------------

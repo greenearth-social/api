@@ -49,6 +49,13 @@ from ..lib.posthog_client import get_posthog_client, track_interaction, track_se
 from ..lib.config import fail_fast
 from ..lib.request_cache import request_cache_scope
 from ..lib.metrics import get_metric_collector
+from ..lib.pipeline_context import (
+    DegradationEvent,
+    DegradationStage,
+    PipelineContext,
+    current_pipeline_context,
+    pipeline_context_scope,
+)
 from ..lib.telemetry import timed
 from ..feeds import FEEDS
 
@@ -222,10 +229,18 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
     try:
         async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
             pairs = await fetch_post_embeddings(es, missing, index="posts_recent")
-    except Exception:
-        logger.exception("Embedding hydration failed")
-        if fail_fast():
-            raise
+    except Exception as exc:
+        # If the refetch fails, MMR falls back to author-only similarity
+        # and the two-tower ranker has its own refetch path. Don't fail
+        # the request over a hydration hiccup.
+        logger.exception("Embedding hydration failed; continuing without")
+        ctx = current_pipeline_context()
+        if ctx is not None:
+            ctx.record(DegradationEvent(
+                stage=DegradationStage.EMBED_HYDRATION,
+                component="fetch_post_embeddings",
+                cause=exc,
+            ))
         return candidates
 
     encoded: dict[str, str] = {}
@@ -267,6 +282,8 @@ async def _run_ranking_pipeline(
                 spec.name for spec in feed_cfg.rank_request_template.models
             )
 
+    ctx = current_pipeline_context()
+
     async with request_cache_scope():
         async with timed(
             logger,
@@ -293,23 +310,37 @@ async def _run_ranking_pipeline(
             rank_req = feed_cfg.rank_request_template.model_copy(
                 update={"candidates": candidates, "user_did": gen_request.user_did}
             )
-            async with timed(
-                logger,
-                "run_predict",
-                n_candidates=len(candidates),
-                n_models=len(rank_req.models),
-            ):
-                rank_result = await run_predict(rank_req, es)
-            if rec is not None:
-                rec.record_ranking(rank_result)
-            # Reorder CandidatePosts by model rank and stamp rank_score onto each
-            # so MMR uses the model's relevance scores, not the generator scores.
-            by_uri = {c.at_uri: c for c in candidates if c.at_uri}
-            ordered = [
-                by_uri[r.at_uri].model_copy(update={"score": r.rank_score})
-                for r in rank_result.rankings
-                if r.at_uri in by_uri
-            ]
+            try:
+                async with timed(
+                    logger,
+                    "run_predict",
+                    n_candidates=len(candidates),
+                    n_models=len(rank_req.models),
+                ):
+                    rank_result = await run_predict(rank_req, es)
+                if rec is not None:
+                    rec.record_ranking(rank_result)
+                # Reorder CandidatePosts by model rank and stamp rank_score onto each
+                # so MMR uses the model's relevance scores, not the generator scores.
+                by_uri = {c.at_uri: c for c in candidates if c.at_uri}
+                ordered = [
+                    by_uri[r.at_uri].model_copy(update={"score": r.rank_score})
+                    for r in rank_result.rankings
+                    if r.at_uri in by_uri
+                ]
+            except Exception as exc:
+                logger.exception("Ranking stage failed; falling back to unranked ordering")
+                if ctx is not None:
+                    component = getattr(exc, "name", type(exc).__name__)
+                    ctx.record(DegradationEvent(
+                        stage=DegradationStage.RANK,
+                        component=component,
+                        cause=exc,
+                    ))
+                    # ctx.record re-raises exc when fail_fast=True, so reaching here means fail_fast=False
+                    ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
+                else:
+                    raise
         else:
             ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
 
@@ -320,6 +351,15 @@ async def _run_ranking_pipeline(
         final_uris = [c.at_uri for c in final if c.at_uri]
         if rec is not None:
             rec.record_final_order(final_uris)
+
+        # Emit once per render. When fail_fast=True, exceptions propagate before
+        # reaching here, so the metric is only emitted for soft-failed (degraded)
+        # renders — not for hard failures.
+        if ctx is not None and ctx.degradations and not ctx.fail_fast:
+            collector = get_metric_collector()
+            if collector is not None:
+                collector.record("feed.render.degraded_count", 1, feed_name=ctx.feed_name)
+
         return final_uris
 
 
@@ -337,17 +377,19 @@ async def _run_pipeline_capturing(
 ) -> list[str]:
     """Run the ranking pipeline, optionally capturing debug info for this user.
 
-    When ``debug_enabled``, a :class:`FeedDebugRecorder` is installed for the
-    duration of the pipeline and a background task persists the assembled
-    document afterwards (handle resolution + the Firestore write stay off the
-    hot path).
+    Installs a PipelineContext for every render so degradation events and the
+    feed.render.degraded_count metric are always tracked. fail_fast=False for
+    now; PostHog per-user flag (issue 279) will pass it in when implemented.
     """
+    ctx = PipelineContext(feed_name=feed_name)
+
     if not debug_enabled:
-        return await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
+        with pipeline_context_scope(ctx):
+            return await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
 
     recorder = FeedDebugRecorder(feed_name=feed_name, regenerated=regenerated)
     generated_at = datetime.now(timezone.utc)
-    with feed_debug_scope(recorder):
+    with feed_debug_scope(recorder), pipeline_context_scope(ctx):
         uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
     _spawn_background(_write_feed_debug(request, db, recorder, request_id, user_did, generated_at))
     return uris
