@@ -46,7 +46,6 @@ from ..lib.firestore import (
     write_feed_debug,
 )
 from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
-from ..lib.config import fail_fast
 from ..lib.request_cache import request_cache_scope
 from ..lib.metrics import get_metric_collector
 from ..lib.pipeline_context import (

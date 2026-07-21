@@ -10,7 +10,6 @@ import time
 import aiohttp
 
 from ..models import CandidatePost
-from .config import fail_fast
 from .http_client import get_http_client
 from .pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from .telemetry import timed
