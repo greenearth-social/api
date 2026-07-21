@@ -11,46 +11,58 @@ Implements the two endpoints required by the AT Protocol Feed Generator spec:
 See: https://docs.bsky.app/docs/starter-templates/custom-feeds
 """
 
+from __future__ import annotations
+
 import asyncio
 import hmac
 import logging
 import os
 import time
 import uuid
+from collections.abc import Awaitable, Callable
+from concurrent.futures import Future
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
+from threading import Lock
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from ..documents import InteractionDocument
+from ..documents import (
+    FeedCacheDocument,
+    FeedSnapshotDocument,
+    InteractionDocument,
+    PipelineItemMeta,
+)
+from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
+from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
+from ..lib.config import fail_fast
 from ..lib.diversify import mmr_rerank
 from ..lib.elasticsearch import fetch_post_embeddings
 from ..lib.embeddings import encode_float32_b64
-from ..lib.feed_cache import FeedCache, DEFAULT_TTL_SECONDS
+from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
-from ..lib.rankers import run_predict
-from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
-
-from ..lib.atproto_auth import verify_auth_header
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     get_recent_seen_uris,
     get_user,
+    merge_feed_snapshot,
     record_interaction,
     record_seen_posts,
     upsert_feed_activity,
     upsert_user,
     write_feed_debug,
 )
-from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
-from ..lib.config import fail_fast
-from ..lib.request_cache import request_cache_scope
 from ..lib.metrics import get_metric_collector
+from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
+from ..lib.rankers import run_predict
+from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
-from ..feeds import FEEDS
+from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +72,78 @@ router = APIRouter(tags=["xrpc"])
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+FEED_SNAPSHOT_RETENTION_SECONDS = 900  # 15 minutes
+INITIAL_REQUEST_REUSE_SECONDS = 5
+
+
+@dataclass
+class _InitialRequestEntry:
+    created_at: float
+    future: Future[FeedSkeletonResponse]
+
+
+_initial_request_lock = Lock()
+_initial_requests: dict[tuple[str, str, int], _InitialRequestEntry] = {}
+
+
+def _claim_initial_request(
+    user_did: str,
+    feed_name: str,
+    limit: int,
+) -> tuple[bool, Future[FeedSkeletonResponse]]:
+    """Elect one generator for identical initial requests within a short window."""
+    now = time.monotonic()
+    key = (user_did, feed_name, limit)
+    with _initial_request_lock:
+        expired = [
+            existing_key
+            for existing_key, entry in _initial_requests.items()
+            if now - entry.created_at >= INITIAL_REQUEST_REUSE_SECONDS
+        ]
+        for existing_key in expired:
+            _initial_requests.pop(existing_key, None)
+
+        existing = _initial_requests.get(key)
+        if existing is not None:
+            return False, existing.future
+
+        future: Future[FeedSkeletonResponse] = Future()
+        _initial_requests[key] = _InitialRequestEntry(created_at=now, future=future)
+        return True, future
+
+
+def _complete_initial_request(
+    user_did: str,
+    feed_name: str,
+    limit: int,
+    future: Future[FeedSkeletonResponse],
+    *,
+    response: FeedSkeletonResponse | None = None,
+    error: BaseException | None = None,
+) -> None:
+    key = (user_did, feed_name, limit)
+    if error is not None:
+        with _initial_request_lock:
+            entry = _initial_requests.get(key)
+            if entry is not None and entry.future is future:
+                _initial_requests.pop(key, None)
+        if not future.done():
+            future.set_exception(error)
+            # Mark the exception observed for the no-follower case. Awaiting
+            # followers still receive the same exception from wrap_future.
+            future.exception()
+        return
+    assert response is not None
+    if not future.done():
+        future.set_result(response)
+
+
+def _clear_initial_request_cache() -> None:
+    """Test helper for isolating process-local request reuse state."""
+    with _initial_request_lock:
+        _initial_requests.clear()
+
 
 def _get_service_did() -> str:
     """Return the DID of this feed generator service.
@@ -223,9 +307,10 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
         async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
             pairs = await fetch_post_embeddings(es, missing, index="posts_recent")
     except Exception:
-        logger.exception("Embedding hydration failed")
-        if fail_fast():
-            raise
+        # If the refetch fails, MMR falls back to author-only similarity
+        # and the two-tower ranker has its own refetch path. Don't fail
+        # the request over a hydration hiccup.
+        logger.exception("Embedding hydration failed; continuing without")
         return candidates
 
     encoded: dict[str, str] = {}
@@ -334,23 +419,70 @@ async def _run_pipeline_capturing(
     request_id: str,
     regenerated: bool,
     debug_enabled: bool,
-) -> list[str]:
-    """Run the ranking pipeline, optionally capturing debug info for this user.
+    applied_social_radius: int | None = None,
+) -> FeedSnapshotDocument:
+    """Run the ranking pipeline, capturing a lightweight snapshot for every
+    feed load and a full debug document for debug-flagged users.
 
-    When ``debug_enabled``, a :class:`FeedDebugRecorder` is installed for the
-    duration of the pipeline and a background task persists the assembled
-    document afterwards (handle resolution + the Firestore write stay off the
-    hot path).
+    The snapshot is written inline (no handle resolution needed) so the
+    transparency API can re-render any served feed.  The full debug document
+    (for the CLI tool) is written in a background task only when
+    ``debug_enabled`` is true.
     """
-    if not debug_enabled:
-        return await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
-
     recorder = FeedDebugRecorder(feed_name=feed_name, regenerated=regenerated)
     generated_at = datetime.now(timezone.utc)
+
     with feed_debug_scope(recorder):
-        uris = await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
-    _spawn_background(_write_feed_debug(request, db, recorder, request_id, user_did, generated_at))
-    return uris
+        await _run_ranking_pipeline(feed_cfg, gen_request, request.app.state.es)
+
+    # Create or extend the lightweight snapshot in the background. Cursor
+    # regeneration reuses request_id, so all batches remain one feed session.
+    expires_at = generated_at + timedelta(seconds=FEED_SNAPSHOT_RETENTION_SECONDS)
+    snapshot = recorder.build_pipeline_metadata(
+        request_id=request_id,
+        generated_at=generated_at,
+        expires_at=expires_at,
+        applied_social_radius=applied_social_radius,
+    )
+
+    # Full debug document only for debug-flagged users, in background.
+    if debug_enabled:
+        _spawn_background(
+            _write_feed_debug(request, db, recorder, request_id, user_did, generated_at)
+        )
+
+    return snapshot
+
+
+def _snapshot_page(
+    snapshot: FeedSnapshotDocument,
+    uris: list[str],
+) -> FeedSnapshotDocument:
+    """Restrict pipeline metadata to posts actually returned in one page."""
+    meta_by_uri = {meta.at_uri: meta for meta in snapshot.items_meta}
+    items_meta = [
+        meta_by_uri.get(uri, PipelineItemMeta(at_uri=uri))
+        for uri in uris
+    ]
+    diagnostics = [
+        diagnostic.model_copy(
+            update={
+                "contributed_count": sum(
+                    1
+                    for meta in items_meta
+                    if any(g.name == diagnostic.name for g in meta.generators)
+                )
+            }
+        )
+        for diagnostic in snapshot.generator_diagnostics
+    ]
+    return snapshot.model_copy(
+        update={
+            "items": uris,
+            "items_meta": items_meta,
+            "generator_diagnostics": diagnostics,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +627,41 @@ async def _resolve_handles(request: Request, dids: set[str]) -> dict[str, str]:
     return {did: handle for did, handle in zip(did_list, handles) if handle}
 
 
+async def _write_feed_snapshot_background(
+    db,
+    user_did: str,
+    request_id: str,
+    snapshot,
+) -> None:
+    """Create or extend the lightweight feed snapshot in a background task.
+
+    Separated from ``_run_pipeline_capturing`` so the Firestore write stays
+    off the feed-serving hot path. Failures are logged, never surfaced.
+    """
+    if not snapshot.items:
+        return
+    try:
+        truncated = await merge_feed_snapshot(db, user_did, request_id, snapshot)
+        if truncated:
+            logger.warning(
+                "Feed snapshot reached item limit for user '%s', request '%s'",
+                user_did,
+                request_id,
+                extra={"user_did": user_did, "request_id": request_id},
+            )
+            collector = get_metric_collector()
+            if collector is not None:
+                collector.record(
+                    "feed.snapshot.truncated_count", 1, feed_name=snapshot.feed_name
+                )
+    except Exception:
+        logger.exception(
+            "Failed to write feed snapshot for user '%s', request '%s'",
+            user_did,
+            request_id,
+        )
+
+
 async def _write_feed_debug(
     request: Request,
     db,
@@ -601,6 +768,60 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _feed_name_for_metrics(feed: object) -> str:
+    if not isinstance(feed, str):
+        return "unknown"
+    try:
+        rkey = feed.split("/")[-1]
+        collection = feed.split("/")[-2] if feed.count("/") >= 4 else ""
+    except Exception:
+        return "unknown"
+    if collection != "app.bsky.feed.generator":
+        return "unknown"
+    if rkey in FEEDS:
+        return rkey
+    for name, config in FEEDS.items():
+        if config.internal_rkey == rkey:
+            return name
+    return "unknown"
+
+
+def _record_feed_render_metrics(
+    endpoint: Callable[..., Awaitable[FeedSkeletonResponse]],
+) -> Callable[..., Awaitable[FeedSkeletonResponse]]:
+    """Record one success/failure counter around a feed render request."""
+
+    @wraps(endpoint)
+    async def wrapped(*args: object, **kwargs: object) -> FeedSkeletonResponse:
+        feed_name = _feed_name_for_metrics(kwargs.get("feed"))
+        outcome = "success"
+        try:
+            return await endpoint(*args, **kwargs)
+        except HTTPException as exc:
+            outcome = str(exc.status_code)
+            raise
+        except Exception:
+            outcome = "500"
+            raise
+        finally:
+            if collector := get_metric_collector():
+                if outcome == "success":
+                    collector.record(
+                        "feed.render.success_count",
+                        1,
+                        feed_name=feed_name,
+                    )
+                else:
+                    collector.record(
+                        "feed.render.failure_count",
+                        1,
+                        feed_name=feed_name,
+                        status_code=outcome,
+                    )
+
+    return wrapped
+
+
 @router.get("/.well-known/did.json", response_class=JSONResponse)
 async def well_known_did() -> JSONResponse:
     """Serve the DID document for ``did:web`` resolution.
@@ -644,6 +865,7 @@ async def describe_feed_generator() -> DescribeFeedGeneratorResponse:
     response_model=FeedSkeletonResponse,
     response_model_exclude_none=True,
 )
+@_record_feed_render_metrics
 async def get_feed_skeleton(
     request: Request,
     feed: str = Query(..., description="AT URI of the requested feed"),
@@ -660,163 +882,217 @@ async def get_feed_skeleton(
     # (the account that owns the record), which differs from the service DID,
     # so we match on the rkey alone.
     feed_name: str | None = None
-    _outcome: str = "success"
     try:
-        try:
-            # at://<did>/app.bsky.feed.generator/<rkey>
-            rkey = feed.split("/")[-1]
-            collection = feed.split("/")[-2] if feed.count("/") >= 4 else ""
-        except Exception:
-            rkey = ""
-            collection = ""
+        # at://<did>/app.bsky.feed.generator/<rkey>
+        rkey = feed.split("/")[-1]
+        collection = feed.split("/")[-2] if feed.count("/") >= 4 else ""
+    except Exception:
+        rkey = ""
+        collection = ""
 
-        if collection == "app.bsky.feed.generator":
-            if rkey in FEEDS:
-                feed_name = rkey
+    if collection == "app.bsky.feed.generator":
+        if rkey in FEEDS:
+            feed_name = rkey
+        else:
+            for key, cfg in FEEDS.items():
+                if cfg.internal_rkey == rkey:
+                    feed_name = key
+                    break
+
+    if feed_name is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown feed: {feed}",
+        )
+
+    feed_cfg = FEEDS[feed_name]
+
+    # Cloud Scheduler probe bypass: if GE_PROBE_SECRET is set and the request
+    # carries the matching X-Probe-Secret header, skip AT Protocol auth and
+    # use the configured probe DID so the full pipeline runs and emits latency metrics.
+    _probe_secret = os.environ.get("GE_PROBE_SECRET")
+    is_probe = bool(_probe_secret) and hmac.compare_digest(
+        request.headers.get("X-Probe-Secret", ""), _probe_secret
+    )
+    if is_probe:
+        user_did = os.environ.get("GE_PROBE_USER_DID", "did:plc:s4tl2ajfsnstzuxtegl7r33g")
+    else:
+        user_did = await verify_auth_header(request, service_did=_get_service_did())
+
+        if not user_did:
+            if request.headers.get("Authorization"):
+                logger.warning("Auth header present but verification failed for feed %s", feed_name)
             else:
-                for key, cfg in FEEDS.items():
-                    if cfg.internal_rkey == rkey:
-                        feed_name = key
-                        break
-
-        if feed_name is None:
+                logger.warning("No auth header present for feed %s", feed_name)
             raise HTTPException(
-                status_code=400,
-                detail=f"Unknown feed: {feed}",
+                status_code=401,
+                detail="Authentication required",
+                headers={"WWW-Authenticate": "Bearer"},
             )
 
-        feed_cfg = FEEDS[feed_name]
+    # Record authenticated users in Firestore for backend analytics. Runs in
+    # the background since this isn't essential for serving.
+    db = getattr(request.app.state, "firestore", None)
+    if db is None:
+        logger.error("Firestore client not initialized")
+        raise HTTPException(status_code=500, detail="Firestore unavailable")
 
-        # Cloud Scheduler probe bypass: if GE_PROBE_SECRET is set and the request
-        # carries the matching X-Probe-Secret header, skip AT Protocol auth and
-        # use the configured probe DID so the full pipeline runs and emits latency metrics.
-        _probe_secret = os.environ.get("GE_PROBE_SECRET")
-        if _probe_secret and hmac.compare_digest(
-            request.headers.get("X-Probe-Secret", ""), _probe_secret
-        ):
-            user_did = os.environ.get("GE_PROBE_USER_DID", "did:plc:s4tl2ajfsnstzuxtegl7r33g")
-        else:
-            user_did = await verify_auth_header(request, service_did=_get_service_did())
+    _spawn_background(_record_session(request, user_did, feed_name, db))
 
-            if not user_did:
-                if request.headers.get("Authorization"):
-                    logger.warning("Auth header present but verification failed for feed %s", feed_name)
-                else:
-                    logger.warning("No auth header present for feed %s", feed_name)
-                raise HTTPException(
-                    status_code=401,
-                    detail="Authentication required",
-                    headers={"WWW-Authenticate": "Bearer"},
+    # Per-user opt-in: capture pipeline debugging info for this feed load. This
+    # costs one extra Firestore read per request; fail-soft so a hiccup degrades
+    # to no-debug rather than breaking feed serving.
+    debug_enabled = False
+    user_doc = None
+    try:
+        user_doc = await get_user(db, user_did)
+        debug_enabled = bool(user_doc and user_doc.debug_feeds)
+    except Exception:
+        logger.exception("Failed to read debug flag for user '%s'", user_did)
+
+    # Apply social-radius preference override to your-feed generator weights.
+    # The override is computed once and threaded through model_copy in both
+    # generation paths so the shared module-level template is never mutated.
+    generators_override: dict = {}
+    applied_social_radius: int | None = None
+    if feed_name == "your-feed":
+        applied_social_radius = user_doc.social_radius if user_doc is not None else 3
+        preset = SOCIAL_RADIUS_PRESETS.get(applied_social_radius)
+        if preset is not None:
+            generators_override = {"generators": preset}
+
+    feed_cache = _get_feed_cache(request)
+
+    async with timed(
+        logger,
+        "feed.render.duration_ms",
+        record_metric=True,
+        metric_attrs={"feed_name": feed_name},
+    ):
+        # ------------------------------------------------------------------
+        # If the client sent a cursor, try to serve the next page from cache.
+        # ------------------------------------------------------------------
+        if cursor is not None:
+            try:
+                parsed = FeedCursor.decode(cursor)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid cursor")
+
+            async with timed(logger, "feedcache_retrieve", cache_id=parsed.id):
+                cache_doc = await feed_cache.retrieve_document(parsed.id)
+            if cache_doc is not None:
+                cached_uris = cache_doc.items
+                if parsed.offset < len(cached_uris):
+                    # Serve from the existing cached batch.
+                    page = cached_uris[parsed.offset : parsed.offset + limit]
+                    next_offset = parsed.offset + len(page)
+                    next_cursor: str | None = None
+                    if page:
+                        # Always return a cursor when there are results.
+                        # When next_offset reaches the end of the cache the
+                        # next request will fall into the regeneration branch
+                        # below, which fetches fresh candidates.
+                        next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                    feed_context = _make_feed_context(user_did, feed_name, parsed.id)
+                    cached_snapshot = FeedSnapshotDocument(
+                        request_id=parsed.id,
+                        items=cached_uris,
+                        feed_name=cache_doc.feed_name or feed_name,
+                        generated_at=cache_doc.generated_at or datetime.now(timezone.utc),
+                        expires_at=cache_doc.expires_at,
+                        generator_diagnostics=cache_doc.generator_diagnostics,
+                        applied_social_radius=cache_doc.applied_social_radius,
+                        items_meta=cache_doc.items_meta,
+                    )
+                    if not is_probe:
+                        await _write_feed_snapshot_background(
+                            db,
+                            user_did,
+                            parsed.id,
+                            _snapshot_page(cached_snapshot, page),
+                        )
+                    return FeedSkeletonResponse(
+                        feed=_skeleton_items(page, feed_context),
+                        cursor=next_cursor,
+                    )
+
+                # Offset is at or past the end — regenerate with exclusions.
+                batch = _batch_size(limit)
+                seen_uris = await _seen_exclusions(db, user_did, feed_cfg)
+                # Dedup while preserving order; the cached batch and seen posts
+                # can overlap.
+                exclude_uris = list(dict.fromkeys(cached_uris + seen_uris))
+                gen_request = feed_cfg.gen_request_template.model_copy(
+                    update={
+                        "user_did": user_did,
+                        "num_candidates": batch,
+                        "exclude_uris": exclude_uris,
+                        **generators_override,
+                    }
                 )
 
-        # Record authenticated users in Firestore for backend analytics. Runs in
-        # the background since this isn't essential for serving.
-        db = getattr(request.app.state, "firestore", None)
-        if db is None:
-            logger.error("Firestore client not initialized")
-            raise HTTPException(status_code=500, detail="Firestore unavailable")
-
-        _spawn_background(_record_session(request, user_did, feed_name, db))
-
-        # Per-user opt-in: capture pipeline debugging info for this feed load. This
-        # costs one extra Firestore read per request; fail-soft so a hiccup degrades
-        # to no-debug rather than breaking feed serving.
-        debug_enabled = False
-        try:
-            user_doc = await get_user(db, user_did)
-            debug_enabled = bool(user_doc and user_doc.debug_feeds)
-        except Exception:
-            logger.exception("Failed to read debug flag for user '%s'", user_did)
-
-        feed_cache = _get_feed_cache(request)
-
-        async with timed(
-            logger,
-            "feed.render.duration_ms",
-            record_metric=True,
-            metric_attrs={"feed_name": feed_name},
-        ):
-            # ------------------------------------------------------------------
-            # If the client sent a cursor, try to serve the next page from cache.
-            # ------------------------------------------------------------------
-            if cursor is not None:
-                try:
-                    parsed = FeedCursor.decode(cursor)
-                except ValueError:
-                    raise HTTPException(status_code=400, detail="Invalid cursor")
-
-                async with timed(logger, "feedcache_retrieve", cache_id=parsed.id):
-                    cached_uris = await feed_cache.retrieve(parsed.id)
-                if cached_uris is not None:
-                    if parsed.offset < len(cached_uris):
-                        # Serve from the existing cached batch.
-                        page = cached_uris[parsed.offset : parsed.offset + limit]
+                generated_snapshot = await _run_pipeline_capturing(
+                    request,
+                    db,
+                    feed_cfg,
+                    gen_request,
+                    feed_name=feed_name,
+                    user_did=user_did,
+                    request_id=parsed.id,
+                    regenerated=True,
+                    debug_enabled=debug_enabled,
+                    applied_social_radius=applied_social_radius,
+                )
+                new_uris = generated_snapshot.items
+                if new_uris:
+                    async with timed(logger, "feedcache_append", cache_id=parsed.id):
+                        updated = await feed_cache.append_document(
+                            parsed.id,
+                            new_uris,
+                            generated_snapshot.items_meta,
+                        )
+                    if updated is not None:
+                        page = new_uris[:limit]
                         next_offset = parsed.offset + len(page)
-                        next_cursor: str | None = None
-                        if page:
-                            # Always return a cursor when there are results.
-                            # When next_offset reaches the end of the cache the
-                            # next request will fall into the regeneration branch
-                            # below, which fetches fresh candidates.
-                            next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                        next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
                         feed_context = _make_feed_context(user_did, feed_name, parsed.id)
+                        if not is_probe:
+                            await _write_feed_snapshot_background(
+                                db,
+                                user_did,
+                                parsed.id,
+                                _snapshot_page(generated_snapshot, page),
+                            )
                         return FeedSkeletonResponse(
                             feed=_skeleton_items(page, feed_context),
                             cursor=next_cursor,
                         )
 
-                    # Offset is at or past the end — regenerate with exclusions.
-                    batch = _batch_size(limit)
-                    seen_uris = await _seen_exclusions(db, user_did, feed_cfg)
-                    # Dedup while preserving order; the cached batch and seen posts
-                    # can overlap.
-                    exclude_uris = list(dict.fromkeys(cached_uris + seen_uris))
-                    gen_request = feed_cfg.gen_request_template.model_copy(
-                        update={
-                            "user_did": user_did,
-                            "num_candidates": batch,
-                            "exclude_uris": exclude_uris,
-                        }
-                    )
+                # Append failed or nothing new — end of feed.
+                return FeedSkeletonResponse(feed=[])
 
-                    new_uris = await _run_pipeline_capturing(
-                        request,
-                        db,
-                        feed_cfg,
-                        gen_request,
-                        feed_name=feed_name,
-                        user_did=user_did,
-                        request_id=parsed.id,
-                        regenerated=True,
-                        debug_enabled=debug_enabled,
-                    )
-                    if new_uris:
-                        async with timed(logger, "feedcache_append", cache_id=parsed.id):
-                            updated = await feed_cache.append(parsed.id, new_uris)
-                        if updated is not None:
-                            page = new_uris[:limit]
-                            next_offset = parsed.offset + len(page)
-                            next_cursor = None
-                            if len(page) == limit:
-                                next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
-                            feed_context = _make_feed_context(user_did, feed_name, parsed.id)
-                            return FeedSkeletonResponse(
-                                feed=_skeleton_items(page, feed_context),
-                                cursor=next_cursor,
-                            )
+            # Cache miss (expired / evicted) — fall through to generate fresh.
 
-                    # Append failed or nothing new — end of feed.
-                    return FeedSkeletonResponse(feed=[])
+        # ------------------------------------------------------------------
+        # No cursor or cache miss — generate a fresh batch.
+        # ------------------------------------------------------------------
+        reuse_future: Future[FeedSkeletonResponse] | None = None
+        if cursor is None and not is_probe:
+            is_leader, reuse_future = _claim_initial_request(user_did, feed_name, limit)
+            if not is_leader:
+                reused = await asyncio.wrap_future(reuse_future)
+                return reused.model_copy(deep=True)
 
-                # Cache miss (expired / evicted) — fall through to generate fresh.
-
-            # ------------------------------------------------------------------
-            # No cursor or cache miss — generate a fresh batch.
-            # ------------------------------------------------------------------
+        try:
             batch = _batch_size(limit)
             seen_uris = await _seen_exclusions(db, user_did, feed_cfg)
             gen_request = feed_cfg.gen_request_template.model_copy(
-                update={"user_did": user_did, "num_candidates": batch, "exclude_uris": seen_uris}
+                update={
+                    "user_did": user_did,
+                    "num_candidates": batch,
+                    "exclude_uris": seen_uris,
+                    **generators_override,
+                }
             )
 
             # The request id identifies this response; when we cache a batch it doubles
@@ -824,7 +1100,7 @@ async def get_feed_skeleton(
             # Generated up front so it can key the debug record too.
             request_id = uuid.uuid4().hex
 
-            all_uris = await _run_pipeline_capturing(
+            generated_snapshot = await _run_pipeline_capturing(
                 request,
                 db,
                 feed_cfg,
@@ -834,38 +1110,84 @@ async def get_feed_skeleton(
                 request_id=request_id,
                 regenerated=False,
                 debug_enabled=debug_enabled,
+                applied_social_radius=applied_social_radius,
             )
+            all_uris = generated_snapshot.items
 
-            # First page to return immediately. Prepend the pinned post if configured.
+            # Pinned posts are a Bluesky presentation concern and are deliberately
+            # excluded from observability snapshots and source diagnostics.
             if feed_cfg.pinned_post_uri:
-                page = _prepend_pinned(feed_cfg.pinned_post_uri, all_uris, limit)
+                cache_uris = [uri for uri in all_uris if uri != feed_cfg.pinned_post_uri]
+                generated_page = cache_uris[: max(0, limit - 1)]
+                page = [feed_cfg.pinned_post_uri, *generated_page]
+                consumed = len(generated_page)
             else:
-                page = all_uris[:limit]
+                cache_uris = all_uris
+                generated_page = all_uris[:limit]
+                page = generated_page
+                consumed = len(generated_page)
 
-            # Store the full batch and issue a cursor only when there are more pages.
+            if not is_probe:
+                await _write_feed_snapshot_background(
+                    db,
+                    user_did,
+                    request_id,
+                    _snapshot_page(generated_snapshot, generated_page),
+                )
+
+            # Store every non-empty batch. Even when the first generated batch
+            # fits in one page, its cursor lets Bluesky request regeneration
+            # with exclusions instead of treating a short batch as end-of-feed.
             next_cursor = None
-            if len(all_uris) > limit:
+            if cache_uris:
+                cache_meta_by_uri = {
+                    meta.at_uri: meta for meta in generated_snapshot.items_meta
+                }
+                cache_items_meta = [
+                    cache_meta_by_uri[uri]
+                    for uri in cache_uris
+                    if uri in cache_meta_by_uri
+                ]
                 async with timed(logger, "feedcache_store", cache_id=request_id):
-                    await feed_cache.store(request_id, all_uris)
-                next_cursor = FeedCursor(id=request_id, offset=limit).encode()
+                    await feed_cache.store_document(
+                        request_id,
+                        FeedCacheDocument(
+                            items=cache_uris,
+                            items_meta=cache_items_meta,
+                            generator_diagnostics=generated_snapshot.generator_diagnostics,
+                            applied_social_radius=applied_social_radius,
+                            feed_name=feed_name,
+                            generated_at=generated_snapshot.generated_at,
+                            expires_at=datetime.now(timezone.utc)
+                            + timedelta(seconds=DEFAULT_TTL_SECONDS),
+                        ),
+                    )
+                next_cursor = FeedCursor(id=request_id, offset=consumed).encode()
 
             feed_context = _make_feed_context(user_did, feed_name, request_id)
-            return FeedSkeletonResponse(
+            response = FeedSkeletonResponse(
                 feed=_skeleton_items(page, feed_context),
                 cursor=next_cursor,
             )
-    except HTTPException as exc:
-        _outcome = str(exc.status_code)
-        raise
-    except Exception:
-        _outcome = "500"
-        raise
-    finally:
-        if mc := get_metric_collector():
-            if _outcome == "success":
-                mc.record("feed.render.success_count", 1, feed_name=feed_name or "unknown")
-            else:
-                mc.record("feed.render.failure_count", 1, feed_name=feed_name or "unknown", status_code=_outcome)
+            if reuse_future is not None:
+                _complete_initial_request(
+                    user_did,
+                    feed_name,
+                    limit,
+                    reuse_future,
+                    response=response.model_copy(deep=True),
+                )
+            return response
+        except BaseException as error:
+            if reuse_future is not None:
+                _complete_initial_request(
+                    user_did,
+                    feed_name,
+                    limit,
+                    reuse_future,
+                    error=error,
+                )
+            raise
 
 
 @router.post(

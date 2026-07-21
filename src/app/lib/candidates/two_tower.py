@@ -7,10 +7,8 @@ for the most relevant posts via the pre-calculated post embeddings.
 import logging
 
 from .base import CandidateGenerator, CandidateResult
-from ..feed_debug import current_recorder
 from ..inference import get_inference_settings, compute_user_embedding, get_cached_post_tower_uuid
 from .es_candidates import knn_search_posts
-from ..telemetry import timed
 from ..embeddings import GE_POST_EMBEDDING_FIELD
 
 logger = logging.getLogger(__name__)
@@ -39,8 +37,6 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         video_only: bool = False,
         exclude_uris: list[str] | None = None,
     ) -> CandidateResult:
-        rec = current_recorder()
-
         inference_base_url, inference_api_key = (
             get_inference_settings()
         )
@@ -52,7 +48,12 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             logger.warning(
                 "Skipping two-tower candidates because post-tower is not configured",
             )
-            return CandidateResult(generator_name=self.name, candidates=[])
+            return CandidateResult(
+                generator_name=self.name,
+                candidates=[],
+                status="not_configured",
+                reason="post_tower_not_configured",
+            )
 
         # run the user tower to get the user embedding
         user_embedding = await compute_user_embedding(

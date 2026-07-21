@@ -35,9 +35,12 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-from .routers import candidates, diversify, health, rank, skylight, xrpc
+logger = logging.getLogger(__name__)
+
+from .routers import candidates, diversify, feed_transparency, health, rank, skylight, xrpc
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
+from .lib.firebase_auth import init_firebase_auth
 from .lib.es_client import SlowQueryLoggingES
 from .lib.feed_cache import FirestoreFeedCache
 from .lib.firestore import init_firestore_client
@@ -107,6 +110,12 @@ async def lifespan(app: FastAPI):
     app.state.id_resolver = init_id_resolver()
     app.state.firestore = init_firestore_client()
     app.state.feed_cache = FirestoreFeedCache(app.state.firestore)
+    try:
+        init_firebase_auth()
+    except Exception:
+        logger.warning(
+            "Firebase Admin SDK initialization failed; feed-transparency endpoints will return 500"
+        )
     init_http_client()
     try:
         yield
@@ -316,6 +325,7 @@ async def request_id_mw(request: Request, call_next):
 
 app.include_router(candidates.router)
 app.include_router(diversify.router)
+app.include_router(feed_transparency.router)
 app.include_router(health.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)

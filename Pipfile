@@ -15,6 +15,7 @@ opentelemetry-api = "*"
 opentelemetry-sdk = "*"
 opentelemetry-exporter-gcp-monitoring = "*"
 posthog = "*"
+firebase-admin = "*"
 
 [dev-packages]
 pytest = "*"
