@@ -34,9 +34,9 @@ def _normalize(
     """Linearly map *raw* from *bounds* into [0, 1], clamping the result.
 
     Missing scores (``None`` — e.g. a ranker couldn't score a candidate)
-    normalize to ``fallback_normalized_score`` (neutral), matching how individual rankers already
-    treat unscoreable candidates. Degenerate bounds (``hi <= lo``) also
-    normalize to ``fallback_normalized_score`` to avoid division by zero.
+    normalize to ``fallback_normalized_score``. Degenerate bounds
+    (``hi <= lo``) also normalize to ``fallback_normalized_score`` to avoid
+    division by zero.
     """
     if raw is None:
         return fallback_normalized_score
@@ -79,9 +79,9 @@ async def run_predict(
     """Rank the supplied candidates by combining the requested rank models.
 
     Each model runs in parallel; its raw `rank_score`s are normalized into
-    [-1, 1] using its `score_bounds`, then combined into a single score per
+    [0, 1] using its `score_bounds`, then combined into a single score per
     candidate via a weighted average (weights normalized to sum to 1, so the
-    combined score also stays within [-1, 1]). The final ordering is by
+    combined score also stays within [0, 1]). The final ordering is by
     combined score, descending, with ties broken by original candidate order.
     If a candidate at_uri has no valid scores from any model, it is dropped.
     If it has a score from at least one model but not the others, the median

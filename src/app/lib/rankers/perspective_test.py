@@ -25,8 +25,8 @@ class TestPerspectiveRanker:
         # _PRC_WEIGHTS' positive weights sum to 1.0 (6 * 1/6) and negative
         # weights sum to -1.0 (2*(-1/6) + 3*(-1/18) + 4*(-1/8)) — see
         # lib/perspective.py — so the theoretical bounds of the weighted-sum
-        # PRC score are exactly (-1.0, 1.0).
-        assert PerspectiveRanker().score_bounds == (-1.0, 1.0)
+        # PRC score are exactly (-1.0, 1.0), then rescaled to (0.0, 1.0).
+        assert PerspectiveRanker().score_bounds == (0.0, 1.0)
 
     def test_predict_orders_by_prc_score_descending(self):
         candidates = [
@@ -48,9 +48,8 @@ class TestPerspectiveRanker:
         assert [r.rank for r in rankings] == [1, 2, 3]
         assert [r.rank_score for r in rankings] == [0.9, 0.5, 0.1]
 
-    def test_predict_reports_raw_prc_scores_not_normalized(self):
-        """`predict` returns raw PRC scores; normalization into [-1, 1] using
-        `score_bounds` is `run_predict`'s responsibility, not the ranker's."""
+    def test_predict_reports_rescaled_prc_scores(self):
+        """`predict` returns the rescaled PRC scores produced by score_candidates."""
         candidates = [_make_candidate("at://a/1")]
         with patch(
             "app.lib.rankers.perspective.score_candidates",
@@ -93,28 +92,28 @@ class TestPerspectiveRanker:
         by_uri = {r.at_uri: r.rank_score for r in result.result.rankings}
         assert by_uri == {"at://a/1": 0.5, "at://a/2": None}
 
-    def test_predict_orders_real_scores_descending_with_missing_last(self):
+    def test_predict_orders_scores_descending_with_missing_last(self):
         candidates = [
             _make_candidate("at://a/missing", content="missing"),
-            _make_candidate("at://a/negative", content="negative"),
-            _make_candidate("at://a/zero", content="zero"),
-            _make_candidate("at://a/positive", content="positive"),
+            _make_candidate("at://a/low", content="low"),
+            _make_candidate("at://a/mid", content="mid"),
+            _make_candidate("at://a/high", content="high"),
         ]
         with patch(
             "app.lib.rankers.perspective.score_candidates",
             new_callable=AsyncMock,
             return_value={
                 "at://a/missing": None,
-                "at://a/negative": -0.2,
-                "at://a/zero": 0.0,
-                "at://a/positive": 0.7,
+                "at://a/low": 0.2,
+                "at://a/mid": 0.5,
+                "at://a/high": 0.85,
             },
         ):
             result = asyncio.run(PerspectiveRanker().predict(es=object(), user_did="did:plc:user1", candidates=candidates))
 
         assert [(r.at_uri, r.rank, r.rank_score) for r in result.result.rankings] == [
-            ("at://a/positive", 1, 0.7),
-            ("at://a/zero", 2, 0.0),
-            ("at://a/negative", 3, -0.2),
+            ("at://a/high", 1, 0.85),
+            ("at://a/mid", 2, 0.5),
+            ("at://a/low", 3, 0.2),
             ("at://a/missing", 4, None),
         ]

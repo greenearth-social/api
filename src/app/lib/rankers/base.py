@@ -46,7 +46,7 @@ class Ranker(ABC):
     def score_bounds(self) -> tuple[float, float]:
         """Theoretical (min, max) bounds of this ranker's raw `rank_score` values.
 
-        Used to linearly normalize raw scores into [-1, 1] before combining
+        Used to linearly normalize raw scores into [0, 1] before combining
         multiple rankers' outputs into a single weighted score.
         """
         ...

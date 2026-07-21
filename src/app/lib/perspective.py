@@ -50,13 +50,12 @@ class PerspectiveLanguageNotSupportedError(Exception):
 # part of this reference formula and is intentionally omitted.
 #
 # Each attribute score from the Perspective API is in [0, 1], so for any
-# weighted sum of attributes the theoretical score bounds are
+# weighted sum of attributes the raw theoretical score bounds are
 # (sum of negative weights, sum of positive weights) — see
-# `_weighted_score_bounds`. This formula's positive weights sum to 1.0
+# `_raw_weighted_score_bounds`. This formula's positive weights sum to 1.0
 # (6 * 1/6) and negative weights sum to -1.0 (2*(-1/6) + 3*(-1/18) +
-# 4*(-1/8)), giving bounds of exactly (-1.0, 1.0) — no rescaling needed
-# beyond the float-precision clamp `_weighted_score_bounds` already performs
-# implicitly via `_normalize`'s clamping in the rank-model pipeline.
+# 4*(-1/8)), giving raw bounds of exactly (-1.0, 1.0). The final PRC score
+# is linearly rescaled into [0, 1] before it enters the rank-model pipeline.
 _PRC_WEIGHTS: dict[str, float] = {
     "REASONING_EXPERIMENTAL": 1 / 6,
     "PERSONAL_STORY_EXPERIMENTAL": 1 / 6,
@@ -97,7 +96,7 @@ def _raw_weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]
 
 def weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]:
     """Theoretical (min, max) bounds for a weighted sum of Perspective attributes,
-    rescaled to the final score bounds [-1, 1].
+    rescaled to the final score bounds [0, 1].
 
     See `_raw_weighted_score_bounds` for the underlying calculation.
     """
@@ -109,7 +108,7 @@ def weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]:
 
 
 def _change_bounds(raw: float, original_bounds: tuple[float, float], new_bounds: tuple[float, float]) -> float:
-    """Linearly map *raw* from *bounds* into the final score bounds [-1, 1]."""
+    """Linearly map *raw* from *original_bounds* into *new_bounds*."""
     orig_lo, orig_hi = original_bounds
     if orig_hi <= orig_lo:
         raise ValueError(f"degenerate original bounds: {original_bounds}")
@@ -120,7 +119,7 @@ def _change_bounds(raw: float, original_bounds: tuple[float, float], new_bounds:
 
 
 def _prc_score(attr: dict[str, float], weights: dict[str, float] = _PRC_WEIGHTS) -> float:
-    """Score a post as a weighted sum of its Perspective attribute scores."""
+    """Score a post as a weighted sum rescaled into final [0, 1] bounds."""
     raw_score = sum(weight * attr[name] for name, weight in weights.items())
     return _change_bounds(raw_score, _raw_weighted_score_bounds(weights), _FINAL_SCORE_BOUNDS)
 

@@ -1,7 +1,7 @@
 """Perspective API ranker.
 
 Scores each candidate's text content for conversational quality via the
-Perspective API (see :mod:`app.lib.perspective`) and exposes the raw PRC
+Perspective API (see :mod:`app.lib.perspective`) and exposes the rescaled PRC
 scores as a `Ranker` so they can be normalized and combined with other rank
 models (e.g. the two-tower model) by `run_predict`.
 """
