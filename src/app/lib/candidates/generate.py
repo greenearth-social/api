@@ -18,9 +18,9 @@ from ...models import (
     GeneratorSpec,
 )
 from .base import CandidateGenerator, CandidateResult, get_generator
-from ..config import fail_fast
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
+from ..pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -102,19 +102,16 @@ async def run_generate(
 ) -> CandidateGenerateResult:
     """Execute a candidate-generation pipeline described by *request*.
 
-    Parameters
-    ----------
-    request:
-        The generation configuration.
-    es:
-        An ``AsyncElasticsearch`` client.
+    Soft-fail behavior is driven by whether a PipelineContext is installed
+    (via pipeline_context_scope) on the current task:
 
-    Generator failures are swallowed (empty candidates) or re-raised according
-    to ``fail_fast()`` / ``GE_FAIL_FAST``. All call sites use that env var
-    rather than a per-call override, consistent with ``score_candidates`` and
-    ``_hydrate_embeddings``.
+    - No context → generator failures raise GeneratorError (hard fail).
+    - Context installed, fail_fast=False → failures are logged, recorded as
+      DegradationEvent, and the generator returns no candidates.
+    - Context installed, fail_fast=True → failures re-raise after recording.
+
+    Missing generators always raise GeneratorNotFoundError regardless of context.
     """
-    _swallow = not fail_fast()
     counts = allocate_counts(request.generators, request.num_candidates)
 
     # Resolve generators up front so missing-name errors raise deterministically
@@ -130,7 +127,7 @@ async def run_generate(
 
     async def _run_one(
         spec: GeneratorSpec, count: int, gen: CandidateGenerator
-    ) -> CandidateResult:
+    ) -> CandidateResult | None:
         try:
             async with timed(logger, "candidates.generate.duration_ms", record_metric=True, metric_attrs={"generator_name": spec.name}, count=count):
                 result = await asyncio.wait_for(
@@ -165,8 +162,14 @@ async def run_generate(
                     outcome="timeout",
                     is_infill="false",
                 )
-            if _swallow:
-                return CandidateResult(generator_name=spec.name, candidates=[])
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(DegradationEvent(
+                    stage=DegradationStage.CANDIDATE_GEN,
+                    component=spec.name,
+                    cause=exc,
+                ))
+                return None
             raise GeneratorError(spec.name, exc) from exc
         except Exception as exc:
             logger.exception("Candidate generator '%s' failed", spec.name)
@@ -178,8 +181,14 @@ async def run_generate(
                     outcome="error",
                     is_infill="false",
                 )
-            if _swallow:
-                return CandidateResult(generator_name=spec.name, candidates=[])
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(DegradationEvent(
+                    stage=DegradationStage.CANDIDATE_GEN,
+                    component=spec.name,
+                    cause=exc,
+                ))
+                return None
             raise GeneratorError(spec.name, exc) from exc
 
     results = await asyncio.gather(
@@ -190,6 +199,8 @@ async def run_generate(
 
     all_candidates: list[CandidatePost] = []
     for result in results:
+        if result is None:
+            continue
         if rec is not None:
             rec.record_generator_output(result)
         all_candidates.extend(result.candidates)
@@ -244,7 +255,13 @@ async def run_generate(
                     outcome="timeout",
                     is_infill="true",
                 )
-            if _swallow:
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(DegradationEvent(
+                    stage=DegradationStage.CANDIDATE_GEN,
+                    component=f"{request.infill}:infill",
+                    cause=exc,
+                ))
                 infill_result = CandidateResult(generator_name=request.infill, candidates=[])
             else:
                 raise GeneratorError(request.infill, exc, is_infill=True) from exc
@@ -258,7 +275,13 @@ async def run_generate(
                     outcome="error",
                     is_infill="true",
                 )
-            if _swallow:
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(DegradationEvent(
+                    stage=DegradationStage.CANDIDATE_GEN,
+                    component=f"{request.infill}:infill",
+                    cause=exc,
+                ))
                 infill_result = CandidateResult(generator_name=request.infill, candidates=[])
             else:
                 raise GeneratorError(request.infill, exc, is_infill=True) from exc

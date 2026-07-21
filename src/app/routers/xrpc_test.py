@@ -584,18 +584,20 @@ class TestGetFeedSkeleton:
 
         assert resp.status_code == 500
 
-    def test_primary_failure_falls_back_to_infill_when_not_fail_fast(self, monkeypatch):
-        """With GE_FAIL_FAST=false, a failing primary generator yields infill results."""
-        monkeypatch.setenv("GE_FAIL_FAST", "false")
-        infill = _make_candidates("infill", 3, "popularity")
+    def test_primary_failure_returns_500_without_pipeline_context(self, monkeypatch):
+        """Without a PipelineContext installed, generator failures always hard-fail (500).
 
+        Soft-fail / infill fallback requires a PipelineContext to be installed by the
+        XRPC handler (a later task). The old GE_FAIL_FAST=false behavior is replaced by
+        PipelineContext-driven degradation.
+        """
         primary_gen = AsyncMock()
         primary_gen.generate.side_effect = RuntimeError("ES down")
 
         infill_gen = AsyncMock()
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity",
-            candidates=infill,
+            candidates=_make_candidates("infill", 3, "popularity"),
         )
 
         followed_users_gen = AsyncMock()
@@ -612,13 +614,12 @@ class TestGetFeedSkeleton:
             }.get(name)
 
         with patch("app.lib.candidates.generate.get_generator", side_effect=fake_get):
-            data = client.get(
+            resp = TestClient(app, raise_server_exceptions=False).get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": FEED_URI, "limit": 5},
-            ).json()
+            )
 
-        assert len(data["feed"]) == 3
-        assert data["feed"][0]["post"] == "at://infill/0"
+        assert resp.status_code == 500
 
     # --- empty feed ---
 
