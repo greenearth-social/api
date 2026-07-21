@@ -50,7 +50,8 @@ class TestPerspectiveUrl:
 # the PRC reference implementation: 6 positively-weighted "bridging"
 # attributes at +1/6 each, and 9 negatively-weighted attributes split into
 # three groups — 2 "outrage" attrs at -1/6, 3 "outrage" attrs at -1/18, and
-# 4 "toxic" attrs at -1/8 — summing to weights of (-1.0, +1.0).
+# 4 "toxic" attrs at -1/8 — summing to raw weights of (-1.0, +1.0), then
+# rescaled to final scores in [0, 1].
 # ---------------------------------------------------------------------------
 
 _BRIDGING_ATTRS = [
@@ -76,15 +77,15 @@ def _zero_attr() -> dict[str, float]:
 
 
 class TestPrcScore:
-    def test_all_zeros_returns_zero(self):
-        assert _prc_score(_zero_attr()) == pytest.approx(0.0)
+    def test_all_zeros_returns_midpoint(self):
+        assert _prc_score(_zero_attr()) == pytest.approx(0.5)
 
     def test_pure_bridging_returns_positive(self):
         attr = {**_zero_attr(), **dict.fromkeys(_BRIDGING_ATTRS, 1.0)}
-        # 6 attrs at weight 1/6 each, all at 1.0 -> score = 1.0
+        # 6 attrs at weight 1/6 each, all at 1.0 -> raw score = 1.0 -> final score = 1.0
         assert _prc_score(attr) == pytest.approx(1.0)
 
-    def test_pure_negative_returns_negative(self):
+    def test_pure_negative_returns_bottom_score(self):
         attr = {
             **_zero_attr(),
             **dict.fromkeys(_OUTRAGE_SIXTH_ATTRS, 1.0),
@@ -92,8 +93,8 @@ class TestPrcScore:
             **dict.fromkeys(_TOXIC_EIGHTH_ATTRS, 1.0),
         }
         # negative weights sum to -1.0 (2*(-1/6) + 3*(-1/18) + 4*(-1/8)),
-        # all at 1.0 -> score = -1.0
-        assert _prc_score(attr) == pytest.approx(-1.0)
+        # all at 1.0 -> raw score = -1.0 -> final score = 0.0
+        assert _prc_score(attr) == pytest.approx(0.0)
 
     def test_known_mixed_inputs(self):
         attr = {
@@ -102,12 +103,13 @@ class TestPrcScore:
             **dict.fromkeys(_OUTRAGE_EIGHTEENTH_ATTRS, 0.9),
             **dict.fromkeys(_TOXIC_EIGHTH_ATTRS, 0.4),
         }
-        expected = (
+        raw_expected = (
             len(_BRIDGING_ATTRS) * (1 / 6) * 0.6
             + len(_OUTRAGE_SIXTH_ATTRS) * (-1 / 6) * 0.3
             + len(_OUTRAGE_EIGHTEENTH_ATTRS) * (-1 / 18) * 0.9
             + len(_TOXIC_EIGHTH_ATTRS) * (-1 / 8) * 0.4
         )
+        expected = (raw_expected + 1.0) / 2.0
         assert _prc_score(attr) == pytest.approx(expected)
 
 

@@ -146,7 +146,7 @@ class RankPredictRequest(BaseModel):
         min_length=1,
         description=(
             "Rank models to run and combine. Each model's scores are normalized "
-            "to [-1, 1] using its theoretical bounds, then combined via a "
+            "to [0, 1] using its theoretical bounds, then combined via a "
             "weighted average using the configured relative weights."
         ),
     )
