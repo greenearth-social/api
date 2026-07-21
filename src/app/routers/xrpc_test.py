@@ -1577,11 +1577,11 @@ class TestSlateCutoffs:
 
     def test_rank_floor_cuts_low_scores_and_records_discards(self, monkeypatch):
         """Sub-floor candidates are cut (boundary-equal kept) and persisted as discarded."""
-        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
         candidates = _make_candidates("p", 4, with_embedding=True)
         discarded = AsyncMock()
 
-        data = self._get_feed(candidates, self._rank_result([0.5, 0.2, 0.0, -0.3]), discarded)
+        data = self._get_feed(candidates, self._rank_result([0.8, 0.6, 0.5, 0.4]), discarded)
 
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/0", "at://p/1", "at://p/2"]
@@ -1630,11 +1630,11 @@ class TestSlateCutoffs:
 
     def test_fail_open_serves_precut_slate_when_everything_cut(self, monkeypatch):
         """If the gates reject everything retrieved, the pre-cutoff slate is served."""
-        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
         candidates = _make_candidates("p", 3, with_embedding=True)
         discarded = AsyncMock()
 
-        data = self._get_feed(candidates, self._rank_result([-0.1, -0.2, -0.3]), discarded)
+        data = self._get_feed(candidates, self._rank_result([0.4, 0.3, 0.2]), discarded)
 
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/0", "at://p/1", "at://p/2"]
@@ -1647,21 +1647,21 @@ class TestSlateCutoffs:
         from app.routers import xrpc as xrpc_mod
 
         monkeypatch.setattr(xrpc_mod, "EMPTY_SLATE_FAIL_OPEN", False)
-        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
         candidates = _make_candidates("p", 3, with_embedding=True)
 
-        data = self._get_feed(candidates, self._rank_result([-0.1, -0.2, -0.3]))
+        data = self._get_feed(candidates, self._rank_result([0.4, 0.3, 0.2]))
 
         assert data["feed"] == []
         assert "cursor" not in data
 
     def test_discarded_uris_excluded_on_fresh_request(self, monkeypatch):
         """Feeds with a rank floor exclude previously-discarded posts from generation."""
-        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
         candidates = _make_candidates("p", 2, with_embedding=True)
         gen_patch, primary_gen = self._patch_generators(candidates)
 
-        rank_result = self._rank_result([0.5, 0.4])
+        rank_result = self._rank_result([0.7, 0.6])
         with gen_patch, \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result), \
              patch("app.routers.xrpc.record_discarded_posts", new_callable=AsyncMock), \
@@ -1711,9 +1711,9 @@ class TestSlateCutoffs:
         reader = InMemoryMetricReader()
         set_metric_collector(MetricCollector._from_reader(reader, service_name="t", env="test"))
         try:
-            monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+            monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
             candidates = _make_candidates("p", 4, with_embedding=True)
-            self._get_feed(candidates, self._rank_result([0.5, 0.2, 0.0, -0.3]))
+            self._get_feed(candidates, self._rank_result([0.8, 0.6, 0.5, 0.4]))
 
             metrics = {}
             metrics_data = reader.get_metrics_data()
