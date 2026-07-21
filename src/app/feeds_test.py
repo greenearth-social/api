@@ -73,3 +73,22 @@ class TestFeedsRegistry:
             assert cfg.max_render_share is None, feed_name
             assert cfg.min_rank_score is None, feed_name
             assert cfg.min_mmr_score is None, feed_name
+
+    def test_cutoff_preview_feed_exercises_the_full_ranked_pipeline(self):
+        """Private dev feed for tuning slate-cutoff thresholds (issue #248):
+        same generator mix as your-feed, with ranking and diversification
+        enabled, so it's a faithful preview of production cutoff behavior."""
+        cfg = FEEDS["cutoff-preview"]
+        assert cfg.public is False
+        assert cfg.rank_request_template is not None
+        assert [
+            spec.name for spec in cfg.rank_request_template.models
+        ] == ["heavy_ranker", "perspective"]
+        assert cfg.diversify is True
+        assert (
+            cfg.gen_request_template.generators
+            == FEEDS["your-feed"].gen_request_template.generators
+        )
+        assert cfg.max_render_share == pytest.approx(0.5)
+        assert cfg.min_rank_score == pytest.approx(-0.15)
+        assert cfg.min_mmr_score == pytest.approx(-0.05)

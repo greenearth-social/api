@@ -145,6 +145,52 @@ FEEDS: dict[str, FeedConfig] = {
             ],
         ),
     ),
+    "cutoff-preview": FeedConfig(
+        display_name="Cutoff Preview",
+        description="Development feed — your-feed's ranked pipeline with slate-cutoff "
+        "limits enabled, for observing and tuning thresholds (see issue #248).",
+        internal_rkey="qr-cp",
+        internal_display_name="qr CP",
+        # Same generator mix as your-feed, so cutoff behavior here previews what
+        # real users would see.
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[
+                GeneratorSpec(name="followed_users", weight=0.40),
+                GeneratorSpec(name="two_tower", weight=0.30),
+                GeneratorSpec(name="popularity", weight=0.30),
+            ],
+            infill=None,
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
+        ),
+        rank_request_template=RankPredictRequest.model_construct(
+            models=[
+                RankModelSpec(name="heavy_ranker", weight=1.0),
+                RankModelSpec(name="perspective", weight=1.0),
+            ],
+        ),
+        # Values below are calibrated from real combined rank_score and MMR
+        # pick_score distributions pulled from stage feed_debug records (242
+        # ranked candidates across 4 real "your-feed" loads from 2 debug-enabled
+        # stage users, 2026-07-14 to 2026-07-21), not the theoretical [-1, 1]
+        # midpoint used as the initial guess for your-feed/best-of-friends.
+        #
+        # Empirically the combined score skews well below 0 (p10=-0.21,
+        # p25=-0.07, p50=+0.07) — a floor at the theoretical midpoint (0.0)
+        # would cut roughly half of all candidates by itself, before MMR or the
+        # share cap get a say. min_rank_score=-0.15 sits at ~p12-13, trimming
+        # only the clearly-bad tail and leaving max_render_share as the
+        # dominant lever on render volume, matching the issue's 10-50% band.
+        #
+        # MMR pick_score p10=+0.01, and the observed minimums (-0.52, -0.08,
+        # -0.08, -0.06) show -0.05 already sits below almost all real picks —
+        # it only fires on genuine outliers, so it's left at the same starting
+        # value used for your-feed/best-of-friends.
+        max_render_share=0.5,
+        min_rank_score=-0.15,
+        min_mmr_score=-0.05,
+    ),
 
     ### (Private) Pure Candidate Generator Feeds, mostly for testing and debugging ###
     "post-similarity": FeedConfig(
