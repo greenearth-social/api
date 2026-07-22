@@ -248,6 +248,10 @@ class FeedDebugDiversificationEntry(BaseModel):
     content_penalty: float = Field(
         default=0.0, description="Penalty from embedding (content) similarity to selected items"
     )
+    diversity_score: float = Field(
+        default=0.0,
+        description="Diversity score for this item (0=least diverse, 1=most diverse)",
+    )
 
 
 class FeedDebugDocument(BaseModel):
@@ -341,6 +345,7 @@ class DiversificationMeta(BaseModel):
     score: float
     author_penalty: float = 0.0
     content_penalty: float = 0.0
+    diversity_score: float = 0.0
 
 
 class GeneratorMeta(BaseModel):

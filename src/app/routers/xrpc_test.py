@@ -1,11 +1,19 @@
 """Tests for the XRPC feed generator endpoints."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+from ..documents import (
+    DiversificationMeta,
+    FeedCacheDocument,
+    FeedSnapshotDocument,
+    PipelineItemMeta,
+)
 from ..feeds import FEEDS
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
@@ -112,10 +120,17 @@ class FakeMetricCollector:
 
 
 class InMemoryFeedCache(FeedCache):
-    """Trivial in-memory feed cache for tests."""
+    """Trivial in-memory feed cache for tests.
+
+    Stores full :class:`FeedCacheDocument` objects (with ``items_meta``) so
+    tests that exercise diversity/observability data on cursor pages served
+    purely from cache can set up realistic fixtures, mirroring
+    ``FirestoreFeedCache``'s document-based methods.
+    """
 
     def __init__(self):
         self._store: dict[str, list[str]] = {}
+        self._docs: dict[str, FeedCacheDocument] = {}
 
     async def store(self, key: str, items: list[str], ttl_seconds: int = 600) -> None:
         self._store[key] = items
@@ -129,6 +144,30 @@ class InMemoryFeedCache(FeedCache):
             return None
         updated = existing + new_items
         self._store[key] = updated
+        return updated
+
+    async def store_document(self, key: str, document: FeedCacheDocument) -> None:
+        self._store[key] = document.items
+        self._docs[key] = document
+
+    async def retrieve_document(self, key: str) -> FeedCacheDocument | None:
+        return self._docs.get(key)
+
+    async def append_document(
+        self,
+        key: str,
+        new_items: list[str],
+        new_items_meta: list[PipelineItemMeta],
+    ) -> FeedCacheDocument | None:
+        existing = self._docs.get(key)
+        if existing is None:
+            return None
+        updated_items = list(dict.fromkeys([*existing.items, *new_items]))
+        meta_by_uri = {m.at_uri: m for m in existing.items_meta}
+        meta_by_uri.update({m.at_uri: m for m in new_items_meta})
+        updated_meta = [meta_by_uri[uri] for uri in updated_items if uri in meta_by_uri]
+        updated = existing.model_copy(update={"items": updated_items, "items_meta": updated_meta})
+        self._docs[key] = updated
         return updated
 
 
@@ -883,6 +922,7 @@ class TestFeedSkeletonCursor:
 
         # Simulate cache eviction.
         app.state.feed_cache._store.clear()
+        app.state.feed_cache._docs.clear()
 
         fresh = _make_candidates("fresh", 5)
         with self._patch_generators(fresh):
@@ -2214,6 +2254,181 @@ class TestGetFeedSkeletonProbe:
 
 
 # ---------------------------------------------------------------------------
+# Diversity score metric
+# ---------------------------------------------------------------------------
+
+
+class TestDiversityScoreMetric:
+    @pytest.fixture(autouse=True)
+    def _mock_auth_and_session(self):
+        with (
+            patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"),
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock),
+            patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock),
+        ):
+            yield
+
+    def _make_candidates(self, n: int) -> list[CandidatePost]:
+        return [
+            CandidatePost(
+                at_uri=f"at://test/{i}",
+                score=1.0 - i * 0.02,
+                author_did=f"did:plc:{i}",
+            )
+            for i in range(n)
+        ]
+
+    def test_metric_emitted_on_initial_request(self):
+        """The real MMR pipeline runs; the served page's mean diversity score
+        (from items_meta) is emitted for batch 0."""
+        collector = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, collector))
+
+        candidates = self._make_candidates(35)
+        with _patch_unranked_your_feed_generators(candidates):
+            client = TestClient(app)
+            resp = client.get(
+                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={FEED_URI_FROM_APPVIEW}&limit=5"
+            )
+
+        set_metric_collector(None)
+        assert resp.status_code == 200
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        assert len(metric_calls) == 1
+        _, value, attrs = metric_calls[0]
+        assert attrs["feed_name"] == FEED_RKEY
+        assert attrs["batch"] == "0"
+        assert 0.0 <= value <= 1.0
+
+    def test_metric_emitted_on_cursor_request_from_cache_items_meta(self):
+        """A cursor page served purely from FeedCache (no pipeline call) reads
+        its diversity scores from items_meta already stored on the cache
+        document, requiring no extra Firestore read."""
+        collector = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, collector))
+
+        candidates = self._make_candidates(35)
+        with _patch_unranked_your_feed_generators(candidates):
+            client = TestClient(app)
+            resp1 = client.get(
+                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={FEED_URI_FROM_APPVIEW}&limit=5"
+            )
+            assert resp1.status_code == 200
+            cursor = resp1.json().get("cursor")
+            assert cursor is not None
+
+            resp2 = client.get(
+                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={FEED_URI_FROM_APPVIEW}&limit=5&cursor={cursor}"
+            )
+
+        set_metric_collector(None)
+        assert resp2.status_code == 200
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        assert len(metric_calls) == 2
+        batches = {c[2]["batch"] for c in metric_calls}
+        assert batches == {"0", "1"}
+        batch_1_value = next(v for _, v, attrs in metric_calls if attrs["batch"] == "1")
+        assert 0.0 <= batch_1_value <= 1.0
+
+    def test_metric_not_emitted_when_no_scores(self):
+        """When diversification is off, no items carry diversification info,
+        so no metric fires."""
+        collector = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, collector))
+
+        # Use random feed — no diversification
+        candidates = [
+            CandidatePost(at_uri=f"at://test/{i}", score=float(i), author_did=f"did:plc:{i}")
+            for i in range(5)
+        ]
+        random_gen = AsyncMock()
+        random_gen.generate.return_value = CandidateResult(
+            generator_name="random_posts", candidates=candidates
+        )
+        with patch("app.lib.candidates.generate.get_generator", return_value=random_gen):
+            client = TestClient(app)
+            resp = client.get(
+                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={RANDOM_FEED_URI}&limit=5"
+            )
+
+        set_metric_collector(None)
+        assert resp.status_code == 200
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        assert len(metric_calls) == 0
+
+    def test_metric_excludes_pinned_post_from_mean(self):
+        """The pinned post is forced to the front regardless of its diversity
+        score, so it must not be averaged into the mean-diversity metric,
+        even when it happens to also be one of the organically-generated
+        candidates (and so does carry a real diversity score)."""
+        from ..lib.diversify import mmr_rerank as real_mmr_rerank
+        from ..lib.feed_debug import FeedDebugRecorder, feed_debug_scope
+        from app.routers import xrpc as xrpc_mod
+
+        collector = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, collector))
+
+        pinned_uri = "at://did:plc:pinauthor/app.bsky.feed.post/pinnedpost"
+        pinned_candidate = CandidatePost(at_uri=pinned_uri, score=1.0, author_did="did:plc:pin")
+        others = [
+            CandidatePost(at_uri=f"at://test/{i}", score=0.9 - i * 0.1, author_did="did:plc:same")
+            for i in range(5)
+        ]
+        candidates = [pinned_candidate, *others]
+
+        random_gen = AsyncMock()
+        random_gen.generate.return_value = CandidateResult(
+            generator_name="random_posts", candidates=candidates
+        )
+
+        def fake_get_generator(name):
+            return random_gen if name == "random_posts" else None
+
+        pinned_cfg = FEEDS["random"].model_copy(
+            update={"pinned_post_uri": pinned_uri, "diversify": True}
+        )
+        patched_feeds = {"random": pinned_cfg, **{k: v for k, v in FEEDS.items() if k != "random"}}
+
+        with (
+            patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator),
+            patch.object(xrpc_mod, "FEEDS", patched_feeds),
+        ):
+            client = TestClient(app)
+            resp = client.get(
+                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={RANDOM_FEED_URI}&limit=5"
+            )
+
+        set_metric_collector(None)
+        assert resp.status_code == 200
+        post_uris = [item["post"] for item in resp.json()["feed"]]
+        assert post_uris[0] == pinned_uri
+        assert len(post_uris) == 5
+
+        # Ground truth: run the same production diversification independently
+        # (same input, same order) to know each candidate's real diversity
+        # score, then compute the expected mean over the served non-pinned
+        # items only.
+        ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
+        rec = FeedDebugRecorder(feed_name="random", regenerated=False)
+        with feed_debug_scope(rec):
+            real_mmr_rerank(ordered)
+        diversity_by_uri = {uri: d for uri, _, _, _, _, d in rec.diversification}
+
+        non_pinned_scores = [diversity_by_uri[uri] for uri in post_uris[1:]]
+        expected_mean = sum(non_pinned_scores) / len(non_pinned_scores)
+
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        assert len(metric_calls) == 1
+        _, value, attrs = metric_calls[0]
+        assert attrs["batch"] == "0"
+        assert value == pytest.approx(expected_mean)
+        # Pinned is always the first MMR pick here (highest score), so its
+        # own diversity score is 1.0 — distinct from the computed mean,
+        # proving the exclusion is actually doing something.
+        assert diversity_by_uri[pinned_uri] == 1.0
+        assert value != pytest.approx(1.0)
+
+# ---------------------------------------------------------------------------
 # Pinned post
 # ---------------------------------------------------------------------------
 
@@ -2376,6 +2591,10 @@ class TestPinnedPost:
         cache = InMemoryFeedCache()
         cached_uris = [f"at://did:plc:a/{i}" for i in range(20)]
         cache._store["testcacheid"] = cached_uris
+        cache._docs["testcacheid"] = FeedCacheDocument(
+            items=cached_uris,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        )
         app.state.feed_cache = cache
 
         cursor = FeedCursor(id="testcacheid", offset=10).encode()
@@ -2388,8 +2607,6 @@ class TestPinnedPost:
         assert resp.status_code == 200
         post_uris = [item["post"] for item in resp.json()["feed"]]
         assert self.PINNED_URI not in post_uris
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -2609,8 +2826,6 @@ class TestGetFeedSkeletonMetrics:
         assert [
             call for call in self.mc.calls if call[0] == "feed.render.success_count"
         ] == []
-
-
 class TestPosthogTracking:
     """Verify PostHog events are emitted from XRPC background handlers."""
 

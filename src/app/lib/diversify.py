@@ -61,9 +61,11 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[tuple[CandidatePost, flo
     decayed_same_author_counts = [0] * n
 
     rec = current_recorder()
-    # (at_uri, relevance, score, author_penalty, content_penalty) per pick, for
-    # the algorithm-agnostic diversification debug record.
-    diag: list[tuple[str, float, float, float, float]] | None = [] if rec is not None else None
+    # (at_uri, relevance, score, author_penalty, content_penalty, diversity_score)
+    # per pick, for the algorithm-agnostic diversification debug record.
+    diag: list[tuple[str, float, float, float, float, float]] | None = (
+        [] if rec is not None else None
+    )
 
     def _calculate_author_penalty(i: int) -> float:
         return BETA * AUTHOR_WEIGHT * decayed_same_author_counts[i]
@@ -84,11 +86,18 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[tuple[CandidatePost, flo
             pick_score = (1 - BETA) * norm_scores[best]
             author_penalty = 0.0
             content_penalty = 0.0
+            diversity_score = 1.0
         else:
             best = max(remaining, key=_calculate_penalized_score)
             pick_score = _calculate_penalized_score(best)
             author_penalty = _calculate_author_penalty(best)
             content_penalty = _calculate_content_penalty(best)
+            # Diversity score mirrors the combined similarity the penalty was
+            # derived from, so it stays comparable to the pre-decay formula.
+            combined_sim = decayed_same_author_counts[best] * AUTHOR_WEIGHT + (
+                1 - AUTHOR_WEIGHT
+            ) * decayed_max_content_sims[best]
+            diversity_score = max(0.0, 1.0 - combined_sim)
 
         if diag is not None:
             diag.append(
@@ -98,6 +107,7 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[tuple[CandidatePost, flo
                     pick_score,
                     author_penalty,
                     content_penalty,
+                    diversity_score,
                 )
             )
 

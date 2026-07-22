@@ -641,6 +641,51 @@ def _get_feed_cache(request: Request) -> FeedCache:
     return cache
 
 
+def _diversity_scores_from_items_meta(items_meta: list[PipelineItemMeta]) -> dict[str, float]:
+    """Build an ``{at_uri: diversity_score}`` lookup from pipeline metadata.
+
+    Items without diversification info (diversify disabled, or not yet
+    joined) are simply absent from the result.
+    """
+    return {
+        meta.at_uri: meta.diversification.diversity_score
+        for meta in items_meta
+        if meta.diversification is not None
+    }
+
+
+def _record_diversity_metric(
+    page_uris: list[str],
+    scores_by_uri: dict[str, float],
+    feed_name: str,
+    batch: int,
+    exclude_uri: str | None = None,
+) -> None:
+    """Emit the mean diversity score for one served page.
+
+    Silently emits nothing when no URI in the page has a known score (e.g.
+    diversify is disabled for this feed). ``exclude_uri`` (the pinned post,
+    when present) is always excluded from the mean even if it happens to
+    carry a score, since it wasn't organically selected by MMR.
+    """
+    scores = [
+        scores_by_uri[uri]
+        for uri in page_uris
+        if uri in scores_by_uri and uri != exclude_uri
+    ]
+    if not scores:
+        return
+    mc = get_metric_collector()
+    if mc is None:
+        return
+    mc.record(
+        "feed.mean_diversity_score",
+        sum(scores) / len(scores),
+        feed_name=feed_name,
+        batch=str(batch),
+    )
+
+
 # ---------------------------------------------------------------------------
 # feedContext helpers
 # ---------------------------------------------------------------------------
@@ -1141,6 +1186,10 @@ async def get_feed_skeleton(
                         # next request will fall into the regeneration branch
                         # below, which fetches fresh candidates.
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                    scores_by_uri = _diversity_scores_from_items_meta(cache_doc.items_meta)
+                    _record_diversity_metric(
+                        page, scores_by_uri, feed_name, batch=parsed.offset // limit
+                    )
                     feed_context = _make_feed_context(user_did, feed_name, parsed.id)
                     cached_snapshot = FeedSnapshotDocument(
                         request_id=parsed.id,
@@ -1208,6 +1257,12 @@ async def get_feed_skeleton(
                         # lands at end-of-cache and regenerates again (the
                         # ranking session restarts with fresh exclusions).
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                        scores_by_uri = _diversity_scores_from_items_meta(
+                            generated_snapshot.items_meta
+                        )
+                        _record_diversity_metric(
+                            page, scores_by_uri, feed_name, batch=parsed.offset // limit
+                        )
                         feed_context = _make_feed_context(user_did, feed_name, parsed.id)
                         if not is_probe:
                             await _write_feed_snapshot_background(
@@ -1281,6 +1336,11 @@ async def get_feed_skeleton(
                 generated_page = all_uris[:limit]
                 page = generated_page
                 consumed = len(generated_page)
+
+            scores_by_uri = _diversity_scores_from_items_meta(generated_snapshot.items_meta)
+            _record_diversity_metric(
+                page, scores_by_uri, feed_name, batch=0, exclude_uri=feed_cfg.pinned_post_uri
+            )
 
             if not is_probe:
                 await _write_feed_snapshot_background(

@@ -162,12 +162,16 @@ class TestBuildDocument:
     def test_includes_diversification(self):
         rec = self._recorder()
         rec.record_diversification(
-            [("at://p/2", 0.9, 0.4, 0.3, 0.1), ("at://p/1", 1.0, 1.0, 0.0, 0.0)]
+            [
+                ("at://p/2", 0.9, 0.4, 0.3, 0.1, 0.6),
+                ("at://p/1", 1.0, 1.0, 0.0, 0.0, 1.0),
+            ]
         )
         doc = self._build(rec)
         assert [e.at_uri for e in doc.diversification] == ["at://p/2", "at://p/1"]
         assert doc.diversification[0].author_penalty == 0.3
         assert doc.diversification[0].content_penalty == 0.1
+        assert doc.diversification[0].diversity_score == 0.6
 
     def test_author_dids_union(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
@@ -262,17 +266,19 @@ class TestDiversificationCapture:
 
         assert [e[0] for e in rec.diversification] == ["at://a", "at://b"]
         # First pick: selected on weighted relevance alone, no penalty.
-        _, rel, score, author_pen, content_pen = rec.diversification[0]
+        _, rel, score, author_pen, content_pen, diversity_score = rec.diversification[0]
         assert rel == pytest.approx(1.0)
         assert score == pytest.approx((1 - BETA) * 1.0)
         assert author_pen == pytest.approx(0.0)
         assert content_pen == pytest.approx(0.0)
+        assert diversity_score == pytest.approx(1.0)
         # Second pick: author_penalty = BETA * AUTHOR_WEIGHT * 1.
-        _, rel, score, author_pen, content_pen = rec.diversification[1]
+        _, rel, score, author_pen, content_pen, diversity_score = rec.diversification[1]
         assert rel == pytest.approx(0.5)
         assert author_pen == pytest.approx(BETA * AUTHOR_WEIGHT * 1)
         assert content_pen == pytest.approx(0.0)
         assert score == pytest.approx((1 - BETA) * 0.5 - author_pen - content_pen)
+        assert diversity_score == pytest.approx(1.0 - (author_pen + content_pen) / BETA)
 
     def test_content_penalty_recorded(self):
         # Different authors, identical embeddings -> penalty is purely content.
@@ -287,10 +293,11 @@ class TestDiversificationCapture:
         with feed_debug_scope(rec):
             mmr_rerank([a, b])
 
-        _, _, _, author_pen, content_pen = rec.diversification[1]
+        _, _, _, author_pen, content_pen, diversity_score = rec.diversification[1]
         # content_penalty = BETA * (1 - AUTHOR_WEIGHT) * cosine(=1).
         assert author_pen == pytest.approx(0.0)
         assert content_pen == pytest.approx(BETA * (1 - AUTHOR_WEIGHT) * 1.0)
+        assert diversity_score == pytest.approx(1.0 - content_pen / BETA)
 
     def test_no_recording_without_recorder(self):
         a = CandidatePost(
@@ -423,7 +430,7 @@ class TestBuildPipelineMetadata:
         )
         rec.diversify = True
         rec.diversification = [
-            ("at://a", 1.0, 0.80, 0.15, 0.05),
+            ("at://a", 1.0, 0.80, 0.15, 0.05, 0.7),
         ]
         rec.final_order = ["at://a"]
         rec.order_after_rank = ["at://a"]
@@ -438,6 +445,7 @@ class TestBuildPipelineMetadata:
         assert div.score == 0.80
         assert div.author_penalty == 0.15
         assert div.content_penalty == 0.05
+        assert div.diversity_score == 0.7
 
     def test_diversification_none_when_not_diversified(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
