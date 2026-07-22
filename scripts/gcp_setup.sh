@@ -787,6 +787,7 @@ main() {
     ensure_firestore_database
     ensure_ttl_policy feed_cache
     ensure_ttl_policy seen_posts
+    ensure_ttl_policy discarded_posts
     ensure_ttl_policy feed_debug
     ensure_ttl_policy feed_snapshots
     ensure_firestore_api_key_secret

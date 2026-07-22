@@ -106,6 +106,21 @@ class SeenPostsDocument(BaseModel):
     expires_at: datetime = Field(..., description="UTC expiration timestamp; drives native TTL")
 
 
+class DiscardedPostsDocument(BaseModel):
+    """Post URIs cut from a user's slates for low ranker score on a given UTC day.
+
+    One document per user per day under the ``discarded_posts`` subcollection;
+    the document ID is the ``YYYY-MM-DD`` date.  These posts are excluded from
+    future candidate generation (no point re-fetching and re-ranking posts we
+    will never display).  ``expires_at`` anchors the native Firestore TTL policy.
+    """
+
+    post_uris: list[str] = Field(
+        default_factory=list, description="Discarded post AT URIs for this day"
+    )
+    expires_at: datetime = Field(..., description="UTC expiration timestamp; drives native TTL")
+
+
 class FeedActivityDocument(BaseModel):
     feed_name: str = Field(..., description="AT Protocol rkey of the feed (also the document ID)")
     first_seen_at: datetime = Field(
@@ -295,6 +310,16 @@ class FeedDebugDocument(BaseModel):
     diversification: list[FeedDebugDiversificationEntry] = Field(
         default_factory=list,
         description="Per-item diversification breakdown in final order (empty when diversify was off)",
+    )
+    n_retrieved: int = Field(
+        default=0,
+        description="Candidates retrieved by generation (post-dedup) — the denominator "
+        "for the slate-cutoff share",
+    )
+    cutoff_uris: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="AT URIs removed by each slate cutoff, keyed by reason "
+        "(rank_score / mmr_score / share); empty when no cutoff fired",
     )
 
     created_at: datetime = Field(

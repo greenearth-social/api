@@ -326,6 +326,19 @@ def _header_panel(doc: FeedDebugDocument) -> Panel:
     if req.exclude_uris:
         body.append(f"   excluded={len(req.exclude_uris)}", style="dim")
 
+    if doc.cutoff_uris:
+        body.append("\ncutoffs     ", style="dim")
+        body.append(
+            "  ".join(f"{reason}={len(uris)}" for reason, uris in doc.cutoff_uris.items()),
+            style="yellow",
+        )
+        if doc.n_retrieved:
+            kept = len(doc.final_order)
+            body.append(
+                f"   kept {kept}/{doc.n_retrieved} ({kept / doc.n_retrieved:.0%})",
+                style="dim",
+            )
+
     if doc.user_features:
         for uf in doc.user_features:
             body.append("\nuser feats  ", style="dim")
@@ -460,7 +473,17 @@ def _item_panel(
     )
 
 
-def _discarded_table(discarded: list[str], generators_by_uri: dict) -> Table:
+# Display labels for the slate-cutoff reasons recorded in cutoff_uris.
+_CUTOFF_REASON_LABELS = {
+    "rank_score": "rank floor",
+    "mmr_score": "mmr floor",
+    "share": "share cap",
+}
+
+
+def _discarded_table(
+    doc: FeedDebugDocument, discarded: list[str], generators_by_uri: dict
+) -> Table:
     table = Table(
         box=box.SIMPLE,
         title=f"discarded — {len(discarded)} candidates not in final feed",
@@ -468,11 +491,25 @@ def _discarded_table(discarded: list[str], generators_by_uri: dict) -> Table:
         title_style="bold yellow",
     )
     table.add_column("uri", style="dim cyan", no_wrap=True)
+    table.add_column("reason", style="yellow")
     table.add_column("generators")
+
+    cutoff_reason_by_uri = {
+        uri: _CUTOFF_REASON_LABELS.get(reason, reason)
+        for reason, uris in doc.cutoff_uris.items()
+        for uri in uris
+    }
+    ranked_uris = {r.at_uri for r in doc.ranking.rankings} if doc.ranking else None
+
     for uri in discarded:
+        reason = cutoff_reason_by_uri.get(uri)
+        if reason is None:
+            # Not removed by a slate cutoff: either the ranker dropped it
+            # (no valid score / missing embedding) or it predates cutoff capture.
+            reason = "not ranked" if ranked_uris is not None and uri not in ranked_uris else "—"
         gens = generators_by_uri.get(uri, [])
         gen_str = ", ".join(f"{n} ({_fmt_score(s)})" for n, s in gens)
-        table.add_row(uri, gen_str)
+        table.add_row(uri, reason, gen_str)
     return table
 
 
@@ -546,7 +583,7 @@ def _render_show(doc: FeedDebugDocument) -> None:
     discarded = sorted(set(generators_by_uri) - set(final_pos))
     if discarded:
         console.print()
-        console.print(_discarded_table(discarded, generators_by_uri))
+        console.print(_discarded_table(doc, discarded, generators_by_uri))
     console.print()
 
 
