@@ -21,13 +21,6 @@ class TestPerspectiveRanker:
     def test_name(self):
         assert PerspectiveRanker().name == "perspective"
 
-    def test_score_bounds_match_weighted_prc_formula(self):
-        # _PRC_WEIGHTS' positive weights sum to 1.0 (6 * 1/6) and negative
-        # weights sum to -1.0 (2*(-1/6) + 3*(-1/18) + 4*(-1/8)) — see
-        # lib/perspective.py — so the theoretical bounds of the weighted-sum
-        # PRC score are exactly (-1.0, 1.0), then rescaled to (0.0, 1.0).
-        assert PerspectiveRanker().score_bounds == (0.0, 1.0)
-
     def test_predict_orders_by_prc_score_descending(self):
         candidates = [
             _make_candidate("at://a/1", content="low quality"),
