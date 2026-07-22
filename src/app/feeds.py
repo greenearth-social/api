@@ -95,10 +95,18 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="a0 YF",
         avatar="assets/icons/green-earth.png",
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5utph3ka26",
-        # Slate-cutoff starting points — tune from the feed.slate.kept_share and
-        # feed.slate.cutoff_count metrics once live (see issue #248).
+        # Slate-cutoff starting points — tune further from the feed.slate.kept_share
+        # and feed.slate.cutoff_count metrics once live (see issue #248).
+        # min_rank_score=-0.15 is calibrated from real combined rank_score
+        # distributions pulled from stage feed_debug records for this feed (242
+        # ranked candidates across 4 real loads): the theoretical [-1, 1] midpoint
+        # (0.0) sits around the empirical p40-50, so it would cut roughly half of
+        # all candidates by itself; -0.15 sits at ~p12-13, trimming only the clear
+        # tail and leaving max_render_share as the dominant lever on render volume.
+        # See "cutoff-preview" below for the live preview of this feed's pipeline
+        # with the same thresholds.
         max_render_share=0.5,
-        min_rank_score=0.0,
+        min_rank_score=-0.15,
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
@@ -127,9 +135,13 @@ FEEDS: dict[str, FeedConfig] = {
         avatar="assets/icons/best-of-friends.png",
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5uvi4exl2s",
         # Slate-cutoff starting points — tune from the feed.slate.kept_share and
-        # feed.slate.cutoff_count metrics once live (see issue #248).
+        # feed.slate.cutoff_count metrics once live (see issue #248). min_rank_score
+        # matches your-feed's empirically-calibrated value above; this feed's own
+        # score distribution (followed_users-only, no two_tower/popularity mix)
+        # wasn't separately sampled, so treat it as a starting point to revisit
+        # once its own metrics are live.
         max_render_share=0.5,
-        min_rank_score=0.0,
+        min_rank_score=-0.15,
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="followed_users", weight=1.0)],
