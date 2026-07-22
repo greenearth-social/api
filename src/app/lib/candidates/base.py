@@ -23,6 +23,9 @@ class CandidateResult(BaseModel):
 
     generator_name: str = Field(..., description="Name of the generator that produced these candidates")
     candidates: list[CandidatePost] = Field(default_factory=list)
+    status: str = Field(default="success")
+    reason: str | None = None
+    mode: str = Field(default="primary")
 
 
 # ---------------------------------------------------------------------------

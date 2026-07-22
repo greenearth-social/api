@@ -252,8 +252,10 @@ class TestGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_swallowed_primary_failure_records_infill_debug_output(self, monkeypatch):
-        # With PipelineContext: primary failure is degraded (None returned, not recorded),
-        # infill success is recorded. Debug output only contains the infill entry.
+        # With PipelineContext: primary failure is degraded (an empty
+        # status="error" CandidateResult is recorded, not skipped, so debug/
+        # transparency views can show why the generator contributed nothing),
+        # and the infill success is recorded separately.
         gen = _FailThenReturnGenerator("popular", [_candidate("at://infill/1", "popular")])
         _stub_generators(monkeypatch, {"popular": gen})
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
@@ -268,10 +270,11 @@ class TestGeneratorTimeout:
 
         assert [c.at_uri for c in result.candidates] == ["at://infill/1"]
         assert [
-            (output.generator_name, [c.at_uri for c in output.candidates])
+            (output.generator_name, output.status, [c.at_uri for c in output.candidates])
             for output in rec.generator_outputs
         ] == [
-            ("popular", ["at://infill/1"]),
+            ("popular", "error", []),
+            ("popular", "success", ["at://infill/1"]),
         ]
 
     @pytest.mark.asyncio

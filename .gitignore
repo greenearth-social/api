@@ -44,6 +44,7 @@ vendor/
 # Claude configurations
 claude.md
 .claude/
+AGENTS.md
 
 # generated requirements.txt
 requirements.txt

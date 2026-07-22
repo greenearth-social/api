@@ -17,11 +17,12 @@ from ...models import (
     CandidatePost,
     GeneratorSpec,
 )
-from .base import CandidateGenerator, CandidateResult, get_generator
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
 from ..pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from ..telemetry import timed
+from .base import CandidateGenerator, CandidateResult, get_generator
+from .followed_users import FollowedUsersCandidateGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ async def run_generate(
 
     - No context → generator failures raise GeneratorError (hard fail).
     - Context installed, fail_fast=False → failures are logged, recorded as
-      DegradationEvent, and the generator returns no candidates.
+      DegradationEvent, and the generator contributes an empty result.
     - Context installed, fail_fast=True → failures re-raise after recording.
 
     Missing generators always raise GeneratorNotFoundError regardless of context.
@@ -127,19 +128,33 @@ async def run_generate(
 
     async def _run_one(
         spec: GeneratorSpec, count: int, gen: CandidateGenerator
-    ) -> CandidateResult | None:
+    ) -> list[CandidateResult]:
         try:
             async with timed(logger, "candidates.generate.duration_ms", record_metric=True, metric_attrs={"generator_name": spec.name}, count=count):
-                result = await asyncio.wait_for(
-                    gen.generate(
-                        es=es,
-                        user_did=request.user_did,
-                        num_candidates=count,
-                        video_only=request.video_only,
-                        exclude_uris=request.exclude_uris or None,
-                    ),
-                    timeout=_GENERATOR_TIMEOUT_SEC,
-                )
+                if isinstance(gen, FollowedUsersCandidateGenerator):
+                    results = await asyncio.wait_for(
+                        gen.generate_stages(
+                            es=es,
+                            user_did=request.user_did,
+                            num_candidates=count,
+                            video_only=request.video_only,
+                            exclude_uris=request.exclude_uris or None,
+                        ),
+                        timeout=_GENERATOR_TIMEOUT_SEC,
+                    )
+                else:
+                    results = [
+                        await asyncio.wait_for(
+                            gen.generate(
+                                es=es,
+                                user_did=request.user_did,
+                                num_candidates=count,
+                                video_only=request.video_only,
+                                exclude_uris=request.exclude_uris or None,
+                            ),
+                            timeout=_GENERATOR_TIMEOUT_SEC,
+                        )
+                    ]
             if mc := get_metric_collector():
                 mc.record(
                     "candidates.generate.success_count",
@@ -147,7 +162,14 @@ async def run_generate(
                     generator_name=spec.name,
                     is_infill="false",
                 )
-            return result
+            return [
+                result.model_copy(
+                    update={"status": "empty", "reason": result.reason or "no_candidates"}
+                )
+                if not result.candidates and result.status == "success"
+                else result
+                for result in results
+            ]
         except Exception as exc:
             if isinstance(exc, asyncio.TimeoutError):
                 logger.warning(
@@ -174,19 +196,23 @@ async def run_generate(
                     component=spec.name,
                     cause=exc,
                 ))
-                return None
+                return [CandidateResult(
+                    generator_name=spec.name,
+                    candidates=[],
+                    status=outcome,
+                    reason="generator_timeout" if outcome == "timeout" else "generator_error",
+                )]
             raise GeneratorError(spec.name, exc) from exc
 
-    results = await asyncio.gather(
+    result_groups = await asyncio.gather(
         *(_run_one(spec, count, gen) for spec, count, gen in active)
     )
+    results = [result for group in result_groups for result in group]
 
     rec = current_recorder()
 
     all_candidates: list[CandidatePost] = []
     for result in results:
-        if result is None:
-            continue
         if rec is not None:
             rec.record_generator_output(result)
         all_candidates.extend(result.candidates)
@@ -253,10 +279,16 @@ async def run_generate(
                     component=f"{request.infill}:infill",
                     cause=exc,
                 ))
-                infill_result = CandidateResult(generator_name=request.infill, candidates=[])
+                infill_result = CandidateResult(
+                    generator_name=request.infill,
+                    candidates=[],
+                    status=outcome,
+                    reason="generator_timeout" if outcome == "timeout" else "generator_error",
+                )
             else:
                 raise GeneratorError(request.infill, exc, is_infill=True) from exc
 
+        infill_result = infill_result.model_copy(update={"mode": "infill"})
         if rec is not None:
             rec.record_generator_output(infill_result)
         deduped = dedup_candidates(deduped + infill_result.candidates)

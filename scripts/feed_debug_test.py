@@ -47,6 +47,9 @@ def _doc(
     final_order: list[str],
     model_scores=None,
     diversification=None,
+    ranking=None,
+    cutoff_uris=None,
+    n_retrieved=0,
 ):
     return SimpleNamespace(
         generate_request=SimpleNamespace(
@@ -57,6 +60,9 @@ def _doc(
         final_order=final_order,
         model_scores=model_scores or [],
         diversification=diversification or [],
+        ranking=ranking,
+        cutoff_uris=cutoff_uris or {},
+        n_retrieved=n_retrieved,
     )
 
 
@@ -123,6 +129,43 @@ def test_generator_output_stats_includes_missing_primary_as_zero():
         ("followed_users", "0", missing, missing, missing),
         ("infill popularity", "0", missing, missing, missing),
     ]
+
+
+def test_discarded_table_labels_cutoff_reasons():
+    doc = _doc(
+        generators=["two_tower"],
+        infill=None,
+        outputs=[_result("two_tower", ["at://p/1", "at://p/cut", "at://p/capped", "at://p/unranked"])],
+        final_order=["at://p/1"],
+        ranking=SimpleNamespace(
+            rankings=[
+                SimpleNamespace(at_uri="at://p/1"),
+                SimpleNamespace(at_uri="at://p/cut"),
+                SimpleNamespace(at_uri="at://p/capped"),
+            ]
+        ),
+        cutoff_uris={"rank_score": ["at://p/cut"], "share": ["at://p/capped"]},
+    )
+
+    table = feed_debug._discarded_table(
+        doc, ["at://p/cut", "at://p/capped", "at://p/unranked"], {}
+    )
+
+    reasons = list(table.columns[1]._cells)
+    assert reasons == ["rank floor", "share cap", "not ranked"]
+
+
+def test_discarded_table_dash_reason_when_no_ranking_or_cutoffs():
+    doc = _doc(
+        generators=["two_tower"],
+        infill=None,
+        outputs=[_result("two_tower", ["at://p/1", "at://p/2"])],
+        final_order=["at://p/1"],
+    )
+
+    table = feed_debug._discarded_table(doc, ["at://p/2"], {})
+
+    assert list(table.columns[1]._cells) == ["—"]
 
 
 def test_generator_output_stats_counts_duplicate_candidates_in_average():

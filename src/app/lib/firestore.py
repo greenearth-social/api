@@ -11,11 +11,18 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from google.cloud.firestore import ArrayUnion, AsyncClient, FieldFilter, Query  # type: ignore[import-untyped]
+from google.cloud.firestore import (  # type: ignore[import-untyped]
+    ArrayUnion,
+    AsyncClient,
+    FieldFilter,
+    Query,
+    async_transactional,
+)
 
 from ..documents import (
     FeedActivityDocument,
     FeedDebugDocument,
+    FeedSnapshotDocument,
     InteractionDocument,
     UserDocument,
 )
@@ -26,10 +33,18 @@ USERS_COLLECTION = "users"
 FEED_ACTIVITY_COLLECTION = "feed_activity"
 INTERACTIONS_COLLECTION = "interactions"
 SEEN_POSTS_COLLECTION = "seen_posts"
+DISCARDED_POSTS_COLLECTION = "discarded_posts"
 FEED_DEBUG_COLLECTION = "feed_debug"
+FEED_SNAPSHOTS_COLLECTION = "feed_snapshots"
+MAX_FEED_SNAPSHOT_ITEMS = 500
 
 # How long a seen-posts bucket lives before native Firestore TTL deletes it.
 SEEN_POSTS_RETENTION_DAYS = 5
+
+# How long a discarded-posts bucket lives before native Firestore TTL deletes
+# it. Shorter than seen posts: the candidate pool refreshes quickly and ranker
+# scores are only stable short-term.
+DISCARDED_POSTS_RETENTION_DAYS = 3
 
 # How long a feed-debug record lives before native Firestore TTL deletes it.
 FEED_DEBUG_RETENTION_DAYS = 7
@@ -107,7 +122,9 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str) -> UserDocu
     if doc.exists:
         data = doc.to_dict()
         if data is None:
-            raise ValueError(f"Firestore document exists but to_dict() returned None for {user_did}")
+            raise ValueError(
+                f"Firestore document exists but to_dict() returned None for {user_did}"
+            )
 
         update_fields: dict[str, object] = {"last_seen_at": now}
         if data.get("username") != username:
@@ -161,12 +178,55 @@ async def set_user_debug_flag(db: AsyncClient, user_did: str, enabled: bool) -> 
     await ref.update({"debug_feeds": enabled, "updated_at": datetime.now(timezone.utc)})
 
 
+async def set_user_social_radius(db: AsyncClient, user_did: str, social_radius: int) -> None:
+    """Set the ``social_radius`` preference on a user document.
+
+    Uses ``merge=True`` so the preference is created alongside a minimal
+    user document when the user has not yet loaded a feed in Bluesky.
+    The full user document is filled in later by ``upsert_user``.
+    """
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    await ref.set(
+        {"user_did": user_did, "social_radius": social_radius},
+        merge=True,
+    )
+
+
+async def set_user_preferences(
+    db: AsyncClient,
+    user_did: str,
+    social_radius: int,
+    freshness: int,
+    politics: float,
+    purpose: float,
+) -> None:
+    """Set all preferences on a user document.
+
+    Uses ``merge=True`` so the preference is created alongside a minimal
+    user document when the user has not yet loaded a feed in Bluesky.
+    The full user document is filled in later by ``upsert_user``.
+    """
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    await ref.set(
+        {
+            "user_did": user_did,
+            "social_radius": social_radius,
+            "freshness": freshness,
+            "politics": politics,
+            "purpose": purpose,
+        },
+        merge=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Feed activity
 # ---------------------------------------------------------------------------
 
 
-async def get_feed_activity(db: AsyncClient, user_did: str, feed_name: str) -> FeedActivityDocument | None:
+async def get_feed_activity(
+    db: AsyncClient, user_did: str, feed_name: str
+) -> FeedActivityDocument | None:
     """Fetch a feed activity document, or return ``None`` if not found."""
     doc = await (
         db.collection(USERS_COLLECTION)
@@ -183,7 +243,9 @@ async def get_feed_activity(db: AsyncClient, user_did: str, feed_name: str) -> F
     return FeedActivityDocument.model_validate(data)
 
 
-async def upsert_feed_activity(db: AsyncClient, user_did: str, feed_name: str) -> FeedActivityDocument:
+async def upsert_feed_activity(
+    db: AsyncClient, user_did: str, feed_name: str
+) -> FeedActivityDocument:
     """Record that a user loaded a feed.
 
     On first visit creates the document with both timestamps set to now.
@@ -234,30 +296,36 @@ async def record_interaction(db: AsyncClient, interaction: InteractionDocument) 
 
 
 # ---------------------------------------------------------------------------
-# Seen posts
+# Seen / discarded posts (per-user daily URI buckets)
 # ---------------------------------------------------------------------------
 
 
-async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
-    """Append seen post URIs to the user's bucket for the current UTC day.
+async def _record_daily_bucket_uris(
+    db: AsyncClient,
+    user_did: str,
+    collection: str,
+    post_uris: list[str],
+    retention_days: int,
+) -> None:
+    """Append post URIs to the user's ``collection`` bucket for the current UTC day.
 
-    Buckets are keyed by ``YYYY-MM-DD`` under the user's ``seen_posts``
-    subcollection.  ``ArrayUnion`` appends without duplicating within the bucket,
-    and ``expires_at`` (re-stamped on each write) drives the native Firestore TTL
-    so the bucket self-deletes ~``SEEN_POSTS_RETENTION_DAYS`` days after its last
-    update.  No-op when there is nothing to record.
+    Buckets are keyed by ``YYYY-MM-DD`` under the user's subcollection.
+    ``ArrayUnion`` appends without duplicating within the bucket, and
+    ``expires_at`` (re-stamped on each write) drives the native Firestore TTL
+    so the bucket self-deletes ~``retention_days`` days after its last update.
+    No-op when there is nothing to record.
     """
     if not post_uris:
         return
 
     now = datetime.now(timezone.utc)
     bucket_id = now.strftime("%Y-%m-%d")
-    expires_at = now + timedelta(days=SEEN_POSTS_RETENTION_DAYS)
+    expires_at = now + timedelta(days=retention_days)
 
     ref = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
-        .collection(SEEN_POSTS_COLLECTION)
+        .collection(collection)
         .document(bucket_id)
     )
     await ref.set(
@@ -266,10 +334,10 @@ async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]
     )
 
 
-async def get_recent_seen_uris(
-    db: AsyncClient, user_did: str, *, max_uris: int = 1000
+async def _get_recent_bucket_uris(
+    db: AsyncClient, user_did: str, collection: str, max_uris: int
 ) -> list[str]:
-    """Return the user's most-recently-seen post URIs, de-duped and capped.
+    """Return the user's most-recent ``collection`` post URIs, de-duped and capped.
 
     Reads the non-expired daily buckets (filtering on ``expires_at`` so buckets
     not yet reaped by TTL are still excluded once stale) and walks them
@@ -281,7 +349,7 @@ async def get_recent_seen_uris(
     query = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
-        .collection(SEEN_POSTS_COLLECTION)
+        .collection(collection)
         .where("expires_at", ">", now)
     )
 
@@ -301,6 +369,38 @@ async def get_recent_seen_uris(
             if len(result) >= max_uris:
                 return result
     return result
+
+
+async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+    """Append seen post URIs to the user's bucket for the current UTC day."""
+    await _record_daily_bucket_uris(
+        db, user_did, SEEN_POSTS_COLLECTION, post_uris, SEEN_POSTS_RETENTION_DAYS
+    )
+
+
+async def get_recent_seen_uris(
+    db: AsyncClient, user_did: str, *, max_uris: int = 1000
+) -> list[str]:
+    """Return the user's most-recently-seen post URIs, de-duped and capped."""
+    return await _get_recent_bucket_uris(db, user_did, SEEN_POSTS_COLLECTION, max_uris)
+
+
+async def record_discarded_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+    """Append low-ranker-score post URIs to the user's bucket for the current UTC day.
+
+    Discarded posts scored below a feed's ``min_rank_score`` and will never be
+    displayed, so future candidate generation excludes them.
+    """
+    await _record_daily_bucket_uris(
+        db, user_did, DISCARDED_POSTS_COLLECTION, post_uris, DISCARDED_POSTS_RETENTION_DAYS
+    )
+
+
+async def get_recent_discarded_uris(
+    db: AsyncClient, user_did: str, *, max_uris: int = 1000
+) -> list[str]:
+    """Return the user's most-recently-discarded post URIs, de-duped and capped."""
+    return await _get_recent_bucket_uris(db, user_did, DISCARDED_POSTS_COLLECTION, max_uris)
 
 
 # ---------------------------------------------------------------------------
@@ -359,3 +459,229 @@ async def get_feed_debug(
     if data is None:
         return None
     return FeedDebugDocument.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# Feed snapshots — lightweight pipeline metadata for every feed load
+# ---------------------------------------------------------------------------
+
+
+def _merge_feed_snapshots(
+    existing: FeedSnapshotDocument,
+    incoming: FeedSnapshotDocument,
+) -> tuple[FeedSnapshotDocument, bool]:
+    """Merge two batches for one feed session in chronological order."""
+    incoming_is_earlier = incoming.generated_at < existing.generated_at
+    earlier, later = (incoming, existing) if incoming_is_earlier else (existing, incoming)
+
+    ordered_items = list(dict.fromkeys([*earlier.items, *later.items]))
+    truncated = len(ordered_items) > MAX_FEED_SNAPSHOT_ITEMS
+    ordered_items = ordered_items[:MAX_FEED_SNAPSHOT_ITEMS]
+    # Later metadata wins for a URI without changing its first position.
+    meta_by_uri = {meta.at_uri: meta for meta in earlier.items_meta}
+    meta_by_uri.update({meta.at_uri: meta for meta in later.items_meta})
+    items_meta = [meta_by_uri[uri] for uri in ordered_items if uri in meta_by_uri]
+    existing_diag = {
+        (diag.name, diag.mode): diag for diag in existing.generator_diagnostics
+    }
+    incoming_diag = {
+        (diag.name, diag.mode): diag for diag in incoming.generator_diagnostics
+    }
+    incoming_new = set(incoming.items) - set(existing.items)
+    diagnostics = []
+    for key in dict.fromkeys([*existing_diag, *incoming_diag]):
+        name, _mode = key
+        old = existing_diag.get(key)
+        new = incoming_diag.get(key)
+        if old is None and new is not None:
+            diagnostics.append(new)
+            continue
+        if new is None and old is not None:
+            diagnostics.append(old)
+            continue
+        assert old is not None and new is not None
+        is_new_generation = incoming.generated_at > existing.generated_at
+        added = sum(
+            1
+            for meta in incoming.items_meta
+            if meta.at_uri in incoming_new
+            and any(generator.name == name for generator in meta.generators)
+        )
+        diagnostics.append(
+            old.model_copy(
+                update={
+                    "returned_count": (
+                        old.returned_count + new.returned_count
+                        if is_new_generation
+                        else max(old.returned_count, new.returned_count)
+                    ),
+                    "contributed_count": old.contributed_count + added,
+                    "status": new.status if old.status != "success" else old.status,
+                    "reason": new.reason if old.reason is None else old.reason,
+                }
+            )
+        )
+
+    return (
+        earlier.model_copy(
+            update={
+                "items": ordered_items,
+                "items_meta": items_meta,
+                "generator_diagnostics": diagnostics,
+                "expires_at": max(existing.expires_at, incoming.expires_at),
+            }
+        ),
+        truncated,
+    )
+
+
+async def merge_feed_snapshot(
+    db: AsyncClient, user_did: str, request_id: str, doc: FeedSnapshotDocument
+) -> bool:
+    """Atomically create or extend a feed-session snapshot.
+
+    Returns ``True`` when the merged session exceeded the item safety limit and
+    was truncated. Empty batches are ignored.
+    """
+    if not doc.items:
+        return False
+
+    if len(doc.items) > MAX_FEED_SNAPSHOT_ITEMS:
+        included_items = doc.items[:MAX_FEED_SNAPSHOT_ITEMS]
+        included = set(included_items)
+        doc = doc.model_copy(
+            update={
+                "items": included_items,
+                "items_meta": [meta for meta in doc.items_meta if meta.at_uri in included],
+            }
+        )
+        initial_truncated = True
+    else:
+        initial_truncated = False
+
+    ref = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(FEED_SNAPSHOTS_COLLECTION)
+        .document(request_id)
+    )
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _merge(transaction) -> bool:
+        snapshot = await ref.get(transaction=transaction)
+        if not snapshot.exists:
+            transaction.set(ref, doc.model_dump())
+            return initial_truncated
+
+        data = snapshot.to_dict()
+        if data is None:
+            transaction.set(ref, doc.model_dump())
+            return initial_truncated
+
+        merged, truncated = _merge_feed_snapshots(FeedSnapshotDocument.model_validate(data), doc)
+        transaction.set(ref, merged.model_dump())
+        return truncated
+
+    return await _merge(transaction)
+
+
+async def get_feed_snapshot(
+    db: AsyncClient, user_did: str, request_id: str
+) -> FeedSnapshotDocument | None:
+    """Fetch a single feed snapshot, or ``None`` if not found."""
+    doc = await (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(FEED_SNAPSHOTS_COLLECTION)
+        .document(request_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    data = doc.to_dict()
+    if data is None:
+        return None
+    return FeedSnapshotDocument.model_validate(data)
+
+
+async def get_recent_feed_snapshots(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    feed_name: str | None = None,
+    cutoff: datetime | None = None,
+    limit: int = 20,
+) -> list[FeedSnapshotDocument]:
+    """Return a user's most recent feed snapshots, newest first.
+
+    Optional *feed_name* and *cutoff* filters are pushed into the Firestore
+    query so callers don't get false-empty results from Python-side filtering
+    of a fixed-size result set.
+
+    Requires a collection-group composite index on ``feed_snapshots`` with
+    fields ``(feed_name ASC, generated_at DESC)`` — see ``firestore.indexes.json``.
+    """
+    try:
+        query = (
+            db.collection(USERS_COLLECTION)
+            .document(user_doc_id(user_did))
+            .collection(FEED_SNAPSHOTS_COLLECTION)
+        )
+        if feed_name is not None:
+            query = query.where(filter=FieldFilter("feed_name", "==", feed_name))
+        if cutoff is not None:
+            query = query.where(filter=FieldFilter("generated_at", ">=", cutoff))
+        query = query.order_by("generated_at", direction=Query.DESCENDING).limit(limit)
+        docs: list[FeedSnapshotDocument] = []
+        async for doc in query.stream():
+            data = doc.to_dict()
+            if data is not None:
+                docs.append(FeedSnapshotDocument.model_validate(data))
+        return docs
+    except Exception:
+        logger.exception(
+            "Failed to query feed snapshots for user '%s' (feed_name=%s)",
+            user_did,
+            feed_name,
+        )
+        return []
+
+
+async def get_newer_feed_snapshot_uris(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    feed_name: str,
+    newer_than: datetime,
+) -> set[str]:
+    """Return all AT URIs from snapshots newer than *newer_than* for *feed_name*.
+
+    Used for deduplication when viewing a feed snapshot: any post that already
+    appears in a more-recent snapshot for the same feed is excluded so the user
+    only sees fresh posts.
+    """
+    try:
+        uris: set[str] = set()
+        query = (
+            db.collection(USERS_COLLECTION)
+            .document(user_doc_id(user_did))
+            .collection(FEED_SNAPSHOTS_COLLECTION)
+            .where(filter=FieldFilter("feed_name", "==", feed_name))
+            .where(filter=FieldFilter("generated_at", ">", newer_than))
+            .order_by("generated_at", direction=Query.DESCENDING)
+        )
+        async for doc in query.stream():
+            data = doc.to_dict()
+            if data is not None:
+                items = data.get("items", [])
+                if items:
+                    uris.update(items)
+        return uris
+    except Exception:
+        logger.exception(
+            "Failed to query newer feed snapshot URIs for user '%s' (feed_name=%s)",
+            user_did,
+            feed_name,
+        )
+        return set()
