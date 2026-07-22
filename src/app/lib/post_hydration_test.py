@@ -81,6 +81,23 @@ def test_parse_basic_post():
     assert data["engagement"]["reply_count"] == 3
     assert data["engagement"]["repost_count"] == 12
     assert data["engagement"]["like_count"] == 47
+    assert data["moderation"] == {"post_labels": [], "author_labels": []}
+
+
+def test_parse_public_moderation_labels_separately_from_media_labels():
+    _uri, data = _parse_bsky_post(
+        _post(
+            labels=[{"src": "did:plc:labeler", "val": "graphic-media"}],
+            author={"labels": [{"src": "did:plc:labeler", "val": "porn"}]},
+            embed={"images": [{"fullsize": "https://cdn.bsky.app/img/x.jpg"}]},
+        )
+    )
+
+    assert data["moderation"] == {
+        "post_labels": ["graphic-media"],
+        "author_labels": ["porn"],
+    }
+    assert data["media"]["labels"] == ["1 image"]
 
 
 def test_parse_post_with_images():
@@ -232,6 +249,7 @@ async def test_get_cached_hydrated_posts_hit():
     mock_doc.to_dict.return_value = {
         "data": {"author": {"handle": "cached.bsky.social"}},
         "expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        "version": 2,
     }
     db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
 
@@ -252,10 +270,31 @@ async def test_get_cached_hydrated_posts_expired():
     mock_doc.to_dict.return_value = {
         "data": {"author": {"handle": "stale.bsky.social"}},
         "expires_at": datetime(2000, 1, 1, tzinfo=timezone.utc),
+        "version": 2,
     }
     db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
 
     cached, missing = await get_cached_hydrated_posts(db, [uri])
+    assert cached == {}
+    assert missing == [uri]
+
+
+@pytest.mark.asyncio
+async def test_get_cached_hydrated_posts_reloads_legacy_shape_without_moderation():
+    from .post_hydration import _post_rkey
+    db = MagicMock()
+    uri = "at://a/app.bsky.feed.post/p1"
+    mock_doc = MagicMock()
+    mock_doc.exists = True
+    mock_doc.id = _post_rkey(uri)
+    mock_doc.to_dict.return_value = {
+        "data": {"author": {"handle": "legacy.bsky.social"}},
+        "expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+    }
+    db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
+
+    cached, missing = await get_cached_hydrated_posts(db, [uri])
+
     assert cached == {}
     assert missing == [uri]
 
@@ -318,6 +357,7 @@ async def test_hydrate_posts_all_cached():
     mock_doc.to_dict.return_value = {
         "data": {"author": {"handle": "cached.bsky.social"}, "content": "cached content"},
         "expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        "version": 2,
     }
     db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
 

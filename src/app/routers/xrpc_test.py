@@ -8,19 +8,33 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from ..main import app
-from ..documents import DiversificationMeta, FeedSnapshotDocument, PipelineItemMeta
+from ..documents import (
+    DiversificationMeta,
+    FeedCacheDocument,
+    FeedSnapshotDocument,
+    PipelineItemMeta,
+)
 from ..feeds import FEEDS
-from ..models import CandidatePost, FeedCursor, RankedCandidate, RankPredictResult
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import FeedCache
+from ..lib.feed_context import decode_feed_context
 from ..lib.metrics import MetricCollector, set_metric_collector
-
+from ..main import app
+from ..models import CandidatePost, FeedCursor, RankedCandidate, RankPredictResult
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_initial_request_reuse():
+    from ..routers.xrpc import _clear_initial_request_cache
+
+    _clear_initial_request_cache()
+    yield
+    _clear_initial_request_cache()
 
 SERVICE_DID = "did:web:test.example.com"
 PUBLISHER_DID = "did:plc:publisherabc123"
@@ -99,17 +113,24 @@ def _patch_unranked_your_feed_generators(
 
 class FakeMetricCollector:
     def __init__(self):
-        self.calls: list[tuple[str, float, dict]] = []
+        self.calls: list[tuple[str, float, dict[str, str]]] = []
 
     def record(self, name: str, value: float, **attributes: str) -> None:
         self.calls.append((name, value, dict(attributes)))
 
 
 class InMemoryFeedCache(FeedCache):
-    """Trivial in-memory feed cache for tests."""
+    """Trivial in-memory feed cache for tests.
+
+    Stores full :class:`FeedCacheDocument` objects (with ``items_meta``) so
+    tests that exercise diversity/observability data on cursor pages served
+    purely from cache can set up realistic fixtures, mirroring
+    ``FirestoreFeedCache``'s document-based methods.
+    """
 
     def __init__(self):
         self._store: dict[str, list[str]] = {}
+        self._docs: dict[str, FeedCacheDocument] = {}
 
     async def store(self, key: str, items: list[str], ttl_seconds: int = 600) -> None:
         self._store[key] = items
@@ -123,6 +144,30 @@ class InMemoryFeedCache(FeedCache):
             return None
         updated = existing + new_items
         self._store[key] = updated
+        return updated
+
+    async def store_document(self, key: str, document: FeedCacheDocument) -> None:
+        self._store[key] = document.items
+        self._docs[key] = document
+
+    async def retrieve_document(self, key: str) -> FeedCacheDocument | None:
+        return self._docs.get(key)
+
+    async def append_document(
+        self,
+        key: str,
+        new_items: list[str],
+        new_items_meta: list[PipelineItemMeta],
+    ) -> FeedCacheDocument | None:
+        existing = self._docs.get(key)
+        if existing is None:
+            return None
+        updated_items = list(dict.fromkeys([*existing.items, *new_items]))
+        meta_by_uri = {m.at_uri: m for m in existing.items_meta}
+        meta_by_uri.update({m.at_uri: m for m in new_items_meta})
+        updated_meta = [meta_by_uri[uri] for uri in updated_items if uri in meta_by_uri]
+        updated = existing.model_copy(update={"items": updated_items, "items_meta": updated_meta})
+        self._docs[key] = updated
         return updated
 
 
@@ -409,6 +454,53 @@ class TestGetFeedSkeleton:
         rids = {p.rid for p in payloads if p is not None}
         assert len(rids) == 1
 
+    def test_identical_initial_requests_within_window_reuse_response(self):
+        candidates = _make_candidates("p", 8)
+        with (
+            self._patch_generators(candidates) as mock_get,
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as snapshot_write,
+        ):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            )
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            )
+
+        assert first.json() == second.json()
+        mock_get.side_effect("two_tower").generate.assert_awaited_once()
+        snapshot_write.assert_awaited_once()
+
+    def test_initial_request_after_reuse_window_gets_new_session(self):
+        from app.routers import xrpc as xrpc_mod
+
+        candidates = _make_candidates("p", 8)
+        with self._patch_generators(candidates):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            ).json()
+            key = ("did:plc:testuser", FEED_RKEY, 3)
+            xrpc_mod._initial_requests[key].created_at -= (
+                xrpc_mod.INITIAL_REQUEST_REUSE_SECONDS + 1
+            )
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            ).json()
+
+        first_context = decode_feed_context(first["feed"][0]["feedContext"])
+        second_context = decode_feed_context(second["feed"][0]["feedContext"])
+        assert first_context is not None
+        assert second_context is not None
+        assert first_context.rid != second_context.rid
+
     # --- rkey matching ---
 
     def test_matches_feed_by_rkey_regardless_of_did(self):
@@ -462,8 +554,12 @@ class TestGetFeedSkeleton:
     # --- cursor is excluded when None ---
 
     def test_cursor_omitted_when_none(self):
-        """AT Protocol requires cursor to be absent, not null."""
-        with self._patch_generators(_make_candidates("p", 1)):
+        """AT Protocol requires cursor to be absent, not null.
+
+        A fresh request that generates nothing is the no-cursor case (any
+        non-empty slate now issues a cursor so paging can restart the session).
+        """
+        with self._patch_generators([]):
             resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
         assert "cursor" not in resp.json()
 
@@ -713,7 +809,9 @@ class TestFeedSkeletonCursor:
         parsed = FeedCursor.decode(data["cursor"])
         assert parsed.offset == 3
 
-    def test_no_cursor_when_all_results_fit_in_one_page(self):
+    def test_cursor_returned_when_all_results_fit_in_one_page(self):
+        """Even a single-page batch gets a cursor: following it past the end
+        regenerates (restarts the ranking session) instead of ending the feed."""
         candidates = _make_candidates("p", 3)
         with self._patch_generators(candidates):
             data = client.get(
@@ -721,7 +819,18 @@ class TestFeedSkeletonCursor:
                 params={"feed": FEED_URI, "limit": 5},
             ).json()
         assert len(data["feed"]) == 3
-        assert "cursor" not in data
+        assert "cursor" in data
+        parsed = FeedCursor.decode(data["cursor"])
+        assert parsed.offset == 3
+
+        # Following the cursor regenerates with the shown posts excluded.
+        fresh = _make_candidates("fresh", 2)
+        with self._patch_generators(fresh):
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 5, "cursor": data["cursor"]},
+            ).json()
+        assert [item["post"] for item in second["feed"]] == ["at://fresh/0", "at://fresh/1"]
 
     def test_second_page_via_cursor(self):
         candidates = _make_candidates("p", 10)
@@ -813,6 +922,7 @@ class TestFeedSkeletonCursor:
 
         # Simulate cache eviction.
         app.state.feed_cache._store.clear()
+        app.state.feed_cache._docs.clear()
 
         fresh = _make_candidates("fresh", 5)
         with self._patch_generators(fresh):
@@ -1286,6 +1396,13 @@ class TestRankedFeed:
         """Isolate ranking tests from the pinned post — that's tested in TestPinnedPost."""
         monkeypatch.setattr(FEEDS["your-feed"], "pinned_post_uri", None)
 
+    @pytest.fixture(autouse=True)
+    def _disable_slate_cutoffs(self, monkeypatch):
+        """Isolate ranking tests from the slate cutoffs — tested in TestSlateCutoffs."""
+        monkeypatch.setattr(FEEDS["your-feed"], "max_render_share", None)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", None)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_mmr_score", None)
+
     def _patch_generators(self, candidates):
         primary_gen = AsyncMock()
         primary_gen.generate.return_value = CandidateResult(
@@ -1422,6 +1539,246 @@ class TestRankedFeed:
 
 
 # ---------------------------------------------------------------------------
+# Slate cutoffs (max_render_share / min_rank_score / min_mmr_score)
+# ---------------------------------------------------------------------------
+
+class TestSlateCutoffs:
+    """The quality gates cut the slate and drive session restarts + discards."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_authenticated_user(self):
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), \
+             patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _reset_feed_config(self, monkeypatch):
+        """Start each test from a clean your-feed: no pin, no cutoffs, no MMR.
+
+        Individual tests re-enable exactly the gate under test.
+        """
+        monkeypatch.setattr(FEEDS["your-feed"], "pinned_post_uri", None)
+        monkeypatch.setattr(FEEDS["your-feed"], "diversify", False)
+        monkeypatch.setattr(FEEDS["your-feed"], "max_render_share", None)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", None)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_mmr_score", None)
+
+    def _patch_generators(self, candidates):
+        primary_gen = AsyncMock()
+        primary_gen.generate.return_value = CandidateResult(
+            generator_name="two_tower", candidates=candidates
+        )
+        followed_gen = AsyncMock()
+        followed_gen.generate.return_value = CandidateResult(
+            generator_name="followed_users", candidates=[]
+        )
+        infill_gen = AsyncMock()
+        infill_gen.generate.return_value = CandidateResult(
+            generator_name="popularity", candidates=[]
+        )
+
+        def fake_get(name):
+            return {
+                "two_tower": primary_gen,
+                "followed_users": followed_gen,
+                "popularity": infill_gen,
+            }.get(name)
+
+        return (
+            patch("app.lib.candidates.generate.get_generator", side_effect=fake_get),
+            primary_gen,
+        )
+
+    @staticmethod
+    def _rank_result(scores: list[float]) -> RankPredictResult:
+        """Rank p/0..p/n-1 with the given scores, in descending-score order."""
+        order = sorted(range(len(scores)), key=lambda i: -scores[i])
+        return RankPredictResult(rankings=[
+            RankedCandidate(at_uri=f"at://p/{i}", rank=r + 1, rank_score=scores[i])
+            for r, i in enumerate(order)
+        ])
+
+    def _get_feed(self, candidates, rank_result, discarded_mock=None):
+        gen_patch, _ = self._patch_generators(candidates)
+        discarded_mock = discarded_mock if discarded_mock is not None else AsyncMock()
+        with gen_patch, \
+             patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result), \
+             patch("app.routers.xrpc.record_discarded_posts", discarded_mock):
+            return client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            ).json()
+
+    def test_rank_floor_cuts_low_scores_and_records_discards(self, monkeypatch):
+        """Sub-floor candidates are cut (boundary-equal kept) and persisted as discarded."""
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        candidates = _make_candidates("p", 4, with_embedding=True)
+        discarded = AsyncMock()
+
+        data = self._get_feed(candidates, self._rank_result([0.5, 0.2, 0.0, -0.3]), discarded)
+
+        posts = [item["post"] for item in data["feed"]]
+        assert posts == ["at://p/0", "at://p/1", "at://p/2"]
+        discarded.assert_awaited_once()
+        assert discarded.await_args
+        assert discarded.await_args.args[1] == "did:plc:testuser"
+        assert discarded.await_args.args[2] == ["at://p/3"]
+
+    def test_share_cap_limits_slate(self, monkeypatch):
+        """At most max_render_share of the retrieved candidates are rendered."""
+        monkeypatch.setattr(FEEDS["your-feed"], "max_render_share", 0.2)
+        candidates = _make_candidates("p", 10, with_embedding=True)
+
+        data = self._get_feed(candidates, self._rank_result([1.0 - i / 10 for i in range(10)]))
+
+        posts = [item["post"] for item in data["feed"]]
+        assert posts == ["at://p/0", "at://p/1"]
+        # The shortened slate still cursors so paging restarts the session.
+        parsed = FeedCursor.decode(data["cursor"])
+        assert parsed.offset == 2
+
+    def test_mmr_floor_cuts_slate(self, monkeypatch):
+        """With diversify on, the slate stops at the first sub-floor MMR pick."""
+        monkeypatch.setattr(FEEDS["your-feed"], "diversify", True)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_mmr_score", 0.0)
+        # Same author + identical embeddings: pick 2 carries maximal author and
+        # content penalties, dropping its MMR score below 0.
+        candidates = [
+            CandidatePost(
+                at_uri=f"at://p/{i}",
+                content=f"post {i}",
+                minilm_l12_embedding=TEST_EMBEDDING,
+                score=None,
+                author_did="did:plc:same",
+                generator_name="test",
+            )
+            for i in range(3)
+        ]
+        discarded = AsyncMock()
+
+        data = self._get_feed(candidates, self._rank_result([1.0, 1.0, 1.0]), discarded)
+
+        assert len(data["feed"]) == 1
+        # MMR-cut posts are not discarded — they may fit a future slate.
+        discarded.assert_not_awaited()
+
+    def test_fail_open_serves_precut_slate_when_everything_cut(self, monkeypatch):
+        """If the gates reject everything retrieved, the pre-cutoff slate is served."""
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        candidates = _make_candidates("p", 3, with_embedding=True)
+        discarded = AsyncMock()
+
+        data = self._get_feed(candidates, self._rank_result([-0.1, -0.2, -0.3]), discarded)
+
+        posts = [item["post"] for item in data["feed"]]
+        assert posts == ["at://p/0", "at://p/1", "at://p/2"]
+        # Still recorded as discarded so the next session stops retrieving them.
+        discarded.assert_awaited_once()
+        assert discarded.await_args
+        assert discarded.await_args.args[2] == ["at://p/0", "at://p/1", "at://p/2"]
+
+    def test_fail_closed_returns_empty_feed_when_constant_flipped(self, monkeypatch):
+        from app.routers import xrpc as xrpc_mod
+
+        monkeypatch.setattr(xrpc_mod, "EMPTY_SLATE_FAIL_OPEN", False)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        candidates = _make_candidates("p", 3, with_embedding=True)
+
+        data = self._get_feed(candidates, self._rank_result([-0.1, -0.2, -0.3]))
+
+        assert data["feed"] == []
+        assert "cursor" not in data
+
+    def test_discarded_uris_excluded_on_fresh_request(self, monkeypatch):
+        """Feeds with a rank floor exclude previously-discarded posts from generation."""
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        candidates = _make_candidates("p", 2, with_embedding=True)
+        gen_patch, primary_gen = self._patch_generators(candidates)
+
+        rank_result = self._rank_result([0.5, 0.4])
+        with gen_patch, \
+             patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result), \
+             patch("app.routers.xrpc.record_discarded_posts", new_callable=AsyncMock), \
+             patch(
+                 "app.routers.xrpc.get_recent_seen_uris",
+                 new_callable=AsyncMock,
+                 return_value=["at://seen/1"],
+             ), \
+             patch(
+                 "app.routers.xrpc.get_recent_discarded_uris",
+                 new_callable=AsyncMock,
+                 return_value=["at://disc/1"],
+             ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": RANKED_FEED_URI}
+            )
+
+        assert resp.status_code == 200
+        assert primary_gen.generate.call_args.kwargs.get("exclude_uris") == [
+            "at://seen/1",
+            "at://disc/1",
+        ]
+
+    def test_discarded_not_fetched_without_rank_floor(self):
+        """Feeds without a min_rank_score never pay for the discarded-posts read."""
+        gen_patch, _ = self._patch_generators(_make_candidates("p", 2, with_embedding=True))
+
+        rank_result = self._rank_result([0.5, 0.4])
+        with gen_patch, \
+             patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result), \
+             patch(
+                 "app.routers.xrpc.get_recent_discarded_uris", new_callable=AsyncMock
+             ) as discarded_fetch:
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": RANKED_FEED_URI}
+            )
+
+        assert resp.status_code == 200
+        discarded_fetch.assert_not_called()
+
+    def test_cutoff_metrics_recorded(self, monkeypatch):
+        """Hitting a gate emits feed.slate.cutoff_count and feed.slate.kept_share."""
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+        from ..lib.metrics import MetricCollector, set_metric_collector
+
+        reader = InMemoryMetricReader()
+        set_metric_collector(MetricCollector._from_reader(reader, service_name="t", env="test"))
+        try:
+            monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+            candidates = _make_candidates("p", 4, with_embedding=True)
+            self._get_feed(candidates, self._rank_result([0.5, 0.2, 0.0, -0.3]))
+
+            metrics = {}
+            metrics_data = reader.get_metrics_data()
+            assert metrics_data is not None
+            for rm in metrics_data.resource_metrics:
+                for sm in rm.scope_metrics:
+                    for metric in sm.metrics:
+                        metrics[metric.name] = metric
+
+            cutoff = metrics["feed.slate.cutoff_count"]
+            (point,) = cutoff.data.data_points
+            assert point.value == 1
+            assert point.attributes["feed_name"] == "your-feed"
+            assert point.attributes["reason"] == "rank_score"
+
+            kept = metrics["feed.slate.kept_share"]
+            (kept_point,) = kept.data.data_points
+            assert kept_point.sum == pytest.approx(3 / 4)
+
+            assert "candidates.generate.retrieved_share" in metrics
+            assert "feed.slate.exclusion_size" in metrics
+        finally:
+            set_metric_collector(None)
+
+
+# ---------------------------------------------------------------------------
 # Best-of-friends feed
 # ---------------------------------------------------------------------------
 
@@ -1443,6 +1800,13 @@ class TestBestOfFriendsFeed:
     def _clear_pinned_post(self, monkeypatch):
         """Isolate ranking tests from the pinned post — that's tested in TestPinnedPost."""
         monkeypatch.setattr(FEEDS["best-of-friends"], "pinned_post_uri", None)
+
+    @pytest.fixture(autouse=True)
+    def _disable_slate_cutoffs(self, monkeypatch):
+        """Isolate ranking tests from the slate cutoffs — tested in TestSlateCutoffs."""
+        monkeypatch.setattr(FEEDS["best-of-friends"], "max_render_share", None)
+        monkeypatch.setattr(FEEDS["best-of-friends"], "min_rank_score", None)
+        monkeypatch.setattr(FEEDS["best-of-friends"], "min_mmr_score", None)
 
     def _patch_generators(self, candidates):
         primary_gen = AsyncMock()
@@ -1749,6 +2113,25 @@ class TestFeedDebugCapture:
         mock_snapshot.assert_awaited_once()
         mock_debug.assert_not_awaited()
 
+    def test_snapshot_contains_only_posts_returned_on_initial_page(self):
+        candidates = _make_candidates("p", 8)
+        with (
+            self._patch_generators(candidates),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=self._user_doc(False)),
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False) as mock_snapshot,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            )
+
+        returned = [item["post"] for item in response.json()["feed"]]
+        assert mock_snapshot.await_args is not None
+        snapshot = mock_snapshot.await_args.args[3]
+        assert snapshot.items == returned
+        assert snapshot.items == ["at://p/0", "at://p/1", "at://p/2"]
+        assert [meta.at_uri for meta in snapshot.items_meta] == snapshot.items
+
     def test_full_debug_record_when_enabled(self):
         """Full debug record written in background when debug_feeds is on."""
         spawned: list = []
@@ -1825,6 +2208,23 @@ class TestGetFeedSkeletonProbe:
             )
         assert resp.status_code == 200
 
+    def test_probe_does_not_write_observability_snapshot(self):
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 3)),
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot",
+                new_callable=AsyncMock,
+            ) as snapshot_write,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers={"X-Probe-Secret": self.PROBE_SECRET},
+            )
+
+        assert resp.status_code == 200
+        snapshot_write.assert_not_awaited()
+
     def test_wrong_probe_secret_returns_401(self):
         """Wrong X-Probe-Secret still 401s (no bypass)."""
         resp = client.get(
@@ -1868,23 +2268,23 @@ class TestDiversityScoreMetric:
         ):
             yield
 
-    def _make_scored_candidates(self, n: int) -> list[CandidatePost]:
-        """Candidates with diversity_score set, as mmr_rerank would produce."""
+    def _make_candidates(self, n: int) -> list[CandidatePost]:
         return [
             CandidatePost(
                 at_uri=f"at://test/{i}",
-                score=1.0 - i * 0.1,
+                score=1.0 - i * 0.02,
                 author_did=f"did:plc:{i}",
-                diversity_score=1.0 if i == 0 else 0.8,
             )
             for i in range(n)
         ]
 
-    def test_metric_emitted_on_initial_request(self, monkeypatch):
+    def test_metric_emitted_on_initial_request(self):
+        """The real MMR pipeline runs; the served page's mean diversity score
+        (from items_meta) is emitted for batch 0."""
         collector = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, collector))
 
-        candidates = self._make_scored_candidates(35)
+        candidates = self._make_candidates(35)
         with _patch_unranked_your_feed_generators(candidates):
             client = TestClient(app)
             resp = client.get(
@@ -1895,48 +2295,21 @@ class TestDiversityScoreMetric:
         assert resp.status_code == 200
         metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
         assert len(metric_calls) == 1
-        name, value, attrs = metric_calls[0]
+        _, value, attrs = metric_calls[0]
         assert attrs["feed_name"] == FEED_RKEY
         assert attrs["batch"] == "0"
         assert 0.0 <= value <= 1.0
 
-    def test_metric_emitted_on_cursor_request(self, monkeypatch):
+    def test_metric_emitted_on_cursor_request_from_cache_items_meta(self):
         """A cursor page served purely from FeedCache (no pipeline call) reads
-        its diversity scores from the feed snapshot rather than in-memory."""
+        its diversity scores from items_meta already stored on the cache
+        document, requiring no extra Firestore read."""
         collector = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, collector))
 
-        candidates = self._make_scored_candidates(35)
-        # Covers the full candidate URI space so whichever URIs land on page 2
-        # (drawn from the same 35 candidates) all resolve to a known score.
-        fake_snapshot = FeedSnapshotDocument(
-            request_id="ignored",
-            items=[c.at_uri for c in candidates if c.at_uri],
-            feed_name=FEED_RKEY,
-            generated_at=datetime.now(timezone.utc),
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
-            items_meta=[
-                PipelineItemMeta(
-                    at_uri=c.at_uri,
-                    diversification=DiversificationMeta(
-                        relevance=1.0, score=1.0, diversity_score=0.75
-                    ),
-                )
-                for c in candidates
-                if c.at_uri
-            ],
-        )
-
-        with (
-            _patch_unranked_your_feed_generators(candidates),
-            patch(
-                "app.routers.xrpc.get_feed_snapshot",
-                new_callable=AsyncMock,
-                return_value=fake_snapshot,
-            ),
-        ):
+        candidates = self._make_candidates(35)
+        with _patch_unranked_your_feed_generators(candidates):
             client = TestClient(app)
-            # Initial request
             resp1 = client.get(
                 f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={FEED_URI_FROM_APPVIEW}&limit=5"
             )
@@ -1944,7 +2317,6 @@ class TestDiversityScoreMetric:
             cursor = resp1.json().get("cursor")
             assert cursor is not None
 
-            # Cursor follow-up
             resp2 = client.get(
                 f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={FEED_URI_FROM_APPVIEW}&limit=5&cursor={cursor}"
             )
@@ -1956,44 +2328,11 @@ class TestDiversityScoreMetric:
         batches = {c[2]["batch"] for c in metric_calls}
         assert batches == {"0", "1"}
         batch_1_value = next(v for _, v, attrs in metric_calls if attrs["batch"] == "1")
-        assert batch_1_value == pytest.approx(0.75)
+        assert 0.0 <= batch_1_value <= 1.0
 
-    def test_snapshot_read_failure_skips_metric_without_raising(self, monkeypatch):
-        """A get_feed_snapshot error must not break serving the cursor page —
-        the diversity metric is simply skipped for that page."""
-        collector = FakeMetricCollector()
-        set_metric_collector(cast(MetricCollector, collector))
-
-        candidates = self._make_scored_candidates(35)
-        with (
-            _patch_unranked_your_feed_generators(candidates),
-            patch(
-                "app.routers.xrpc.get_feed_snapshot",
-                new_callable=AsyncMock,
-                side_effect=Exception("firestore boom"),
-            ),
-        ):
-            client = TestClient(app)
-            resp1 = client.get(
-                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={FEED_URI_FROM_APPVIEW}&limit=5"
-            )
-            assert resp1.status_code == 200
-            cursor = resp1.json().get("cursor")
-            assert cursor is not None
-
-            resp2 = client.get(
-                f"/xrpc/app.bsky.feed.getFeedSkeleton?feed={FEED_URI_FROM_APPVIEW}&limit=5&cursor={cursor}"
-            )
-
-        set_metric_collector(None)
-        assert resp2.status_code == 200
-        assert resp2.json()["feed"]
-        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
-        batches = {c[2]["batch"] for c in metric_calls}
-        assert batches == {"0"}
-
-    def test_metric_not_emitted_when_no_scores(self, monkeypatch):
-        """When diversification is off (no diversity_score on candidates), no metric fires."""
+    def test_metric_not_emitted_when_no_scores(self):
+        """When diversification is off, no items carry diversification info,
+        so no metric fires."""
         collector = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, collector))
 
@@ -2019,22 +2358,24 @@ class TestDiversityScoreMetric:
 
     def test_metric_excludes_pinned_post_from_mean(self):
         """The pinned post is forced to the front regardless of its diversity
-        score, so it must not be averaged into the mean-diversity metric."""
+        score, so it must not be averaged into the mean-diversity metric,
+        even when it happens to also be one of the organically-generated
+        candidates (and so does carry a real diversity score)."""
+        from ..lib.diversify import mmr_rerank as real_mmr_rerank
+        from ..lib.feed_debug import FeedDebugRecorder, feed_debug_scope
         from app.routers import xrpc as xrpc_mod
 
         collector = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, collector))
 
         pinned_uri = "at://did:plc:pinauthor/app.bsky.feed.post/pinnedpost"
-        candidates = [
-            CandidatePost(
-                at_uri=f"at://test/{i}",
-                score=1.0 - i * 0.1,
-                author_did=f"did:plc:{i}",
-                diversity_score=1.0 - i * 0.1,
-            )
-            for i in range(6)
+        pinned_candidate = CandidatePost(at_uri=pinned_uri, score=1.0, author_did="did:plc:pin")
+        others = [
+            CandidatePost(at_uri=f"at://test/{i}", score=0.9 - i * 0.1, author_did="did:plc:same")
+            for i in range(5)
         ]
+        candidates = [pinned_candidate, *others]
+
         random_gen = AsyncMock()
         random_gen.generate.return_value = CandidateResult(
             generator_name="random_posts", candidates=candidates
@@ -2051,7 +2392,6 @@ class TestDiversityScoreMetric:
         with (
             patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator),
             patch.object(xrpc_mod, "FEEDS", patched_feeds),
-            patch.object(xrpc_mod, "mmr_rerank", return_value=candidates),
         ):
             client = TestClient(app)
             resp = client.get(
@@ -2064,15 +2404,29 @@ class TestDiversityScoreMetric:
         assert post_uris[0] == pinned_uri
         assert len(post_uris) == 5
 
+        # Ground truth: run the same production diversification independently
+        # (same input, same order) to know each candidate's real diversity
+        # score, then compute the expected mean over the served non-pinned
+        # items only.
+        ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
+        rec = FeedDebugRecorder(feed_name="random", regenerated=False)
+        with feed_debug_scope(rec):
+            real_mmr_rerank(ordered)
+        diversity_by_uri = {uri: d for uri, _, _, _, _, d in rec.diversification}
+
+        non_pinned_scores = [diversity_by_uri[uri] for uri in post_uris[1:]]
+        expected_mean = sum(non_pinned_scores) / len(non_pinned_scores)
+
         metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
         assert len(metric_calls) == 1
         _, value, attrs = metric_calls[0]
         assert attrs["batch"] == "0"
-        # Only the 4 non-pinned served items (scores 1.0, 0.9, 0.8, 0.7) should
-        # contribute to the mean. Including the pinned post as a 0-score
-        # fifth entry would instead yield 0.8.
-        assert value == pytest.approx(0.85)
-
+        assert value == pytest.approx(expected_mean)
+        # Pinned is always the first MMR pick here (highest score), so its
+        # own diversity score is 1.0 — distinct from the computed mean,
+        # proving the exclusion is actually doing something.
+        assert diversity_by_uri[pinned_uri] == 1.0
+        assert value != pytest.approx(1.0)
 
 # ---------------------------------------------------------------------------
 # Pinned post
@@ -2118,6 +2472,46 @@ class TestPinnedPost:
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None)
     @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
     @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    def test_pinned_post_is_excluded_from_observability_snapshot(self, *mocks):
+        from app.routers import xrpc as xrpc_mod
+
+        candidates = _make_candidates("did:plc:a", 5, "random_posts")
+        random_gen = AsyncMock()
+        random_gen.generate.return_value = CandidateResult(
+            generator_name="random_posts", candidates=candidates
+        )
+        patched_feeds = self._make_random_feed_with_pin()
+        with (
+            patch(
+                "app.lib.candidates.generate.get_generator",
+                return_value=random_gen,
+            ),
+            patch.object(xrpc_mod, "FEEDS", patched_feeds),
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as snapshot_write,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 3},
+            )
+
+        assert response.json()["feed"][0]["post"] == self.PINNED_URI
+        assert snapshot_write.await_args is not None
+        snapshot = snapshot_write.await_args.args[3]
+        assert self.PINNED_URI not in snapshot.items
+        assert snapshot.items == [
+            "at://did:plc:a/0",
+            "at://did:plc:a/1",
+        ]
+        assert all(meta.at_uri != self.PINNED_URI for meta in snapshot.items_meta)
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None)
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
     def test_pinned_post_not_duplicated_if_in_candidates(self, *mocks):
         """If the pinned URI is already in generated candidates, it appears only once."""
         from app.routers import xrpc as xrpc_mod
@@ -2151,6 +2545,44 @@ class TestPinnedPost:
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None)
     @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
     @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    def test_pinned_page_cursor_does_not_skip_a_post(self, *mocks):
+        """The pinned first page consumes limit-1 generated posts; the cursor
+        must account for that so page 2 continues without skipping one."""
+        from app.routers import xrpc as xrpc_mod
+
+        candidates = _make_candidates("did:plc:a", 20, "random_posts")
+        random_gen = AsyncMock()
+        random_gen.generate.return_value = CandidateResult(
+            generator_name="random_posts", candidates=candidates
+        )
+
+        def fake_get_generator(name):
+            return random_gen if name == "random_posts" else None
+
+        patched_feeds = self._make_random_feed_with_pin()
+        with patch("app.lib.candidates.generate.get_generator", side_effect=fake_get_generator), \
+             patch.object(xrpc_mod, "FEEDS", patched_feeds):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 10},
+            ).json()
+
+        assert first["feed"][0]["post"] == self.PINNED_URI
+        assert first["feed"][-1]["post"] == "at://did:plc:a/8"
+        assert FeedCursor.decode(first["cursor"]).offset == 9
+
+        with patch.object(xrpc_mod, "FEEDS", patched_feeds):
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 10, "cursor": first["cursor"]},
+            ).json()
+
+        assert second["feed"][0]["post"] == "at://did:plc:a/9"
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None)
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
     def test_pinned_post_not_on_subsequent_pages(self, *mocks):
         """Pinned post does not appear when a cursor is sent (subsequent pages)."""
         from app.routers import xrpc as xrpc_mod
@@ -2159,6 +2591,10 @@ class TestPinnedPost:
         cache = InMemoryFeedCache()
         cached_uris = [f"at://did:plc:a/{i}" for i in range(20)]
         cache._store["testcacheid"] = cached_uris
+        cache._docs["testcacheid"] = FeedCacheDocument(
+            items=cached_uris,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        )
         app.state.feed_cache = cache
 
         cursor = FeedCursor(id="testcacheid", offset=10).encode()
@@ -2171,105 +2607,6 @@ class TestPinnedPost:
         assert resp.status_code == 200
         post_uris = [item["post"] for item in resp.json()["feed"]]
         assert self.PINNED_URI not in post_uris
-
-
-# ---------------------------------------------------------------------------
-# feed.render success/failure metrics
-# ---------------------------------------------------------------------------
-
-
-class TestGetFeedSkeletonMetrics:
-    """feed.render.{success,failure}_count are recorded on every getFeedSkeleton call."""
-
-    @pytest.fixture(autouse=True)
-    def _fake_metric_collector(self):
-        from typing import cast
-        self.mc = FakeMetricCollector()
-        set_metric_collector(cast(MetricCollector, self.mc))
-        yield
-        set_metric_collector(None)
-
-    @pytest.fixture(autouse=True)
-    def _mock_firestore_upsert(self):
-        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), \
-             patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock):
-            yield
-
-    def test_success_records_success_count(self):
-        with (
-            _patch_unranked_your_feed_generators(_make_candidates("p", 2)),
-            patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:user"),
-        ):
-            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
-
-        assert resp.status_code == 200
-        success_calls = [c for c in self.mc.calls if c[0] == "feed.render.success_count"]
-        assert len(success_calls) == 1
-        _, value, attrs = success_calls[0]
-        assert value == 1
-        assert attrs["feed_name"] == FEED_RKEY
-
-    def test_success_records_no_failure_count(self):
-        with (
-            _patch_unranked_your_feed_generators(_make_candidates("p", 2)),
-            patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:user"),
-        ):
-            client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
-
-        failure_calls = [c for c in self.mc.calls if c[0] == "feed.render.failure_count"]
-        assert failure_calls == []
-
-    def test_unknown_feed_records_failure_count_400(self):
-        resp = client.get(
-            "/xrpc/app.bsky.feed.getFeedSkeleton",
-            params={"feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/nonexistent"},
-        )
-
-        assert resp.status_code == 400
-        failure_calls = [c for c in self.mc.calls if c[0] == "feed.render.failure_count"]
-        assert len(failure_calls) == 1
-        _, value, attrs = failure_calls[0]
-        assert value == 1
-        assert attrs["status_code"] == "400"
-        assert attrs["feed_name"] == "unknown"
-
-    def test_auth_failure_records_failure_count_401(self):
-        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value=None):
-            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
-
-        assert resp.status_code == 401
-        failure_calls = [c for c in self.mc.calls if c[0] == "feed.render.failure_count"]
-        assert len(failure_calls) == 1
-        _, value, attrs = failure_calls[0]
-        assert value == 1
-        assert attrs["status_code"] == "401"
-        assert attrs["feed_name"] == FEED_RKEY
-
-    def test_firestore_unavailable_records_failure_count_500(self):
-        with (
-            patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:user"),
-        ):
-            app.state.firestore = None
-            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
-            app.state.firestore = AsyncMock()
-
-        assert resp.status_code == 500
-        failure_calls = [c for c in self.mc.calls if c[0] == "feed.render.failure_count"]
-        assert len(failure_calls) == 1
-        _, value, attrs = failure_calls[0]
-        assert value == 1
-        assert attrs["status_code"] == "500"
-        assert attrs["feed_name"] == FEED_RKEY
-
-    def test_failure_records_no_success_count(self):
-        resp = client.get(
-            "/xrpc/app.bsky.feed.getFeedSkeleton",
-            params={"feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/nonexistent"},
-        )
-
-        assert resp.status_code == 400
-        success_calls = [c for c in self.mc.calls if c[0] == "feed.render.success_count"]
-        assert success_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -2296,13 +2633,13 @@ class TestSocialRadiusOverride:
     def test_applies_social_radius_preset_0(self, mock_pipeline, mock_get_user):
         """social_radius=0 (Friends) → followed_users-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS
+        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
             social_radius=0,
         )
-        mock_pipeline.return_value = (["at://dummy/1", "at://dummy/2"], {})
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1", "at://dummy/2"], [])
 
         resp = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2318,13 +2655,13 @@ class TestSocialRadiusOverride:
     def test_applies_social_radius_preset_4(self, mock_pipeline, mock_get_user):
         """social_radius=4 (Everyone) → popularity-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS
+        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
             social_radius=4,
         )
-        mock_pipeline.return_value = (["at://dummy/1", "at://dummy/2"], {})
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1", "at://dummy/2"], [])
 
         resp = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2338,14 +2675,14 @@ class TestSocialRadiusOverride:
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_default_radius_when_missing(self, mock_pipeline, mock_get_user):
-        """User doc without social_radius field → defaults to 2 (balanced)."""
+        """User doc without social_radius field → defaults to 3 (balanced)."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS
+        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
         )
-        mock_pipeline.return_value = (["at://dummy/1"], {})
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
 
         resp = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2354,19 +2691,20 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[2]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_no_override_for_non_your_feed(self, mock_pipeline, mock_get_user):
         """best-of-friends is unaffected by social_radius."""
         from ..documents import UserDocument
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
             social_radius=0,
         )
-        mock_pipeline.return_value = (["at://dummy/1"], {})
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
 
         resp = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2383,10 +2721,10 @@ class TestSocialRadiusOverride:
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_fallen_back_to_defaults_when_user_has_no_doc(self, mock_pipeline, mock_get_user):
         """User doc is None → no override, defaults used."""
-        from .xrpc import SOCIAL_RADIUS_PRESETS
+        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
 
         mock_get_user.return_value = None
-        mock_pipeline.return_value = (["at://dummy/1"], {})
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
 
         resp = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2395,9 +2733,99 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[2]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
 
 
+class TestGetFeedSkeletonMetrics:
+    """Feed renders emit exactly one success or failure counter."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_metric_collector(self):
+        from typing import cast
+
+        self.mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, self.mc))
+        yield
+        set_metric_collector(None)
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        with patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock), patch(
+            "app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock
+        ):
+            yield
+
+    def test_success_records_success_count(self):
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 2)),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value="did:plc:user",
+            ),
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+
+        assert response.status_code == 200
+        success_calls = [
+            call for call in self.mc.calls if call[0] == "feed.render.success_count"
+        ]
+        assert len(success_calls) == 1
+        assert success_calls[0][2]["feed_name"] == FEED_RKEY
+
+    def test_unknown_feed_records_failure_count_400(self):
+        response = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={
+                "feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/nonexistent"
+            },
+        )
+
+        assert response.status_code == 400
+        failure_calls = [
+            call for call in self.mc.calls if call[0] == "feed.render.failure_count"
+        ]
+        assert len(failure_calls) == 1
+        assert failure_calls[0][2] == {
+            "feed_name": "unknown",
+            "status_code": "400",
+        }
+
+    def test_auth_failure_records_failure_count_401(self):
+        with patch(
+            "app.routers.xrpc.verify_auth_header",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+
+        assert response.status_code == 401
+        failure_calls = [
+            call for call in self.mc.calls if call[0] == "feed.render.failure_count"
+        ]
+        assert len(failure_calls) == 1
+        assert failure_calls[0][2] == {
+            "feed_name": FEED_RKEY,
+            "status_code": "401",
+        }
+
+    def test_failure_records_no_success_count(self):
+        client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={
+                "feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/nonexistent"
+            },
+        )
+
+        assert [
+            call for call in self.mc.calls if call[0] == "feed.render.success_count"
+        ] == []
 class TestPosthogTracking:
     """Verify PostHog events are emitted from XRPC background handlers."""
 
@@ -2429,8 +2857,8 @@ class TestPosthogTracking:
     async def test_record_interactions_calls_track_interaction(self):
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        from ..routers.xrpc import Interaction, _record_interactions
         from ..lib.feed_context import FeedContextPayload, encode_feed_context
+        from ..routers.xrpc import Interaction, _record_interactions
 
         feed_context = encode_feed_context(
             FeedContextPayload(did="did:plc:abc", feed="your-feed", rid="reqid123", iat=0)

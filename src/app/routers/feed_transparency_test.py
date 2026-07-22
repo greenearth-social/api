@@ -134,7 +134,7 @@ def test_list_feeds_returns_401_without_auth():
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
-def test_list_feeds_skips_fully_deduped_snapshots(mock_query, client):
+def test_list_feeds_preserves_overlapping_snapshots(mock_query, client):
     now = datetime.now(timezone.utc)
     newer = _snapshot_doc(
         request_id="req-1",
@@ -158,8 +158,9 @@ def test_list_feeds_skips_fully_deduped_snapshots(mock_query, client):
 
     response = client.get("/api/feeds")
     data = response.json()
-    assert len(data["feeds"]) == 1
+    assert len(data["feeds"]) == 2
     assert data["feeds"][0]["request_id"] == "req-1"
+    assert data["feeds"][1]["request_id"] == "req-2"
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
@@ -191,7 +192,7 @@ def test_list_feeds_newest_first_order(mock_query, client):
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
-def test_list_feeds_skips_middle_when_fully_deduped(mock_query, client):
+def test_list_feeds_preserves_fully_overlapping_middle_snapshot(mock_query, client):
     now = datetime.now(timezone.utc)
     newest = _snapshot_doc(
         request_id="req-3", generated_at=now,
@@ -219,9 +220,10 @@ def test_list_feeds_skips_middle_when_fully_deduped(mock_query, client):
 
     response = client.get("/api/feeds")
     data = response.json()
-    assert len(data["feeds"]) == 2
+    assert len(data["feeds"]) == 3
     assert data["feeds"][0]["request_id"] == "req-3"
-    assert data["feeds"][1]["request_id"] == "req-1"
+    assert data["feeds"][1]["request_id"] == "req-2"
+    assert data["feeds"][2]["request_id"] == "req-1"
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +453,7 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
     response = client.get("/api/feeds/preferences")
     assert response.status_code == 200
     data = response.json()
-    assert data["social_radius"] == 2  # default
+    assert data["social_radius"] == 3  # default
     assert data["freshness"] == 2  # default
     assert data["politics"] == 1.0  # default
     assert data["purpose"] == 0.5  # default
@@ -590,10 +592,9 @@ def _hydrated(uri: str, handle: str = "alice.bsky.social") -> dict:
 
 
 @patch("app.routers.feed_transparency.hydrate_posts")
-@patch("app.routers.feed_transparency.get_newer_feed_snapshot_uris")
 @patch("app.routers.feed_transparency.get_feed_snapshot")
-def test_get_feed_detail_excludes_items_seen_in_newer_snapshots(
-    mock_get_snapshot, mock_newer, mock_hydrate, client
+def test_get_feed_detail_preserves_items_seen_in_newer_snapshots(
+    mock_get_snapshot, mock_hydrate, client
 ):
     uri1 = "at://did:plc:a/app.bsky.feed.post/p1"
     uri2 = "at://did:plc:b/app.bsky.feed.post/p2"
@@ -613,7 +614,6 @@ def test_get_feed_detail_excludes_items_seen_in_newer_snapshots(
         items=[uri1, uri2],
     )
     mock_get_snapshot.return_value = doc
-    mock_newer.return_value = {uri1}
     mock_hydrate.return_value = {**_hydrated(uri2, "bob.bsky.social")}
 
     response = client.get("/api/feeds/req-abc")
@@ -621,14 +621,88 @@ def test_get_feed_detail_excludes_items_seen_in_newer_snapshots(
 
     assert response.status_code == 200
     assert len(data["items"]) == 1
-    assert data["items"][0]["at_uri"] == uri2
+    assert [item["at_uri"] for item in data["items"]] == [uri2]
 
 
 @patch("app.routers.feed_transparency.hydrate_posts")
-@patch("app.routers.feed_transparency.get_newer_feed_snapshot_uris")
+@patch("app.routers.feed_transparency.get_feed_snapshot")
+def test_get_feed_detail_hides_unavailable_posts_but_preserves_valid_order(
+    mock_get_snapshot, mock_hydrate, client
+):
+    unavailable = "at://did:plc:a/app.bsky.feed.post/deleted"
+    first = "at://did:plc:b/app.bsky.feed.post/p1"
+    second = "at://did:plc:c/app.bsky.feed.post/p2"
+    mock_get_snapshot.return_value = _snapshot_doc(
+        items=[unavailable, first, second],
+        items_meta=[
+            PipelineItemMeta(at_uri=unavailable),
+            PipelineItemMeta(at_uri=first),
+            PipelineItemMeta(at_uri=second),
+        ],
+    )
+    mock_hydrate.return_value = {
+        unavailable: {
+            "author": {"handle": None, "display_name": None, "avatar_url": None},
+            "content": None,
+            "created_at": None,
+            "media": {"image_urls": [], "labels": []},
+            "engagement": {"reply_count": 0, "repost_count": 0, "like_count": 0},
+        },
+        **_hydrated(first, "first.bsky.social"),
+        **_hydrated(second, "second.bsky.social"),
+    }
+
+    response = client.get("/api/feeds/req-abc")
+
+    assert response.status_code == 200
+    assert [item["at_uri"] for item in response.json()["items"]] == [first, second]
+    assert response.json()["stored_item_count"] == 3
+    assert response.json()["displayed_item_count"] == 2
+    assert response.json()["publicly_filtered_count"] == 0
+    assert response.json()["unavailable_count"] == 1
+
+
+@patch("app.routers.feed_transparency.hydrate_posts")
+@patch("app.routers.feed_transparency.get_feed_snapshot")
+def test_get_feed_detail_filters_public_post_and_author_labels(
+    mock_get_snapshot, mock_hydrate, client
+):
+    safe = "at://did:plc:a/app.bsky.feed.post/safe"
+    labeled_post = "at://did:plc:b/app.bsky.feed.post/labeled"
+    labeled_author = "at://did:plc:c/app.bsky.feed.post/author-labeled"
+    mock_get_snapshot.return_value = _snapshot_doc(
+        items=[safe, labeled_post, labeled_author],
+        items_meta=[PipelineItemMeta(at_uri=uri) for uri in [safe, labeled_post, labeled_author]],
+    )
+    hydrated = {
+        **_hydrated(safe, "safe.bsky.social"),
+        **_hydrated(labeled_post, "post.bsky.social"),
+        **_hydrated(labeled_author, "author.bsky.social"),
+    }
+    hydrated[safe]["moderation"] = {"post_labels": [], "author_labels": []}
+    hydrated[labeled_post]["moderation"] = {
+        "post_labels": ["graphic-media"], "author_labels": []
+    }
+    hydrated[labeled_author]["moderation"] = {
+        "post_labels": [], "author_labels": ["porn"]
+    }
+    mock_hydrate.return_value = hydrated
+
+    response = client.get("/api/feeds/req-abc")
+    data = response.json()
+
+    assert response.status_code == 200
+    assert [item["at_uri"] for item in data["items"]] == [safe]
+    assert data["stored_item_count"] == 3
+    assert data["displayed_item_count"] == 1
+    assert data["publicly_filtered_count"] == 2
+    assert data["unavailable_count"] == 0
+
+
+@patch("app.routers.feed_transparency.hydrate_posts")
 @patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_returns_all_when_no_newer_snapshots(
-    mock_get_snapshot, mock_newer, mock_hydrate, client
+    mock_get_snapshot, mock_hydrate, client
 ):
     uri1 = "at://did:plc:a/app.bsky.feed.post/p1"
     uri2 = "at://did:plc:b/app.bsky.feed.post/p2"
@@ -648,7 +722,6 @@ def test_get_feed_detail_returns_all_when_no_newer_snapshots(
         items=[uri1, uri2],
     )
     mock_get_snapshot.return_value = doc
-    mock_newer.return_value = set()
     mock_hydrate.return_value = {**_hydrated(uri1), **_hydrated(uri2, "bob.bsky.social")}
 
     response = client.get("/api/feeds/req-abc")
@@ -664,10 +737,9 @@ def test_get_feed_detail_returns_all_when_no_newer_snapshots(
 
 
 @patch("app.routers.feed_transparency.hydrate_posts")
-@patch("app.routers.feed_transparency.get_newer_feed_snapshot_uris")
 @patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_diverse_pipeline_metadata(
-    mock_get_snapshot, mock_newer, mock_hydrate, client
+    mock_get_snapshot, mock_hydrate, client
 ):
     uri = "at://did:plc:author/app.bsky.feed.post/post1"
     doc = _snapshot_doc(
@@ -696,7 +768,6 @@ def test_get_feed_detail_diverse_pipeline_metadata(
         ranker_model="heavy_ranker, perspective",
     )
     mock_get_snapshot.return_value = doc
-    mock_newer.return_value = set()
     mock_hydrate.return_value = {
         uri: {
             "author": {"handle": "alice.bsky.social", "display_name": "Alice", "avatar_url": None},

@@ -15,10 +15,23 @@ class FeedSummary(BaseModel):
     request_id: str
     generated_at: datetime
     feed_name: str
+    applied_social_radius: int | None = None
+    generator_diagnostics: list["GeneratorDiagnosticView"] = Field(default_factory=list)
 
 
 class FeedListResponse(BaseModel):
     feeds: list[FeedSummary]
+
+
+class GeneratorDiagnosticView(BaseModel):
+    name: str
+    weight: float
+    requested_count: int
+    returned_count: int
+    contributed_count: int
+    status: str
+    reason: str | None = None
+    mode: str = "primary"
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +98,10 @@ class FeedDetailResponse(BaseModel):
     request_id: str
     generated_at: datetime
     items: list[FeedItemView]
+    stored_item_count: int = 0
+    displayed_item_count: int = 0
+    publicly_filtered_count: int = 0
+    unavailable_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +112,7 @@ class FeedDetailResponse(BaseModel):
 class Preferences(BaseModel):
     model_config = {"extra": "forbid"}
 
-    social_radius: int = Field(default=2, ge=0, le=4)
+    social_radius: int = Field(default=3, ge=0, le=4)
     freshness: int = Field(default=2, ge=0, le=5)
     politics: float = Field(default=1.0, ge=0.5, le=1.5)
     purpose: float = Field(default=0.5, ge=0.2, le=0.8)

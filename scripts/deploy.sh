@@ -281,6 +281,12 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_PROBE_USER_DID=did:plc:s4tl2ajfsnstzuxtegl7r33g"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=15"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_POSTHOG_HOST=$GE_POSTHOG_HOST"
+    # NOTE: keep this false until the Perspective API timeout and ES generator
+    # connection errors under investigation in #270/#271 are resolved --
+    # enabling fail-fast while those are unaddressed would turn silent,
+    # swallowed failures into user-visible "feed unavailable" errors on every
+    # occurrence.
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_FAIL_FAST=false"
 
     if [ -n "$GE_INFERENCE_BASE_URL" ]; then
         deploy_cmd="$deploy_cmd --set-env-vars=GE_INFERENCE_BASE_URL=$GE_INFERENCE_BASE_URL"

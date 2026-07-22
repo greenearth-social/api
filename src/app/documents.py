@@ -50,10 +50,10 @@ class UserDocument(BaseModel):
         "information into the feed_debug subcollection (has a perf cost).",
     )
     social_radius: int = Field(
-        default=2,
+        default=3,
         ge=0,
         le=4,
-        description="Social radius preference: 0=friends only, 2=balanced, 4=everyone.  "
+        description="Social radius preference: 0=friends only, 3=balanced, 4=everyone.  "
         "Used to override the generator weights in your-feed.",
     )
     freshness: int = Field(
@@ -87,6 +87,11 @@ class FeedCacheDocument(BaseModel):
 
     items: list[str] = Field(default_factory=list, description="Cached AT URI list")
     expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")
+    items_meta: list["PipelineItemMeta"] = Field(default_factory=list)
+    generator_diagnostics: list["GeneratorDiagnostic"] = Field(default_factory=list)
+    applied_social_radius: int | None = None
+    feed_name: str | None = None
+    generated_at: datetime | None = None
 
 
 class SeenPostsDocument(BaseModel):
@@ -98,6 +103,21 @@ class SeenPostsDocument(BaseModel):
     """
 
     post_uris: list[str] = Field(default_factory=list, description="Seen post AT URIs for this day")
+    expires_at: datetime = Field(..., description="UTC expiration timestamp; drives native TTL")
+
+
+class DiscardedPostsDocument(BaseModel):
+    """Post URIs cut from a user's slates for low ranker score on a given UTC day.
+
+    One document per user per day under the ``discarded_posts`` subcollection;
+    the document ID is the ``YYYY-MM-DD`` date.  These posts are excluded from
+    future candidate generation (no point re-fetching and re-ranking posts we
+    will never display).  ``expires_at`` anchors the native Firestore TTL policy.
+    """
+
+    post_uris: list[str] = Field(
+        default_factory=list, description="Discarded post AT URIs for this day"
+    )
     expires_at: datetime = Field(..., description="UTC expiration timestamp; drives native TTL")
 
 
@@ -295,6 +315,16 @@ class FeedDebugDocument(BaseModel):
         default_factory=list,
         description="Per-item diversification breakdown in final order (empty when diversify was off)",
     )
+    n_retrieved: int = Field(
+        default=0,
+        description="Candidates retrieved by generation (post-dedup) — the denominator "
+        "for the slate-cutoff share",
+    )
+    cutoff_uris: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="AT URIs removed by each slate cutoff, keyed by reason "
+        "(rank_score / mmr_score / share); empty when no cutoff fired",
+    )
 
     created_at: datetime = Field(
         default_factory=_utcnow, description="When this debug record was written"
@@ -324,6 +354,19 @@ class GeneratorMeta(BaseModel):
     name: str
     weight: float = 1.0
     score: float | None = None
+
+
+class GeneratorDiagnostic(BaseModel):
+    """Snapshot-level outcome for one configured candidate generator."""
+
+    name: str
+    weight: float
+    requested_count: int
+    returned_count: int
+    contributed_count: int = 0
+    status: str = "success"
+    reason: str | None = None
+    mode: str = "primary"
 
 
 class ModelScoreMeta(BaseModel):
@@ -366,4 +409,6 @@ class FeedSnapshotDocument(BaseModel):
     ranker_model: str | None = None
     diversify: bool = False
     generator_legend: list[GeneratorMeta] = Field(default_factory=list)
+    generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
+    applied_social_radius: int | None = None
     items_meta: list[PipelineItemMeta] = Field(default_factory=list)

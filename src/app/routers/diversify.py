@@ -44,4 +44,4 @@ async def diversify(payload: DiversifyRequest) -> DiversifyResponse:
     `minilm_l12_embedding` values for similarity to be computed; posts
     without embeddings are appended to the end of the reranked list.
     """
-    return DiversifyResponse(candidates=mmr_rerank(payload.candidates))
+    return DiversifyResponse(candidates=[c for c, _ in mmr_rerank(payload.candidates)])

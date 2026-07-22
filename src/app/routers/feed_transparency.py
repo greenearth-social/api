@@ -13,11 +13,10 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, HTTPException, Request, status
 from google.cloud.firestore import AsyncClient
 
-from ..documents import FeedSnapshotDocument
+from ..documents import FeedSnapshotDocument, PipelineItemMeta
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import (
     get_feed_snapshot,
-    get_newer_feed_snapshot_uris,
     get_recent_feed_snapshots,
     get_user,
     set_user_preferences,
@@ -32,6 +31,7 @@ from ..models_feed_transparency import (
     FeedListResponse,
     FeedSummary,
     GeneratorView,
+    GeneratorDiagnosticView,
     MediaView,
     ModelScoreView,
     Preferences,
@@ -44,6 +44,15 @@ router = APIRouter(tags=["feed-transparency"], prefix="/api/feeds")
 CACHE_WINDOW_MINUTES = 15
 TARGET_FEED_NAME = "your-feed"
 DEFAULT_LIST_LIMIT = 20
+PUBLIC_MODERATION_LABELS = frozenset(
+    {
+        "porn",
+        "sexual",
+        "nudity",
+        "graphic-media",
+        "graphic_media",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,15 +68,52 @@ def _at_uri_to_bsky_url(at_uri: str, handle: str | None = None) -> str | None:
     return f"https://bsky.app/profile/{identifier}/post/{post_id}"
 
 
-def _build_items(snapshot: FeedSnapshotDocument, hydrated: dict[str, dict]) -> list[FeedItemView]:
+def _is_publicly_filtered(hydrated_post: dict) -> bool:
+    moderation = hydrated_post.get("moderation") or {}
+    labels = [
+        *moderation.get("post_labels", []),
+        *moderation.get("author_labels", []),
+    ]
+    return any(str(label).strip().lower() in PUBLIC_MODERATION_LABELS for label in labels)
+
+
+def _has_usable_hydration(hydrated_post: dict) -> bool:
+    return bool(hydrated_post) and any(
+        (
+            hydrated_post.get("content") is not None,
+            hydrated_post.get("created_at") is not None,
+            (hydrated_post.get("author") or {}).get("handle") is not None,
+        )
+    )
+
+
+def _build_items(
+    snapshot: FeedSnapshotDocument,
+    hydrated: dict[str, dict],
+) -> tuple[list[FeedItemView], int, int]:
     """Build ``FeedItemView`` list from a ``FeedSnapshotDocument`` + hydrated post data.
 
     ``PipelineItemMeta`` is already per-URI with all pipeline fields joined, so no
     cross-stage merging is needed here.
     """
     items: list[FeedItemView] = []
-    for meta in snapshot.items_meta:
+    publicly_filtered_count = 0
+    unavailable_count = 0
+    meta_by_uri = {meta.at_uri: meta for meta in snapshot.items_meta}
+    for at_uri in snapshot.items:
+        meta = meta_by_uri.get(at_uri, PipelineItemMeta(at_uri=at_uri))
         hyd = hydrated.get(meta.at_uri, {})
+        # The AppView applies user-specific moderation after this generator
+        # returns skeleton URIs, so that exact state is not available here.
+        # Missing hydration does reliably indicate a deleted or unavailable
+        # post, which should remain in the stored audit but not render as a
+        # recurring blank observability row.
+        if not _has_usable_hydration(hyd):
+            unavailable_count += 1
+            continue
+        if _is_publicly_filtered(hyd):
+            publicly_filtered_count += 1
+            continue
         author = hyd.get("author", {})
         media = hyd.get("media", {})
         engagement = hyd.get("engagement", {})
@@ -103,7 +149,7 @@ def _build_items(snapshot: FeedSnapshotDocument, hydrated: dict[str, dict]) -> l
                 post_url=_at_uri_to_bsky_url(meta.at_uri, author.get("handle")),
             )
         )
-    return items
+    return items, publicly_filtered_count, unavailable_count
 
 
 # ---------------------------------------------------------------------------
@@ -124,17 +170,18 @@ async def list_feeds(
         db, user_doc_id, feed_name=TARGET_FEED_NAME, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT
     )
 
-    seen_uris: set[str] = set()
     summaries: list[FeedSummary] = []
     for doc in docs:
-        if set(doc.items).issubset(seen_uris):
-            continue
-        seen_uris.update(doc.items)
         summaries.append(
             FeedSummary(
                 request_id=doc.request_id,
                 generated_at=doc.generated_at,
                 feed_name=doc.feed_name,
+                applied_social_radius=doc.applied_social_radius,
+                generator_diagnostics=[
+                    GeneratorDiagnosticView(**diagnostic.model_dump())
+                    for diagnostic in doc.generator_diagnostics
+                ],
             )
         )
 
@@ -199,25 +246,15 @@ async def get_feed_detail(
             detail="Feed snapshot not found",
         )
 
-    newer_uris = await get_newer_feed_snapshot_uris(
-        db,
-        user_doc_id,
-        feed_name=snapshot.feed_name,
-        newer_than=snapshot.generated_at,
-    )
-    if newer_uris:
-        snapshot = snapshot.model_copy(
-            update={
-                "items": [u for u in snapshot.items if u not in newer_uris],
-                "items_meta": [m for m in snapshot.items_meta if m.at_uri not in newer_uris],
-            }
-        )
-
     hydrated = await hydrate_posts(db, snapshot.items)
-    items = _build_items(snapshot, hydrated)
+    items, publicly_filtered_count, unavailable_count = _build_items(snapshot, hydrated)
 
     return FeedDetailResponse(
         request_id=request_id,
         generated_at=snapshot.generated_at,
         items=items,
+        stored_item_count=len(snapshot.items),
+        displayed_item_count=len(items),
+        publicly_filtered_count=publicly_filtered_count,
+        unavailable_count=unavailable_count,
     )

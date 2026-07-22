@@ -280,6 +280,45 @@ class TestFollowedUsersCandidateGenerator:
         assert result.candidates[0].generator_name == "followed_users"
 
     @pytest.mark.asyncio
+    async def test_generate_stages_uses_recent_then_seven_day_window(self, generator, monkeypatch):
+        stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+
+        class SequencedEs(FakeEs):
+            def __init__(self):
+                super().__init__()
+                self.responses = [
+                    {"hits": {"hits": [{
+                        "_score": 1.0,
+                        "_source": {"at_uri": "at://recent/1", "content": "recent"},
+                    }]}},
+                    {"hits": {"hits": [{
+                        "_score": 0.8,
+                        "_source": {"at_uri": "at://older/1", "content": "older"},
+                    }]}},
+                ]
+
+            async def search(self, **kwargs):
+                self.calls.append(kwargs)
+                return self.responses.pop(0)
+
+        es = SequencedEs()
+        stages = await generator.generate_stages(es, "did:plc:user1", num_candidates=2)
+
+        assert [stage.mode for stage in stages] == [
+            "direct_friends_recent", "direct_friends_7d"
+        ]
+        assert [candidate.at_uri for stage in stages for candidate in stage.candidates] == [
+            "at://recent/1", "at://older/1"
+        ]
+        recent_filters = es.calls[0]["query"]["bool"]["filter"]
+        older_filters = es.calls[1]["query"]["bool"]["filter"]
+        assert {"range": {"created_at": {"gte": "now-24h"}}} in recent_filters
+        assert {
+            "range": {"created_at": {"gte": "now-7d", "lt": "now-24h"}}
+        } in older_filters
+        assert es.calls[1]["size"] == 2  # one needed + recent URI exclusion overfetch
+
+    @pytest.mark.asyncio
     async def test_generate_empty_when_no_followed_users(self, generator, monkeypatch):
         stub_followed_dids(monkeypatch, [])
         es = FakeEs()

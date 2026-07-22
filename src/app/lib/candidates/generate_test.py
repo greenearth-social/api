@@ -154,7 +154,7 @@ class TestGeneratorTimeout:
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
-        result = await run_generate(_make_request("post_similarity"), es=None, swallow_errors=True)
+        result = await run_generate(_make_request("post_similarity"), es=None)
 
         assert result.candidates == []
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -173,7 +173,7 @@ class TestGeneratorTimeout:
         _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
 
         with caplog.at_level(logging.WARNING):
-            await run_generate(_make_request("post_similarity"), es=None, swallow_errors=True)
+            await run_generate(_make_request("post_similarity"), es=None)
 
         timeout_warnings = [
             r for r in caplog.records
@@ -188,12 +188,13 @@ class TestGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_no_swallow_raises_generator_error_promptly(self, monkeypatch):
+        monkeypatch.setenv("GE_FAIL_FAST", "true")
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
 
         with pytest.raises(GeneratorError) as exc_info:
             await asyncio.wait_for(
-                run_generate(_make_request("post_similarity"), es=None, swallow_errors=False),
+                run_generate(_make_request("post_similarity"), es=None),
                 timeout=1.0,
             )
 
@@ -201,13 +202,14 @@ class TestGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_no_swallow_records_metric_before_raising(self, monkeypatch):
+        monkeypatch.setenv("GE_FAIL_FAST", "true")
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
         with pytest.raises(GeneratorError):
-            await run_generate(_make_request("post_similarity"), es=None, swallow_errors=False)
+            await run_generate(_make_request("post_similarity"), es=None)
 
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
         assert len(failure_calls) == 1
@@ -222,7 +224,7 @@ class TestGeneratorTimeout:
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
-        result = await run_generate(_make_request("network_likes"), es=None, swallow_errors=True)
+        result = await run_generate(_make_request("network_likes"), es=None)
 
         assert result.candidates == []
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -244,7 +246,6 @@ class TestGeneratorTimeout:
             result = await run_generate(
                 _make_request("popular", num_candidates=1, infill="popular"),
                 es=None,
-                swallow_errors=True,
             )
 
         assert [c.at_uri for c in result.candidates] == ["at://infill/1"]
@@ -262,7 +263,7 @@ class TestGeneratorTimeout:
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
-        await run_generate(_make_request("popular"), es=None, swallow_errors=True)
+        await run_generate(_make_request("popular"), es=None)
 
         success_calls = [c for c in mc.calls if c[0] == "candidates.generate.success_count"]
         assert len(success_calls) == 1
@@ -289,7 +290,6 @@ class TestInfillGeneratorTimeout:
         result = await run_generate(
             _make_request("random", num_candidates=5, infill="popular"),
             es=None,
-            swallow_errors=True,
         )
 
         assert result.candidates == []
@@ -304,6 +304,7 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_timeout_no_swallow_raises_generator_error_with_is_infill(self, monkeypatch):
+        monkeypatch.setenv("GE_FAIL_FAST", "true")
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {
             "random": _EmptyGenerator("random"),
@@ -314,7 +315,6 @@ class TestInfillGeneratorTimeout:
             await run_generate(
                 _make_request("random", num_candidates=5, infill="popular"),
                 es=None,
-                swallow_errors=False,
             )
 
         assert exc_info.value.name == "popular"
@@ -322,6 +322,7 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_timeout_no_swallow_records_metric(self, monkeypatch):
+        monkeypatch.setenv("GE_FAIL_FAST", "true")
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {
             "random": _EmptyGenerator("random"),
@@ -334,7 +335,6 @@ class TestInfillGeneratorTimeout:
             await run_generate(
                 _make_request("random", num_candidates=5, infill="popular"),
                 es=None,
-                swallow_errors=False,
             )
 
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -355,7 +355,6 @@ class TestInfillGeneratorTimeout:
         result = await run_generate(
             _make_request("random", num_candidates=5, infill="popular"),
             es=None,
-            swallow_errors=True,
         )
 
         assert result.candidates == []
@@ -380,7 +379,6 @@ class TestInfillGeneratorTimeout:
         await run_generate(
             _make_request("random", num_candidates=5, infill="popular"),
             es=None,
-            swallow_errors=True,
         )
 
         success_calls = [c for c in mc.calls if c[0] == "candidates.generate.success_count"]
@@ -419,7 +417,6 @@ class TestInfillGeneratorTimeout:
                 exclude_uris=["at://seen/1"],
             ),
             es=None,
-            swallow_errors=True,
         )
 
         assert infill.calls[0]["exclude_uris"] == [

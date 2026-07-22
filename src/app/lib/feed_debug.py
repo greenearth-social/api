@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 from contextvars import ContextVar
 from datetime import datetime
+import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -68,6 +69,11 @@ class FeedDebugRecorder:
         # diversity_score) in final selection order; populated only when
         # diversification runs.
         self.diversification: list[tuple[str, float, float, float, float, float]] = []
+        # Candidates retrieved by generation (post-dedup), the denominator for
+        # the slate-cutoff share.
+        self.n_retrieved: int = 0
+        # reason -> URIs removed by that slate cutoff (rank_score / mmr_score / share).
+        self.cutoff_uris: dict[str, list[str]] = {}
 
     # -- recording -------------------------------------------------------
 
@@ -109,6 +115,13 @@ class FeedDebugRecorder:
         """Record per-item diversification breakdown: (at_uri, relevance, score,
         author_penalty, content_penalty, diversity_score) in final selection order."""
         self.diversification = list(entries)
+
+    def record_n_retrieved(self, n: int) -> None:
+        self.n_retrieved = n
+
+    def record_cutoff(self, reason: str, uris: list[str]) -> None:
+        """Record the URIs a slate cutoff removed, keyed by cutoff reason."""
+        self.cutoff_uris[reason] = list(uris)
 
     # -- assembly --------------------------------------------------------
 
@@ -159,6 +172,9 @@ class FeedDebugRecorder:
             CandidateResult(
                 generator_name=r.generator_name,
                 candidates=[sanitize(c) for c in r.candidates],
+                status=r.status,
+                reason=r.reason,
+                mode=r.mode,
             )
             for r in self.generator_outputs
         ]
@@ -208,6 +224,8 @@ class FeedDebugRecorder:
             order_after_rank=self.order_after_rank,
             final_order=self.final_order,
             diversification=diversification,
+            n_retrieved=self.n_retrieved,
+            cutoff_uris=self.cutoff_uris,
             generated_at=generated_at,
             expires_at=expires_at,
         )
@@ -218,6 +236,7 @@ class FeedDebugRecorder:
         request_id: str,
         generated_at: datetime,
         expires_at: datetime,
+        applied_social_radius: int | None = None,
     ) -> "FeedSnapshotDocument":
         """Assemble a lightweight :class:`FeedSnapshotDocument` with only the
         per-URI pipeline metadata needed by the transparency API.
@@ -229,6 +248,7 @@ class FeedDebugRecorder:
         from ..documents import (
             DiversificationMeta,
             FeedSnapshotDocument,
+            GeneratorDiagnostic,
             GeneratorMeta,
             ModelScoreMeta,
             PipelineItemMeta,
@@ -240,14 +260,94 @@ class FeedDebugRecorder:
             for g in (self.generate_request.generators if self.generate_request else [])
         ]
 
-        # Per-URI generator contributions.
+        # Per-URI generator contributions. Scores from different retrieval
+        # systems are not comparable, so expose percentile-like strength only
+        # within each generator result.
         gens_by_uri: dict[str, list[GeneratorMeta]] = {}
         for result in self.generator_outputs:
+            finite_scores = [
+                c.score for c in result.candidates
+                if c.score is not None and math.isfinite(c.score)
+            ]
+            lo = min(finite_scores) if finite_scores else None
+            hi = max(finite_scores) if finite_scores else None
             for c in result.candidates:
                 if c.at_uri:
+                    normalized = None
+                    if c.score is not None and math.isfinite(c.score):
+                        assert lo is not None and hi is not None
+                        normalized = 1.0 if lo == hi else (c.score - lo) / (hi - lo)
                     gens_by_uri.setdefault(c.at_uri, []).append(
-                        GeneratorMeta(name=result.generator_name, score=c.score)
+                        GeneratorMeta(name=result.generator_name, score=normalized)
                     )
+
+        requested_by_name: dict[str, int] = {}
+        if self.generate_request:
+            from .candidates.generate import allocate_counts
+            counts = allocate_counts(
+                self.generate_request.generators,
+                self.generate_request.num_candidates,
+            )
+            requested_by_name = {
+                spec.name: count
+                for spec, count in zip(self.generate_request.generators, counts)
+            }
+
+        diagnostics: list[GeneratorDiagnostic] = []
+        specs = self.generate_request.generators if self.generate_request else []
+        for spec in specs:
+            staged = [
+                output for output in self.generator_outputs
+                if output.generator_name == spec.name and output.mode != "primary"
+            ]
+            if staged:
+                remaining = requested_by_name.get(spec.name, 0)
+                for output in staged:
+                    requested = remaining
+                    returned_uris = {
+                        candidate.at_uri for candidate in output.candidates if candidate.at_uri
+                    }
+                    contributed = sum(uri in returned_uris for uri in self.final_order)
+                    diagnostics.append(
+                        GeneratorDiagnostic(
+                            name=spec.name,
+                            weight=spec.weight,
+                            requested_count=requested,
+                            returned_count=len(returned_uris),
+                            contributed_count=contributed,
+                            status=output.status,
+                            reason=output.reason,
+                            mode=output.mode,
+                        )
+                    )
+                    remaining = max(0, remaining - len(returned_uris))
+                continue
+            matching = [
+                output for output in self.generator_outputs
+                if output.generator_name == spec.name and output.mode == "primary"
+            ]
+            returned_uris = {
+                candidate.at_uri
+                for output in matching
+                for candidate in output.candidates
+                if candidate.at_uri
+            }
+            output = matching[-1] if matching else None
+            contributed = sum(
+                1 for uri in self.final_order
+                if any(g.name == spec.name for g in gens_by_uri.get(uri, []))
+            )
+            diagnostics.append(
+                GeneratorDiagnostic(
+                    name=spec.name,
+                    weight=spec.weight,
+                    requested_count=requested_by_name.get(spec.name, 0),
+                    returned_count=len(returned_uris),
+                    contributed_count=contributed,
+                    status=output.status if output else "error",
+                    reason=output.reason if output else "missing_generator_result",
+                )
+            )
 
         # Per-URI rank.
         rank_by_uri: dict[str, tuple[int | None, float | None]] = {}
@@ -303,6 +403,8 @@ class FeedDebugRecorder:
             ranker_model=self.ranker_model,
             diversify=self.diversify,
             generator_legend=generator_legend,
+            generator_diagnostics=diagnostics,
+            applied_social_radius=applied_social_radius,
             items_meta=items_meta,
         )
 

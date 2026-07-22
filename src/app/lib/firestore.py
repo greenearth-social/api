@@ -33,12 +33,18 @@ USERS_COLLECTION = "users"
 FEED_ACTIVITY_COLLECTION = "feed_activity"
 INTERACTIONS_COLLECTION = "interactions"
 SEEN_POSTS_COLLECTION = "seen_posts"
+DISCARDED_POSTS_COLLECTION = "discarded_posts"
 FEED_DEBUG_COLLECTION = "feed_debug"
 FEED_SNAPSHOTS_COLLECTION = "feed_snapshots"
 MAX_FEED_SNAPSHOT_ITEMS = 500
 
 # How long a seen-posts bucket lives before native Firestore TTL deletes it.
 SEEN_POSTS_RETENTION_DAYS = 5
+
+# How long a discarded-posts bucket lives before native Firestore TTL deletes
+# it. Shorter than seen posts: the candidate pool refreshes quickly and ranker
+# scores are only stable short-term.
+DISCARDED_POSTS_RETENTION_DAYS = 3
 
 # How long a feed-debug record lives before native Firestore TTL deletes it.
 FEED_DEBUG_RETENTION_DAYS = 7
@@ -290,30 +296,36 @@ async def record_interaction(db: AsyncClient, interaction: InteractionDocument) 
 
 
 # ---------------------------------------------------------------------------
-# Seen posts
+# Seen / discarded posts (per-user daily URI buckets)
 # ---------------------------------------------------------------------------
 
 
-async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
-    """Append seen post URIs to the user's bucket for the current UTC day.
+async def _record_daily_bucket_uris(
+    db: AsyncClient,
+    user_did: str,
+    collection: str,
+    post_uris: list[str],
+    retention_days: int,
+) -> None:
+    """Append post URIs to the user's ``collection`` bucket for the current UTC day.
 
-    Buckets are keyed by ``YYYY-MM-DD`` under the user's ``seen_posts``
-    subcollection.  ``ArrayUnion`` appends without duplicating within the bucket,
-    and ``expires_at`` (re-stamped on each write) drives the native Firestore TTL
-    so the bucket self-deletes ~``SEEN_POSTS_RETENTION_DAYS`` days after its last
-    update.  No-op when there is nothing to record.
+    Buckets are keyed by ``YYYY-MM-DD`` under the user's subcollection.
+    ``ArrayUnion`` appends without duplicating within the bucket, and
+    ``expires_at`` (re-stamped on each write) drives the native Firestore TTL
+    so the bucket self-deletes ~``retention_days`` days after its last update.
+    No-op when there is nothing to record.
     """
     if not post_uris:
         return
 
     now = datetime.now(timezone.utc)
     bucket_id = now.strftime("%Y-%m-%d")
-    expires_at = now + timedelta(days=SEEN_POSTS_RETENTION_DAYS)
+    expires_at = now + timedelta(days=retention_days)
 
     ref = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
-        .collection(SEEN_POSTS_COLLECTION)
+        .collection(collection)
         .document(bucket_id)
     )
     await ref.set(
@@ -322,10 +334,10 @@ async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]
     )
 
 
-async def get_recent_seen_uris(
-    db: AsyncClient, user_did: str, *, max_uris: int = 1000
+async def _get_recent_bucket_uris(
+    db: AsyncClient, user_did: str, collection: str, max_uris: int
 ) -> list[str]:
-    """Return the user's most-recently-seen post URIs, de-duped and capped.
+    """Return the user's most-recent ``collection`` post URIs, de-duped and capped.
 
     Reads the non-expired daily buckets (filtering on ``expires_at`` so buckets
     not yet reaped by TTL are still excluded once stale) and walks them
@@ -337,7 +349,7 @@ async def get_recent_seen_uris(
     query = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
-        .collection(SEEN_POSTS_COLLECTION)
+        .collection(collection)
         .where("expires_at", ">", now)
     )
 
@@ -357,6 +369,38 @@ async def get_recent_seen_uris(
             if len(result) >= max_uris:
                 return result
     return result
+
+
+async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+    """Append seen post URIs to the user's bucket for the current UTC day."""
+    await _record_daily_bucket_uris(
+        db, user_did, SEEN_POSTS_COLLECTION, post_uris, SEEN_POSTS_RETENTION_DAYS
+    )
+
+
+async def get_recent_seen_uris(
+    db: AsyncClient, user_did: str, *, max_uris: int = 1000
+) -> list[str]:
+    """Return the user's most-recently-seen post URIs, de-duped and capped."""
+    return await _get_recent_bucket_uris(db, user_did, SEEN_POSTS_COLLECTION, max_uris)
+
+
+async def record_discarded_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+    """Append low-ranker-score post URIs to the user's bucket for the current UTC day.
+
+    Discarded posts scored below a feed's ``min_rank_score`` and will never be
+    displayed, so future candidate generation excludes them.
+    """
+    await _record_daily_bucket_uris(
+        db, user_did, DISCARDED_POSTS_COLLECTION, post_uris, DISCARDED_POSTS_RETENTION_DAYS
+    )
+
+
+async def get_recent_discarded_uris(
+    db: AsyncClient, user_did: str, *, max_uris: int = 1000
+) -> list[str]:
+    """Return the user's most-recently-discarded post URIs, de-duped and capped."""
+    return await _get_recent_bucket_uris(db, user_did, DISCARDED_POSTS_COLLECTION, max_uris)
 
 
 # ---------------------------------------------------------------------------
@@ -437,12 +481,53 @@ def _merge_feed_snapshots(
     meta_by_uri = {meta.at_uri: meta for meta in earlier.items_meta}
     meta_by_uri.update({meta.at_uri: meta for meta in later.items_meta})
     items_meta = [meta_by_uri[uri] for uri in ordered_items if uri in meta_by_uri]
+    existing_diag = {
+        (diag.name, diag.mode): diag for diag in existing.generator_diagnostics
+    }
+    incoming_diag = {
+        (diag.name, diag.mode): diag for diag in incoming.generator_diagnostics
+    }
+    incoming_new = set(incoming.items) - set(existing.items)
+    diagnostics = []
+    for key in dict.fromkeys([*existing_diag, *incoming_diag]):
+        name, _mode = key
+        old = existing_diag.get(key)
+        new = incoming_diag.get(key)
+        if old is None and new is not None:
+            diagnostics.append(new)
+            continue
+        if new is None and old is not None:
+            diagnostics.append(old)
+            continue
+        assert old is not None and new is not None
+        is_new_generation = incoming.generated_at > existing.generated_at
+        added = sum(
+            1
+            for meta in incoming.items_meta
+            if meta.at_uri in incoming_new
+            and any(generator.name == name for generator in meta.generators)
+        )
+        diagnostics.append(
+            old.model_copy(
+                update={
+                    "returned_count": (
+                        old.returned_count + new.returned_count
+                        if is_new_generation
+                        else max(old.returned_count, new.returned_count)
+                    ),
+                    "contributed_count": old.contributed_count + added,
+                    "status": new.status if old.status != "success" else old.status,
+                    "reason": new.reason if old.reason is None else old.reason,
+                }
+            )
+        )
 
     return (
         earlier.model_copy(
             update={
                 "items": ordered_items,
                 "items_meta": items_meta,
+                "generator_diagnostics": diagnostics,
                 "expires_at": max(existing.expires_at, incoming.expires_at),
             }
         ),
