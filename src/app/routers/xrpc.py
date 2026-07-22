@@ -588,6 +588,54 @@ async def _run_pipeline_capturing(
     return snapshot, pipeline_result.low_score_uris
 
 
+def _feed_request_timeout_sec() -> float:
+    """Internal deadline for the feed pipeline, read fresh per call so it can
+    be overridden per-request in tests. Set below the Cloud Run request
+    timeout so a downstream hang (ES, ranker) surfaces as a logged 504 instead
+    of the platform silently killing the connection with nothing recorded.
+    """
+    return float(os.environ.get("GE_FEED_REQUEST_TIMEOUT_SEC", "45"))
+
+
+async def _run_pipeline_capturing_with_timeout(
+    request: Request,
+    db,
+    feed_cfg: FeedConfig,
+    gen_request: CandidateGenerateRequest,
+    *,
+    feed_name: str,
+    user_did: str,
+    request_id: str,
+    regenerated: bool,
+    debug_enabled: bool,
+    applied_social_radius: int | None = None,
+) -> tuple[FeedSnapshotDocument, list[str]]:
+    """Enforce ``GE_FEED_REQUEST_TIMEOUT_SEC`` around ``_run_pipeline_capturing``."""
+    try:
+        return await asyncio.wait_for(
+            _run_pipeline_capturing(
+                request,
+                db,
+                feed_cfg,
+                gen_request,
+                feed_name=feed_name,
+                user_did=user_did,
+                request_id=request_id,
+                regenerated=regenerated,
+                debug_enabled=debug_enabled,
+                applied_social_radius=applied_social_radius,
+            ),
+            timeout=_feed_request_timeout_sec(),
+        )
+    except TimeoutError:
+        logger.error(
+            "Feed pipeline exceeded internal timeout (%.0fs) for feed '%s'",
+            _feed_request_timeout_sec(),
+            feed_name,
+        )
+        raise HTTPException(status_code=504, detail="Feed generation timed out") from None
+
+
 def _snapshot_page(
     snapshot: FeedSnapshotDocument,
     uris: list[str],
@@ -1179,7 +1227,7 @@ async def get_feed_skeleton(
                     }
                 )
 
-                generated_snapshot, low_score_uris = await _run_pipeline_capturing(
+                generated_snapshot, low_score_uris = await _run_pipeline_capturing_with_timeout(
                     request,
                     db,
                     feed_cfg,
@@ -1253,7 +1301,7 @@ async def get_feed_skeleton(
             # Generated up front so it can key the debug record too.
             request_id = uuid.uuid4().hex
 
-            generated_snapshot, low_score_uris = await _run_pipeline_capturing(
+            generated_snapshot, low_score_uris = await _run_pipeline_capturing_with_timeout(
                 request,
                 db,
                 feed_cfg,
