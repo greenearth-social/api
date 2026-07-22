@@ -97,12 +97,11 @@ FEEDS: dict[str, FeedConfig] = {
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mrash36z5b2c",
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
-        # min_rank_score=-0.15 is calibrated from real combined rank_score
-        # distributions pulled from stage feed_debug records for this feed (242
-        # ranked candidates across 4 real loads): the theoretical [-1, 1] midpoint
-        # (0.0) sits around the empirical p40-50, so it would cut roughly half of
-        # all candidates by itself; -0.15 sits at ~p12-13, trimming only the clear
-        # tail and leaving max_render_share as the dominant lever on render volume.
+        # min_rank_score=0.425 maps the old -0.15 floor into the current [0, 1]
+        # combined rank-score range. That value was calibrated from stage
+        # feed_debug records for this feed (242 ranked candidates across 4 real
+        # loads), where it sat at ~p12-13 and trimmed only the clear tail,
+        # leaving max_render_share as the dominant lever on render volume.
         # See "cutoff-preview" below for the live preview of this feed's pipeline
         # with the same thresholds.
         max_render_share=0.5,
