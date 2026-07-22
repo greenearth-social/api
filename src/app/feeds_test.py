@@ -90,5 +90,5 @@ class TestFeedsRegistry:
             == FEEDS["your-feed"].gen_request_template.generators
         )
         assert cfg.max_render_share == pytest.approx(0.5)
-        assert cfg.min_rank_score == pytest.approx(-0.15)
+        assert cfg.min_rank_score == pytest.approx(0.425)
         assert cfg.min_mmr_score == pytest.approx(-0.05)

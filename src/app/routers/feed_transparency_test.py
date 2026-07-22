@@ -783,7 +783,7 @@ def test_get_feed_detail_diverse_pipeline_metadata(
                 ],
                 model_scores=[
                     ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92),
-                    ModelScoreMeta(name="perspective", weight=1.0, score=-0.15),
+                    ModelScoreMeta(name="perspective", weight=1.0, score=0.425),
                 ],
             )
         ],
@@ -826,4 +826,4 @@ def test_get_feed_detail_diverse_pipeline_metadata(
     assert item["model_scores"][0]["weight"] == 1.0
     assert item["model_scores"][0]["score"] == 0.92
     assert item["model_scores"][1]["weight"] == 1.0
-    assert item["model_scores"][1]["score"] == -0.15
+    assert item["model_scores"][1]["score"] == 0.425
