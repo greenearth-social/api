@@ -9,7 +9,10 @@ import logging
 import os
 import time
 
-from .elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings_and_metadata
+from .elasticsearch import (
+    fetch_recent_liked_post_uris_and_times,
+    fetch_post_embeddings_and_metadata,
+)
 from .feed_debug import current_recorder
 from .telemetry import timed
 from .request_context import get_request_id
@@ -208,7 +211,7 @@ async def compute_user_embedding(
     async with timed(logger, "two_tower_user_side", user_did=user_did):
         user_history_vectors: list[list[float]] = []
         history_author_dids: list[str] = []
-        user_history_liked_uris = await fetch_recent_liked_post_uris(es, user_did)
+        user_history_liked_uris, _ = await fetch_recent_liked_post_uris_and_times(es, user_did)
 
         rec = current_recorder()
 
