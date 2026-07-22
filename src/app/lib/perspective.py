@@ -76,7 +76,7 @@ _PRC_WEIGHTS: dict[str, float] = {
 
 _REQUESTED_ATTRIBUTES = {name: {} for name in _PRC_WEIGHTS}
 
-_FINAL_SCORE_BOUNDS = (0.0, 1.0)
+PERSPECTIVE_SCORE_BOUNDS = (0.0, 1.0)
 
 
 def _raw_weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]:
@@ -94,19 +94,6 @@ def _raw_weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]
     return (lo, hi)
 
 
-def weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]:
-    """Theoretical (min, max) bounds for a weighted sum of Perspective attributes,
-    rescaled to the final score bounds [0, 1].
-
-    See `_raw_weighted_score_bounds` for the underlying calculation.
-    """
-    raw_lo, raw_hi = _raw_weighted_score_bounds(weights)
-    return (
-        _change_bounds(raw_lo, (raw_lo, raw_hi), _FINAL_SCORE_BOUNDS),
-        _change_bounds(raw_hi, (raw_lo, raw_hi), _FINAL_SCORE_BOUNDS),
-    )
-
-
 def _change_bounds(raw: float, original_bounds: tuple[float, float], new_bounds: tuple[float, float]) -> float:
     """Linearly map *raw* from *original_bounds* into *new_bounds*."""
     orig_lo, orig_hi = original_bounds
@@ -121,7 +108,7 @@ def _change_bounds(raw: float, original_bounds: tuple[float, float], new_bounds:
 def _prc_score(attr: dict[str, float], weights: dict[str, float] = _PRC_WEIGHTS) -> float:
     """Score a post as a weighted sum rescaled into final [0, 1] bounds."""
     raw_score = sum(weight * attr[name] for name, weight in weights.items())
-    return _change_bounds(raw_score, _raw_weighted_score_bounds(weights), _FINAL_SCORE_BOUNDS)
+    return _change_bounds(raw_score, _raw_weighted_score_bounds(weights), PERSPECTIVE_SCORE_BOUNDS)
 
 
 class PerspectiveClient:

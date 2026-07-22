@@ -9,7 +9,7 @@ models (e.g. the two-tower model) by `run_predict`.
 import logging
 
 from ...models import CandidatePost, RankedCandidate, RankPredictResult
-from ..perspective import _PRC_WEIGHTS, weighted_score_bounds, score_candidates
+from ..perspective import PERSPECTIVE_SCORE_BOUNDS, score_candidates
 from .base import Ranker, RankerResult
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class PerspectiveRanker(Ranker):
 
     @property
     def score_bounds(self) -> tuple[float, float]:
-        return weighted_score_bounds(_PRC_WEIGHTS)
+        return PERSPECTIVE_SCORE_BOUNDS
 
     async def predict(
         self,
