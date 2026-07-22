@@ -94,7 +94,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
         avatar="assets/icons/green-earth.png",
-        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5utph3ka26",
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mrash36z5b2c",
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
         # min_rank_score=-0.15 is calibrated from real combined rank_score
