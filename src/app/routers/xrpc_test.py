@@ -1415,7 +1415,7 @@ class TestRankedFeed:
         ])
 
         with self._patch_generators(candidates), \
-             patch("app.routers.xrpc.fetch_post_embeddings_and_metadata", new_callable=AsyncMock, return_value=[("at://p/0", [1.0, 0.0, 0.0], "did:plc:author", 1)]) as mock_fetch, \
+             patch("app.routers.xrpc.fetch_post_embeddings", new_callable=AsyncMock, return_value=[("at://p/0", [1.0, 0.0, 0.0])]) as mock_fetch, \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result) as mock_run:
             data = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
