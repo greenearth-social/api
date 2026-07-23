@@ -20,13 +20,13 @@ to skip that lookup and show the feed exactly as a real client would see it.
 Usually invoked through the dev environment, which supplies the persona,
 endpoints, and secrets:
 
-    devctl feed popularity
+    devctl feed
     devctl feed your-feed --user did:plc:... --limit 50
 
 Run it directly against a devenv api with the same environment the api
 container has:
 
-    pipenv run python scripts/feed_view.py popularity --user did:plc:...
+    pipenv run python scripts/feed_view.py your-feed --user did:plc:...
 """
 
 from __future__ import annotations
@@ -51,6 +51,9 @@ from feed_format import fmt_score, media_badges, relative_time
 
 console = Console()
 
+# The flagship feed: the full retrieve -> rank -> diversify path, which is
+# what someone running this usually wants to look at.
+DEFAULT_FEED = "your-feed"
 DEFAULT_FEED_PUBLISHER = "did:web:test"
 POSTS_ALIAS = "posts_recent"
 
@@ -379,7 +382,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="View a locally-generated Green Earth feed in the terminal"
     )
-    parser.add_argument("feed", nargs="?", default="popularity", help="Feed name or full at:// URI")
+    parser.add_argument(
+        "feed",
+        nargs="?",
+        default=DEFAULT_FEED,
+        help=f"Feed name or full at:// URI (default {DEFAULT_FEED})",
+    )
     parser.add_argument("--user", help="Persona DID (defaults to the seeded GE_PROBE_USER_DID)")
     parser.add_argument("--limit", type=int, default=20, help="Posts per page (default 20)")
     parser.add_argument("--cursor", help="Resume from a cursor returned by an earlier run")
