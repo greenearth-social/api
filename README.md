@@ -77,13 +77,14 @@ so you don't need a live GCP project.
 npm install -g firebase-tools
 ```
 
-From the `api/` directory, this project now uses `firebase.json` to define
-Firestore emulator settings (including the Emulator UI).
+The frontend repository is the sole owner of Firebase configuration, including
+the Firestore emulator and Emulator UI settings.
 
 ### Start the emulator
 
 ```bash
-firebase emulators:start --only firestore
+cd ../frontend
+npm run emulators:firestore
 ```
 
 The Emulator UI is available at:
@@ -98,10 +99,13 @@ Set the following in your `.env` (see `.env.example`):
 
 ```bash
 GE_FIRESTORE_EMULATOR_HOST=127.0.0.1:8080
+GE_FIRESTORE_PROJECT=greenearth-471522
 ```
 
 The API reads this on startup and routes all Firestore traffic to the
 emulator. No GCP credentials are needed when the emulator is active.
+The real project identifier selects the same local namespace used by the
+frontend; `GE_FIRESTORE_EMULATOR_HOST` ensures requests do not reach production.
 
 > **Note**: The emulator does not persist data across restarts by default.
 > Add `--export-on-exit` / `--import` flags if you want persistence between
@@ -210,11 +214,16 @@ This script will:
 - Configure the Elasticsearch connection using `GE_ELASTICSEARCH_URL` as non-secret config and `GE_ELASTICSEARCH_API_KEY` as a Secret Manager secret
 - Create Secret Manager secrets for `GE_FEED_CONTEXT_SECRET` (auto-generated), `GE_POSTHOG_API_KEY`, `GE_PERSPECTIVE_API_KEY`, and `GE_BSKY_APP_PASSWORD`
 - Verify VPC connector for internal network access
-- Ensure Firestore TTL policies for cache, debug, seen-post, and feed-snapshot data
+- Ensure the environment's Firestore database exists
 
-Existing stage and production environments must rerun `gcp_setup.sh` once after
-the feed-transparency rollout so the `feed_snapshots.expires_at` TTL policy is
-created; deploying the application alone does not enable that policy.
+Firestore rules, indexes, and TTL policies are owned by the frontend repository
+and applied by its stage and production deployment workflows.
+
+After adopting frontend-owned Firestore deployment, rerun `./scripts/gcp_setup.sh`
+once before the next frontend deployment. This grants the frontend deployment
+service account the index-administrator permission required for composite indexes
+and TTL policies. The role is project-wide, so either environment's setup is
+sufficient.
 
 Before API deployment in stage/prod, run the inference setup script so domain mapping
 and DNS are in place for stable inference hostnames:
@@ -252,11 +261,13 @@ ENVIRONMENT=prod \
 
 The deployment script will:
 
-- Deploy Firestore security rules and indexes (`firestore.rules`, `firestore.indexes.json`) to the target project
 - Generate `requirements.txt` from `Pipfile`
 - Auto-detect the Elasticsearch internal load balancer IP
 - Build the container using Google Cloud buildpacks
 - Deploy to Cloud Run with proper environment variables and secrets
+
+API deployments do not change Firebase configuration. Deploy Firebase rules,
+indexes, TTL policies, Functions, and Hosting from the frontend repository.
 
 Inference endpoint resolution order during deploy:
 
@@ -369,7 +380,7 @@ export GE_ELASTICSEARCH_URL="https://localhost:9200"
 export GE_ELASTICSEARCH_VERIFY_SSL="false"
 export GE_INFERENCE_BASE_URL="https://inference.greenearth.social"
 export GE_FIRESTORE_EMULATOR_HOST="127.0.0.1:8080"
-export GE_FIRESTORE_PROJECT="demo-no-project"
+export GE_FIRESTORE_PROJECT="greenearth-471522"
 export GE_BSKY_APP_PASSWORD="<your-dev-account-app-password>"
 EOF
 source .env
@@ -380,7 +391,8 @@ source .env
 **Firestore emulator** (requires Java — install with `brew install --cask temurin`):
 
 ```bash
-firebase emulators:start --only firestore
+cd ../frontend
+npm run emulators:firestore
 ```
 
 **Elasticsearch port-forward** (prod ES runs on a private VPC):
@@ -591,8 +603,6 @@ greenearth/api/
 │   ├── apikeys.py                 # API key management
 │   ├── feed_debug.py              # CLI debug tool
 │   └── publish_feed.py            # Publish/update feed generator records
-├── firestore.rules                # Firestore security rules
-├── firestore.indexes.json         # Composite indexes
 ├── .gcloudignore                  # Files to exclude from deployment
 ├── .python-version
 ├── Pipfile                        # pipenv dependencies

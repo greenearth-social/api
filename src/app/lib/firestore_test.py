@@ -171,7 +171,7 @@ class TestInitFirestoreClient:
 
         init_firestore_client()
 
-        MockAsyncClient.assert_called_once_with(project="demo-no-project", database="(default)")
+        MockAsyncClient.assert_called_once_with(project="greenearth-471522", database="(default)")
 
 
 # ---------------------------------------------------------------------------

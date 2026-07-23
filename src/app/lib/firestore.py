@@ -77,9 +77,9 @@ def init_firestore_client() -> AsyncClient:
 
     project = os.environ.get("GE_FIRESTORE_PROJECT", os.environ.get("PROJECT_ID"))
     if emulator_host and not project:
-        # firebase-tools defaults to this demo project when no project is configured.
-        # Aligning the SDK avoids writing into a different project namespace.
-        project = "demo-no-project"
+        # The canonical emulator config lives in the frontend repository and
+        # uses this project namespace via its .firebaserc.
+        project = "greenearth-471522"
 
     database = os.environ.get("GE_FIRESTORE_DATABASE", "(default)")
     logger.info(
@@ -625,7 +625,8 @@ async def get_recent_feed_snapshots(
     of a fixed-size result set.
 
     Requires a collection-group composite index on ``feed_snapshots`` with
-    fields ``(feed_name ASC, generated_at DESC)`` — see ``firestore.indexes.json``.
+    fields ``(feed_name ASC, generated_at DESC)`` — managed by the frontend
+    repository's ``firestore.indexes.json``.
     """
     try:
         query = (
