@@ -68,6 +68,24 @@ class ExplodingRanker:
         raise RuntimeError("downstream boom")
 
 
+class HangingRanker:
+    """A ranker that never returns within any reasonable per-model timeout."""
+
+    def __init__(self, name: str):
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def score_bounds(self) -> tuple[float, float]:
+        return (0.0, 1.0)
+
+    async def predict(self, es, user_did, candidates):
+        await asyncio.sleep(9999)
+
+
 def _request(models: list[RankModelSpec], candidates: list[CandidatePost]) -> RankPredictRequest:
     return RankPredictRequest(
         models=models,
@@ -264,6 +282,40 @@ def test_run_predict_ignores_ranker_with_no_valid_scores(monkeypatch):
                 models=[
                     RankModelSpec(name="x", weight=1.0),
                     RankModelSpec(name="empty", weight=9.0),
+                ],
+                candidates=candidates,
+            ),
+            es=object(),
+        )
+    )
+
+    assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
+        ("at://post/a", 1, pytest.approx(1.0)),
+        ("at://post/b", 2, pytest.approx(-1.0)),
+    ]
+
+
+def test_run_predict_excludes_timed_out_ranker_without_losing_fast_ranker(monkeypatch):
+    """A ranker that exceeds the per-model timeout is excluded from the
+    combination (same as an empty-result ranker), and does not cause a
+    concurrently-running fast ranker's results to be discarded."""
+    monkeypatch.setattr(predict_module, "_RANK_MODEL_TIMEOUT_SEC", 0.01)
+    candidates = [
+        CandidatePost(at_uri="at://post/a", score=0.5),
+        CandidatePost(at_uri="at://post/b", score=0.5),
+    ]
+    rankers = {
+        "x": StubRanker("x", (0.0, 1.0), {"at://post/a": 1.0, "at://post/b": 0.0}),
+        "slow": HangingRanker("slow"),
+    }
+    monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
+
+    result = asyncio.run(
+        predict_module.run_predict(
+            _request(
+                models=[
+                    RankModelSpec(name="x", weight=1.0),
+                    RankModelSpec(name="slow", weight=9.0),
                 ],
                 candidates=candidates,
             ),

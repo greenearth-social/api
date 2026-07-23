@@ -1507,6 +1507,45 @@ class TestRankedFeed:
 
 
 # ---------------------------------------------------------------------------
+# Embedding hydration timeout
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingHydrationTimeout:
+    """A hung `fetch_post_embeddings` call must not block the pipeline past
+    `GE_EMBED_HYDRATION_TIMEOUT_SEC` — it should fall back to unhydrated
+    candidates via the existing error path, same as any other hydration
+    failure."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_falls_back_to_unhydrated_candidates(self, monkeypatch):
+        from ..lib.pipeline_context import (
+            DegradationStage,
+            PipelineContext,
+            pipeline_context_scope,
+        )
+        from ..routers import xrpc as xrpc_module
+
+        monkeypatch.setattr(xrpc_module, "_EMBED_HYDRATION_TIMEOUT_SEC", 0.01)
+
+        async def _hangs(*args, **kwargs):
+            await asyncio.sleep(9999)
+
+        candidates = [CandidatePost(at_uri="at://post/1", score=0.5)]
+
+        with patch(
+            "app.routers.xrpc.fetch_post_embeddings", side_effect=_hangs
+        ), pipeline_context_scope(PipelineContext(feed_name="f")) as ctx:
+            result = await xrpc_module._hydrate_embeddings(object(), candidates)
+
+        assert result == candidates
+        assert len(ctx.degradations) == 1
+        assert ctx.degradations[0].stage == DegradationStage.EMBED_HYDRATION
+        assert ctx.degradations[0].component == "fetch_post_embeddings"
+        assert isinstance(ctx.degradations[0].cause, asyncio.TimeoutError)
+
+
+# ---------------------------------------------------------------------------
 # Slate cutoffs (max_render_share / min_rank_score / min_mmr_score)
 # ---------------------------------------------------------------------------
 
