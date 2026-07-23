@@ -226,6 +226,11 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=4"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_RANK_MODEL_TIMEOUT_SEC=2.5"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_EMBED_HYDRATION_TIMEOUT_SEC=1.5"
+    # Below the AppView's 10s abort on getFeedSkeleton calls (confirmed via
+    # atproto source, see #291) so a hung downstream call (ES, ranker)
+    # surfaces as a logged, metered 504 instead of losing the race against
+    # the client's own timeout with nothing recorded on our side (see #270).
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_FEED_REQUEST_TIMEOUT_SEC=9"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_POSTHOG_HOST=$GE_POSTHOG_HOST"
     # NOTE: keep this false until the Perspective API timeout and ES generator
     # connection errors under investigation in #270/#271 are resolved --

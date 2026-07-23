@@ -1860,6 +1860,25 @@ class TestBestOfFriendsFeed:
         posts = [item["post"] for item in resp.json()["feed"]]
         assert len(posts) == 3
 
+    def test_pipeline_timeout_returns_504(self, monkeypatch):
+        """When the pipeline exceeds GE_FEED_REQUEST_TIMEOUT_SEC, the feed
+        returns HTTP 504 instead of hanging until the Cloud Run request
+        timeout kills the connection."""
+        monkeypatch.setenv("GE_FEED_REQUEST_TIMEOUT_SEC", "0.05")
+        candidates = _make_candidates("p", 3, with_embedding=True)
+
+        async def _slow_run_predict(*args, **kwargs):
+            await asyncio.sleep(1)
+
+        with self._patch_generators(candidates), \
+             patch("app.routers.xrpc.run_predict", side_effect=_slow_run_predict):
+            resp = TestClient(app, raise_server_exceptions=False).get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": BEST_OF_FRIENDS_FEED_URI},
+            )
+
+        assert resp.status_code == 504
+
 
 # ---------------------------------------------------------------------------
 # /xrpc/app.bsky.feed.sendInteractions
@@ -2645,6 +2664,38 @@ class TestGetFeedSkeletonMetrics:
         assert failure_calls[0][2] == {
             "feed_name": FEED_RKEY,
             "status_code": "401",
+        }
+
+    def test_pipeline_timeout_records_failure_count_504(self, monkeypatch):
+        monkeypatch.setenv("GE_FEED_REQUEST_TIMEOUT_SEC", "0.05")
+
+        async def _slow_generate(*args, **kwargs):
+            await asyncio.sleep(1)
+
+        with (
+            patch(
+                "app.lib.candidates.generate.get_generator",
+                side_effect=lambda name: AsyncMock(generate=_slow_generate),
+            ),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value="did:plc:user",
+            ),
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+
+        assert response.status_code == 504
+        failure_calls = [
+            call for call in self.mc.calls if call[0] == "feed.render.failure_count"
+        ]
+        assert len(failure_calls) == 1
+        assert failure_calls[0][2] == {
+            "feed_name": FEED_RKEY,
+            "status_code": "504",
         }
 
     def test_failure_records_no_success_count(self):
