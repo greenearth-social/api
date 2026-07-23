@@ -7,7 +7,6 @@ GET  /api/feeds/{request_id} — full detail with pipeline metadata + hydrated p
 from __future__ import annotations
 
 import logging
-import os
 import re
 from datetime import UTC, datetime, timedelta
 
@@ -43,10 +42,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["feed-transparency"], prefix="/api/feeds")
 
 CACHE_WINDOW_MINUTES = 15
-# The feed this UI reports on. Overridable so a local environment can point it
-# at a feed that runs there: "your-feed" depends on the Perspective API and the
-# trained ranking models, neither of which a developer machine has.
-TARGET_FEED_NAME = os.environ.get("GE_FEED_TRANSPARENCY_FEED", "your-feed")
 DEFAULT_LIST_LIMIT = 20
 PUBLIC_MODERATION_LABELS = frozenset(
     {
@@ -170,8 +165,12 @@ async def list_feeds(
     db: AsyncClient = request.app.state.firestore
     cutoff = datetime.now(UTC) - timedelta(minutes=CACHE_WINDOW_MINUTES)
 
+    # Every feed the user loaded, not one hardcoded name: each summary carries
+    # its own feed_name, so which of them to surface is the client's call.
+    # Dropping the filter also drops the (feed_name, generated_at) composite
+    # index this query used to need.
     docs = await get_recent_feed_snapshots(
-        db, user_doc_id, feed_name=TARGET_FEED_NAME, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT
+        db, user_doc_id, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT
     )
 
     summaries: list[FeedSummary] = []
