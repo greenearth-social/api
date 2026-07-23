@@ -2702,7 +2702,7 @@ class TestFailFastFeatureFlag:
     def test_flag_enabled_calls_set_fail_fast_true(self):
         """When PostHog returns True for the user, set_fail_fast_for_request(True) is called."""
         mock_ph = MagicMock()
-        mock_ph.is_feature_enabled.return_value = True
+        mock_ph.feature_enabled.return_value = True
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
@@ -2718,7 +2718,7 @@ class TestFailFastFeatureFlag:
     def test_flag_disabled_calls_set_fail_fast_false(self):
         """When PostHog returns False, set_fail_fast_for_request(False) is called."""
         mock_ph = MagicMock()
-        mock_ph.is_feature_enabled.return_value = False
+        mock_ph.feature_enabled.return_value = False
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
