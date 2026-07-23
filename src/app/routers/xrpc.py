@@ -86,6 +86,13 @@ router = APIRouter(tags=["xrpc"])
 FEED_SNAPSHOT_RETENTION_SECONDS = 900  # 15 minutes
 INITIAL_REQUEST_REUSE_SECONDS = 5
 
+try:
+    _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
+        os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5")
+    )
+except ValueError:
+    _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
+
 
 @dataclass
 class _InitialRequestEntry:
@@ -315,7 +322,10 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
 
     try:
         async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
-            pairs = await fetch_post_embeddings(es, missing, index="posts_recent")
+            pairs = await asyncio.wait_for(
+                fetch_post_embeddings(es, missing, index="posts_recent"),
+                timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
+            )
     except Exception as exc:
         # If the refetch fails, MMR falls back to author-only similarity
         # and the two-tower ranker has its own refetch path. Don't fail
