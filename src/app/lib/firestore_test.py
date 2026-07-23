@@ -286,6 +286,40 @@ class TestUpsertUser:
         doc_ref.set.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_creates_user_without_a_resolved_handle(self):
+        # Handle resolution is best-effort; the DID is the identity, so a
+        # failed lookup must still produce a user document.
+        db, _, doc_ref = _mock_firestore_client()
+        doc_ref.get.return_value = _mock_doc_snapshot(False)
+
+        user = await upsert_user(db, USER_DID, None)
+
+        assert user.user_did == USER_DID
+        assert user.username is None
+        doc_ref.set.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_unresolved_handle_does_not_erase_a_known_one(self):
+        # A directory blip shouldn't wipe a handle we already resolved.
+        db, _, doc_ref = _mock_firestore_client()
+        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        doc_ref.get.return_value = _mock_doc_snapshot(True, {
+            "user_did": USER_DID,
+            "username": USERNAME,
+            "created_at": original_time,
+            "updated_at": original_time,
+            "last_seen_at": original_time,
+        })
+
+        user = await upsert_user(db, USER_DID, None)
+
+        assert user.username == USERNAME
+        update_fields = doc_ref.update.call_args[0][0]
+        assert "username" not in update_fields
+        # last_seen_at is still refreshed: the visit did happen.
+        assert user.last_seen_at > original_time
+
+    @pytest.mark.asyncio
     async def test_updates_username_when_changed(self):
         db, _, doc_ref = _mock_firestore_client()
         original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)

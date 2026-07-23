@@ -107,12 +107,17 @@ async def get_user(db: AsyncClient, user_did: str) -> UserDocument | None:
     return UserDocument.model_validate(data)
 
 
-async def upsert_user(db: AsyncClient, user_did: str, username: str) -> UserDocument:
+async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> UserDocument:
     """Create or update a user document.
 
     On first visit the document is created with all timestamps set to now.
     On subsequent visits ``last_seen_at`` is refreshed and ``username`` is
     updated if it changed.
+
+    ``username`` may be ``None`` when the caller's handle couldn't be resolved
+    (the DID is the identity; the handle is enrichment). A ``None`` never
+    overwrites a handle we already know — a transient resolution failure
+    shouldn't erase good data.
     """
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     doc = await ref.get()
@@ -127,7 +132,7 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str) -> UserDocu
             )
 
         update_fields: dict[str, object] = {"last_seen_at": now}
-        if data.get("username") != username:
+        if username is not None and data.get("username") != username:
             update_fields["username"] = username
             update_fields["updated_at"] = now
 
