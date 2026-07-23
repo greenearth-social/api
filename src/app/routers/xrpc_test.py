@@ -2811,3 +2811,79 @@ class TestPosthogTracking:
                 assert call_kwargs.args[2] == "interactionLike"
                 assert call_kwargs.args[3] == "your-feed"
                 assert call_kwargs.args[4] == "at://did/post/1"
+
+
+class TestFailFastFeatureFlag:
+    """Verify that get_feed_skeleton evaluates the PostHog flag and wires it to fail_fast()."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_authenticated_user(self):
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        with (
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock),
+            patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_pipeline(self):
+        empty_snapshot = MagicMock()
+        empty_snapshot.items = []
+        empty_snapshot.generator_diagnostics = []
+        empty_snapshot.items_meta = []
+        with patch(
+            "app.routers.xrpc._run_pipeline_capturing",
+            new_callable=AsyncMock,
+            return_value=(empty_snapshot, []),
+        ):
+            yield
+
+    def test_flag_enabled_calls_set_fail_fast_true(self):
+        """When PostHog returns True for the user, set_fail_fast_for_request(True) is called."""
+        mock_ph = MagicMock()
+        mock_ph.feature_enabled.return_value = True
+
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        mock_set.assert_called_once_with(True)
+
+    def test_flag_disabled_calls_set_fail_fast_false(self):
+        """When PostHog returns False, set_fail_fast_for_request(False) is called."""
+        mock_ph = MagicMock()
+        mock_ph.feature_enabled.return_value = False
+
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        mock_set.assert_called_once_with(False)
+
+    def test_none_posthog_client_calls_set_fail_fast_false(self):
+        """When PostHog client is None (local dev), set_fail_fast_for_request(False) is called."""
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=None),
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        mock_set.assert_called_once_with(False)
