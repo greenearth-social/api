@@ -177,6 +177,40 @@ def _feed_uri(feed_name: str) -> str:
     return f"at://{_get_service_did()}/app.bsky.feed.generator/{feed_name}"
 
 
+def dev_session_did(request: Request) -> str | None:
+    """DID for a development session, or ``None`` when the request isn't one.
+
+    ``getFeedSkeleton`` normally authenticates an AT Protocol JWT signed by the
+    caller's Bluesky identity. A local environment has no such identity and no
+    way to mint one, so without this there is no way to exercise the
+    signed-in-user path — the one that writes feed snapshots, user records and
+    activity — outside production.
+
+    Deliberately *not* the Cloud Scheduler probe bypass, which exists for
+    monitoring and is excluded from user data for that reason. This stands in
+    for a real session and is treated as one everywhere downstream.
+
+    Enabled only by ``GE_DEV_SESSION_SECRET``, which ``main.lifespan`` refuses
+    to start with in a deployed environment. Requests supply the secret in
+    ``X-Dev-Session`` and the user in ``X-Dev-Session-DID``.
+    """
+    secret = os.environ.get("GE_DEV_SESSION_SECRET")
+    if not secret:
+        return None
+    if not hmac.compare_digest(request.headers.get("X-Dev-Session", ""), secret):
+        return None
+
+    did = request.headers.get("X-Dev-Session-DID", "").strip()
+    if not did.startswith("did:plc:"):
+        # The secret matched, so this is a developer getting it wrong rather
+        # than stray traffic — say so instead of falling through to a 401.
+        raise HTTPException(
+            status_code=400,
+            detail="X-Dev-Session-DID must be a did:plc DID",
+        )
+    return did
+
+
 async def _resolve_username(request: Request, user_did: str) -> str:
     """Resolve the caller's handle from their DID document."""
     resolver = getattr(request.app.state, "id_resolver", None)
@@ -1071,7 +1105,16 @@ async def get_feed_skeleton(
     is_probe = bool(_probe_secret) and hmac.compare_digest(
         request.headers.get("X-Probe-Secret", ""), _probe_secret
     )
-    if is_probe:
+    # A development session is a stand-in for a signed-in user, so it takes
+    # precedence over the probe bypass and clears is_probe: the request must be
+    # treated as real traffic downstream, including writing feed snapshots.
+    _dev_session_did = dev_session_did(request)
+    if _dev_session_did is not None:
+        is_probe = False
+
+    if _dev_session_did is not None:
+        user_did = _dev_session_did
+    elif is_probe:
         user_did = os.environ.get("GE_PROBE_USER_DID", "did:plc:s4tl2ajfsnstzuxtegl7r33g")
     else:
         user_did = await verify_auth_header(request, service_did=_get_service_did())
