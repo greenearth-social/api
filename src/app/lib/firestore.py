@@ -77,9 +77,9 @@ def init_firestore_client() -> AsyncClient:
 
     project = os.environ.get("GE_FIRESTORE_PROJECT", os.environ.get("PROJECT_ID"))
     if emulator_host and not project:
-        # firebase-tools defaults to this demo project when no project is configured.
-        # Aligning the SDK avoids writing into a different project namespace.
-        project = "demo-no-project"
+        # The canonical emulator config lives in the frontend repository and
+        # uses this project namespace via its .firebaserc.
+        project = "greenearth-471522"
 
     database = os.environ.get("GE_FIRESTORE_DATABASE", "(default)")
     logger.info(
@@ -107,12 +107,17 @@ async def get_user(db: AsyncClient, user_did: str) -> UserDocument | None:
     return UserDocument.model_validate(data)
 
 
-async def upsert_user(db: AsyncClient, user_did: str, username: str) -> UserDocument:
+async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> UserDocument:
     """Create or update a user document.
 
     On first visit the document is created with all timestamps set to now.
     On subsequent visits ``last_seen_at`` is refreshed and ``username`` is
     updated if it changed.
+
+    ``username`` may be ``None`` when the caller's handle couldn't be resolved
+    (the DID is the identity; the handle is enrichment). A ``None`` never
+    overwrites a handle we already know — a transient resolution failure
+    shouldn't erase good data.
     """
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     doc = await ref.get()
@@ -127,7 +132,7 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str) -> UserDocu
             )
 
         update_fields: dict[str, object] = {"last_seen_at": now}
-        if data.get("username") != username:
+        if username is not None and data.get("username") != username:
             update_fields["username"] = username
             update_fields["updated_at"] = now
 
@@ -620,7 +625,8 @@ async def get_recent_feed_snapshots(
     of a fixed-size result set.
 
     Requires a collection-group composite index on ``feed_snapshots`` with
-    fields ``(feed_name ASC, generated_at DESC)`` — see ``firestore.indexes.json``.
+    fields ``(feed_name ASC, generated_at DESC)`` — managed by the frontend
+    repository's ``firestore.indexes.json``.
     """
     try:
         query = (
