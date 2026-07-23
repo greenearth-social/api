@@ -1164,7 +1164,8 @@ class TestGetFeedSkeletonAuth:
 
     def test_username_resolution_failure_is_logged_but_non_fatal(self, caplog):
         """Username resolution runs in a background task; failures are logged
-        but don't block the response."""
+        but don't block the response, and the session is still recorded
+        without the handle."""
         from unittest.mock import MagicMock
 
         mock_payload = MagicMock()
@@ -1186,7 +1187,7 @@ class TestGetFeedSkeletonAuth:
             )
 
         assert resp.status_code == 200
-        assert "Failed to resolve username" in caplog.text
+        assert "Could not resolve handle" in caplog.text
 
     def test_firestore_upsert_failure_is_logged_but_non_fatal(self, caplog):
         """Firestore user upserts run in a background task; failures are
@@ -2637,6 +2638,44 @@ class TestPosthogTracking:
                 assert call_kwargs.args[1] == "did:plc:abc"
                 assert call_kwargs.args[2] == "alice.bsky.app"
                 assert call_kwargs.args[3] == "your-feed"
+
+    @pytest.mark.asyncio
+    async def test_record_session_survives_handle_resolution_failure(self):
+        """A DID that won't resolve must not cost us the session record.
+
+        Resolution goes over the network to the PLC directory, so it fails for
+        reasons unrelated to the user existing. Before this, one such failure
+        skipped the user upsert, the feed-activity write and the analytics
+        event outright.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ..routers.xrpc import _record_session
+
+        db = AsyncMock()
+        request = MagicMock()
+        request.app.state.id_resolver = AsyncMock()
+        request.app.state.id_resolver.did.resolve = AsyncMock(
+            side_effect=RuntimeError("PLC directory unavailable")
+        )
+
+        with patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()):
+            with patch("app.routers.xrpc.track_session") as mock_track:
+                with patch("app.routers.xrpc.upsert_user", new=AsyncMock()) as mock_upsert:
+                    with patch(
+                        "app.routers.xrpc.upsert_feed_activity", new=AsyncMock()
+                    ) as mock_activity:
+                        await _record_session(request, "did:plc:abc", "your-feed", db)
+
+        mock_upsert.assert_awaited_once()
+        upsert_args = mock_upsert.await_args
+        assert upsert_args is not None
+        # The DID is the identity; the handle is enrichment we simply lack.
+        assert upsert_args.args[1] == "did:plc:abc"
+        assert upsert_args.args[2] is None
+        mock_activity.assert_awaited_once()
+        mock_track.assert_called_once()
+        assert mock_track.call_args.args[2] is None
 
     @pytest.mark.asyncio
     async def test_record_interactions_calls_track_interaction(self):

@@ -726,11 +726,20 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
     isn't paying for firebase roundtrips.
     Failures are logged but do not surface to the caller.
     """
+    # Handle resolution goes over the network to the PLC directory, so it fails
+    # for reasons that have nothing to do with this user existing — a directory
+    # blip, a DID document that's briefly unresolvable. Treat it as enrichment:
+    # losing the handle shouldn't also lose the session record, which is keyed
+    # on the DID we already have.
     try:
         username = await _resolve_username(request, user_did)
     except Exception:
-        logger.exception("Failed to resolve username for %s in background", user_did)
-        return
+        logger.warning(
+            "Could not resolve handle for %s; recording session without it",
+            user_did,
+            exc_info=True,
+        )
+        username = None
 
     now = datetime.now(timezone.utc)
 
