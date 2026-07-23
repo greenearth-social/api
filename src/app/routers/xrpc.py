@@ -41,7 +41,7 @@ from ..documents import (
 from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
-from ..lib.config import fail_fast
+from ..lib.config import fail_fast, set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
 from ..lib.elasticsearch import fetch_post_embeddings
 from ..lib.embeddings import encode_float32_b64
@@ -62,7 +62,7 @@ from ..lib.firestore import (
     write_feed_debug,
 )
 from ..lib.metrics import get_metric_collector
-from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
+from ..lib.posthog_client import evaluate_fail_fast_flag, get_posthog_client, track_interaction, track_session
 from ..lib.rankers import run_predict
 from ..lib.request_cache import request_cache_scope
 from ..lib.telemetry import timed
@@ -1086,6 +1086,8 @@ async def get_feed_skeleton(
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
     _spawn_background(_record_session(request, user_did, feed_name, db))
+
+    set_fail_fast_for_request(evaluate_fail_fast_flag(get_posthog_client(), user_did))
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
