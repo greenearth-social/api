@@ -1169,7 +1169,8 @@ class TestGetFeedSkeletonAuth:
 
     def test_username_resolution_failure_is_logged_but_non_fatal(self, caplog):
         """Username resolution runs in a background task; failures are logged
-        but don't block the response."""
+        but don't block the response, and the session is still recorded
+        without the handle."""
         from unittest.mock import MagicMock
 
         mock_payload = MagicMock()
@@ -1191,7 +1192,7 @@ class TestGetFeedSkeletonAuth:
             )
 
         assert resp.status_code == 200
-        assert "Failed to resolve username" in caplog.text
+        assert "Could not resolve handle" in caplog.text
 
     def test_firestore_upsert_failure_is_logged_but_non_fatal(self, caplog):
         """Firestore user upserts run in a background task; failures are
@@ -2659,6 +2660,111 @@ class TestGetFeedSkeletonMetrics:
         ] == []
 
 
+class TestDevSession:
+    """The development stand-in for a signed-in user (dev_session_did).
+
+    Distinct from the probe bypass on purpose: a probe is monitoring traffic
+    excluded from user data, while this has to be indistinguishable from a real
+    session downstream so the snapshot/user-record path can be exercised
+    locally.
+    """
+
+    def _request(self, headers: dict[str, str]):
+        from unittest.mock import MagicMock
+
+        request = MagicMock()
+        request.headers = headers
+        return request
+
+    def test_disabled_when_no_secret_is_configured(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.delenv("GE_DEV_SESSION_SECRET", raising=False)
+        request = self._request(
+            {"X-Dev-Session": "anything", "X-Dev-Session-DID": "did:plc:abc"}
+        )
+        assert dev_session_did(request) is None
+
+    def test_ignores_a_wrong_secret(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        request = self._request(
+            {"X-Dev-Session": "wrong", "X-Dev-Session-DID": "did:plc:abc"}
+        )
+        assert dev_session_did(request) is None
+
+    def test_ignores_a_request_with_no_headers(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        assert dev_session_did(self._request({})) is None
+
+    def test_returns_the_did_when_the_secret_matches(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        request = self._request(
+            {"X-Dev-Session": "correct", "X-Dev-Session-DID": "did:plc:abc"}
+        )
+        assert dev_session_did(request) == "did:plc:abc"
+
+    def test_rejects_a_did_that_is_not_did_plc(self, monkeypatch):
+        # The secret matched, so this is a developer mistake worth reporting
+        # rather than stray traffic to ignore.
+        from fastapi import HTTPException
+
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        request = self._request(
+            {"X-Dev-Session": "correct", "X-Dev-Session-DID": "alice.bsky.social"}
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            dev_session_did(request)
+        assert excinfo.value.status_code == 400
+
+
+class TestDevSessionStartupGuard:
+    """It must be impossible to serve deployed traffic with this enabled."""
+
+    @pytest.mark.asyncio
+    async def test_refuses_to_start_when_enabled_in_a_deployed_environment(
+        self, monkeypatch
+    ):
+        from ..main import app, lifespan
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "anything")
+        monkeypatch.setenv("GE_ELASTICSEARCH_API_KEY", "k")
+        monkeypatch.setenv("GE_FEED_CONTEXT_SECRET", "s")
+        monkeypatch.setenv("ENVIRONMENT", "prod")
+
+        with pytest.raises(RuntimeError, match="GE_DEV_SESSION_SECRET"):
+            async with lifespan(app):
+                pass
+
+    def test_deployed_environment_is_fine_without_it(self, monkeypatch):
+        # Guard must key on the variable, not merely on being deployed. This
+        # calls the guard directly rather than entering the lifespan: a clean
+        # startup goes on to build real GCP clients, which needs credentials
+        # CI doesn't have.
+        from ..main import _reject_dev_session_secret_in_deployment
+
+        monkeypatch.delenv("GE_DEV_SESSION_SECRET", raising=False)
+        monkeypatch.setenv("ENVIRONMENT", "prod")
+
+        _reject_dev_session_secret_in_deployment()
+
+    def test_local_environment_may_set_it(self, monkeypatch):
+        from ..main import _reject_dev_session_secret_in_deployment
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "anything")
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+        monkeypatch.delenv("GE_ENVIRONMENT", raising=False)
+
+        _reject_dev_session_secret_in_deployment()
+
+
 class TestPosthogTracking:
     """Verify PostHog events are emitted from XRPC background handlers."""
 
@@ -2685,6 +2791,44 @@ class TestPosthogTracking:
                 assert call_kwargs.args[1] == "did:plc:abc"
                 assert call_kwargs.args[2] == "alice.bsky.app"
                 assert call_kwargs.args[3] == "your-feed"
+
+    @pytest.mark.asyncio
+    async def test_record_session_survives_handle_resolution_failure(self):
+        """A DID that won't resolve must not cost us the session record.
+
+        Resolution goes over the network to the PLC directory, so it fails for
+        reasons unrelated to the user existing. Before this, one such failure
+        skipped the user upsert, the feed-activity write and the analytics
+        event outright.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ..routers.xrpc import _record_session
+
+        db = AsyncMock()
+        request = MagicMock()
+        request.app.state.id_resolver = AsyncMock()
+        request.app.state.id_resolver.did.resolve = AsyncMock(
+            side_effect=RuntimeError("PLC directory unavailable")
+        )
+
+        with patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()):
+            with patch("app.routers.xrpc.track_session") as mock_track:
+                with patch("app.routers.xrpc.upsert_user", new=AsyncMock()) as mock_upsert:
+                    with patch(
+                        "app.routers.xrpc.upsert_feed_activity", new=AsyncMock()
+                    ) as mock_activity:
+                        await _record_session(request, "did:plc:abc", "your-feed", db)
+
+        mock_upsert.assert_awaited_once()
+        upsert_args = mock_upsert.await_args
+        assert upsert_args is not None
+        # The DID is the identity; the handle is enrichment we simply lack.
+        assert upsert_args.args[1] == "did:plc:abc"
+        assert upsert_args.args[2] is None
+        mock_activity.assert_awaited_once()
+        mock_track.assert_called_once()
+        assert mock_track.call_args.args[2] is None
 
     @pytest.mark.asyncio
     async def test_record_interactions_calls_track_interaction(self):

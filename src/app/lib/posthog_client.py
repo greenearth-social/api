@@ -38,20 +38,26 @@ def init_posthog_client(api_key: str, host: str) -> Posthog:
 def track_session(
     client: Posthog | None,
     user_did: str,
-    username: str,
+    username: str | None,
     feed_name: str,
     timestamp: datetime,
 ) -> None:
-    """Capture a feedLoaded event and update the user's person properties."""
+    """Capture a feedLoaded event and update the user's person properties.
+
+    ``username`` may be ``None`` when the handle couldn't be resolved. The
+    event is still captured — it's keyed on the DID — but the person property
+    is left alone rather than set to null, so a transient resolution failure
+    doesn't erase a handle PostHog already has.
+    """
     if client is None:
         return
+    properties: dict[str, object] = {"feed_name": feed_name}
+    if username is not None:
+        properties["$set"] = {"username": username}
     client.capture(
         distinct_id=user_did,
         event="feedLoaded",
-        properties={
-            "feed_name": feed_name,
-            "$set": {"username": username},
-        },
+        properties=properties,
         timestamp=timestamp,
     )
 
