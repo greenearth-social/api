@@ -9,6 +9,7 @@ import pytest
 from ..models import CandidatePost
 from . import perspective as perspective_module
 from .perspective import PerspectiveLanguageNotSupportedError, _prc_score, score_candidates
+from .pipeline_context import DegradationStage, PipelineContext, pipeline_context_scope
 
 
 @pytest.fixture(autouse=True)
@@ -467,3 +468,110 @@ class TestClosePerspectiveClient:
 
         perspective_module._client = None
         asyncio.run(perspective_module.close_perspective_client())  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Degradation tracking
+# ---------------------------------------------------------------------------
+
+
+class TestScoreCandidatesDegradation:
+    """Unexpected Perspective errors record DegradationEvent; expected errors don't."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_perspective_client(self, monkeypatch):
+        monkeypatch.setattr(perspective_module, "_client", None)
+
+    def _candidate(self, uri: str) -> CandidatePost:
+        return _make_candidate(uri, content="some text")
+
+    @pytest.mark.asyncio
+    async def test_unexpected_http_error_records_degradation(self, monkeypatch):
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=500)
+        )
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        ctx = PipelineContext(feed_name="your-feed")
+        with pipeline_context_scope(ctx):
+            scores = await score_candidates([self._candidate("at://a/1")])
+
+        assert scores.get("at://a/1") is None  # still soft-fails
+        assert len(ctx.degradations) == 1
+        assert ctx.degradations[0].stage == DegradationStage.RANK
+        assert ctx.degradations[0].component == "perspective"
+
+    @pytest.mark.asyncio
+    async def test_generic_exception_records_degradation(self, monkeypatch):
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(side_effect=ConnectionError("timeout"))
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        ctx = PipelineContext(feed_name="your-feed")
+        with pipeline_context_scope(ctx):
+            scores = await score_candidates([self._candidate("at://a/1")])
+
+        assert scores.get("at://a/1") is None
+        assert len(ctx.degradations) == 1
+        assert ctx.degradations[0].stage == DegradationStage.RANK
+        assert ctx.degradations[0].component == "perspective"
+
+    @pytest.mark.asyncio
+    async def test_language_not_supported_does_not_record_degradation(self, monkeypatch):
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(
+            side_effect=PerspectiveLanguageNotSupportedError("ja")
+        )
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        ctx = PipelineContext(feed_name="your-feed")
+        with pipeline_context_scope(ctx):
+            scores = await score_candidates([self._candidate("at://a/1")])
+
+        assert scores.get("at://a/1") is None
+        assert ctx.degradations == []
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_429_does_not_record_degradation(self, monkeypatch):
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=429)
+        )
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        ctx = PipelineContext(feed_name="your-feed")
+        with pipeline_context_scope(ctx):
+            scores = await score_candidates([self._candidate("at://a/1")])
+
+        assert scores.get("at://a/1") is None
+        assert ctx.degradations == []
+
+    @pytest.mark.asyncio
+    async def test_no_context_unexpected_error_still_returns_none(self, monkeypatch):
+        """Without PipelineContext, unexpected errors still return None (no crash)."""
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(side_effect=ConnectionError("timeout"))
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        scores = await score_candidates([self._candidate("at://a/1")])
+        assert scores.get("at://a/1") is None
+        # no assertion about degradations — there is no context
+
+    @pytest.mark.asyncio
+    async def test_multiple_posts_unexpected_error_records_one_event_per_post(self, monkeypatch):
+        """Each failing post records its own event (may be noisy — by design for now)."""
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=503)
+        )
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        ctx = PipelineContext(feed_name="your-feed")
+        with pipeline_context_scope(ctx):
+            scores = await score_candidates(
+                [self._candidate("at://a/1"), self._candidate("at://a/2")]
+            )
+
+        assert all(v is None for v in scores.values())
+        assert len(ctx.degradations) == 2  # one per post — conservative tracking

@@ -17,9 +17,9 @@ from ...models import (
     CandidatePost,
     GeneratorSpec,
 )
-from ..config import fail_fast
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
+from ..pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult, get_generator
 from .followed_users import FollowedUsersCandidateGenerator
@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 
 try:
     _GENERATOR_TIMEOUT_SEC: float = float(
-        os.environ.get("GE_CANDIDATE_GENERATOR_TIMEOUT_SEC", "15")
+        os.environ.get("GE_CANDIDATE_GENERATOR_TIMEOUT_SEC", "4")
     )
 except ValueError:
-    _GENERATOR_TIMEOUT_SEC = 15.0
+    _GENERATOR_TIMEOUT_SEC = 4.0
 
 
 # ---------------------------------------------------------------------------
@@ -103,16 +103,16 @@ async def run_generate(
 ) -> CandidateGenerateResult:
     """Execute a candidate-generation pipeline described by *request*.
 
-    Parameters
-    ----------
-    request:
-        The generation configuration.
-    es:
-        An ``AsyncElasticsearch`` client.
-    Generator failures are swallowed or re-raised according to
-    ``fail_fast()`` / ``GE_FAIL_FAST``.
+    Soft-fail behavior is driven by whether a PipelineContext is installed
+    (via pipeline_context_scope) on the current task:
+
+    - No context → generator failures raise GeneratorError (hard fail).
+    - Context installed, fail_fast=False → failures are logged, recorded as
+      DegradationEvent, and the generator contributes an empty result.
+    - Context installed, fail_fast=True → failures re-raise after recording.
+
+    Missing generators always raise GeneratorNotFoundError regardless of context.
     """
-    swallow_errors = not fail_fast()
     counts = allocate_counts(request.generators, request.num_candidates)
 
     # Resolve generators up front so missing-name errors raise deterministically
@@ -170,40 +170,37 @@ async def run_generate(
                 else result
                 for result in results
             ]
-        except asyncio.TimeoutError as exc:
-            logger.warning(
-                "Candidate generator '%s' timed out after %.1fs",
-                spec.name,
-                _GENERATOR_TIMEOUT_SEC,
-            )
-            if mc := get_metric_collector():
-                mc.record(
-                    "candidates.generate.failure_count",
-                    1,
-                    generator_name=spec.name,
-                    outcome="timeout",
-                    is_infill="false",
-                )
-            if swallow_errors:
-                return [CandidateResult(
-                    generator_name=spec.name, candidates=[], status="timeout",
-                    reason="generator_timeout",
-                )]
-            raise GeneratorError(spec.name, exc) from exc
         except Exception as exc:
-            logger.exception("Candidate generator '%s' failed", spec.name)
+            if isinstance(exc, asyncio.TimeoutError):
+                logger.warning(
+                    "Candidate generator '%s' timed out after %.1fs",
+                    spec.name,
+                    _GENERATOR_TIMEOUT_SEC,
+                )
+                outcome = "timeout"
+            else:
+                logger.exception("Candidate generator '%s' failed", spec.name)
+                outcome = "error"
             if mc := get_metric_collector():
                 mc.record(
                     "candidates.generate.failure_count",
                     1,
                     generator_name=spec.name,
-                    outcome="error",
+                    outcome=outcome,
                     is_infill="false",
                 )
-            if swallow_errors:
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(DegradationEvent(
+                    stage=DegradationStage.CANDIDATE_GEN,
+                    component=spec.name,
+                    cause=exc,
+                ))
                 return [CandidateResult(
-                    generator_name=spec.name, candidates=[], status="error",
-                    reason="generator_error",
+                    generator_name=spec.name,
+                    candidates=[],
+                    status=outcome,
+                    reason="generator_timeout" if outcome == "timeout" else "generator_error",
                 )]
             raise GeneratorError(spec.name, exc) from exc
 
@@ -256,47 +253,37 @@ async def run_generate(
                     generator_name=request.infill,
                     is_infill="true",
                 )
-        except asyncio.TimeoutError as exc:
-            logger.warning(
-                "Infill generator '%s' timed out after %.1fs",
-                request.infill,
-                _GENERATOR_TIMEOUT_SEC,
-            )
-            if mc := get_metric_collector():
-                mc.record(
-                    "candidates.generate.failure_count",
-                    1,
-                    generator_name=request.infill,
-                    outcome="timeout",
-                    is_infill="true",
-                )
-            if swallow_errors:
-                infill_result = CandidateResult(
-                    generator_name=request.infill,
-                    candidates=[],
-                    status="timeout",
-                    reason="generator_timeout",
-                    mode="infill",
-                )
-            else:
-                raise GeneratorError(request.infill, exc, is_infill=True) from exc
         except Exception as exc:
-            logger.exception("Infill generator '%s' failed", request.infill)
+            if isinstance(exc, asyncio.TimeoutError):
+                logger.warning(
+                    "Infill generator '%s' timed out after %.1fs",
+                    request.infill,
+                    _GENERATOR_TIMEOUT_SEC,
+                )
+                outcome = "timeout"
+            else:
+                logger.exception("Infill generator '%s' failed", request.infill)
+                outcome = "error"
             if mc := get_metric_collector():
                 mc.record(
                     "candidates.generate.failure_count",
                     1,
                     generator_name=request.infill,
-                    outcome="error",
+                    outcome=outcome,
                     is_infill="true",
                 )
-            if swallow_errors:
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(DegradationEvent(
+                    stage=DegradationStage.CANDIDATE_GEN,
+                    component=f"{request.infill}:infill",
+                    cause=exc,
+                ))
                 infill_result = CandidateResult(
                     generator_name=request.infill,
                     candidates=[],
-                    status="error",
-                    reason="generator_error",
-                    mode="infill",
+                    status=outcome,
+                    reason="generator_timeout" if outcome == "timeout" else "generator_error",
                 )
             else:
                 raise GeneratorError(request.infill, exc, is_infill=True) from exc

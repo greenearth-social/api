@@ -605,7 +605,12 @@ class TestGetFeedSkeleton:
     # --- primary generator failure ---
 
     def test_primary_failure_falls_back_to_infill(self):
-        """If primary raises, we still get infill results."""
+        """If primary raises, we still get infill results.
+
+        The XRPC handler installs a PipelineContext for every render, so a failing
+        primary generator is recorded as a degradation event rather than raising,
+        and the feed is served with partial results from infill/other generators.
+        """
         infill = _make_candidates("infill", 3, "popularity")
 
         primary_gen = AsyncMock()
@@ -1485,18 +1490,59 @@ class TestRankedFeed:
         # Should follow rank_score order (p/2 first), not generator score (p/0 first).
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
-    def test_ranking_failure_returns_500(self):
-        """When ranking raises, the feed fails with a 500."""
+    def test_ranking_failure_soft_fails_to_unranked(self):
+        """When ranking raises, the feed soft-fails and returns candidates in unranked order."""
         candidates = _make_candidates("p", 3, with_embedding=True)
 
         with self._patch_generators(candidates), \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, side_effect=RuntimeError("inference down")):
-            resp = TestClient(app, raise_server_exceptions=False).get(
+            resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": RANKED_FEED_URI},
             )
 
-        assert resp.status_code == 500
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert len(posts) == 3
+
+
+# ---------------------------------------------------------------------------
+# Embedding hydration timeout
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingHydrationTimeout:
+    """A hung `fetch_post_embeddings` call must not block the pipeline past
+    `GE_EMBED_HYDRATION_TIMEOUT_SEC` — it should fall back to unhydrated
+    candidates via the existing error path, same as any other hydration
+    failure."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_falls_back_to_unhydrated_candidates(self, monkeypatch):
+        from ..lib.pipeline_context import (
+            DegradationStage,
+            PipelineContext,
+            pipeline_context_scope,
+        )
+        from ..routers import xrpc as xrpc_module
+
+        monkeypatch.setattr(xrpc_module, "_EMBED_HYDRATION_TIMEOUT_SEC", 0.01)
+
+        async def _hangs(*args, **kwargs):
+            await asyncio.sleep(9999)
+
+        candidates = [CandidatePost(at_uri="at://post/1", score=0.5)]
+
+        with patch(
+            "app.routers.xrpc.fetch_post_embeddings", side_effect=_hangs
+        ), pipeline_context_scope(PipelineContext(feed_name="f")) as ctx:
+            result = await xrpc_module._hydrate_embeddings(object(), candidates)
+
+        assert result == candidates
+        assert len(ctx.degradations) == 1
+        assert ctx.degradations[0].stage == DegradationStage.EMBED_HYDRATION
+        assert ctx.degradations[0].component == "fetch_post_embeddings"
+        assert isinstance(ctx.degradations[0].cause, asyncio.TimeoutError)
 
 
 # ---------------------------------------------------------------------------
@@ -1799,18 +1845,20 @@ class TestBestOfFriendsFeed:
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
-    def test_ranking_failure_returns_500(self):
-        """When the two-tower ranker raises, the feed returns HTTP 500."""
+    def test_ranking_failure_soft_fails_to_unranked(self):
+        """When the two-tower ranker raises, the feed soft-fails and returns candidates in unranked order."""
         candidates = _make_candidates("p", 3, with_embedding=True)
 
         with self._patch_generators(candidates), \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, side_effect=RuntimeError("inference down")):
-            resp = TestClient(app, raise_server_exceptions=False).get(
+            resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": BEST_OF_FRIENDS_FEED_URI},
             )
 
-        assert resp.status_code == 500
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert len(posts) == 3
 
 
 # ---------------------------------------------------------------------------

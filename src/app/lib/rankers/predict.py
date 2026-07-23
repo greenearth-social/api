@@ -8,6 +8,7 @@ average using each model's configured relative weight.
 
 import asyncio
 import logging
+import os
 import statistics
 
 from ...models import RankedCandidate, RankPredictRequest, RankPredictResult
@@ -17,6 +18,14 @@ from .base import Ranker, RankerError, RankerExecutionError, RankerResult, get_r
 from ..metrics import get_metric_collector
 
 logger = logging.getLogger(__name__)
+
+try:
+    _RANK_MODEL_TIMEOUT_SEC: float = float(
+        os.environ.get("GE_RANK_MODEL_TIMEOUT_SEC", "2.5")
+    )
+except ValueError:
+    _RANK_MODEL_TIMEOUT_SEC = 2.5
+
 
 class RankModelNotFoundError(Exception):
     """Raised when a requested rank model does not exist."""
@@ -62,10 +71,18 @@ async def _run_one(
             metric_attrs={"model_name": name},
             n_candidates=len(request.candidates),
         ):
-            return await ranker.predict(es, user_did, request.candidates)
+            return await asyncio.wait_for(
+                ranker.predict(es, user_did, request.candidates),
+                timeout=_RANK_MODEL_TIMEOUT_SEC,
+            )
     except RankerError:
         raise
     except RankerExecutionError:
+        raise
+    except TimeoutError:
+        logger.warning(
+            "Ranker '%s' timed out after %.1fs", name, _RANK_MODEL_TIMEOUT_SEC
+        )
         raise
     except Exception as exc:
         logger.exception("Ranker '%s' failed", name)
@@ -100,11 +117,14 @@ async def run_predict(
             raise RankModelNotFoundError(spec.name)
         resolved.append((spec.name, spec.weight, ranker))
 
+    # return_exceptions=True so one ranker timing out doesn't cancel the
+    # others mid-flight and discard their already-completed results.
     results = await asyncio.gather(
         *(
             _run_one(es, request.user_did, request, name, ranker)
             for name, _weight, ranker in resolved
-        )
+        ),
+        return_exceptions=True,
     )
 
     rec = current_recorder()
@@ -114,6 +134,13 @@ async def run_predict(
     results_by_candidate: dict[str, dict[str, float]] = {}  # {uri: {model_name: score}}
     models_with_valid_results: list[tuple[str, float, Ranker]] = [] # filtered version of resolved
     for (name, weight, ranker), result in zip(resolved, results):
+        if isinstance(result, BaseException):
+            # A model that timed out contributes no scores, same as one that
+            # returned zero valid rankings. Any other error still propagates.
+            if isinstance(result, TimeoutError):
+                continue
+            raise result
+
         # all the valid uris with their scores from this ranker model
         raw_by_uri = {
             r.at_uri: r.rank_score

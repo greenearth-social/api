@@ -10,8 +10,8 @@ import time
 import aiohttp
 
 from ..models import CandidatePost
-from .config import fail_fast
 from .http_client import get_http_client
+from .pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from .telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -288,17 +288,31 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
                 exc.language,
                 c.at_uri,
             )
-            return None
+            return None  # expected — not a degradation
         except aiohttp.ClientResponseError as exc:
             if exc.status == 429:
                 logger.warning(
                     "Perspective API rate limited for post %s; using missing score", c.at_uri
                 )
-            else:
-                logger.exception("Perspective API scoring failed for post %s", c.at_uri)
-            return None
-        except Exception:
+                return None  # expected rate-limit — not a degradation
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(DegradationEvent(
+                    stage=DegradationStage.RANK,
+                    component="perspective",
+                    cause=exc,
+                ))
+            return None
+        except Exception as exc:
+            logger.exception("Perspective API scoring failed for post %s", c.at_uri)
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(DegradationEvent(
+                    stage=DegradationStage.RANK,
+                    component="perspective",
+                    cause=exc,
+                ))
             return None
 
     scorable = [c for c in candidates if c.at_uri]
