@@ -96,7 +96,7 @@ class FeedDebugRecorder:
     def record_model_scores(self, model_name: str, weight: float, scores: dict[str, float]) -> None:
         """Record one rank model's normalized per-candidate scores and weight.
 
-        Captures the score *after* normalization to [-1, 1] (the form the
+        Captures the score *after* normalization to [0, 1] (the form the
         scores are in when combined), not the model's raw output — and not
         the final combined score, which is already captured via `ranking`.
         """

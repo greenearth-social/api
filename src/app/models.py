@@ -149,7 +149,7 @@ class RankPredictRequest(BaseModel):
         min_length=1,
         description=(
             "Rank models to run and combine. Each model's scores are normalized "
-            "to [-1, 1] using its theoretical bounds, then combined via a "
+            "to [0, 1] using its theoretical bounds, then combined via a "
             "weighted average using the configured relative weights."
         ),
     )
@@ -231,7 +231,9 @@ class FeedConfig(BaseModel):
     )
     min_rank_score: float | None = Field(
         None,
-        description="Combined rank-score floor in [-1, 1]. Candidates scoring below it "
+        ge=0.0,
+        le=1.0,
+        description="Combined rank-score floor in [0, 1]. Candidates scoring below it "
         "are cut from the slate and recorded as discarded so future generation "
         "excludes them. Only applies when rank_request_template is set. None disables.",
     )

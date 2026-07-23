@@ -63,7 +63,7 @@ class TestFeedsRegistry:
         for feed_name in ("your-feed", "best-of-friends"):
             cfg = FEEDS[feed_name]
             assert cfg.max_render_share is not None
-            assert cfg.min_rank_score is not None
+            assert cfg.min_rank_score == pytest.approx(0.425)
             assert cfg.min_mmr_score is not None
 
     def test_unranked_feeds_have_no_slate_cutoffs(self):
@@ -90,5 +90,5 @@ class TestFeedsRegistry:
             == FEEDS["your-feed"].gen_request_template.generators
         )
         assert cfg.max_render_share == pytest.approx(0.5)
-        assert cfg.min_rank_score == pytest.approx(-0.15)
+        assert cfg.min_rank_score == pytest.approx(0.425)
         assert cfg.min_mmr_score == pytest.approx(-0.05)

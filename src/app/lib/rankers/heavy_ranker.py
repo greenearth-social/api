@@ -32,7 +32,7 @@ class HeavyRanker(Ranker):
 
     @property
     def score_bounds(self) -> tuple[float, float]:
-        return (-1.0, 1.0)
+        return (0.0, 1.0)
 
     async def predict(
         self,
