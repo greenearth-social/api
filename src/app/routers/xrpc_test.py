@@ -2695,22 +2695,26 @@ class TestDevSessionStartupGuard:
             async with lifespan(app):
                 pass
 
-    @pytest.mark.asyncio
-    async def test_deployed_environment_starts_fine_without_it(self, monkeypatch):
-        # Guard must key on the variable, not merely on being deployed.
-        from ..main import app, lifespan
+    def test_deployed_environment_is_fine_without_it(self, monkeypatch):
+        # Guard must key on the variable, not merely on being deployed. This
+        # calls the guard directly rather than entering the lifespan: a clean
+        # startup goes on to build real GCP clients, which needs credentials
+        # CI doesn't have.
+        from ..main import _reject_dev_session_secret_in_deployment
 
         monkeypatch.delenv("GE_DEV_SESSION_SECRET", raising=False)
-        monkeypatch.setenv("GE_ELASTICSEARCH_API_KEY", "k")
-        monkeypatch.setenv("GE_FEED_CONTEXT_SECRET", "s")
         monkeypatch.setenv("ENVIRONMENT", "prod")
-        monkeypatch.setenv("GE_POSTHOG_API_KEY", "ph")
 
-        try:
-            async with lifespan(app):
-                pass
-        except RuntimeError as exc:  # pragma: no cover - diagnostic
-            assert "GE_DEV_SESSION_SECRET" not in str(exc)
+        _reject_dev_session_secret_in_deployment()
+
+    def test_local_environment_may_set_it(self, monkeypatch):
+        from ..main import _reject_dev_session_secret_in_deployment
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "anything")
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+        monkeypatch.delenv("GE_ENVIRONMENT", raising=False)
+
+        _reject_dev_session_secret_in_deployment()
 
 
 class TestPosthogTracking:

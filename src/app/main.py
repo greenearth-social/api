@@ -61,6 +61,21 @@ from starlette.routing import BaseRoute, Match
 from starlette.types import Scope
 
 
+def _reject_dev_session_secret_in_deployment() -> None:
+    """Refuse to run with the dev-session escape hatch enabled outside local dev.
+
+    GE_DEV_SESSION_SECRET lets a caller assume any user's identity without an
+    AT Protocol JWT (see routers.xrpc.dev_session_did). That is only ever
+    acceptable locally, so refuse to start rather than serve deployed traffic
+    with it enabled — a misconfiguration here is silent and total.
+    """
+    if os.environ.get("GE_DEV_SESSION_SECRET") and _is_deployed_environment():
+        raise RuntimeError(
+            "GE_DEV_SESSION_SECRET must not be set in a deployed environment: "
+            "it allows unauthenticated impersonation of any user"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan handler that validates required environment variables and
@@ -74,15 +89,7 @@ async def lifespan(app: FastAPI):
     if not os.environ.get("GE_FEED_CONTEXT_SECRET"):
         raise RuntimeError("GE_FEED_CONTEXT_SECRET environment variable is required")
 
-    # GE_DEV_SESSION_SECRET lets a caller assume any user's identity without an
-    # AT Protocol JWT (see routers.xrpc.dev_session_did). That is only ever
-    # acceptable locally, so refuse to start rather than serve deployed traffic
-    # with it enabled — a misconfiguration here is silent and total.
-    if os.environ.get("GE_DEV_SESSION_SECRET") and _is_deployed_environment():
-        raise RuntimeError(
-            "GE_DEV_SESSION_SECRET must not be set in a deployed environment: "
-            "it allows unauthenticated impersonation of any user"
-        )
+    _reject_dev_session_secret_in_deployment()
 
     es_url = os.environ.get("GE_ELASTICSEARCH_URL", "https://localhost:9200")
     es_api_key = os.environ.get("GE_ELASTICSEARCH_API_KEY")
