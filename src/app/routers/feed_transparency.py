@@ -7,6 +7,7 @@ GET  /api/feeds/{request_id} — full detail with pipeline metadata + hydrated p
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import UTC, datetime, timedelta
 
@@ -42,7 +43,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["feed-transparency"], prefix="/api/feeds")
 
 CACHE_WINDOW_MINUTES = 15
-TARGET_FEED_NAME = "your-feed"
+# The feed this UI reports on. Overridable so a local environment can point it
+# at a feed that runs there: "your-feed" depends on the Perspective API and the
+# trained ranking models, neither of which a developer machine has.
+TARGET_FEED_NAME = os.environ.get("GE_FEED_TRANSPARENCY_FEED", "your-feed")
 DEFAULT_LIST_LIMIT = 20
 PUBLIC_MODERATION_LABELS = frozenset(
     {

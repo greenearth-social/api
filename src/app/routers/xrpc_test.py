@@ -2612,6 +2612,107 @@ class TestGetFeedSkeletonMetrics:
         ] == []
 
 
+class TestDevSession:
+    """The development stand-in for a signed-in user (dev_session_did).
+
+    Distinct from the probe bypass on purpose: a probe is monitoring traffic
+    excluded from user data, while this has to be indistinguishable from a real
+    session downstream so the snapshot/user-record path can be exercised
+    locally.
+    """
+
+    def _request(self, headers: dict[str, str]):
+        from unittest.mock import MagicMock
+
+        request = MagicMock()
+        request.headers = headers
+        return request
+
+    def test_disabled_when_no_secret_is_configured(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.delenv("GE_DEV_SESSION_SECRET", raising=False)
+        request = self._request(
+            {"X-Dev-Session": "anything", "X-Dev-Session-DID": "did:plc:abc"}
+        )
+        assert dev_session_did(request) is None
+
+    def test_ignores_a_wrong_secret(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        request = self._request(
+            {"X-Dev-Session": "wrong", "X-Dev-Session-DID": "did:plc:abc"}
+        )
+        assert dev_session_did(request) is None
+
+    def test_ignores_a_request_with_no_headers(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        assert dev_session_did(self._request({})) is None
+
+    def test_returns_the_did_when_the_secret_matches(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        request = self._request(
+            {"X-Dev-Session": "correct", "X-Dev-Session-DID": "did:plc:abc"}
+        )
+        assert dev_session_did(request) == "did:plc:abc"
+
+    def test_rejects_a_did_that_is_not_did_plc(self, monkeypatch):
+        # The secret matched, so this is a developer mistake worth reporting
+        # rather than stray traffic to ignore.
+        from fastapi import HTTPException
+
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        request = self._request(
+            {"X-Dev-Session": "correct", "X-Dev-Session-DID": "alice.bsky.social"}
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            dev_session_did(request)
+        assert excinfo.value.status_code == 400
+
+
+class TestDevSessionStartupGuard:
+    """It must be impossible to serve deployed traffic with this enabled."""
+
+    @pytest.mark.asyncio
+    async def test_refuses_to_start_when_enabled_in_a_deployed_environment(
+        self, monkeypatch
+    ):
+        from ..main import app, lifespan
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "anything")
+        monkeypatch.setenv("GE_ELASTICSEARCH_API_KEY", "k")
+        monkeypatch.setenv("GE_FEED_CONTEXT_SECRET", "s")
+        monkeypatch.setenv("ENVIRONMENT", "prod")
+
+        with pytest.raises(RuntimeError, match="GE_DEV_SESSION_SECRET"):
+            async with lifespan(app):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_deployed_environment_starts_fine_without_it(self, monkeypatch):
+        # Guard must key on the variable, not merely on being deployed.
+        from ..main import app, lifespan
+
+        monkeypatch.delenv("GE_DEV_SESSION_SECRET", raising=False)
+        monkeypatch.setenv("GE_ELASTICSEARCH_API_KEY", "k")
+        monkeypatch.setenv("GE_FEED_CONTEXT_SECRET", "s")
+        monkeypatch.setenv("ENVIRONMENT", "prod")
+        monkeypatch.setenv("GE_POSTHOG_API_KEY", "ph")
+
+        try:
+            async with lifespan(app):
+                pass
+        except RuntimeError as exc:  # pragma: no cover - diagnostic
+            assert "GE_DEV_SESSION_SECRET" not in str(exc)
+
+
 class TestPosthogTracking:
     """Verify PostHog events are emitted from XRPC background handlers."""
 
