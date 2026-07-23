@@ -136,7 +136,7 @@ class TestRenderPost:
 class TestBuildParser:
     def test_defaults(self):
         args = feed_view.build_parser().parse_args([])
-        assert args.feed == "popularity"
+        assert args.feed == feed_view.DEFAULT_FEED
         assert args.limit == 20
         assert args.pages == 1
         assert args.no_pipeline is False

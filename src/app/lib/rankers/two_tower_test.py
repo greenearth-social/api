@@ -35,25 +35,25 @@ def test_predict_keeps_candidate_uris_aligned_with_embeddings(monkeypatch):
         lambda: ("https://example.com", "secret"),
     )
 
-    async def fake_fetch_recent_liked_post_uris(es, user_did):
-        return ["at://liked/1"]
+    async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
+        return ["at://liked/1"], [1234567890]
 
     monkeypatch.setattr(
         inference_module,
-        "fetch_recent_liked_post_uris",
-        fake_fetch_recent_liked_post_uris,
+        "fetch_recent_liked_post_uris_and_times",
+        fake_fetch_recent_liked_post_uris_and_times,
     )
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index=None):
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index=None):
         if at_uris == ["at://liked/1"]:
-            return [("at://liked/1", [0.5, 0.5], "did:plc:liked")]
+            return [("at://liked/1", [0.5, 0.5], "did:plc:liked", 4)]
         return [
-            ("at://post/b", [0.0, 1.0], "did:plc:b"),
-            ("at://post/a", [1.0, 0.0], "did:plc:a"),
+            ("at://post/b", [0.0, 1.0], "did:plc:b", 2),
+            ("at://post/a", [1.0, 0.0], "did:plc:a", 1),
         ]
 
-    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
-    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
+    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_metadata", fake_fetch_post_embeddings_and_metadata)
+    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_metadata", fake_fetch_post_embeddings_and_metadata)
 
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
         assert history_embeddings == [[0.5, 0.5]]
@@ -99,12 +99,12 @@ def test_predict_calls_user_tower_with_empty_history_when_user_has_no_likes(monk
     )
     seen = {}
 
-    async def fake_fetch_recent_liked_post_uris(es, user_did):
-        return []
+    async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
+        return [], []
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index=None):
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index=None):
         seen.setdefault("fetch_post_embeddings_calls", []).append(at_uris)
-        return [("at://post/a", [2.0, 0.0], "did:plc:a")]
+        return [("at://post/a", [2.0, 0.0], "did:plc:a", 1)]
 
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
         seen["history_embeddings"] = history_embeddings
@@ -117,16 +117,16 @@ def test_predict_calls_user_tower_with_empty_history_when_user_has_no_likes(monk
 
     monkeypatch.setattr(
         elasticsearch_module,
-        "fetch_recent_liked_post_uris",
-        fake_fetch_recent_liked_post_uris,
+        "fetch_recent_liked_post_uris_and_times",
+        fake_fetch_recent_liked_post_uris_and_times,
     )
     monkeypatch.setattr(
         inference_module,
-        "fetch_recent_liked_post_uris",
-        fake_fetch_recent_liked_post_uris,
+        "fetch_recent_liked_post_uris_and_times",
+        fake_fetch_recent_liked_post_uris_and_times,
     )
-    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
-    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
+    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_metadata", fake_fetch_post_embeddings_and_metadata)
+    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_metadata", fake_fetch_post_embeddings_and_metadata)
     monkeypatch.setattr(
         inference_module,
         "predict_user_tower_single",
@@ -158,14 +158,14 @@ def test_predict_calls_user_tower_with_empty_history_when_likes_have_no_embeddin
     )
     seen = {}
 
-    async def fake_fetch_recent_liked_post_uris(es, user_did):
-        return ["at://liked/1"]
+    async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
+        return ["at://liked/1"], [1234567890]
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index=None):
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index=None):
         seen.setdefault("fetch_post_embeddings_calls", []).append(at_uris)
         if at_uris == ["at://liked/1"]:
             return []
-        return [("at://post/a", [2.0, 0.0], "did:plc:a")]
+        return [("at://post/a", [2.0, 0.0], "did:plc:a", 1)]
 
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
         seen["history_embeddings"] = history_embeddings
@@ -178,16 +178,16 @@ def test_predict_calls_user_tower_with_empty_history_when_likes_have_no_embeddin
 
     monkeypatch.setattr(
         elasticsearch_module,
-        "fetch_recent_liked_post_uris",
-        fake_fetch_recent_liked_post_uris,
+        "fetch_recent_liked_post_uris_and_times",
+        fake_fetch_recent_liked_post_uris_and_times,
     )
     monkeypatch.setattr(
         inference_module,
-        "fetch_recent_liked_post_uris",
-        fake_fetch_recent_liked_post_uris,
+        "fetch_recent_liked_post_uris_and_times",
+        fake_fetch_recent_liked_post_uris_and_times,
     )
-    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
-    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
+    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_metadata", fake_fetch_post_embeddings_and_metadata)
+    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_metadata", fake_fetch_post_embeddings_and_metadata)
     monkeypatch.setattr(
         inference_module,
         "predict_user_tower_single",
@@ -221,10 +221,10 @@ def test_predict_returns_unscored_candidates_when_candidate_embeddings_are_missi
         lambda: ("https://example.com", "secret"),
     )
 
-    async def fake_fetch_recent_liked_post_uris(es, user_did):
-        return []
+    async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
+        return [], []
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index=None):
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index=None):
         return []
 
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
@@ -236,15 +236,15 @@ def test_predict_returns_unscored_candidates_when_candidate_embeddings_are_missi
 
     monkeypatch.setattr(
         elasticsearch_module,
-        "fetch_recent_liked_post_uris",
-        fake_fetch_recent_liked_post_uris,
+        "fetch_recent_liked_post_uris_and_times",
+        fake_fetch_recent_liked_post_uris_and_times,
     )
     monkeypatch.setattr(
         inference_module,
-        "fetch_recent_liked_post_uris",
-        fake_fetch_recent_liked_post_uris,
+        "fetch_recent_liked_post_uris_and_times",
+        fake_fetch_recent_liked_post_uris_and_times,
     )
-    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
+    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_metadata", fake_fetch_post_embeddings_and_metadata)
     monkeypatch.setattr(
         inference_module,
         "predict_user_tower_single",
@@ -276,13 +276,13 @@ def test_predict_raises_when_user_tower_returns_wrong_number_of_embeddings(monke
         lambda: ("https://example.com", "secret"),
     )
 
-    async def fake_fetch_recent_liked_post_uris(es, user_did):
-        return ["at://liked/1"]
+    async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
+        return ["at://liked/1"], [1234567890]
 
-    async def fake_fetch_post_embeddings_and_authors(es, at_uris, index=None):
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index=None):
         if at_uris == ["at://liked/1"]:
-            return [("at://liked/1", [0.5, 0.5], "did:plc:liked")]
-        return [("at://post/a", [1.0, 0.0], "did:plc:a")]
+            return [("at://liked/1", [0.5, 0.5], "did:plc:liked", 4)]
+        return [("at://post/a", [1.0, 0.0], "did:plc:a", 1)]
 
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
         assert history_author_dids == ["did:plc:liked"]
@@ -294,16 +294,16 @@ def test_predict_raises_when_user_tower_returns_wrong_number_of_embeddings(monke
 
     monkeypatch.setattr(
         elasticsearch_module,
-        "fetch_recent_liked_post_uris",
-        fake_fetch_recent_liked_post_uris,
+        "fetch_recent_liked_post_uris_and_times",
+        fake_fetch_recent_liked_post_uris_and_times,
     )
     monkeypatch.setattr(
         inference_module,
-        "fetch_recent_liked_post_uris",
-        fake_fetch_recent_liked_post_uris,
+        "fetch_recent_liked_post_uris_and_times",
+        fake_fetch_recent_liked_post_uris_and_times,
     )
-    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
-    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_authors", fake_fetch_post_embeddings_and_authors)
+    monkeypatch.setattr(two_tower_module, "fetch_post_embeddings_and_metadata", fake_fetch_post_embeddings_and_metadata)
+    monkeypatch.setattr(inference_module, "fetch_post_embeddings_and_metadata", fake_fetch_post_embeddings_and_metadata)
     monkeypatch.setattr(
         inference_module,
         "predict_user_tower_single",
