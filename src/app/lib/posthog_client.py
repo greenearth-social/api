@@ -15,9 +15,12 @@ PostHog events emitted:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from posthog import Posthog
+
+logger = logging.getLogger(__name__)
 
 _posthog_client: Posthog | None = None
 
@@ -81,3 +84,19 @@ def track_interaction(
         properties=properties,
         timestamp=timestamp,
     )
+
+
+def evaluate_fail_fast_flag(client: Posthog | None, user_did: str) -> bool:
+    """Evaluate the fail-fast-feed PostHog feature flag for this user.
+
+    Returns True only when the client is present and the flag is enabled for
+    user_did. Soft-fails to False on any SDK exception so a PostHog outage
+    never breaks feed serving.
+    """
+    if client is None:
+        return False
+    try:
+        return bool(client.is_feature_enabled("fail-fast-feed", user_did))
+    except Exception:
+        logger.warning("PostHog feature flag evaluation failed for %s", user_did)
+        return False
