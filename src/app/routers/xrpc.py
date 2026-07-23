@@ -590,11 +590,12 @@ async def _run_pipeline_capturing(
 
 def _feed_request_timeout_sec() -> float:
     """Internal deadline for the feed pipeline, read fresh per call so it can
-    be overridden per-request in tests. Set below the Cloud Run request
-    timeout so a downstream hang (ES, ranker) surfaces as a logged 504 instead
-    of the platform silently killing the connection with nothing recorded.
+    be overridden per-request in tests. Set below the Bluesky AppView's 10s
+    abort on getFeedSkeleton calls (see #291) so a downstream hang (ES,
+    ranker) surfaces as a logged 504 instead of losing the race against the
+    client's own timeout with nothing recorded.
     """
-    return float(os.environ.get("GE_FEED_REQUEST_TIMEOUT_SEC", "45"))
+    return float(os.environ.get("GE_FEED_REQUEST_TIMEOUT_SEC", "9"))
 
 
 async def _run_pipeline_capturing_with_timeout(
