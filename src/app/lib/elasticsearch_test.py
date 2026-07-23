@@ -3,8 +3,7 @@
 import pytest
 
 from .elasticsearch import (
-    fetch_post_embeddings,
-    fetch_post_embeddings_and_authors,
+    fetch_post_embeddings_and_metadata,
     fetch_recent_liked_post_uris,
     fetch_recent_liked_post_uris_and_times,
 )
@@ -163,7 +162,7 @@ class TestFetchRecentLikedPostUrisAndTimes:
         assert es.calls == []
 
 
-class TestFetchPostEmbeddings:
+class TestFetchPostEmbeddingsAndMetadata:
     @pytest.mark.asyncio
     async def test_returns_embeddings_in_requested_uri_order(self):
         es = FakeEs(responses={
@@ -188,21 +187,23 @@ class TestFetchPostEmbeddings:
                 }
             }
         })
-        vecs = await fetch_post_embeddings(es, ["at://1", "at://2"])
+        vecs = await fetch_post_embeddings_and_metadata(es, ["at://1", "at://2"])
         assert vecs == [
-            ("at://1", [0.1, 0.2]),
-            ("at://2", [0.3, 0.4]),
+            ("at://1", [0.1, 0.2], "", 0),
+            ("at://2", [0.3, 0.4], "", 0),
         ]
         assert es.calls[0]["_source"] == [
             "at_uri",
             MINILM_L12_EMBEDDING_FIELD,
+            "author_did",
+            "like_count",
             "content",
         ]
 
     @pytest.mark.asyncio
-    async def test_returns_empty_for_empty_input(self):
+    async def test_returns_empty_for_empty_input_with_metadata_shape(self):
         es = FakeEs()
-        vecs = await fetch_post_embeddings(es, [])
+        vecs = await fetch_post_embeddings_and_metadata(es, [])
         assert vecs == []
         assert len(es.calls) == 0
 
@@ -230,8 +231,8 @@ class TestFetchPostEmbeddings:
                 }
             }
         })
-        vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
-        assert vecs == [("at://1", [0.1, 0.2])]
+        vecs = await fetch_post_embeddings_and_metadata(es, ["at://1", "at://2", "at://3"])
+        assert vecs == [("at://1", [0.1, 0.2], "", 0)]
 
     @pytest.mark.asyncio
     async def test_skips_embeddings_without_source_text(self):
@@ -259,15 +260,14 @@ class TestFetchPostEmbeddings:
                 }
             }
         })
-        vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
+        vecs = await fetch_post_embeddings_and_metadata(es, ["at://1", "at://2", "at://3"])
         assert vecs == [
-            ("at://1", [0.1, 0.2]),
+            ("at://1", [0.1, 0.2], "", 0),
         ]
 
 
-class TestFetchPostEmbeddingsAndAuthors:
     @pytest.mark.asyncio
-    async def test_returns_embeddings_and_authors_in_requested_uri_order(self):
+    async def test_returns_embeddings_authors_and_like_counts_in_requested_uri_order(self):
         es = FakeEs(responses={
             "posts": {
                 "hits": {
@@ -276,6 +276,7 @@ class TestFetchPostEmbeddingsAndAuthors:
                             "_source": {
                                 "at_uri": "at://2",
                                 "author_did": "did:plc:two",
+                                "like_count": 22,
                                 "content": "two",
                                 "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
                             }
@@ -284,6 +285,7 @@ class TestFetchPostEmbeddingsAndAuthors:
                             "_source": {
                                 "at_uri": "at://1",
                                 "author_did": "did:plc:one",
+                                "like_count": 11,
                                 "content": "one",
                                 "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
                             }
@@ -292,20 +294,21 @@ class TestFetchPostEmbeddingsAndAuthors:
                 }
             }
         })
-        vecs = await fetch_post_embeddings_and_authors(es, ["at://1", "at://2"])
+        vecs = await fetch_post_embeddings_and_metadata(es, ["at://1", "at://2"])
         assert vecs == [
-            ("at://1", [0.1, 0.2], "did:plc:one"),
-            ("at://2", [0.3, 0.4], "did:plc:two"),
+            ("at://1", [0.1, 0.2], "did:plc:one", 11),
+            ("at://2", [0.3, 0.4], "did:plc:two", 22),
         ]
         assert es.calls[0]["_source"] == [
             "at_uri",
             MINILM_L12_EMBEDDING_FIELD,
             "author_did",
+            "like_count",
             "content",
         ]
 
     @pytest.mark.asyncio
-    async def test_keeps_posts_with_missing_author_dids(self):
+    async def test_keeps_posts_with_missing_author_dids_and_like_counts(self):
         es = FakeEs(responses={
             "posts": {
                 "hits": {
@@ -321,6 +324,7 @@ class TestFetchPostEmbeddingsAndAuthors:
                             "_source": {
                                 "at_uri": "at://2",
                                 "author_did": 123,
+                                "like_count": "2",
                                 "content": "two",
                                 "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
                             }
@@ -336,10 +340,10 @@ class TestFetchPostEmbeddingsAndAuthors:
                 }
             }
         })
-        vecs = await fetch_post_embeddings_and_authors(es, ["at://1", "at://2", "at://3"])
+        vecs = await fetch_post_embeddings_and_metadata(es, ["at://1", "at://2", "at://3"])
         assert vecs == [
-            ("at://1", [0.1, 0.2], ""),
-            ("at://2", [0.3, 0.4], ""),
+            ("at://1", [0.1, 0.2], "", 0),
+            ("at://2", [0.3, 0.4], "", 0),
         ]
 
     @pytest.mark.asyncio
@@ -370,12 +374,5 @@ class TestFetchPostEmbeddingsAndAuthors:
                 }
             }
         })
-        vecs = await fetch_post_embeddings_and_authors(es, ["at://1", "at://2"])
-        assert vecs == [("at://1", [0.1, 0.2], "did:plc:one")]
-
-    @pytest.mark.asyncio
-    async def test_returns_empty_for_empty_input(self):
-        es = FakeEs()
-        vecs = await fetch_post_embeddings_and_authors(es, [])
-        assert vecs == []
-        assert len(es.calls) == 0
+        vecs = await fetch_post_embeddings_and_metadata(es, ["at://1", "at://2"])
+        assert vecs == [("at://1", [0.1, 0.2], "did:plc:one", 0)]

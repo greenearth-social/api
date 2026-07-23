@@ -10,7 +10,7 @@ import logging
 
 from ...models import RankedCandidate, CandidatePost, RankPredictResult
 from .base import Ranker, RankerExecutionError, RankerResult
-from ..elasticsearch import fetch_post_embeddings_and_authors
+from ..elasticsearch import fetch_post_embeddings_and_metadata
 from ..embeddings import decode_float32_b64
 from ..http_client import get_http_client
 from ..telemetry import timed
@@ -113,35 +113,35 @@ class TwoTowerRanker(Ranker):
                 logger, "two_tower_post_side", n_candidates=len(candidates_by_uri)
             ):
                 # Use embeddings already carried on CandidatePost when available (avoids an ES round-trip).
-                uris_embs_authors: list[tuple[str, list[float], str]] = []
+                uris_and_metadata: list[tuple[str, list[float], str, int]] = []
                 missing_uris: list[str] = []
                 for uri, candidate in candidates_by_uri.items():
                     if candidate.minilm_l12_embedding and candidate.author_did:
                         try:
                             vec = decode_float32_b64(candidate.minilm_l12_embedding)
-                            uris_embs_authors.append((uri, vec, candidate.author_did))
+                            uris_and_metadata.append((uri, vec, candidate.author_did, candidate.like_count or 0))
                             continue
                         except Exception:
                             pass
                     missing_uris.append(uri)
 
                 if missing_uris:
-                    fetched = await fetch_post_embeddings_and_authors(es, missing_uris, index="posts_recent")
-                    uris_embs_authors.extend(fetched)
+                    fetched = await fetch_post_embeddings_and_metadata(es, missing_uris, index="posts_recent")
+                    uris_and_metadata.extend(fetched)
 
-                if not uris_embs_authors:
+                if not uris_and_metadata:
                     return None
 
                 ranked_candidates_input = [
                     candidates_by_uri[at_uri]
-                    for at_uri, _, _ in uris_embs_authors
+                    for at_uri, _, _, _ in uris_and_metadata
                     if at_uri in candidates_by_uri
                 ]
                 input_post_embeddings = [
-                    embedding for _, embedding, _ in uris_embs_authors
+                    embedding for _, embedding, _, _ in uris_and_metadata
                 ]
                 author_dids = [
-                    author_did for _, _, author_did in uris_embs_authors
+                    author_did for _, _, author_did, _ in uris_and_metadata
                 ]
 
                 output_post_embeddings = await predict_post_tower_batch(
