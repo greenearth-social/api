@@ -28,7 +28,7 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import NoReturn
 
 from rich import box
@@ -37,7 +37,12 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from feed_format import fmt_score as _fmt_score
+from feed_format import media_badges
+from feed_format import relative_time as _relative_time
 
 from app.documents import FeedDebugDocument
 from app.lib.firestore import (
@@ -94,28 +99,6 @@ def _die(message: str) -> NoReturn:
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
-
-
-def _relative_time(dt: datetime) -> str:
-    """Compact relative-time string for a tz-aware datetime."""
-    try:
-        delta = datetime.now(timezone.utc) - dt
-        secs = delta.total_seconds()
-        if secs < 60:
-            return "just now"
-        if secs < 3_600:
-            return f"{int(secs / 60)}m ago"
-        if secs < 86_400:
-            return f"{int(secs / 3_600)}h ago"
-        if delta.days < 30:
-            return f"{delta.days}d ago"
-        return dt.strftime("%b %d, %Y")
-    except Exception:
-        return str(dt)
-
-
-def _fmt_score(score: float | None) -> str:
-    return f"{score:.4f}" if score is not None else "—"
 
 
 def _diversification_relevance_contribution(div) -> float:
@@ -215,20 +198,13 @@ def _candidate_stats_rows(doc: FeedDebugDocument) -> list[tuple[str, str, str, s
 
 def _media_summary(c) -> Text | None:
     """Yellow media badges for a candidate, or None when it has no media."""
-    parts = []
-    if c.image_count:
-        parts.append(f"{c.image_count} image{'s' if c.image_count != 1 else ''}")
-    elif c.contains_images:
-        parts.append("image")
-    if c.video_count:
-        parts.append(f"{c.video_count} video{'s' if c.video_count != 1 else ''}")
-    elif c.contains_video:
-        parts.append("video")
-    if c.external_uri:
-        parts.append("link")
-    if not parts:
-        return None
-    return Text(f"[{', '.join(parts)}]", style="dim yellow")
+    return media_badges(
+        image_count=c.image_count,
+        contains_images=c.contains_images,
+        video_count=c.video_count,
+        contains_video=c.contains_video,
+        external_uri=c.external_uri,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +534,7 @@ def _render_show(doc: FeedDebugDocument) -> None:
     if doc.model_scores:
         console.print(
             "[dim]model scores = each rank model's per-candidate score normalized to "
-            "[-1, 1], with its configured weight — the inputs to the combined "
+            "[0, 1], with its configured weight — the inputs to the combined "
             "(model) score above[/dim]"
         )
     console.print()

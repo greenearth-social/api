@@ -178,62 +178,6 @@ generate_requirements() {
     fi
 }
 
-deploy_firestore_config() {
-    log_info "Deploying Firestore rules and indexes for project $PROJECT_ID..."
-
-    if ! command -v firebase &> /dev/null; then
-        log_error "firebase CLI is not installed. Install with: npm install -g firebase-tools"
-        exit 1
-    fi
-
-    if [ ! -f "firebase.json" ] || [ ! -f "firestore.rules" ]; then
-        log_error "Missing firebase.json or firestore.rules in $(pwd)"
-        log_error "Run this script from the api/ directory where Firebase config lives"
-        exit 1
-    fi
-
-    # Deploy Firestore rules only. Indexes are managed via gcloud below because
-    # firebase deploy does not support named databases — it targets only the
-    # default database, which causes spurious "index not in file" warnings for
-    # the named stage/prod databases.
-    firebase deploy --only firestore:rules --project "$PROJECT_ID"
-
-    if [ $? -eq 0 ]; then
-        log_info "✓ Firestore rules deployed successfully"
-    else
-        log_error "Failed to deploy Firestore rules"
-        exit 1
-    fi
-
-    local firestore_database="greenearth-stage"
-    if [ "$ENVIRONMENT" = "prod" ]; then
-        firestore_database="greenearth-prod"
-    fi
-
-    log_info "Deploying collection-group index for feed_snapshots on ${firestore_database}..."
-    local index_output
-    local index_exit
-    # set -e would abort on non-zero exit from command substitution, so capture
-    # the exit code separately without letting the shell treat failure as fatal.
-    index_output=$(gcloud firestore indexes composite create \
-        --collection-group=feed_snapshots \
-        --query-scope=COLLECTION_GROUP \
-        --field-config=field-path=feed_name,order=ASCENDING \
-        --field-config=field-path=generated_at,order=DESCENDING \
-        --project="$PROJECT_ID" \
-        --database="$firestore_database" \
-        --quiet 2>&1) && index_exit=0 || index_exit=$?
-
-    if [ $index_exit -eq 0 ]; then
-        log_info "✓ Collection-group index creation requested (may take a few minutes to build)"
-    elif echo "$index_output" | grep -q "ALREADY_EXISTS"; then
-        log_info "✓ Collection-group index already exists, skipping"
-    else
-        log_error "Failed to create collection-group index: $index_output"
-        exit 1
-    fi
-}
-
 deploy_api_service() {
     log_info "Deploying greenearth-api-$ENVIRONMENT service from source..."
 
@@ -279,7 +223,9 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_PROBE_USER_DID=did:plc:s4tl2ajfsnstzuxtegl7r33g"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=15"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=4"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_RANK_MODEL_TIMEOUT_SEC=2.5"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_EMBED_HYDRATION_TIMEOUT_SEC=1.5"
     # Below the AppView's 10s abort on getFeedSkeleton calls (confirmed via
     # atproto source, see #291) so a hung downstream call (ES, ranker)
     # surfaces as a logged, metered 504 instead of losing the race against
@@ -451,7 +397,6 @@ main() {
     fi
 
     get_elasticsearch_internal_lb_ip
-    deploy_firestore_config
     generate_requirements
     deploy_api_service
     sync_feeds
