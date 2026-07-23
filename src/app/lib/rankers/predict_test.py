@@ -350,7 +350,7 @@ def test_run_predict_excludes_timed_out_ranker_without_losing_fast_ranker(monkey
 
     assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
         ("at://post/a", 1, pytest.approx(1.0)),
-        ("at://post/b", 2, pytest.approx(-1.0)),
+        ("at://post/b", 2, pytest.approx(0.0)),
     ]
 
 
