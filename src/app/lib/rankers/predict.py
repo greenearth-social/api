@@ -1,7 +1,7 @@
 """Shared ranking pipeline.
 
 Given a `RankPredictRequest`, runs each configured rank model in parallel,
-normalizes each model's raw scores into [-1, 1] using its theoretical
+normalizes each model's raw scores into [0, 1] using its theoretical
 `score_bounds`, and combines them into a single ordering via a weighted
 average using each model's configured relative weight.
 """
@@ -31,20 +31,20 @@ def _normalize(
     bounds: tuple[float, float],
     fallback_normalized_score: float,
 ) -> float:
-    """Linearly map *raw* from *bounds* into [-1, 1], clamping the result.
+    """Linearly map *raw* from *bounds* into [0, 1], clamping the result.
 
     Missing scores (``None`` — e.g. a ranker couldn't score a candidate)
-    normalize to ``fallback_normalized_score`` (neutral), matching how individual rankers already
-    treat unscoreable candidates. Degenerate bounds (``hi <= lo``) also
-    normalize to ``fallback_normalized_score`` to avoid division by zero.
+    normalize to ``fallback_normalized_score``. Degenerate bounds
+    (``hi <= lo``) also normalize to ``fallback_normalized_score`` to avoid
+    division by zero.
     """
     if raw is None:
         return fallback_normalized_score
     lo, hi = bounds
     if hi <= lo:
         return fallback_normalized_score
-    normalized = 2.0 * (raw - lo) / (hi - lo) - 1.0
-    return max(-1.0, min(1.0, normalized))
+    normalized = (raw - lo) / (hi - lo)
+    return max(0.0, min(1.0, normalized))
 
 
 async def _run_one(
@@ -79,9 +79,9 @@ async def run_predict(
     """Rank the supplied candidates by combining the requested rank models.
 
     Each model runs in parallel; its raw `rank_score`s are normalized into
-    [-1, 1] using its `score_bounds`, then combined into a single score per
+    [0, 1] using its `score_bounds`, then combined into a single score per
     candidate via a weighted average (weights normalized to sum to 1, so the
-    combined score also stays within [-1, 1]). The final ordering is by
+    combined score also stays within [0, 1]). The final ordering is by
     combined score, descending, with ties broken by original candidate order.
     If a candidate at_uri has no valid scores from any model, it is dropped.
     If it has a score from at least one model but not the others, the median
@@ -123,7 +123,7 @@ async def run_predict(
         if raw_by_uri:
             bounds = ranker.score_bounds
             raw_median = statistics.median(raw_by_uri.values())
-            medians_by_model[name] = _normalize(raw_median, bounds, 0.0)
+            medians_by_model[name] = _normalize(raw_median, bounds, 0.5)
             models_with_valid_results.append((name, weight, ranker))
         for uri, score in raw_by_uri.items():
             if uri not in results_by_candidate:

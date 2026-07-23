@@ -15,6 +15,10 @@ def _time(hour: int) -> datetime:
     return datetime(2026, 1, 1, hour, tzinfo=timezone.utc)
 
 
+def test_score_bounds_match_inference_service_output_range():
+    assert HeavyRanker().score_bounds == (0.0, 1.0)
+
+
 def test_predict_requires_inference_env_vars(monkeypatch):
     monkeypatch.delenv("GE_INFERENCE_BASE_URL", raising=False)
     monkeypatch.delenv("GE_INFERENCE_API_KEY", raising=False)
