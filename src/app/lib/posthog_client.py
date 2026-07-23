@@ -96,7 +96,7 @@ def evaluate_fail_fast_flag(client: Posthog | None, user_did: str) -> bool:
     if client is None:
         return False
     try:
-        return bool(client.is_feature_enabled("fail-fast-feed", user_did))
+        return bool(client.feature_enabled("fail-fast-feed", user_did))
     except Exception:
         logger.warning("PostHog feature flag evaluation failed for %s", user_did)
         return False
