@@ -48,6 +48,7 @@ from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
+from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     get_recent_discarded_uris,
@@ -1150,7 +1151,9 @@ async def get_feed_skeleton(
     except Exception:
         logger.exception("Failed to read debug flag for user '%s'", user_did)
 
-    # Apply social-radius preference override to your-feed generator weights.
+    # Social Radius only reallocates the fixed candidate batch among sources;
+    # it never increases the total candidate count or per-request batch cap.
+    # Apply its preference override to your-feed generator weights.
     # The override is computed once and threaded through model_copy in both
     # generation paths so the shared module-level template is never mutated.
     generators_override: dict = {}
@@ -1160,6 +1163,11 @@ async def get_feed_skeleton(
         preset = SOCIAL_RADIUS_PRESETS.get(applied_social_radius)
         if preset is not None:
             generators_override = {"generators": preset}
+
+    freshness_index = (
+        user_doc.freshness if user_doc is not None else DEFAULT_FRESHNESS_INDEX
+    )
+    max_age_hours = max_age_hours_for_freshness(freshness_index)
 
     feed_cache = _get_feed_cache(request)
 
@@ -1227,6 +1235,7 @@ async def get_feed_skeleton(
                         "user_did": user_did,
                         "num_candidates": batch,
                         "exclude_uris": exclude_uris,
+                        "max_age_hours": max_age_hours,
                         **generators_override,
                     }
                 )
@@ -1296,6 +1305,7 @@ async def get_feed_skeleton(
                     "user_did": user_did,
                     "num_candidates": batch,
                     "exclude_uris": exclude_uris,
+                    "max_age_hours": max_age_hours,
                     **generators_override,
                 }
             )

@@ -22,7 +22,6 @@ from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult, get_generator
-from .followed_users import FollowedUsersCandidateGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -131,30 +130,19 @@ async def run_generate(
     ) -> list[CandidateResult]:
         try:
             async with timed(logger, "candidates.generate.duration_ms", record_metric=True, metric_attrs={"generator_name": spec.name}, count=count):
-                if isinstance(gen, FollowedUsersCandidateGenerator):
-                    results = await asyncio.wait_for(
-                        gen.generate_stages(
+                results = [
+                    await asyncio.wait_for(
+                        gen.generate(
                             es=es,
                             user_did=request.user_did,
                             num_candidates=count,
                             video_only=request.video_only,
                             exclude_uris=request.exclude_uris or None,
+                            max_age_hours=request.max_age_hours,
                         ),
                         timeout=_GENERATOR_TIMEOUT_SEC,
                     )
-                else:
-                    results = [
-                        await asyncio.wait_for(
-                            gen.generate(
-                                es=es,
-                                user_did=request.user_did,
-                                num_candidates=count,
-                                video_only=request.video_only,
-                                exclude_uris=request.exclude_uris or None,
-                            ),
-                            timeout=_GENERATOR_TIMEOUT_SEC,
-                        )
-                    ]
+                ]
             if mc := get_metric_collector():
                 mc.record(
                     "candidates.generate.success_count",
@@ -238,7 +226,8 @@ async def run_generate(
                 infill_exclude_uris.append(c.at_uri)
 
         try:
-            # Ask for extra to compensate for likely dedup losses
+            # Infill receives the same freshness window as primary generation;
+            # it may compensate for deduplication but must never widen eligibility.
             infill_result = await asyncio.wait_for(
                 infill_gen.generate(
                     es=es,
@@ -246,6 +235,7 @@ async def run_generate(
                     num_candidates=shortfall * 2,
                     video_only=request.video_only,
                     exclude_uris=infill_exclude_uris or None,
+                    max_age_hours=request.max_age_hours,
                 ),
                 timeout=_GENERATOR_TIMEOUT_SEC,
             )

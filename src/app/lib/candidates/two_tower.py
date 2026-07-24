@@ -6,6 +6,7 @@ for the most relevant posts via the pre-calculated post embeddings.
 
 import logging
 
+from ...models import MaxAgeHours
 from .base import CandidateGenerator, CandidateResult
 from ..inference import get_inference_settings, compute_user_embedding, get_cached_post_tower_uuid
 from .es_candidates import knn_search_posts
@@ -36,6 +37,7 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         num_candidates: int = 100,
         video_only: bool = False,
         exclude_uris: list[str] | None = None,
+        max_age_hours: MaxAgeHours = 168,
     ) -> CandidateResult:
         inference_base_url, inference_api_key = (
             get_inference_settings()
@@ -64,11 +66,13 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             TWO_TOWER_GENERATOR_NAME,
         )
 
-        # kNN search for the most relevant posts given the user embedding
+        # Freshness filters returned candidates, not the interaction history
+        # used above to compute the user embedding.
         candidates = await knn_search_posts(
             es, user_embedding, num_candidates, search_field=GE_POST_EMBEDDING_FIELD,
             generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
             ge_post_embedding_model_uuid=post_tower_uuid, min_like_count=MIN_LIKE_COUNT,
+            max_age_hours=max_age_hours,
         )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

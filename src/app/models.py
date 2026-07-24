@@ -1,5 +1,5 @@
 import base64
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -87,6 +87,9 @@ class GeneratorSpec(BaseModel):
     )
 
 
+MaxAgeHours = Literal[6, 12, 24, 48, 72, 168]
+
+
 class CandidateGenerateRequest(BaseModel):
     """Describes a candidate-generation job.
 
@@ -102,6 +105,13 @@ class CandidateGenerateRequest(BaseModel):
     user_did: str = Field(..., description="AT Protocol DID of the user")
     num_candidates: int = Field(100, ge=1, le=1000, description="Total candidates to return")
     video_only: bool = Field(False, description="When true, only return posts containing video")
+    # Freshness always means the candidate post's created_at timestamp. Actual
+    # availability may be shorter than this upper bound when an environment's
+    # backing index retention is shorter (notably stage).
+    max_age_hours: MaxAgeHours = Field(
+        168,
+        description="Maximum candidate-post age in hours (6h through 7d).",
+    )
     exclude_uris: list[str] = Field(
         default_factory=list,
         description=(

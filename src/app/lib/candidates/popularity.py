@@ -18,7 +18,7 @@ via configuration.
 
 import logging
 
-from ...models import CandidatePost
+from ...models import CandidatePost, MaxAgeHours
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 from ..telemetry import timed
@@ -29,14 +29,6 @@ logger = logging.getLogger(__name__)
 # Tunables
 # ---------------------------------------------------------------------------
 
-# How far back to look for posts (ES date-math expression).
-RECENCY_WINDOW = "24h"
-
-# Gaussian decay parameters for created_at.
-# ``origin`` is implicitly "now".
-# ``scale`` controls how quickly the score falls off — posts older than
-#  this lose about half their recency boost.
-DECAY_SCALE = "6h"
 # ``offset`` — posts within this window of "now" are treated as equally new.
 DECAY_OFFSET = "1h"
 # ``decay`` — the score at ``scale`` distance from the origin (0–1).
@@ -46,6 +38,14 @@ DECAY_FACTOR = 0.5
 LIKE_FACTOR = 1.5
 # log(1 + like_count), clamping bad negative values to avoid NaN.
 LIKE_MISSING = 0
+
+
+def recency_decay_scale(max_age_hours: MaxAgeHours) -> str:
+    """Return a decay scale equal to one quarter of the freshness window."""
+    scale_minutes = max_age_hours * 15
+    if scale_minutes % 60 == 0:
+        return f"{scale_minutes // 60}h"
+    return f"{scale_minutes}m"
 
 
 # ---------------------------------------------------------------------------
@@ -58,11 +58,15 @@ async def popularity_search(
     generator_name: str | None = None,
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
+    max_age_hours: MaxAgeHours = 168,
 ) -> list[CandidatePost]:
     """Run a function_score query combining recency and like_count."""
 
+    # Freshness applies to candidate post created_at. Scaling the Gaussian with
+    # the hard window keeps wider presets meaningful rather than scoring their
+    # oldest eligible posts effectively at zero.
     filters: list[dict] = [
-        {"range": {"created_at": {"gte": f"now-{RECENCY_WINDOW}"}}},
+        {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}},
     ]
     if video_only:
         filters.append({"term": {"contains_video": True}})
@@ -79,7 +83,7 @@ async def popularity_search(
                     "gauss": {
                         "created_at": {
                             "origin": "now",
-                            "scale": DECAY_SCALE,
+                            "scale": recency_decay_scale(max_age_hours),
                             "offset": DECAY_OFFSET,
                             "decay": DECAY_FACTOR,
                         }
@@ -146,9 +150,10 @@ class PopularityCandidateGenerator(CandidateGenerator):
         num_candidates: int = 100,
         video_only: bool = False,
         exclude_uris: list[str] | None = None,
+        max_age_hours: MaxAgeHours = 168,
     ) -> CandidateResult:
         candidates = await popularity_search(
             es, num_candidates, generator_name=self.name, video_only=video_only,
-            exclude_uris=exclude_uris,
+            exclude_uris=exclude_uris, max_age_hours=max_age_hours,
         )
         return CandidateResult(generator_name=self.name, candidates=candidates)

@@ -98,6 +98,7 @@ class TestTwoTowerCandidateGenerator:
             exclude_uris=["at://old/1", "at://old/2"],
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=MIN_LIKE_COUNT,
+            max_age_hours=168,
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == candidates
@@ -137,6 +138,7 @@ class TestTwoTowerCandidateGenerator:
             exclude_uris=None,
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=MIN_LIKE_COUNT,
+            max_age_hours=168,
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == []
@@ -176,6 +178,7 @@ class TestTwoTowerCandidateGenerator:
             exclude_uris=None,
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=MIN_LIKE_COUNT,
+            max_age_hours=168,
         )
         assert result.candidates == []
 

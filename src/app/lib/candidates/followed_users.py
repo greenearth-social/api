@@ -1,10 +1,12 @@
 """Candidate generator for posts from followed users.
 
-Returns the last N posts from users that the requesting user follows"""
+Returns the newest posts, within the requested freshness window, from users
+that the requesting user follows.
+"""
 
 import logging
 
-from ...models import CandidatePost
+from ...models import CandidatePost, MaxAgeHours
 from ..bsky import FollowedUsersLookupError, get_followed_user_dids
 from ..config import fail_fast
 from ..telemetry import timed
@@ -13,20 +15,8 @@ from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Parameters
-# ---------------------------------------------------------------------------
-
-# Maximum number of followed users to use in the query
 MAX_FOLLOWED_USERS = 1_000
-RECENT_FRIENDS_WINDOW = "24h"
-MAX_FRIENDS_WINDOW = "7d"
 
-
-# ---------------------------------------------------------------------------
-# Query helper
-# ---------------------------------------------------------------------------
 
 async def followed_users_search(
     es,
@@ -35,69 +25,38 @@ async def followed_users_search(
     generator_name: str | None = None,
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
+    max_age_hours: MaxAgeHours = 168,
 ) -> list[CandidatePost]:
-    """Fetch posts from users followed by user_did from the ``posts_recent`` index."""
-    try:
-        candidates, _ = await _followed_users_search_details(
-            es,
-            user_did,
-            num_candidates,
-            generator_name=generator_name,
-            video_only=video_only,
-            exclude_uris=exclude_uris,
-        )
-        return candidates
-    except FollowedUsersLookupError:
-        if fail_fast():
-            raise
-        return []
-
-
-async def _followed_users_search_details(
-    es,
-    user_did: str,
-    num_candidates: int,
-    generator_name: str | None = None,
-    video_only: bool = False,
-    exclude_uris: list[str] | None = None,
-    created_at_gte: str | None = None,
-    created_at_lt: str | None = None,
-    followed_dids: list[str] | None = None,
-) -> tuple[list[CandidatePost], str | None]:
-
+    """Fetch followed-user posts from ``posts_recent`` within one strict window."""
     filters: list[dict] = []
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
-    if followed_dids is None:
-        try:
-            async with timed(logger, "bsky_get_follows", user_did=user_did):
-                followed_dids = await get_followed_user_dids(
-                    user_did,
-                    limit=MAX_FOLLOWED_USERS,
-                )
-        except FollowedUsersLookupError as exc:
-            logger.warning(
-                "Skipping followed_users candidate generation for %s after follow "
-                "lookup failed: %s",
+    try:
+        async with timed(logger, "bsky_get_follows", user_did=user_did):
+            followed_dids = await get_followed_user_dids(
                 user_did,
-                exc,
+                limit=MAX_FOLLOWED_USERS,
             )
-            if fail_fast():
-                raise
-            return [], "follow_lookup_failed"
+    except FollowedUsersLookupError as exc:
+        logger.warning(
+            "Skipping followed_users candidate generation for %s after follow "
+            "lookup failed: %s",
+            user_did,
+            exc,
+        )
+        if fail_fast():
+            raise
+        return []
 
     if not followed_dids:
-        return [], "no_followed_users"
+        return []
 
-    if created_at_gte is not None or created_at_lt is not None:
-        bounds = {}
-        if created_at_gte is not None:
-            bounds["gte"] = created_at_gte
-        if created_at_lt is not None:
-            bounds["lt"] = created_at_lt
-        filters.append({"range": {"created_at": bounds}})
-
+    # Freshness applies to the candidate post's creation time. The query does
+    # not expand beyond this bound when the requested allocation cannot be filled.
+    filters.append(
+        {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}}
+    )
     query = {
         "bool": {
             "filter": [
@@ -108,7 +67,6 @@ async def _followed_users_search_details(
     }
 
     fetch_size = num_candidates + len(exclude_uris or [])
-
     async with timed(
         logger,
         "es_followed_users",
@@ -126,108 +84,16 @@ async def _followed_users_search_details(
     candidates = candidate_posts_from_es_response(resp, generator_name=generator_name)
     if exclude_uris:
         exclude_set = set(exclude_uris)
-        candidates = [c for c in candidates if c.at_uri not in exclude_set]
-    candidates = candidates[:num_candidates]
-    return candidates, None if candidates else "no_recent_followed_posts"
+        candidates = [candidate for candidate in candidates if candidate.at_uri not in exclude_set]
+    return candidates[:num_candidates]
 
 
 class FollowedUsersCandidateGenerator(CandidateGenerator):
-    """Returns the last N posts from users that the requesting user follows."""
+    """Returns recent posts from users that the requesting user follows."""
 
     @property
     def name(self) -> str:
         return "followed_users"
-
-    async def generate_stages(
-        self,
-        es,
-        user_did: str,
-        num_candidates: int = 100,
-        video_only: bool = False,
-        exclude_uris: list[str] | None = None,
-    ) -> list[CandidateResult]:
-        """Fill the social quota from 24h posts, then posts up to seven days old."""
-        try:
-            async with timed(logger, "bsky_get_follows", user_did=user_did):
-                followed_dids = await get_followed_user_dids(
-                    user_did,
-                    limit=MAX_FOLLOWED_USERS,
-                )
-        except FollowedUsersLookupError:
-            if fail_fast():
-                raise
-            return [
-                CandidateResult(
-                    generator_name=self.name,
-                    candidates=[],
-                    status="error",
-                    reason="follow_lookup_failed",
-                    mode="direct_friends_recent",
-                )
-            ]
-
-        if not followed_dids:
-            return [
-                CandidateResult(
-                    generator_name=self.name,
-                    candidates=[],
-                    status="empty",
-                    reason="no_followed_users",
-                    mode="direct_friends_recent",
-                )
-            ]
-
-        recent, recent_reason = await _followed_users_search_details(
-            es,
-            user_did,
-            num_candidates,
-            generator_name=self.name,
-            video_only=video_only,
-            exclude_uris=exclude_uris,
-            created_at_gte=f"now-{RECENT_FRIENDS_WINDOW}",
-            followed_dids=followed_dids,
-        )
-        results = [
-            CandidateResult(
-                generator_name=self.name,
-                candidates=recent,
-                status="success" if recent else "empty",
-                reason=recent_reason,
-                mode="direct_friends_recent",
-            )
-        ]
-
-        shortfall = num_candidates - len(recent)
-        if shortfall <= 0:
-            return results
-
-        recent_uris = [
-            candidate.at_uri for candidate in recent if candidate.at_uri is not None
-        ]
-        older_exclusions: list[str] = list(
-            dict.fromkeys([*(exclude_uris or []), *recent_uris])
-        )
-        older, older_reason = await _followed_users_search_details(
-            es,
-            user_did,
-            shortfall,
-            generator_name=self.name,
-            video_only=video_only,
-            exclude_uris=older_exclusions,
-            created_at_gte=f"now-{MAX_FRIENDS_WINDOW}",
-            created_at_lt=f"now-{RECENT_FRIENDS_WINDOW}",
-            followed_dids=followed_dids,
-        )
-        results.append(
-            CandidateResult(
-                generator_name=self.name,
-                candidates=older,
-                status="success" if older else "empty",
-                reason=older_reason or (None if older else "no_older_followed_posts"),
-                mode="direct_friends_7d",
-            )
-        )
-        return results
 
     async def generate(
         self,
@@ -236,19 +102,15 @@ class FollowedUsersCandidateGenerator(CandidateGenerator):
         num_candidates: int = 100,
         video_only: bool = False,
         exclude_uris: list[str] | None = None,
+        max_age_hours: MaxAgeHours = 168,
     ) -> CandidateResult:
-        stages = await self.generate_stages(
+        candidates = await followed_users_search(
             es,
             user_did,
             num_candidates,
-            video_only,
-            exclude_uris,
-        )
-        candidates = [candidate for stage in stages for candidate in stage.candidates]
-        failure = next((stage for stage in stages if stage.status == "error"), None)
-        return CandidateResult(
             generator_name=self.name,
-            candidates=candidates,
-            status="success" if candidates else "empty",
-            reason=failure.reason if failure else (stages[-1].reason if stages else None),
+            video_only=video_only,
+            exclude_uris=exclude_uris,
+            max_age_hours=max_age_hours,
         )
+        return CandidateResult(generator_name=self.name, candidates=candidates)

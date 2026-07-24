@@ -6,7 +6,7 @@ from typing import cast
 
 import pytest
 
-from ...models import CandidateGenerateRequest, CandidatePost, GeneratorSpec
+from ...models import CandidateGenerateRequest, CandidatePost, GeneratorSpec, MaxAgeHours
 from ..candidates import generate as generate_module
 from ..candidates.base import CandidateGenerator, CandidateResult
 from ..candidates.generate import GeneratorError, run_generate
@@ -27,7 +27,10 @@ class _HangingGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self, es, user_did, num_candidates=100, video_only=False,
+        exclude_uris=None, max_age_hours=168,
+    ):
         await asyncio.sleep(9999)
         raise AssertionError("unreachable")
 
@@ -41,7 +44,10 @@ class _FailingGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self, es, user_did, num_candidates=100, video_only=False,
+        exclude_uris=None, max_age_hours=168,
+    ):
         raise self._exc
 
 
@@ -53,7 +59,10 @@ class _EmptyGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self, es, user_did, num_candidates=100, video_only=False,
+        exclude_uris=None, max_age_hours=168,
+    ):
         return CandidateResult(generator_name=self.name, candidates=[])
 
 
@@ -67,12 +76,16 @@ class _StaticGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self, es, user_did, num_candidates=100, video_only=False,
+        exclude_uris=None, max_age_hours=168,
+    ):
         self.calls.append(
             {
                 "num_candidates": num_candidates,
                 "video_only": video_only,
                 "exclude_uris": exclude_uris,
+                "max_age_hours": max_age_hours,
             }
         )
         excluded = set(exclude_uris or [])
@@ -90,7 +103,10 @@ class _FailThenReturnGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self, es, user_did, num_candidates=100, video_only=False,
+        exclude_uris=None, max_age_hours=168,
+    ):
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("primary failed")
@@ -116,6 +132,7 @@ def _make_request(
     num_candidates: int = 5,
     infill: str | None = None,
     exclude_uris: list[str] | None = None,
+    max_age_hours: MaxAgeHours = 168,
 ) -> CandidateGenerateRequest:
     return CandidateGenerateRequest(
         generators=[GeneratorSpec(name=generator_name, weight=1.0)],
@@ -124,6 +141,7 @@ def _make_request(
         video_only=False,
         infill=infill,
         exclude_uris=exclude_uris or [],
+        max_age_hours=max_age_hours,
     )
 
 
@@ -424,6 +442,8 @@ class TestInfillGeneratorTimeout:
             "at://primary/1",
             "at://primary/2",
         ]
+        assert primary.calls[0]["max_age_hours"] == 168
+        assert infill.calls[0]["max_age_hours"] == 168
         assert [c.at_uri for c in result.candidates] == [
             "at://primary/1",
             "at://primary/2",
