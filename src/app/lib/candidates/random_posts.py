@@ -8,9 +8,6 @@ from ...models import CandidatePost
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 
-# How far back to sample posts from (ES date-math expression).
-RECENCY_WINDOW = "24h"
-
 
 async def random_posts_search(
     es,
@@ -19,12 +16,12 @@ async def random_posts_search(
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
 ) -> list[CandidatePost]:
-    """Fetch random posts from the ``posts_recent`` index."""
+    """Fetch random posts from the ``posts_recent`` index.
 
-    # Without a recency bound, random_score scores every doc in the alias
-    # (~2 weeks of posts); a 24h window halves the query cost and better
-    # matches the "recent posts" intent.
-    filters: list[dict] = [{"range": {"created_at": {"gte": f"now-{RECENCY_WINDOW}"}}}]
+    Deliberately samples the full alias (~2 weeks) — downstream features
+    depend on random draws from the whole window, so no recency filter here.
+    """
+    filters: list[dict] = []
     if video_only:
         filters.append({"term": {"contains_video": True}})
 

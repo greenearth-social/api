@@ -19,9 +19,12 @@ MIN_LIKE_COUNT = 20
 # Only consider posts created within this window. Besides freshness, this
 # bounds the brute-force vector scan that the selective MIN_LIKE_COUNT filter
 # forces on ES: like_count>=20 alone matches ~1M posts in posts_recent (a
-# multi-second cold scan per query), while the ~48h slice is ~135k and stays
-# hot in the page cache because it is identical for every user.
-MAX_POST_AGE = "48h"
+# multi-second cold scan per query), while the 96h slice is ~320k (~95k/day)
+# and stays hot in the page cache because it is identical for every user.
+# Warm-scan cost measured on prod: 100-350ms; a fully cold scan re-warms the
+# shared set in one query, so longer windows mainly cost re-warm time after
+# cache-eviction events.
+MAX_POST_AGE = "96h"
 
 
 class TwoTowerCandidateGenerator(CandidateGenerator):
