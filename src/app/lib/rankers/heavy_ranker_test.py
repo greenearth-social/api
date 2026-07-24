@@ -2,11 +2,13 @@
 
 import asyncio
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ...models import CandidatePost
 from ..embeddings import encode_float32_b64
+from . import get_ranker
 from . import heavy_ranker as heavy_ranker_module
 from .heavy_ranker import HeavyRanker
 
@@ -17,6 +19,14 @@ def _time(hour: int) -> datetime:
 
 def test_score_bounds_match_inference_service_output_range():
     assert HeavyRanker(name="heavy_ranker", history_mode="actual").score_bounds == (0.0, 1.0)
+
+
+def test_empty_history_variant_is_registered_with_empty_history_mode():
+    ranker = get_ranker("heavy_ranker_empty_history")
+
+    assert isinstance(ranker, HeavyRanker)
+    assert ranker.name == "heavy_ranker_empty_history"
+    assert ranker.history_mode == "empty"
 
 
 def test_predict_requires_inference_env_vars(monkeypatch):
@@ -217,6 +227,112 @@ def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates
         "candidate_author_dids": ["did:plc:embedded", "did:plc:fetched"],
         "candidate_like_counts": [6, 8],
     }
+    assert [ranking.model_dump() for ranking in result.result.rankings] == [
+        {"at_uri": "at://post/fetched", "rank": 1, "rank_score": 0.7},
+        {"at_uri": "at://post/embedded", "rank": 2, "rank_score": 0.4},
+    ]
+
+
+def test_empty_history_mode_skips_like_history_and_ranks_candidates(monkeypatch):
+    monkeypatch.setattr(
+        heavy_ranker_module,
+        "get_inference_settings",
+        lambda: ("https://example.com", "secret"),
+    )
+    fetch_recent_likes = AsyncMock()
+    recorder = MagicMock()
+    seen = {}
+
+    async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
+        seen["fetch_calls"] = [(list(at_uris), index)]
+        return [("at://post/fetched", [0.0, 1.0], "did:plc:fetched", 8)]
+
+    async def fake_predict_heavy_ranker_single_user(
+        history_embeddings,
+        history_author_dids,
+        history_liked_at_times,
+        history_like_counts,
+        candidate_post_embeddings,
+        candidate_author_dids,
+        candidate_like_counts,
+        *,
+        base_url,
+        api_key,
+    ):
+        seen["ranker_call"] = {
+            "history_embeddings": history_embeddings,
+            "history_author_dids": history_author_dids,
+            "history_liked_at_times": history_liked_at_times,
+            "history_like_counts": history_like_counts,
+            "candidate_post_embeddings": candidate_post_embeddings,
+            "candidate_author_dids": candidate_author_dids,
+            "candidate_like_counts": candidate_like_counts,
+            "base_url": base_url,
+            "api_key": api_key,
+        }
+        return [0.4, 0.7]
+
+    monkeypatch.setattr(
+        heavy_ranker_module,
+        "fetch_recent_liked_post_uris_and_times",
+        fetch_recent_likes,
+    )
+    monkeypatch.setattr(
+        heavy_ranker_module,
+        "fetch_post_embeddings_and_metadata",
+        fake_fetch_post_embeddings_and_metadata,
+    )
+    monkeypatch.setattr(
+        heavy_ranker_module,
+        "predict_heavy_ranker_single_user",
+        fake_predict_heavy_ranker_single_user,
+    )
+    monkeypatch.setattr(
+        heavy_ranker_module,
+        "current_recorder",
+        lambda: recorder,
+    )
+
+    result = asyncio.run(
+        HeavyRanker(
+            name="heavy_ranker_empty_history",
+            history_mode="empty",
+        ).predict(
+            es=None,
+            user_did="did:plc:user1",
+            candidates=[
+                CandidatePost(
+                    at_uri="at://post/embedded",
+                    minilm_l12_embedding=encode_float32_b64([1.0, 0.0]),
+                    author_did="did:plc:embedded",
+                    like_count=6,
+                ),
+                CandidatePost(at_uri="at://post/fetched"),
+            ],
+        )
+    )
+
+    fetch_recent_likes.assert_not_awaited()
+    recorder.record_user_features.assert_called_once_with(
+        "heavy_ranker_empty_history",
+        [],
+        0,
+    )
+    assert seen["fetch_calls"] == [
+        (["at://post/fetched"], "posts_recent"),
+    ]
+    assert seen["ranker_call"] == {
+        "history_embeddings": [],
+        "history_author_dids": [],
+        "history_liked_at_times": [],
+        "history_like_counts": [],
+        "candidate_post_embeddings": [[1.0, 0.0], [0.0, 1.0]],
+        "candidate_author_dids": ["did:plc:embedded", "did:plc:fetched"],
+        "candidate_like_counts": [6, 8],
+        "base_url": "https://example.com",
+        "api_key": "secret",
+    }
+    assert result.model == "heavy_ranker_empty_history"
     assert [ranking.model_dump() for ranking in result.result.rankings] == [
         {"at_uri": "at://post/fetched", "rank": 1, "rank_score": 0.7},
         {"at_uri": "at://post/embedded", "rank": 2, "rank_score": 0.4},
