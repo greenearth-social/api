@@ -106,8 +106,10 @@ async def _followed_users_search_details(
             ],
         }
     }
-
-    fetch_size = num_candidates + len(exclude_uris or [])
+    # Exclusions in the query (not client-side after an overfetch) keep the
+    # fetch size at num_candidates even when a user's seen list is large.
+    if exclude_uris:
+        query["bool"]["must_not"] = [{"terms": {"at_uri": exclude_uris}}]
 
     async with timed(
         logger,
@@ -118,13 +120,14 @@ async def _followed_users_search_details(
         resp = await es.search(
             index="posts_recent",
             query=query,
-            size=fetch_size,
+            size=num_candidates,
             sort=[{"created_at": "desc"}],
             _source=CANDIDATE_SOURCE_FIELDS,
         )
 
     candidates = candidate_posts_from_es_response(resp, generator_name=generator_name)
     if exclude_uris:
+        # ES already excluded these; kept as a cheap safety net.
         exclude_set = set(exclude_uris)
         candidates = [c for c in candidates if c.at_uri not in exclude_set]
     candidates = candidates[:num_candidates]

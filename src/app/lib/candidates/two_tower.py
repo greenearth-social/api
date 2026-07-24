@@ -16,6 +16,12 @@ logger = logging.getLogger(__name__)
 
 TWO_TOWER_GENERATOR_NAME = "two_tower"
 MIN_LIKE_COUNT = 20
+# Only consider posts created within this window. Besides freshness, this
+# bounds the brute-force vector scan that the selective MIN_LIKE_COUNT filter
+# forces on ES: like_count>=20 alone matches ~1M posts in posts_recent (a
+# multi-second cold scan per query), while the ~48h slice is ~135k and stays
+# hot in the page cache because it is identical for every user.
+MAX_POST_AGE = "48h"
 
 
 class TwoTowerCandidateGenerator(CandidateGenerator):
@@ -69,6 +75,7 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             es, user_embedding, num_candidates, search_field=GE_POST_EMBEDDING_FIELD,
             generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
             ge_post_embedding_model_uuid=post_tower_uuid, min_like_count=MIN_LIKE_COUNT,
+            max_age=MAX_POST_AGE,
         )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

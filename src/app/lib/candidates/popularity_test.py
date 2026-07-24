@@ -116,7 +116,7 @@ class TestPopularitySearch:
         assert any("range" in f for f in filters)
 
     @pytest.mark.asyncio
-    async def test_exclude_uris_overfetches_and_filters_in_python(self):
+    async def test_exclude_uris_pushed_into_query(self):
         es = FakeEs(responses={
             "posts_recent": {
                 "hits": {
@@ -124,10 +124,6 @@ class TestPopularitySearch:
                         {
                             "_score": 10.0,
                             "_source": {"at_uri": "at://popular/1", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 9.0,
-                            "_source": {"at_uri": "at://popular/excluded", "content": "x", "embeddings": {}},
                         },
                         {
                             "_score": 8.0,
@@ -145,8 +141,10 @@ class TestPopularitySearch:
         )
 
         inner_bool = es.calls[0]["query"]["function_score"]["query"]["bool"]
-        assert "must_not" not in inner_bool
-        assert es.calls[0]["size"] == 3  # num_candidates + len(exclude_uris)
+        assert inner_bool["must_not"] == [
+            {"terms": {"at_uri": ["at://popular/excluded"]}}
+        ]
+        assert es.calls[0]["size"] == 2  # no overfetch; ES handles exclusions
         assert [c.at_uri for c in candidates] == ["at://popular/1", "at://popular/2"]
 
     @pytest.mark.asyncio

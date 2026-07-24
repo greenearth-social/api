@@ -146,7 +146,7 @@ class TestFollowedUsersSearch:
         assert {"term": {"contains_video": True}} not in filters
 
     @pytest.mark.asyncio
-    async def test_exclude_uris_overfetches_and_filters_in_python(self, monkeypatch):
+    async def test_exclude_uris_pushed_into_query(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs(responses={
             "posts_recent": {
@@ -155,10 +155,6 @@ class TestFollowedUsersSearch:
                         {
                             "_score": 1.0,
                             "_source": {"at_uri": "at://post/1", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 0.9,
-                            "_source": {"at_uri": "at://post/excluded", "content": "x", "embeddings": {}},
                         },
                         {
                             "_score": 0.8,
@@ -176,8 +172,10 @@ class TestFollowedUsersSearch:
             exclude_uris=["at://post/excluded"],
         )
 
-        assert "must_not" not in es.calls[0]["query"]["bool"]
-        assert es.calls[0]["size"] == 3  # num_candidates + len(exclude_uris)
+        assert es.calls[0]["query"]["bool"]["must_not"] == [
+            {"terms": {"at_uri": ["at://post/excluded"]}}
+        ]
+        assert es.calls[0]["size"] == 2  # no overfetch; ES handles exclusions
         assert [c.at_uri for c in candidates] == ["at://post/1", "at://post/2"]
 
     @pytest.mark.asyncio
@@ -316,7 +314,12 @@ class TestFollowedUsersCandidateGenerator:
         assert {
             "range": {"created_at": {"gte": "now-7d", "lt": "now-24h"}}
         } in older_filters
-        assert es.calls[1]["size"] == 2  # one needed + recent URI exclusion overfetch
+        # The second stage asks only for the shortfall (1); the recent stage's
+        # URI is excluded inside the query rather than via overfetch.
+        assert es.calls[1]["size"] == 1
+        assert es.calls[1]["query"]["bool"]["must_not"] == [
+            {"terms": {"at_uri": ["at://recent/1"]}}
+        ]
 
     @pytest.mark.asyncio
     async def test_generate_empty_when_no_followed_users(self, generator, monkeypatch):

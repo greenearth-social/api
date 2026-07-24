@@ -67,13 +67,18 @@ async def popularity_search(
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
+    # Exclusions go into the query as must_not so we can fetch exactly
+    # num_candidates docs. The previous approach — overfetching
+    # num_candidates + len(exclude_uris) and filtering client-side — made
+    # fetch sizes balloon to ~2000 as a user's seen-post list grew, which
+    # dominated query cost (fetch phase + response payload).
+    bool_query: dict = {"filter": filters}
+    if exclude_uris:
+        bool_query["must_not"] = [{"terms": {"at_uri": exclude_uris}}]
+
     query = {
         "function_score": {
-            "query": {
-                "bool": {
-                    "filter": filters,
-                }
-            },
+            "query": {"bool": bool_query},
             "functions": [
                 {
                     "gauss": {
@@ -107,18 +112,17 @@ async def popularity_search(
         }
     }
 
-    fetch_size = num_candidates + len(exclude_uris or [])
-
     async with timed(logger, "es_popularity", num_candidates=num_candidates):
         resp = await es.search(
             index="posts_recent",
             query=query,
-            size=fetch_size,
+            size=num_candidates,
             _source=CANDIDATE_SOURCE_FIELDS,
         )
 
     candidates = candidate_posts_from_es_response(resp, generator_name=generator_name)
     if exclude_uris:
+        # ES already excluded these; kept as a cheap safety net.
         exclude_set = set(exclude_uris)
         candidates = [c for c in candidates if c.at_uri not in exclude_set]
     return candidates[:num_candidates]

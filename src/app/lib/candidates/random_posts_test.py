@@ -98,7 +98,7 @@ class TestRandomPostsSearch:
         assert {"term": {"contains_video": True}} not in filters
 
     @pytest.mark.asyncio
-    async def test_exclude_uris_overfetches_and_filters_in_python(self):
+    async def test_exclude_uris_pushed_into_query(self):
         es = FakeEs(responses={
             "posts_recent": {
                 "hits": {
@@ -106,10 +106,6 @@ class TestRandomPostsSearch:
                         {
                             "_score": 1.0,
                             "_source": {"at_uri": "at://post/1", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 0.9,
-                            "_source": {"at_uri": "at://post/excluded", "content": "x", "embeddings": {}},
                         },
                         {
                             "_score": 0.8,
@@ -127,8 +123,8 @@ class TestRandomPostsSearch:
         )
 
         inner_bool = es.calls[0]["query"]["function_score"]["query"]["bool"]
-        assert "must_not" not in inner_bool
-        assert es.calls[0]["size"] == 3  # num_candidates + len(exclude_uris)
+        assert inner_bool["must_not"] == [{"terms": {"at_uri": ["at://post/excluded"]}}]
+        assert es.calls[0]["size"] == 2  # no overfetch; ES handles exclusions
         assert [c.at_uri for c in candidates] == ["at://post/1", "at://post/2"]
 
     @pytest.mark.asyncio
