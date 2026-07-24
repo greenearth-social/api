@@ -16,7 +16,7 @@ def _time(hour: int) -> datetime:
 
 
 def test_score_bounds_match_inference_service_output_range():
-    assert HeavyRanker().score_bounds == (0.0, 1.0)
+    assert HeavyRanker(name="heavy_ranker", history_mode="actual").score_bounds == (0.0, 1.0)
 
 
 def test_predict_requires_inference_env_vars(monkeypatch):
@@ -25,7 +25,7 @@ def test_predict_requires_inference_env_vars(monkeypatch):
 
     with pytest.raises(RuntimeError, match="GE_INFERENCE_BASE_URL"):
         asyncio.run(
-            HeavyRanker().predict(
+            HeavyRanker(name="heavy_ranker", history_mode="actual").predict(
                 es=None,
                 user_did="did:plc:user1",
                 candidates=[CandidatePost(at_uri="at://post/1")],
@@ -102,7 +102,7 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
     )
 
     result = asyncio.run(
-        HeavyRanker().predict(
+        HeavyRanker(name="heavy_ranker", history_mode="actual").predict(
             es=None,
             user_did="did:plc:user1",
             candidates=[
@@ -191,7 +191,7 @@ def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates
     )
 
     result = asyncio.run(
-        HeavyRanker().predict(
+        HeavyRanker(name="heavy_ranker", history_mode="actual").predict(
             es=None,
             user_did="did:plc:user1",
             candidates=[
@@ -274,7 +274,7 @@ def test_predict_calls_ranker_with_empty_history_when_likes_have_no_embeddings(m
     )
 
     result = asyncio.run(
-        HeavyRanker().predict(
+        HeavyRanker(name="heavy_ranker", history_mode="actual").predict(
             es=None,
             user_did="did:plc:user1",
             candidates=[CandidatePost(at_uri="at://post/a")],
@@ -325,7 +325,7 @@ def test_predict_returns_unscored_candidates_when_candidate_features_are_missing
     )
 
     result = asyncio.run(
-        HeavyRanker().predict(
+        HeavyRanker(name="heavy_ranker", history_mode="actual").predict(
             es=None,
             user_did="did:plc:user1",
             candidates=[
@@ -377,7 +377,7 @@ def test_predict_returns_unscored_candidates_when_output_count_mismatches(monkey
     )
 
     result = asyncio.run(
-        HeavyRanker().predict(
+        HeavyRanker(name="heavy_ranker", history_mode="actual").predict(
             es=None,
             user_did="did:plc:user1",
             candidates=[
