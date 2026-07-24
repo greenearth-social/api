@@ -488,6 +488,7 @@ def _request(*generator_names: str) -> CandidateGenerateRequest:
         num_candidates=10,
         video_only=False,
         infill=None,
+        max_age_hours=168,
     )
 
 
@@ -501,7 +502,15 @@ class _FakeGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self,
+        es,
+        user_did,
+        num_candidates=100,
+        video_only=False,
+        exclude_uris=None,
+        max_age_hours=168,
+    ):
         if self._fail:
             raise self._cause
         return CandidateResult(
@@ -597,6 +606,7 @@ class TestWithPipelineContext:
             num_candidates=10,
             video_only=False,
             infill="popularity",
+            max_age_hours=168,
         )
         with pipeline_context_scope(ctx):
             result = await run_generate(req, es=object())
