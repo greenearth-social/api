@@ -163,7 +163,8 @@ class TwoTowerRanker(Ranker):
                 es,
                 inference_base_url,
                 inference_api_key,
-                TWO_TOWER_MODEL_NAME
+                TWO_TOWER_MODEL_NAME,
+                "actual",
             ),
             _compute_candidate_post_embeddings(),
         )

@@ -293,4 +293,32 @@ FEEDS: dict[str, FeedConfig] = {
             exclude_uris=[],
         ),
     ),
+    "cold-start": FeedConfig(
+        display_name="Cold Start",
+        description="Main Green Earth feed for a user with no like history.",
+        public=False,
+        internal_rkey="mf-cs",
+        internal_display_name="mf CS",
+        avatar="assets/icons/green-earth.png",
+        max_render_share=0.5,
+        min_rank_score=0.425,
+        min_mmr_score=-0.05,
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[
+                GeneratorSpec(name="followed_users", weight=0.40),
+                GeneratorSpec(name="two_tower_empty_history", weight=0.30),
+                GeneratorSpec(name="popularity", weight=0.30),
+            ],
+            infill=None,
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
+        ),
+        rank_request_template=RankPredictRequest.model_construct(
+            models=[
+                RankModelSpec(name="heavy_ranker_empty_history", weight=1.0),
+                RankModelSpec(name="perspective", weight=1.0),
+            ],
+        ),
+    ),
 }

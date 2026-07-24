@@ -8,14 +8,18 @@ import logging
 
 from ...models import MaxAgeHours
 from .base import CandidateGenerator, CandidateResult
-from ..inference import get_inference_settings, compute_user_embedding, get_cached_post_tower_uuid
+from ..inference import (
+    get_inference_settings,
+    compute_user_embedding,
+    get_cached_post_tower_uuid,
+    HistoryMode,
+)
 from .es_candidates import knn_search_posts
 from ..embeddings import GE_POST_EMBEDDING_FIELD
 
 logger = logging.getLogger(__name__)
 
 
-TWO_TOWER_GENERATOR_NAME = "two_tower"
 MIN_LIKE_COUNT = 20
 # Hard cap on the freshness window for two-tower, independent of the user's
 # freshness preference. The selective MIN_LIKE_COUNT filter makes Lucene
@@ -36,9 +40,13 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         user_did → recent likes → post embeddings → user tower → kNN search
     """
 
+    def __init__(self, name: str, history_mode: HistoryMode):
+        self._name = name
+        self.history_mode: HistoryMode = history_mode
+
     @property
     def name(self) -> str:
-        return "two_tower"
+        return self._name
 
     async def generate(
         self,
@@ -73,7 +81,8 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             es,
             inference_base_url,
             inference_api_key,
-            TWO_TOWER_GENERATOR_NAME,
+            self.name,
+            self.history_mode,
         )
 
         # Freshness filters returned candidates, not the interaction history
