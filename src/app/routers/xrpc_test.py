@@ -2087,6 +2087,7 @@ class TestSendInteractions:
             await _record_interactions(db, [ix])
 
         rec.assert_awaited_once()
+        assert rec.await_args is not None
         assert rec.await_args.args[1].load_test is True
         track.assert_not_called()
 
@@ -2510,6 +2511,7 @@ class TestLoadTestSession:
             await _record_session(request, self.LT_DID, "your-feed", db, is_load_test=True)
 
         upsert.assert_awaited_once()
+        assert upsert.await_args is not None
         assert upsert.await_args.kwargs.get("is_load_test") is True
         activity.assert_not_awaited()
         track.assert_not_called()
