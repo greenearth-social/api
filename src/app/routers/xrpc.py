@@ -71,6 +71,7 @@ from ..lib.pipeline_context import (
 from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
 from ..lib.rankers import run_predict
 from ..lib.request_cache import request_cache_scope
+from ..lib.request_context import set_traffic
 from ..lib.telemetry import timed
 from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
 
@@ -220,6 +221,44 @@ def dev_session_did(request: Request) -> str | None:
         raise HTTPException(
             status_code=400,
             detail="X-Dev-Session-DID must be a did:plc DID",
+        )
+    return did
+
+
+def load_test_did(request: Request) -> str | None:
+    """DID for a simulated load-test session, or ``None`` when not one.
+
+    Load testing drives ``getFeedSkeleton`` for a chosen set of real Bluesky
+    DIDs to measure how the serving path behaves under load — including the
+    cold-start path for users we've never seen. There is no AT Protocol JWT for
+    those requests, so like the probe and dev-session bypasses this stands in an
+    identity based on a shared secret.
+
+    Unlike ``dev_session_did`` — which is refused in deployed environments —
+    this is *meant* to run in stage/prod: that is where the load matters. To
+    keep it safe, every record it produces is tagged as test data
+    (``created_by_load_test`` on new user docs, ``lt`` on feedContext tokens,
+    ``load_test`` on interactions and cache entries, and a ``load_test`` metric
+    label), analytics (PostHog) are skipped for it, and the tagged data can be
+    deleted afterwards. Otherwise it is treated as a real session downstream so
+    the full write path is exercised.
+
+    Enabled only by ``GE_LOAD_TEST_SECRET``. Requests supply the secret in
+    ``X-Load-Test-Secret`` and the user in ``X-Load-Test-DID``.
+    """
+    secret = os.environ.get("GE_LOAD_TEST_SECRET")
+    if not secret:
+        return None
+    if not hmac.compare_digest(request.headers.get("X-Load-Test-Secret", ""), secret):
+        return None
+
+    did = request.headers.get("X-Load-Test-DID", "").strip()
+    if not did.startswith("did:plc:"):
+        # The secret matched, so this is an operator getting it wrong rather
+        # than stray traffic — say so instead of falling through to a 401.
+        raise HTTPException(
+            status_code=400,
+            detail="X-Load-Test-DID must be a did:plc DID",
         )
     return did
 
@@ -778,11 +817,17 @@ def _get_feed_cache(request: Request) -> FeedCache:
 # ---------------------------------------------------------------------------
 
 
-def _make_feed_context(user_did: str, feed_name: str, request_id: str) -> str:
+def _make_feed_context(
+    user_did: str, feed_name: str, request_id: str, *, load_test: bool = False
+) -> str:
     """Build the signed feedContext token shared by every item in a response.
 
     ``request_id`` doubles as the feed-cache key, so the served item order can be
     recovered from the cache during its TTL window.
+
+    ``load_test`` stamps the ``lt`` claim so that interactions later reported
+    against this feed (via the public sendInteractions endpoint, which carries
+    no other provenance) are recognised as test data.
     """
     return encode_feed_context(
         FeedContextPayload(
@@ -790,6 +835,7 @@ def _make_feed_context(user_did: str, feed_name: str, request_id: str) -> str:
             feed=feed_name,
             rid=request_id,
             iat=int(time.time()),
+            lt=load_test,
         )
     )
 
@@ -851,12 +897,20 @@ async def _record_discarded(db, user_did: str, post_uris: list[str]) -> None:
         logger.exception("Failed to record discarded posts for user '%s'", user_did)
 
 
-async def _record_session(request: Request, user_did: str, feed_name: str, db) -> None:
+async def _record_session(
+    request: Request, user_did: str, feed_name: str, db, *, is_load_test: bool = False
+) -> None:
     """Resolve the caller's handle and upsert user + feed-activity docs.
 
     Runs as a background task so the user-facing latency of getFeedSkeleton
     isn't paying for firebase roundtrips.
     Failures are logged but do not surface to the caller.
+
+    For load-test traffic (``is_load_test=True``) the user upsert is tagged as
+    synthetic (and left untouched if the user already exists — see
+    ``upsert_user``), and both feed-activity recording and PostHog tracking are
+    skipped: activity data feeds user selection for future tests, and test
+    traffic must never inflate real analytics.
     """
     # Handle resolution goes over the network to the PLC directory, so it fails
     # for reasons that have nothing to do with this user existing — a directory
@@ -876,9 +930,12 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
     now = datetime.now(timezone.utc)
 
     try:
-        await upsert_user(db, user_did, username)
+        await upsert_user(db, user_did, username, is_load_test=is_load_test)
     except Exception:
         logger.exception("Failed to upsert user '%s' in Firestore", user_did)
+
+    if is_load_test:
+        return
 
     try:
         await upsert_feed_activity(db, user_did, feed_name)
@@ -1014,6 +1071,10 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
             and ix.item
             and feed_cfg is not None
             and feed_cfg.exclude_seen_posts
+            # Never let a load-test "seen" event enter a real user's seen-posts
+            # exclusion set: it would silently hide posts from their real feed
+            # for days for content they never actually saw.
+            and not payload.lt
         ):
             seen_by_user.setdefault(payload.did, []).append(ix.item)
 
@@ -1024,13 +1085,16 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
             feed_name=payload.feed,
             request_id=payload.rid,
             feed_generated_at=datetime.fromtimestamp(payload.iat, tz=timezone.utc),
+            load_test=payload.lt,
         )
         try:
             await record_interaction(db, doc)
         except Exception:
             logger.exception("Failed to record interaction for user '%s'", payload.did)
 
-        if event:
+        # Load-test interactions are never sent to PostHog — test traffic must
+        # not inflate real analytics.
+        if event and not payload.lt:
             try:
                 track_interaction(
                     get_posthog_client(),
@@ -1203,15 +1267,27 @@ async def get_feed_skeleton(
     is_probe = bool(_probe_secret) and hmac.compare_digest(
         request.headers.get("X-Probe-Secret", ""), _probe_secret
     )
+    # A load-test session is a stand-in for a signed-in user (writes happen, so
+    # the cold-start path is exercised for real), but tagged as test data. It
+    # takes precedence over the probe bypass.
+    _lt_did = load_test_did(request)
     # A development session is a stand-in for a signed-in user, so it takes
-    # precedence over the probe bypass and clears is_probe: the request must be
-    # treated as real traffic downstream, including writing feed snapshots.
+    # precedence over every other bypass: the request must be treated as real
+    # traffic downstream, including writing feed snapshots.
     _dev_session_did = dev_session_did(request)
     if _dev_session_did is not None:
+        is_probe = False
+        _lt_did = None
+    is_load_test = _lt_did is not None
+    if is_load_test:
         is_probe = False
 
     if _dev_session_did is not None:
         user_did = _dev_session_did
+    elif is_load_test:
+        assert _lt_did is not None
+        user_did = _lt_did
+        logger.warning("Load-test feed request for %s on feed %s", user_did, feed_name)
     elif is_probe:
         user_did = os.environ.get("GE_PROBE_USER_DID", "did:plc:s4tl2ajfsnstzuxtegl7r33g")
     else:
@@ -1228,6 +1304,11 @@ async def get_feed_skeleton(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+    # Tag every metric on this request path (incl. background tasks, which
+    # inherit this context at spawn time) with its traffic class so test and
+    # probe traffic can be filtered out of dashboards.
+    set_traffic("load_test" if is_load_test else "probe" if is_probe else "real")
+
     # Record authenticated users in Firestore for backend analytics. Runs in
     # the background since this isn't essential for serving.
     db = getattr(request.app.state, "firestore", None)
@@ -1235,7 +1316,9 @@ async def get_feed_skeleton(
         logger.error("Firestore client not initialized")
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
-    _spawn_background(_record_session(request, user_did, feed_name, db))
+    _spawn_background(
+        _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
+    )
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
@@ -1291,7 +1374,9 @@ async def get_feed_skeleton(
                         # next request will fall into the regeneration branch
                         # below, which fetches fresh candidates.
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
-                    feed_context = _make_feed_context(user_did, feed_name, parsed.id)
+                    feed_context = _make_feed_context(
+                        user_did, feed_name, parsed.id, load_test=is_load_test
+                    )
                     cached_snapshot = FeedSnapshotDocument(
                         request_id=parsed.id,
                         items=cached_uris,
@@ -1358,7 +1443,9 @@ async def get_feed_skeleton(
                         # lands at end-of-cache and regenerates again (the
                         # ranking session restarts with fresh exclusions).
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
-                        feed_context = _make_feed_context(user_did, feed_name, parsed.id)
+                        feed_context = _make_feed_context(
+                            user_did, feed_name, parsed.id, load_test=is_load_test
+                        )
                         if not is_probe:
                             await _write_feed_snapshot_background(
                                 db,
@@ -1468,11 +1555,14 @@ async def get_feed_skeleton(
                             generated_at=generated_snapshot.generated_at,
                             expires_at=datetime.now(timezone.utc)
                             + timedelta(seconds=DEFAULT_TTL_SECONDS),
+                            load_test=is_load_test,
                         ),
                     )
                 next_cursor = FeedCursor(id=request_id, offset=consumed).encode()
 
-            feed_context = _make_feed_context(user_did, feed_name, request_id)
+            feed_context = _make_feed_context(
+                user_did, feed_name, request_id, load_test=is_load_test
+            )
             response = FeedSkeletonResponse(
                 feed=_skeleton_items(page, feed_context),
                 cursor=next_cursor,

@@ -107,7 +107,9 @@ async def get_user(db: AsyncClient, user_did: str) -> UserDocument | None:
     return UserDocument.model_validate(data)
 
 
-async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> UserDocument:
+async def upsert_user(
+    db: AsyncClient, user_did: str, username: str | None, *, is_load_test: bool = False
+) -> UserDocument:
     """Create or update a user document.
 
     On first visit the document is created with all timestamps set to now.
@@ -118,6 +120,21 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> U
     (the DID is the identity; the handle is enrichment). A ``None`` never
     overwrites a handle we already know — a transient resolution failure
     shouldn't erase good data.
+
+    Load testing (``is_load_test=True``):
+
+    - A newly created document is tagged ``created_by_load_test=True`` so a
+      cleanup script can later delete users that only ever existed as test
+      traffic (letting the cold-start path be re-run for the same DID).
+    - When the document already exists it is left **untouched** — no
+      ``last_seen_at`` bump. A load test samples real users, and bumping their
+      activity on every run would corrupt the very activity data the user
+      selection reads. The read already happened; skipping the write is free.
+
+    Real traffic (``is_load_test=False``) on a document previously created by a
+    load test clears the tag and resets ``created_at`` to now: a real person has
+    now shown up, so the user "becomes ours", their data must be preserved, and
+    their first-seen time should reflect the first *real* visit.
     """
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     doc = await ref.get()
@@ -131,9 +148,21 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> U
                 f"Firestore document exists but to_dict() returned None for {user_did}"
             )
 
+        if is_load_test:
+            # Never mutate a real user's record from synthetic traffic.
+            return UserDocument.model_validate(data)
+
         update_fields: dict[str, object] = {"last_seen_at": now}
         if username is not None and data.get("username") != username:
             update_fields["username"] = username
+            update_fields["updated_at"] = now
+
+        if data.get("created_by_load_test"):
+            # A real request has arrived for a load-test-created user: they are
+            # ours now. Clear the deletable flag and treat this as their true
+            # first visit so growth analytics don't count the synthetic one.
+            update_fields["created_by_load_test"] = False
+            update_fields["created_at"] = now
             update_fields["updated_at"] = now
 
         await ref.update(update_fields)
@@ -147,6 +176,7 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> U
         created_at=now,
         updated_at=now,
         last_seen_at=now,
+        created_by_load_test=is_load_test,
     )
     await ref.set(user.model_dump())
     return user
@@ -210,6 +240,10 @@ async def set_user_preferences(
     Uses ``merge=True`` so the preference is created alongside a minimal
     user document when the user has not yet loaded a feed in Bluesky.
     The full user document is filled in later by ``upsert_user``.
+
+    Setting preferences is a real person acting, so it also clears any
+    ``created_by_load_test`` tag — a load-test-created user who adopts us via
+    the web UI (before any real feed load) must not be deletable.
     """
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     await ref.set(
@@ -219,6 +253,7 @@ async def set_user_preferences(
             "freshness": freshness,
             "politics": politics,
             "purpose": purpose,
+            "created_by_load_test": False,
         },
         merge=True,
     )

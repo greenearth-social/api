@@ -343,6 +343,75 @@ class TestUpsertUser:
         assert update_fields["username"] == USERNAME
         assert "updated_at" in update_fields
 
+    @pytest.mark.asyncio
+    async def test_load_test_new_user_is_tagged(self):
+        db, _, doc_ref = _mock_firestore_client()
+        doc_ref.get.return_value = _mock_doc_snapshot(False)
+
+        user = await upsert_user(db, USER_DID, USERNAME, is_load_test=True)
+
+        assert user.created_by_load_test is True
+        written = doc_ref.set.call_args[0][0]
+        assert written["created_by_load_test"] is True
+
+    @pytest.mark.asyncio
+    async def test_load_test_existing_user_is_left_untouched(self):
+        db, _, doc_ref = _mock_firestore_client()
+        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        doc_ref.get.return_value = _mock_doc_snapshot(True, {
+            "user_did": USER_DID,
+            "username": USERNAME,
+            "created_at": original_time,
+            "updated_at": original_time,
+            "last_seen_at": original_time,
+        })
+
+        user = await upsert_user(db, USER_DID, USERNAME, is_load_test=True)
+
+        # No write at all — a real user's activity must not be bumped by a test.
+        doc_ref.update.assert_not_called()
+        doc_ref.set.assert_not_called()
+        assert user.last_seen_at == original_time
+
+    @pytest.mark.asyncio
+    async def test_real_request_clears_load_test_flag(self):
+        db, _, doc_ref = _mock_firestore_client()
+        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        doc_ref.get.return_value = _mock_doc_snapshot(True, {
+            "user_did": USER_DID,
+            "username": USERNAME,
+            "created_at": original_time,
+            "updated_at": original_time,
+            "last_seen_at": original_time,
+            "created_by_load_test": True,
+        })
+
+        user = await upsert_user(db, USER_DID, USERNAME)
+
+        update_fields = doc_ref.update.call_args[0][0]
+        assert update_fields["created_by_load_test"] is False
+        # created_at reset to the first real visit.
+        assert update_fields["created_at"] > original_time
+        assert user.created_by_load_test is False
+
+    @pytest.mark.asyncio
+    async def test_real_request_on_unflagged_user_leaves_flag_alone(self):
+        db, _, doc_ref = _mock_firestore_client()
+        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        doc_ref.get.return_value = _mock_doc_snapshot(True, {
+            "user_did": USER_DID,
+            "username": USERNAME,
+            "created_at": original_time,
+            "updated_at": original_time,
+            "last_seen_at": original_time,
+        })
+
+        await upsert_user(db, USER_DID, USERNAME)
+
+        update_fields = doc_ref.update.call_args[0][0]
+        assert "created_by_load_test" not in update_fields
+        assert "created_at" not in update_fields
+
 
 # ---------------------------------------------------------------------------
 # get_feed_activity

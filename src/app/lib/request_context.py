@@ -29,6 +29,14 @@ _request_id: ContextVar[str | None] = ContextVar("ge_request_id", default=None)
 # way as ``rid``, so background tasks spawned from a request inherit it.
 _endpoint: ContextVar[str | None] = ContextVar("ge_endpoint", default=None)
 
+# The traffic class of the current request: ``real`` (a genuine user or the
+# default), ``probe`` (Cloud Scheduler liveness probe), or ``load_test`` (a
+# simulated load-test session). Set by the feed endpoint so that every metric
+# recorded on the request path — including from background tasks, which inherit
+# this context at spawn time — can be split by traffic class and test traffic
+# filtered out of dashboards. Propagates through ``asyncio`` like ``rid``.
+_traffic: ContextVar[str | None] = ContextVar("ge_traffic", default=None)
+
 
 def get_request_id() -> str | None:
     return _request_id.get()
@@ -52,3 +60,16 @@ def set_endpoint(endpoint: str) -> Token:
 
 def reset_endpoint(token: Token) -> None:
     _endpoint.reset(token)
+
+
+def get_traffic() -> str | None:
+    return _traffic.get()
+
+
+def set_traffic(traffic: str) -> Token:
+    """Set the traffic class (``real`` | ``probe`` | ``load_test``)."""
+    return _traffic.set(traffic)
+
+
+def reset_traffic(token: Token) -> None:
+    _traffic.reset(token)

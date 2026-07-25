@@ -154,6 +154,38 @@ def test_explicit_endpoint_attribute_wins():
     assert _attrs_for(reader, "something.latency").get("endpoint") == "explicit"
 
 
+def test_traffic_label_added_from_context():
+    from .request_context import reset_traffic, set_traffic
+
+    collector, reader = _make_collector()
+    token = set_traffic("load_test")
+    try:
+        collector.record("feed.render.duration_ms", 50.0)
+    finally:
+        reset_traffic(token)
+
+    assert _attrs_for(reader, "feed.render.duration_ms").get("traffic") == "load_test"
+
+
+def test_no_traffic_label_outside_request_context():
+    collector, reader = _make_collector()
+    collector.record("feed.render.duration_ms", 50.0)
+    assert "traffic" not in _attrs_for(reader, "feed.render.duration_ms")
+
+
+def test_explicit_traffic_attribute_wins():
+    from .request_context import reset_traffic, set_traffic
+
+    collector, reader = _make_collector()
+    token = set_traffic("load_test")
+    try:
+        collector.record("something.latency", 1.0, traffic="explicit")
+    finally:
+        reset_traffic(token)
+
+    assert _attrs_for(reader, "something.latency").get("traffic") == "explicit"
+
+
 # ---------------------------------------------------------------------------
 # Lazy instrument reuse
 # ---------------------------------------------------------------------------
