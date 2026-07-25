@@ -152,6 +152,7 @@ class TestTwoTowerCandidateGenerator:
             TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME,
             "empty",
         )
+        assert knn_search.await_args is not None
         assert knn_search.await_args.kwargs["generator_name"] == (
             TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME
         )
