@@ -137,19 +137,19 @@ class TestBuildDocument:
 
     def test_includes_model_scores(self):
         rec = self._recorder()
-        rec.record_model_scores("two_tower", 1.0, {"at://p/1": 0.8, "at://p/2": -0.2})
-        rec.record_model_scores("perspective", 2.0, {"at://p/1": -0.5, "at://p/2": 0.1})
+        rec.record_model_scores("two_tower", 1.0, {"at://p/1": 0.8, "at://p/2": 0.2})
+        rec.record_model_scores("perspective", 2.0, {"at://p/1": 0.25, "at://p/2": 0.1})
         doc = self._build(rec)
 
         assert [e.model_name for e in doc.model_scores] == ["two_tower", "perspective"]
         assert doc.model_scores[0].weight == 1.0
         assert {s.at_uri: s.score for s in doc.model_scores[0].scores} == {
             "at://p/1": 0.8,
-            "at://p/2": -0.2,
+            "at://p/2": 0.2,
         }
         assert doc.model_scores[1].weight == 2.0
         assert {s.at_uri: s.score for s in doc.model_scores[1].scores} == {
-            "at://p/1": -0.5,
+            "at://p/1": 0.25,
             "at://p/2": 0.1,
         }
 
@@ -224,11 +224,11 @@ class TestModelScoreCapture:
     def test_records_one_entry_per_model_in_order(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
         rec.record_model_scores("two_tower", 1.0, {"at://p/1": 0.8})
-        rec.record_model_scores("perspective", 2.0, {"at://p/1": -0.5})
+        rec.record_model_scores("perspective", 2.0, {"at://p/1": 0.25})
 
         assert rec.model_scores == [
             ("two_tower", 1.0, {"at://p/1": 0.8}),
-            ("perspective", 2.0, {"at://p/1": -0.5}),
+            ("perspective", 2.0, {"at://p/1": 0.25}),
         ]
 
     def test_copies_scores_dict_defensively(self):

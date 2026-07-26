@@ -10,8 +10,8 @@ import time
 import aiohttp
 
 from ..models import CandidatePost
-from .config import fail_fast
 from .http_client import get_http_client
+from .pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from .telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -50,13 +50,12 @@ class PerspectiveLanguageNotSupportedError(Exception):
 # part of this reference formula and is intentionally omitted.
 #
 # Each attribute score from the Perspective API is in [0, 1], so for any
-# weighted sum of attributes the theoretical score bounds are
+# weighted sum of attributes the raw theoretical score bounds are
 # (sum of negative weights, sum of positive weights) — see
-# `_weighted_score_bounds`. This formula's positive weights sum to 1.0
+# `_raw_weighted_score_bounds`. This formula's positive weights sum to 1.0
 # (6 * 1/6) and negative weights sum to -1.0 (2*(-1/6) + 3*(-1/18) +
-# 4*(-1/8)), giving bounds of exactly (-1.0, 1.0) — no rescaling needed
-# beyond the float-precision clamp `_weighted_score_bounds` already performs
-# implicitly via `_normalize`'s clamping in the rank-model pipeline.
+# 4*(-1/8)), giving raw bounds of exactly (-1.0, 1.0). The final PRC score
+# is linearly rescaled into [0, 1] before it enters the rank-model pipeline.
 _PRC_WEIGHTS: dict[str, float] = {
     "REASONING_EXPERIMENTAL": 1 / 6,
     "PERSONAL_STORY_EXPERIMENTAL": 1 / 6,
@@ -77,8 +76,10 @@ _PRC_WEIGHTS: dict[str, float] = {
 
 _REQUESTED_ATTRIBUTES = {name: {} for name in _PRC_WEIGHTS}
 
+PERSPECTIVE_SCORE_BOUNDS = (0.0, 1.0)
 
-def _weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]:
+
+def _raw_weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]:
     """Theoretical (min, max) bounds for a weighted sum of Perspective attributes.
 
     Each Perspective API attribute score is in [0, 1]. For a weighted sum
@@ -93,9 +94,21 @@ def _weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]:
     return (lo, hi)
 
 
+def _change_bounds(raw: float, original_bounds: tuple[float, float], new_bounds: tuple[float, float]) -> float:
+    """Linearly map *raw* from *original_bounds* into *new_bounds*."""
+    orig_lo, orig_hi = original_bounds
+    if orig_hi <= orig_lo:
+        raise ValueError(f"degenerate original bounds: {original_bounds}")
+    new_lo, new_hi = new_bounds
+    if new_hi <= new_lo:
+        raise ValueError(f"degenerate new bounds: {new_bounds}")
+    return new_lo + (raw - orig_lo) * (new_hi - new_lo) / (orig_hi - orig_lo)
+
+
 def _prc_score(attr: dict[str, float], weights: dict[str, float] = _PRC_WEIGHTS) -> float:
-    """Score a post as a weighted sum of its Perspective attribute scores."""
-    return sum(weight * attr[name] for name, weight in weights.items())
+    """Score a post as a weighted sum rescaled into final [0, 1] bounds."""
+    raw_score = sum(weight * attr[name] for name, weight in weights.items())
+    return _change_bounds(raw_score, _raw_weighted_score_bounds(weights), PERSPECTIVE_SCORE_BOUNDS)
 
 
 class PerspectiveClient:
@@ -275,17 +288,31 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
                 exc.language,
                 c.at_uri,
             )
-            return None
+            return None  # expected — not a degradation
         except aiohttp.ClientResponseError as exc:
             if exc.status == 429:
                 logger.warning(
                     "Perspective API rate limited for post %s; using missing score", c.at_uri
                 )
-            else:
-                logger.exception("Perspective API scoring failed for post %s", c.at_uri)
-            return None
-        except Exception:
+                return None  # expected rate-limit — not a degradation
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(DegradationEvent(
+                    stage=DegradationStage.RANK,
+                    component="perspective",
+                    cause=exc,
+                ))
+            return None
+        except Exception as exc:
+            logger.exception("Perspective API scoring failed for post %s", c.at_uri)
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(DegradationEvent(
+                    stage=DegradationStage.RANK,
+                    component="perspective",
+                    cause=exc,
+                ))
             return None
 
     scorable = [c for c in candidates if c.at_uri]

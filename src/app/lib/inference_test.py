@@ -102,8 +102,10 @@ async def test_predict_heavy_ranker_single_user_posts_ranker_payload(monkeypatch
         history_embeddings=[[1.0, 0.0]],
         history_author_dids=["did:plc:history"],
         history_liked_at_times=["2026-01-01T00:00:00+00:00"],
+        history_like_counts=[9],
         candidate_post_embeddings=[[0.0, 1.0], [1.0, 1.0]],
         candidate_author_dids=["did:plc:candidate-a", "did:plc:candidate-b"],
+        candidate_like_counts=[3, 4],
         base_url="https://inference.example",
         api_key="secret",
     )
@@ -117,8 +119,10 @@ async def test_predict_heavy_ranker_single_user_posts_ranker_payload(monkeypatch
                 "history_embeddings": [[1.0, 0.0]],
                 "history_author_dids": ["did:plc:history"],
                 "history_liked_at_times": ["2026-01-01T00:00:00+00:00"],
+                "history_prior_cumulative_likes": [9],
                 "candidate_post_embeddings": [[0.0, 1.0], [1.0, 1.0]],
                 "candidate_author_dids": ["did:plc:candidate-a", "did:plc:candidate-b"],
+                "candidate_prior_cumulative_likes": [3, 4],
             },
         }
     ]
@@ -142,8 +146,10 @@ async def test_predict_heavy_ranker_single_user_raises_for_http_error(monkeypatc
             history_embeddings=[],
             history_author_dids=[],
             history_liked_at_times=[],
+            history_like_counts=[],
             candidate_post_embeddings=[[0.0, 1.0]],
             candidate_author_dids=["did:plc:candidate"],
+            candidate_like_counts=[0],
             base_url="https://inference.example",
             api_key="secret",
         )

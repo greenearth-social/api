@@ -65,6 +65,27 @@ def test_track_session_captures_feed_loaded():
     )
 
 
+def test_track_session_without_a_handle_still_captures_the_event():
+    # The event is keyed on the DID, so an unresolved handle shouldn't cost us
+    # the analytics signal...
+    mock = MagicMock()
+    track_session(mock, USER_DID, None, "your-feed", NOW)
+    mock.capture.assert_called_once_with(
+        distinct_id=USER_DID,
+        event="feedLoaded",
+        properties={"feed_name": "your-feed"},
+        timestamp=NOW,
+    )
+
+
+def test_track_session_without_a_handle_leaves_the_person_property_alone():
+    # ...and must not null out a username PostHog already knows.
+    mock = MagicMock()
+    track_session(mock, USER_DID, None, "your-feed", NOW)
+    properties = mock.capture.call_args.kwargs["properties"]
+    assert "$set" not in properties
+
+
 def test_track_interaction_none_client_is_noop():
     track_interaction(None, USER_DID, "interactionLike", "your-feed", "at://did/post/1", NOW)
 

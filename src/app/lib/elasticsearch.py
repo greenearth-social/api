@@ -227,16 +227,18 @@ async def fetch_post_embeddings(
     return await cache.get_or_compute(key, _fetch)
 
 
-async def fetch_post_embeddings_and_authors(
+async def fetch_post_embeddings_and_metadata(
     es,
     at_uris: list[str],
     index: str = "posts",
-) -> list[tuple[str, list[float], str]]:
-    """Fetch MiniLM L12 embeddings for a list of post AT URIs, as well as their author DIDs.
+) -> list[tuple[str, list[float], str, int]]:
+    """Fetch MiniLM L12 embeddings for a list of post AT URIs, as well as their author DIDs
+    and the number of likes each post has received.
 
-    Returns ``(at_uri, embedding, author_did)`` triples in the same order as ``at_uris``.
-    Posts without embeddings or embedding source text are silently skipped.
+    Returns ``(at_uri, embedding, author_did, like_count)`` tuples in the same order as
+    ``at_uris``. Posts without embeddings or embedding source text are silently skipped.
     Posts without author DIDs are kept, with an empty string ("") author_did.
+    Posts without like counts are kept, with a like_count of 0.
 
     When a request cache is active the result is memoized so repeat
     calls within the same request share a single ES round-trip.
@@ -244,7 +246,7 @@ async def fetch_post_embeddings_and_authors(
     if not at_uris:
         return []
 
-    async def _fetch() -> list[tuple[str, list[float], str]]:
+    async def _fetch() -> list[tuple[str, list[float], str, int]]:
         async with timed(logger, "es_post_embeddings", n_uris=len(at_uris)):
             query = {"terms": {"at_uri": at_uris}}
 
@@ -256,6 +258,7 @@ async def fetch_post_embeddings_and_authors(
                     "at_uri",
                     MINILM_L12_EMBEDDING_FIELD,
                     "author_did",
+                    "like_count",
                     *POST_EMBEDDING_SOURCE_FIELDS,
                 ],
             )
@@ -263,6 +266,7 @@ async def fetch_post_embeddings_and_authors(
             data = unwrap_es_response(resp)
             embeddings_by_uri: dict[str, list[float]] = {}
             author_dids_by_uri: dict[str, str] = {}
+            like_counts_by_uri: dict[str, int] = {}
             for hit in data.get("hits", {}).get("hits", []):
                 src = hit.get("_source") or {}
                 at_uri = src.get("at_uri")
@@ -278,17 +282,21 @@ async def fetch_post_embeddings_and_authors(
                 author_did = src.get("author_did")
                 if isinstance(author_did, str):
                     author_dids_by_uri[at_uri] = author_did
+                like_count = src.get("like_count")
+                if isinstance(like_count, int):
+                    like_counts_by_uri[at_uri] = like_count
 
-            ordered_embeddings: list[tuple[str, list[float], str]] = []
+            ordered_embeddings: list[tuple[str, list[float], str, int]] = []
             for at_uri in at_uris:
                 vec = embeddings_by_uri.get(at_uri)
                 author_did = author_dids_by_uri.get(at_uri, "")
+                like_count = like_counts_by_uri.get(at_uri, 0)
                 if vec:
-                    ordered_embeddings.append((at_uri, vec, author_did))
+                    ordered_embeddings.append((at_uri, vec, author_did, like_count))
             return ordered_embeddings
 
     cache = get_request_cache()
     if cache is None:
         return await _fetch()
-    key = ("fetch_post_embeddings_and_authors", index, tuple(at_uris))
+    key = ("fetch_post_embeddings_and_metadata", index, tuple(at_uris))
     return await cache.get_or_compute(key, _fetch)

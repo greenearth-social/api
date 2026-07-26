@@ -19,6 +19,7 @@ CANDIDATE_SOURCE_FIELDS = [
     "image_count",          # media metadata (feed debugging)
     "video_count",          # media metadata (feed debugging)
     "external_embed",       # link embed metadata (feed debugging)
+    "like_count",
 ]
 
 
@@ -70,4 +71,5 @@ def candidate_post_from_hit(
         image_count=src.get("image_count"),
         video_count=src.get("video_count"),
         external_uri=external_uri,
+        like_count=src.get("like_count"),
     )
