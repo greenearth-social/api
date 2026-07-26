@@ -10,6 +10,7 @@ from ...models import CandidateGenerateRequest, CandidatePost, GeneratorSpec
 from ..candidates import generate as generate_module
 from ..candidates.base import CandidateGenerator, CandidateResult
 from ..candidates.generate import GeneratorError, run_generate
+from ..config import set_fail_fast_for_request
 from ..feed_debug import FeedDebugRecorder, feed_debug_scope
 from ..metrics import MetricCollector, set_metric_collector
 
@@ -188,7 +189,7 @@ class TestGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_no_swallow_raises_generator_error_promptly(self, monkeypatch):
-        monkeypatch.setenv("GE_FAIL_FAST", "true")
+        set_fail_fast_for_request(True)
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
 
@@ -202,7 +203,7 @@ class TestGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_no_swallow_records_metric_before_raising(self, monkeypatch):
-        monkeypatch.setenv("GE_FAIL_FAST", "true")
+        set_fail_fast_for_request(True)
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
         mc = FakeMetricCollector()
@@ -304,7 +305,7 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_timeout_no_swallow_raises_generator_error_with_is_infill(self, monkeypatch):
-        monkeypatch.setenv("GE_FAIL_FAST", "true")
+        set_fail_fast_for_request(True)
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {
             "random": _EmptyGenerator("random"),
@@ -322,7 +323,7 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_timeout_no_swallow_records_metric(self, monkeypatch):
-        monkeypatch.setenv("GE_FAIL_FAST", "true")
+        set_fail_fast_for_request(True)
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {
             "random": _EmptyGenerator("random"),
