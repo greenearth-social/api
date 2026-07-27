@@ -4,7 +4,7 @@ Returns random recent posts from Elasticsearch using ``random_score``.
 Useful as a simple baseline generator and as a low-correlation fallback.
 """
 
-from ...models import CandidatePost
+from ...models import CandidatePost, MaxAgeHours
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 
@@ -15,13 +15,14 @@ async def random_posts_search(
     generator_name: str | None = None,
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
+    max_age_hours: MaxAgeHours = 168,
 ) -> list[CandidatePost]:
-    """Fetch random posts from the ``posts_recent`` index.
-
-    Deliberately samples the full alias (~2 weeks) — downstream features
-    depend on random draws from the whole window, so no recency filter here.
-    """
-    filters: list[dict] = []
+    """Fetch random posts from the ``posts_recent`` index."""
+    # Freshness is a strict candidate-post created_at bound. Random infill uses
+    # the same bound as primary generation and cannot widen the search.
+    filters: list[dict] = [
+        {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}},
+    ]
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
@@ -68,6 +69,7 @@ class RandomPostsCandidateGenerator(CandidateGenerator):
         num_candidates: int = 100,
         video_only: bool = False,
         exclude_uris: list[str] | None = None,
+        max_age_hours: MaxAgeHours = 168,
     ) -> CandidateResult:
         candidates = await random_posts_search(
             es,
@@ -75,5 +77,6 @@ class RandomPostsCandidateGenerator(CandidateGenerator):
             generator_name=self.name,
             video_only=video_only,
             exclude_uris=exclude_uris,
+            max_age_hours=max_age_hours,
         )
         return CandidateResult(generator_name=self.name, candidates=candidates)

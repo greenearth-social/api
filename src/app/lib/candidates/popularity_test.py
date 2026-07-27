@@ -5,6 +5,7 @@ import pytest
 from ..candidates.popularity import (
     PopularityCandidateGenerator,
     popularity_search,
+    recency_decay_scale,
 )
 from ..embeddings import MINILM_L12_EMBEDDING_KEY
 
@@ -98,6 +99,21 @@ class TestPopularitySearch:
         assert "Math.log1p(likes)" in script_source
         assert query["function_score"]["score_mode"] == "multiply"
         assert query["function_score"]["boost_mode"] == "replace"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("hours", "scale"),
+        [(6, "90m"), (24, "6h"), (168, "42h")],
+    )
+    async def test_selected_window_sets_cutoff_and_decay(self, hours, scale):
+        es = FakeEs()
+        await popularity_search(es, num_candidates=10, max_age_hours=hours)
+        function_score = es.calls[0]["query"]["function_score"]
+        filters = function_score["query"]["bool"]["filter"]
+        assert {"range": {"created_at": {"gte": f"now-{hours}h"}}} in filters
+        gauss = next(f["gauss"] for f in function_score["functions"] if "gauss" in f)
+        assert gauss["created_at"]["scale"] == scale
+        assert recency_decay_scale(hours) == scale
 
     @pytest.mark.asyncio
     async def test_video_only_true_includes_filter(self):

@@ -206,6 +206,7 @@ class TestFetchPostsByUris:
 
         query = es.calls[0]["query"]
         assert {"term": {"contains_video": True}} in query["bool"]["filter"]
+        assert {"range": {"created_at": {"gte": "now-168h"}}} in query["bool"]["filter"]
         assert {"terms": {"at_uri": ["at://post/a", "at://post/seen"]}} in query["bool"]["filter"]
         assert "must_not" not in query["bool"]
         assert [c.at_uri for c in candidates] == ["at://post/a"]

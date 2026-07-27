@@ -82,6 +82,9 @@ class TestRandomPostsSearch:
         function_score = query["function_score"]
         assert "random_score" in function_score
         assert function_score["boost_mode"] == "replace"
+        assert {"range": {"created_at": {"gte": "now-168h"}}} in (
+            function_score["query"]["bool"]["filter"]
+        )
 
     @pytest.mark.asyncio
     async def test_video_only_true_includes_filter(self):

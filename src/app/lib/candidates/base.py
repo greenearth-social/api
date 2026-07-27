@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, Field
 
-from ...models import CandidatePost
+from ...models import CandidatePost, MaxAgeHours
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +52,7 @@ class CandidateGenerator(ABC):
         num_candidates: int = 100,
         video_only: bool = False,
         exclude_uris: list[str] | None = None,
+        max_age_hours: MaxAgeHours = 168,
     ) -> CandidateResult:
         """Produce candidate posts for the given user.
 
@@ -67,6 +68,8 @@ class CandidateGenerator(ABC):
             When ``True``, restrict results to posts containing video.
         exclude_uris:
             AT URIs to exclude from results via an ES ``must_not`` filter.
+        max_age_hours:
+            Maximum candidate-post age based on ``created_at``.
 
         Returns
         -------

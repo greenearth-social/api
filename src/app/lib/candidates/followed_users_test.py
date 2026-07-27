@@ -119,6 +119,7 @@ class TestFollowedUsersSearch:
         assert query == {
             "bool": {
                 "filter": [
+                    {"range": {"created_at": {"gte": "now-168h"}}},
                     {"terms": {"author_did": ["did:plc:follow1", "did:plc:follow2"]}},
                 ],
             }
@@ -278,48 +279,17 @@ class TestFollowedUsersCandidateGenerator:
         assert result.candidates[0].generator_name == "followed_users"
 
     @pytest.mark.asyncio
-    async def test_generate_stages_uses_recent_then_seven_day_window(self, generator, monkeypatch):
+    async def test_generate_uses_one_strict_selected_window(self, generator, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+        es = FakeEs()
 
-        class SequencedEs(FakeEs):
-            def __init__(self):
-                super().__init__()
-                self.responses = [
-                    {"hits": {"hits": [{
-                        "_score": 1.0,
-                        "_source": {"at_uri": "at://recent/1", "content": "recent"},
-                    }]}},
-                    {"hits": {"hits": [{
-                        "_score": 0.8,
-                        "_source": {"at_uri": "at://older/1", "content": "older"},
-                    }]}},
-                ]
+        await generator.generate(
+            es, "did:plc:user1", num_candidates=2, max_age_hours=48
+        )
 
-            async def search(self, **kwargs):
-                self.calls.append(kwargs)
-                return self.responses.pop(0)
-
-        es = SequencedEs()
-        stages = await generator.generate_stages(es, "did:plc:user1", num_candidates=2)
-
-        assert [stage.mode for stage in stages] == [
-            "direct_friends_recent", "direct_friends_7d"
-        ]
-        assert [candidate.at_uri for stage in stages for candidate in stage.candidates] == [
-            "at://recent/1", "at://older/1"
-        ]
-        recent_filters = es.calls[0]["query"]["bool"]["filter"]
-        older_filters = es.calls[1]["query"]["bool"]["filter"]
-        assert {"range": {"created_at": {"gte": "now-24h"}}} in recent_filters
-        assert {
-            "range": {"created_at": {"gte": "now-7d", "lt": "now-24h"}}
-        } in older_filters
-        # The second stage asks only for the shortfall (1); the recent stage's
-        # URI is excluded inside the query rather than via overfetch.
-        assert es.calls[1]["size"] == 1
-        assert es.calls[1]["query"]["bool"]["must_not"] == [
-            {"terms": {"at_uri": ["at://recent/1"]}}
-        ]
+        assert len(es.calls) == 1
+        filters = es.calls[0]["query"]["bool"]["filter"]
+        assert {"range": {"created_at": {"gte": "now-48h"}}} in filters
 
     @pytest.mark.asyncio
     async def test_generate_empty_when_no_followed_users(self, generator, monkeypatch):

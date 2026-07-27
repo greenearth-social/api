@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from ...models import CandidatePost
+from ...models import CandidatePost, MaxAgeHours
 from ..bsky import FollowedUsersLookupError, get_followed_user_dids
 from ..config import fail_fast
 from ..elasticsearch import unwrap_es_response
@@ -105,12 +105,17 @@ async def fetch_posts_by_uris(
     generator_name: str | None = None,
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
+    max_age_hours: MaxAgeHours = 168,
 ) -> list[CandidatePost]:
     """Fetch posts for the supplied URIs, preserving the requested URI order."""
     if not at_uris:
         return []
 
-    filters: list[dict] = []
+    # Freshness applies to candidate post created_at, not the timestamp of the
+    # followed user's like event.
+    filters: list[dict] = [
+        {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}},
+    ]
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
@@ -150,6 +155,7 @@ async def network_likes_search(
     generator_name: str | None = None,
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
+    max_age_hours: MaxAgeHours = 168,
 ) -> list[CandidatePost]:
     """Fetch posts liked by users followed by user_did."""
 
@@ -213,6 +219,7 @@ async def network_likes_search(
             generator_name=generator_name,
             video_only=video_only,
             exclude_uris=exclude_uris,
+            max_age_hours=max_age_hours,
         ):
             if candidate.at_uri:
                 candidates_by_uri[candidate.at_uri] = candidate
@@ -249,6 +256,7 @@ class NetworkLikesCandidateGenerator(CandidateGenerator):
         num_candidates: int = 100,
         video_only: bool = False,
         exclude_uris: list[str] | None = None,
+        max_age_hours: MaxAgeHours = 168,
     ) -> CandidateResult:
         candidates = await network_likes_search(
             es,
@@ -257,6 +265,7 @@ class NetworkLikesCandidateGenerator(CandidateGenerator):
             generator_name=self.name,
             video_only=video_only,
             exclude_uris=exclude_uris,
+            max_age_hours=max_age_hours,
         )
 
         if not candidates:
