@@ -18,7 +18,6 @@ async def random_posts_search(
     max_age_hours: MaxAgeHours = 168,
 ) -> list[CandidatePost]:
     """Fetch random posts from the ``posts_recent`` index."""
-
     # Freshness is a strict candidate-post created_at bound. Random infill uses
     # the same bound as primary generation and cannot widen the search.
     filters: list[dict] = [
@@ -27,29 +26,30 @@ async def random_posts_search(
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
+    # Exclusions in the query (not client-side after an overfetch) keep the
+    # fetch size at num_candidates even when a user's seen list is large.
+    bool_query: dict = {"filter": filters}
+    if exclude_uris:
+        bool_query["must_not"] = [{"terms": {"at_uri": exclude_uris}}]
+
     query = {
         "function_score": {
-            "query": {
-                "bool": {
-                    "filter": filters,
-                }
-            },
+            "query": {"bool": bool_query},
             "random_score": {},
             "boost_mode": "replace",
         }
     }
 
-    fetch_size = num_candidates + len(exclude_uris or [])
-
     resp = await es.search(
         index="posts_recent",
         query=query,
-        size=fetch_size,
+        size=num_candidates,
         _source=CANDIDATE_SOURCE_FIELDS,
     )
 
     candidates = candidate_posts_from_es_response(resp, generator_name=generator_name)
     if exclude_uris:
+        # ES already excluded these; kept as a cheap safety net.
         exclude_set = set(exclude_uris)
         candidates = [c for c in candidates if c.at_uri not in exclude_set]
     return candidates[:num_candidates]

@@ -147,7 +147,7 @@ class TestFollowedUsersSearch:
         assert {"term": {"contains_video": True}} not in filters
 
     @pytest.mark.asyncio
-    async def test_exclude_uris_overfetches_and_filters_in_python(self, monkeypatch):
+    async def test_exclude_uris_pushed_into_query(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs(responses={
             "posts_recent": {
@@ -156,10 +156,6 @@ class TestFollowedUsersSearch:
                         {
                             "_score": 1.0,
                             "_source": {"at_uri": "at://post/1", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 0.9,
-                            "_source": {"at_uri": "at://post/excluded", "content": "x", "embeddings": {}},
                         },
                         {
                             "_score": 0.8,
@@ -177,8 +173,10 @@ class TestFollowedUsersSearch:
             exclude_uris=["at://post/excluded"],
         )
 
-        assert "must_not" not in es.calls[0]["query"]["bool"]
-        assert es.calls[0]["size"] == 3  # num_candidates + len(exclude_uris)
+        assert es.calls[0]["query"]["bool"]["must_not"] == [
+            {"terms": {"at_uri": ["at://post/excluded"]}}
+        ]
+        assert es.calls[0]["size"] == 2  # no overfetch; ES handles exclusions
         assert [c.at_uri for c in candidates] == ["at://post/1", "at://post/2"]
 
     @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from ..candidates import get_generator, list_generators
 from ..candidates.two_tower import (
     MIN_LIKE_COUNT,
     TWO_TOWER_GENERATOR_NAME,
+    TWO_TOWER_MAX_AGE_CAP_HOURS,
     TwoTowerCandidateGenerator,
 )
 from ..embeddings import GE_POST_EMBEDDING_FIELD
@@ -98,7 +99,7 @@ class TestTwoTowerCandidateGenerator:
             exclude_uris=["at://old/1", "at://old/2"],
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=MIN_LIKE_COUNT,
-            max_age_hours=168,
+            max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == candidates
@@ -138,10 +139,44 @@ class TestTwoTowerCandidateGenerator:
             exclude_uris=None,
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=MIN_LIKE_COUNT,
-            max_age_hours=168,
+            max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == []
+
+    @pytest.mark.asyncio
+    async def test_generate_passes_fresher_window_below_cap_through(self, generator):
+        # A freshness preset below the cap is honored as-is; only windows above
+        # TWO_TOWER_MAX_AGE_CAP_HOURS get clamped.
+        fresh_hours = 24
+        assert fresh_hours < TWO_TOWER_MAX_AGE_CAP_HOURS
+        es = object()
+        user_embedding = [0.5, 0.6]
+
+        with (
+            patch(GET_INFERENCE_SETTINGS, return_value=INFERENCE_SETTINGS),
+            patch(
+                GET_CACHED_POST_TOWER_UUID,
+                new_callable=AsyncMock,
+                return_value="post-tower-uuid",
+            ),
+            patch(
+                COMPUTE_USER_EMBEDDING,
+                new_callable=AsyncMock,
+                return_value=user_embedding,
+            ),
+            patch(
+                KNN_SEARCH_POSTS,
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as knn_search,
+        ):
+            await generator.generate(es, "did:plc:user1", max_age_hours=fresh_hours)
+
+        knn_search.assert_awaited_once()
+        await_args = knn_search.await_args
+        assert await_args is not None
+        assert await_args.kwargs["max_age_hours"] == fresh_hours
 
     @pytest.mark.asyncio
     async def test_generate_allows_zero_candidates_passthrough(self, generator):
@@ -178,7 +213,7 @@ class TestTwoTowerCandidateGenerator:
             exclude_uris=None,
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=MIN_LIKE_COUNT,
-            max_age_hours=168,
+            max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
         )
         assert result.candidates == []
 

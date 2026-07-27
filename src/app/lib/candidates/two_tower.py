@@ -17,6 +17,16 @@ logger = logging.getLogger(__name__)
 
 TWO_TOWER_GENERATOR_NAME = "two_tower"
 MIN_LIKE_COUNT = 20
+# Hard cap on the freshness window for two-tower, independent of the user's
+# freshness preference. The selective MIN_LIKE_COUNT filter makes Lucene
+# abandon the HNSW graph and brute-force scan every matching vector, so cost
+# scales with how many posts pass like_count>=20 inside the window:
+# ~928k over the 7-day default (a ~30s cold scan on prod) versus ~320k at 96h
+# (~95k/day; 100-350ms warm, measured on prod). The scanned set is identical
+# for every user, so it stays hot in the page cache and a cold scan re-warms
+# it for everyone in one query. Freshness preferences below this cap (6h-72h)
+# pass through unchanged; only the 7-day preset is clamped here.
+TWO_TOWER_MAX_AGE_CAP_HOURS = 96
 
 
 class TwoTowerCandidateGenerator(CandidateGenerator):
@@ -67,12 +77,14 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         )
 
         # Freshness filters returned candidates, not the interaction history
-        # used above to compute the user embedding.
+        # used above to compute the user embedding. Cap the requested window at
+        # TWO_TOWER_MAX_AGE_CAP_HOURS to bound the brute-force vector scan.
+        effective_max_age_hours = min(max_age_hours, TWO_TOWER_MAX_AGE_CAP_HOURS)
         candidates = await knn_search_posts(
             es, user_embedding, num_candidates, search_field=GE_POST_EMBEDDING_FIELD,
             generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
             ge_post_embedding_model_uuid=post_tower_uuid, min_like_count=MIN_LIKE_COUNT,
-            max_age_hours=max_age_hours,
+            max_age_hours=effective_max_age_hours,
         )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

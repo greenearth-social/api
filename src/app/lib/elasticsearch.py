@@ -87,6 +87,10 @@ async def fetch_recent_liked_post_uris(
                 size=limit,
                 sort=[{"created_at": "desc"}],
                 _source=["subject_uri"],
+                # Likes are indexed with routing=author_did (see ingex), so
+                # routing on the same DIDs searches one shard per weekly index
+                # instead of fanning out to every shard of every index.
+                routing=",".join(user_dids),
             )
 
             data = unwrap_es_response(resp)
@@ -147,6 +151,8 @@ async def fetch_recent_liked_post_uris_and_times(
                 size=limit,
                 sort=[{"created_at": "desc"}],
                 _source=["subject_uri", "created_at"],
+                # Same routing rationale as fetch_recent_liked_post_uris.
+                routing=",".join(user_dids),
             )
 
             data = unwrap_es_response(resp)
