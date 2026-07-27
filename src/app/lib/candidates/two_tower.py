@@ -7,10 +7,10 @@ for the most relevant posts via the pre-calculated post embeddings.
 import logging
 
 from ...models import MaxAgeHours
-from .base import CandidateGenerator, CandidateResult
-from ..inference import get_inference_settings, compute_user_embedding, get_cached_post_tower_uuid
-from .es_candidates import knn_search_posts
 from ..embeddings import GE_POST_EMBEDDING_FIELD
+from ..inference import compute_user_embedding, get_cached_post_tower_uuid, get_inference_settings
+from .base import CandidateGenerator, CandidateResult
+from .es_candidates import knn_search_posts
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +39,7 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         exclude_uris: list[str] | None = None,
         max_age_hours: MaxAgeHours = 168,
     ) -> CandidateResult:
-        inference_base_url, inference_api_key = (
-            get_inference_settings()
-        )
+        inference_base_url, inference_api_key = get_inference_settings()
 
         post_tower_uuid = await get_cached_post_tower_uuid(inference_base_url, inference_api_key)
         # None means /ready was valid but no post-tower model is configured.
@@ -69,9 +67,15 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         # Freshness filters returned candidates, not the interaction history
         # used above to compute the user embedding.
         candidates = await knn_search_posts(
-            es, user_embedding, num_candidates, search_field=GE_POST_EMBEDDING_FIELD,
-            generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
-            ge_post_embedding_model_uuid=post_tower_uuid, min_like_count=MIN_LIKE_COUNT,
+            es,
+            user_embedding,
+            num_candidates,
+            search_field=GE_POST_EMBEDDING_FIELD,
+            generator_name=self.name,
+            video_only=video_only,
+            exclude_uris=exclude_uris,
+            ge_post_embedding_model_uuid=post_tower_uuid,
+            min_like_count=MIN_LIKE_COUNT,
             max_age_hours=max_age_hours,
         )
 

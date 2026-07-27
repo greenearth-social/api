@@ -4,7 +4,7 @@ Ranks candidates using their existing `score` field. This is a temporary
 fallback until inference-service-backed ranking is wired in.
 """
 
-from ...models import RankedCandidate, CandidatePost, RankPredictResult
+from ...models import CandidatePost, RankedCandidate, RankPredictResult
 from .base import Ranker, RankerResult
 
 
@@ -19,12 +19,7 @@ class CandidateScoreRanker(Ranker):
     def score_bounds(self) -> tuple[float, float]:
         return (0.0, 1.0)
 
-    async def predict(
-        self, 
-        es,
-        user_did: str,
-        candidates: list[CandidatePost]
-    ) -> RankerResult:
+    async def predict(self, es, user_did: str, candidates: list[CandidatePost]) -> RankerResult:
         ranked_candidates = sorted(
             enumerate(candidates),
             key=lambda item: (

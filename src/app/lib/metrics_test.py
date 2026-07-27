@@ -3,20 +3,20 @@
 from unittest.mock import patch
 
 import pytest
-from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
     InMemoryMetricReader,
-    MetricExportResult,
 )
 
 from .metrics import MetricCollector, get_metric_collector, set_metric_collector
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_collector(service_name: str = "test-svc", env: str = "test") -> tuple[MetricCollector, InMemoryMetricReader]:
+
+def _make_collector(
+    service_name: str = "test-svc", env: str = "test"
+) -> tuple[MetricCollector, InMemoryMetricReader]:
     reader = InMemoryMetricReader()
     collector = MetricCollector._from_reader(reader, service_name=service_name, env=env)
     return collector, reader
@@ -41,6 +41,7 @@ def _collect_names_from_data(data) -> set[str]:
 # Instrument type inference
 # ---------------------------------------------------------------------------
 
+
 def test_counter_inferred_for_count_suffix():
     collector, reader = _make_collector()
     collector.record("requests_count", 5)
@@ -51,6 +52,7 @@ def test_counter_inferred_for_count_suffix():
             for metric in sm.metrics:
                 if metric.name == "requests_count":
                     from opentelemetry.sdk.metrics._internal.point import Sum
+
                     assert isinstance(metric.data, Sum)
                     found = True
     assert found, "requests_count not found in exported metrics"
@@ -66,6 +68,7 @@ def test_gauge_inferred_for_rate_suffix():
             for metric in sm.metrics:
                 if metric.name == "throughput_rate":
                     from opentelemetry.sdk.metrics._internal.point import Gauge
+
                     assert isinstance(metric.data, Gauge)
                     found = True
     assert found, "throughput_rate not found in exported metrics"
@@ -81,6 +84,7 @@ def test_histogram_inferred_for_ms_suffix():
             for metric in sm.metrics:
                 if metric.name == "feed.render.duration_ms":
                     from opentelemetry.sdk.metrics._internal.point import Histogram
+
                     assert isinstance(metric.data, Histogram)
                     found = True
     assert found, "feed.render.duration_ms not found in exported metrics"
@@ -96,6 +100,7 @@ def test_histogram_inferred_for_arbitrary_name():
 # ---------------------------------------------------------------------------
 # Attributes (labels)
 # ---------------------------------------------------------------------------
+
 
 def test_attributes_attached_to_histogram():
     collector, reader = _make_collector()
@@ -158,6 +163,7 @@ def test_explicit_endpoint_attribute_wins():
 # Lazy instrument reuse
 # ---------------------------------------------------------------------------
 
+
 def test_same_instrument_reused_across_calls():
     collector, reader = _make_collector()
     collector.record("feed.render.duration_ms", 10.0)
@@ -168,6 +174,7 @@ def test_same_instrument_reused_across_calls():
             for metric in sm.metrics:
                 if metric.name == "feed.render.duration_ms":
                     from opentelemetry.sdk.metrics._internal.point import Histogram
+
                     assert isinstance(metric.data, Histogram)
                     # Both values should be in the same histogram
                     dp = metric.data.data_points[0]
@@ -177,6 +184,7 @@ def test_same_instrument_reused_across_calls():
 # ---------------------------------------------------------------------------
 # GCP exporter construction
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("env", ["stage", "prod"])
 def test_gcp_exporter_uses_unique_identifier(env):
@@ -201,6 +209,7 @@ def test_gcp_exporter_uses_unique_identifier(env):
 # Local/dev (non-deployed environment)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_local_env_records_without_exporting(capsys):
     """Local/dev should record metrics without printing a resource_metrics blob."""
@@ -222,6 +231,7 @@ async def test_local_env_records_without_exporting(capsys):
 # Module-level singleton
 # ---------------------------------------------------------------------------
 
+
 def test_set_and_get_metric_collector():
     collector, _ = _make_collector()
     set_metric_collector(collector)
@@ -233,6 +243,7 @@ def test_set_and_get_metric_collector():
 # ---------------------------------------------------------------------------
 # Shutdown
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_shutdown_does_not_raise():

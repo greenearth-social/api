@@ -40,8 +40,7 @@ async def followed_users_search(
             )
     except FollowedUsersLookupError as exc:
         logger.warning(
-            "Skipping followed_users candidate generation for %s after follow "
-            "lookup failed: %s",
+            "Skipping followed_users candidate generation for %s after follow lookup failed: %s",
             user_did,
             exc,
         )
@@ -54,9 +53,7 @@ async def followed_users_search(
 
     # Freshness applies to the candidate post's creation time. The query does
     # not expand beyond this bound when the requested allocation cannot be filled.
-    filters.append(
-        {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}}
-    )
+    filters.append({"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}})
     query = {
         "bool": {
             "filter": [

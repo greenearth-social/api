@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from google.cloud.firestore import (  # type: ignore[import-untyped]
     ArrayUnion,
@@ -122,7 +122,7 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> U
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     doc = await ref.get()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if doc.exists:
         data = doc.to_dict()
@@ -180,7 +180,7 @@ async def set_user_debug_flag(db: AsyncClient, user_did: str, enabled: bool) -> 
     doc = await ref.get()
     if not doc.exists:
         raise ValueError(f"No user document for {user_did}")
-    await ref.update({"debug_feeds": enabled, "updated_at": datetime.now(timezone.utc)})
+    await ref.update({"debug_feeds": enabled, "updated_at": datetime.now(UTC)})
 
 
 async def set_user_social_radius(db: AsyncClient, user_did: str, social_radius: int) -> None:
@@ -265,13 +265,14 @@ async def upsert_feed_activity(
     )
     doc = await ref.get()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if doc.exists:
         data = doc.to_dict()
         if data is None:
             raise ValueError(
-                f"Firestore feed_activity document exists but to_dict() returned None for {user_did}/{feed_name}"
+                "Firestore feed_activity document exists but to_dict() returned None "
+                f"for {user_did}/{feed_name}"
             )
         await ref.update({"last_seen_at": now})
         data["last_seen_at"] = now
@@ -323,7 +324,7 @@ async def _record_daily_bucket_uris(
     if not post_uris:
         return
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     bucket_id = now.strftime("%Y-%m-%d")
     expires_at = now + timedelta(days=retention_days)
 
@@ -350,7 +351,7 @@ async def _get_recent_bucket_uris(
     ``ArrayUnion`` preserves append order, so the result is roughly the most
     recent URIs.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     query = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
@@ -486,12 +487,8 @@ def _merge_feed_snapshots(
     meta_by_uri = {meta.at_uri: meta for meta in earlier.items_meta}
     meta_by_uri.update({meta.at_uri: meta for meta in later.items_meta})
     items_meta = [meta_by_uri[uri] for uri in ordered_items if uri in meta_by_uri]
-    existing_diag = {
-        (diag.name, diag.mode): diag for diag in existing.generator_diagnostics
-    }
-    incoming_diag = {
-        (diag.name, diag.mode): diag for diag in incoming.generator_diagnostics
-    }
+    existing_diag = {(diag.name, diag.mode): diag for diag in existing.generator_diagnostics}
+    incoming_diag = {(diag.name, diag.mode): diag for diag in incoming.generator_diagnostics}
     incoming_new = set(incoming.items) - set(existing.items)
     diagnostics = []
     for key in dict.fromkeys([*existing_diag, *incoming_diag]):

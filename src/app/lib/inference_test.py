@@ -164,9 +164,7 @@ async def test_cached_post_tower_uuid_reuses_successful_lookup(monkeypatch):
         calls += 1
         return f"{base_url}:{api_key}:uuid"
 
-    monkeypatch.setattr(
-        inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid
-    )
+    monkeypatch.setattr(inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid)
 
     first = await inference_module.get_cached_post_tower_uuid("https://inference", "key")
     second = await inference_module.get_cached_post_tower_uuid("https://inference", "key")
@@ -186,9 +184,7 @@ async def test_cached_post_tower_uuid_collapses_concurrent_lookups(monkeypatch):
         await asyncio.sleep(0)
         return "post-tower-uuid"
 
-    monkeypatch.setattr(
-        inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid
-    )
+    monkeypatch.setattr(inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid)
 
     results = await asyncio.gather(
         inference_module.get_cached_post_tower_uuid("https://inference", "key"),
@@ -208,9 +204,7 @@ async def test_cached_post_tower_uuid_does_not_cache_missing_uuid(monkeypatch):
         calls += 1
         return None
 
-    monkeypatch.setattr(
-        inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid
-    )
+    monkeypatch.setattr(inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid)
 
     first = await inference_module.get_cached_post_tower_uuid("https://inference", "key")
     second = await inference_module.get_cached_post_tower_uuid("https://inference", "key")
@@ -230,13 +224,9 @@ async def test_cached_post_tower_uuid_refreshes_stale_uuid(monkeypatch):
         return "new-uuid"
 
     monkeypatch.setattr(inference_module.time, "monotonic", lambda: now)
-    monkeypatch.setattr(
-        inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid
-    )
+    monkeypatch.setattr(inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid)
 
-    result = await inference_module.get_cached_post_tower_uuid(
-        "https://inference", "key"
-    )
+    result = await inference_module.get_cached_post_tower_uuid("https://inference", "key")
 
     assert result == "new-uuid"
     assert inference_module._post_tower_uuid_cache[key] == (
@@ -257,13 +247,9 @@ async def test_cached_post_tower_uuid_returns_stale_uuid_on_refresh_error(
         raise RuntimeError("ready down")
 
     monkeypatch.setattr(inference_module.time, "monotonic", lambda: now)
-    monkeypatch.setattr(
-        inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid
-    )
+    monkeypatch.setattr(inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid)
 
-    result = await inference_module.get_cached_post_tower_uuid(
-        "https://inference", "key"
-    )
+    result = await inference_module.get_cached_post_tower_uuid("https://inference", "key")
 
     assert result == "stale-uuid"
     assert inference_module._post_tower_uuid_cache[key] == ("stale-uuid", now - 1)
@@ -281,13 +267,9 @@ async def test_cached_post_tower_uuid_returns_none_when_post_tower_not_configure
         return None
 
     monkeypatch.setattr(inference_module.time, "monotonic", lambda: now)
-    monkeypatch.setattr(
-        inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid
-    )
+    monkeypatch.setattr(inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid)
 
-    result = await inference_module.get_cached_post_tower_uuid(
-        "https://inference", "key"
-    )
+    result = await inference_module.get_cached_post_tower_uuid("https://inference", "key")
 
     assert result is None
     assert inference_module._post_tower_uuid_cache[key] == ("stale-uuid", now - 1)
@@ -306,9 +288,7 @@ async def test_cached_post_tower_uuid_raises_refresh_error_after_stale_grace(
         raise RuntimeError("ready down")
 
     monkeypatch.setattr(inference_module.time, "monotonic", lambda: now)
-    monkeypatch.setattr(
-        inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid
-    )
+    monkeypatch.setattr(inference_module, "get_post_tower_uuid", fake_get_post_tower_uuid)
 
     with pytest.raises(RuntimeError, match="ready down"):
         await inference_module.get_cached_post_tower_uuid("https://inference", "key")

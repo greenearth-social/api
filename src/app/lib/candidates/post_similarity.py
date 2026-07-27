@@ -11,10 +11,10 @@ Generates candidates by finding posts similar to a user's recent likes:
 import logging
 
 from ...models import MaxAgeHours
-from .base import CandidateGenerator, CandidateResult
-from ..elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings
-from ..feed_debug import current_recorder
+from ..elasticsearch import fetch_post_embeddings, fetch_recent_liked_post_uris
 from ..embeddings import MINILM_L12_EMBEDDING_FIELD
+from ..feed_debug import current_recorder
+from .base import CandidateGenerator, CandidateResult
 from .es_candidates import knn_search_posts
 
 logger = logging.getLogger(__name__)
@@ -86,8 +86,13 @@ class PostSimilarityCandidateGenerator(CandidateGenerator):
         # Freshness filters returned candidates, not the liked posts above that
         # are used to construct this query vector.
         candidates = await knn_search_posts(
-            es, avg_vector, num_candidates, search_field=MINILM_L12_EMBEDDING_FIELD,
-            generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
+            es,
+            avg_vector,
+            num_candidates,
+            search_field=MINILM_L12_EMBEDDING_FIELD,
+            generator_name=self.name,
+            video_only=video_only,
+            exclude_uris=exclude_uris,
             max_age_hours=max_age_hours,
         )
 

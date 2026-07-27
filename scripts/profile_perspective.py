@@ -133,11 +133,15 @@ async def _main_async(n_candidates: int, profile_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--candidates", type=int, default=500,
+        "--candidates",
+        type=int,
+        default=500,
         help="Number of synthetic candidates to score concurrently (default: 500)",
     )
     parser.add_argument(
-        "--profile-dir", type=Path, default=Path("profiles"),
+        "--profile-dir",
+        type=Path,
+        default=Path("profiles"),
         help="Directory to write the pyinstrument HTML report to (default: ./profiles)",
     )
     args = parser.parse_args()

@@ -34,10 +34,10 @@ import os
 import re
 import sys
 
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich import box
 
 console = Console()
 
@@ -82,6 +82,7 @@ def inject_profile(body: dict) -> dict:
 
 # ──────────────────────────── profile analysis ───────────────────────────────
 
+
 def summarise_profile(profile: dict) -> dict:
     """Reduce the raw ES profile response to the numbers we care about.
 
@@ -102,17 +103,17 @@ def summarise_profile(profile: dict) -> dict:
             for q in search.get("query", [])
         )
         fetch_ns = shard.get("fetch", {}).get("time_in_nanos", 0)
-        shard_details.append({
-            "id": sid,
-            "query_ms": query_ns / 1_000_000,
-            "fetch_ms": fetch_ns / 1_000_000,
-        })
+        shard_details.append(
+            {
+                "id": sid,
+                "query_ms": query_ns / 1_000_000,
+                "fetch_ms": fetch_ns / 1_000_000,
+            }
+        )
 
     max_query_ms = max((s["query_ms"] for s in shard_details), default=0.0)
     max_fetch_ms = max((s["fetch_ms"] for s in shard_details), default=0.0)
-    slowest_shard = next(
-        (s["id"] for s in shard_details if s["query_ms"] == max_query_ms), "?"
-    )
+    slowest_shard = next((s["id"] for s in shard_details if s["query_ms"] == max_query_ms), "?")
 
     return {
         "num_shards": len(shards),
@@ -171,6 +172,7 @@ def _breakdown_table(profile: dict) -> Table | None:
 
 # ──────────────────────────── ES replay ──────────────────────────────────────
 
+
 async def replay_with_profile(entry: dict) -> dict | None:
     """Replay one slow-query entry against ES with profile: true, return response."""
     from elasticsearch import AsyncElasticsearch
@@ -197,6 +199,7 @@ async def replay_with_profile(entry: dict) -> dict | None:
 
 
 # ──────────────────────────── rendering ──────────────────────────────────────
+
 
 def _render_entry(entry: dict, profile_resp: dict | None, pos: int, total: int) -> None:
     """Print one slow-query entry with its profile summary."""
@@ -241,6 +244,7 @@ def _render_entry(entry: dict, profile_resp: dict | None, pos: int, total: int) 
 
 # ──────────────────────────── main ───────────────────────────────────────────
 
+
 def _load_entries(source) -> list[dict]:
     """Parse NDJSON log entries from *source*. Returns list of parsed entries."""
     entries = []
@@ -272,8 +276,7 @@ async def _main_async(args) -> None:
         entries = entries[: args.top]
 
     console.print(
-        f"[bold]Profiling {len(entries)} slow queries[/bold]  "
-        f"(sorted by elapsed_ms desc)"
+        f"[bold]Profiling {len(entries)} slow queries[/bold]  (sorted by elapsed_ms desc)"
     )
     console.print()
 

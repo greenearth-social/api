@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, Field
 
-from ...models import RankPredictResult, CandidatePost
+from ...models import CandidatePost, RankPredictResult
 
 
 class RankerResult(BaseModel):
@@ -52,12 +52,7 @@ class Ranker(ABC):
         ...
 
     @abstractmethod
-    async def predict(
-        self, 
-        es,
-        user_did: str,
-        candidates: list[CandidatePost]
-    ) -> RankerResult:
+    async def predict(self, es, user_did: str, candidates: list[CandidatePost]) -> RankerResult:
         """Rank the supplied candidates."""
         ...
 

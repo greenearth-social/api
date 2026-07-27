@@ -18,36 +18,40 @@ class FakeEs:
     async def search(
         self, *, index=None, query=None, knn=None, size=None, sort=None, _source=None, **kwargs
     ):
-        self.calls.append({
-            "index": index,
-            "query": query,
-            "knn": knn,
-            "size": size,
-            "sort": sort,
-            "_source": _source,
-        })
+        self.calls.append(
+            {
+                "index": index,
+                "query": query,
+                "knn": knn,
+                "size": size,
+                "sort": sort,
+                "_source": _source,
+            }
+        )
         return self._responses.get(index, self._default)
 
 
 class TestKnnSearchPosts:
     @pytest.mark.asyncio
     async def test_returns_candidates_with_scores(self):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 0.95,
-                            "_source": {
-                                "at_uri": "at://post/1",
-                                "content": "hello",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 0.95,
+                                "_source": {
+                                    "at_uri": "at://post/1",
+                                    "content": "hello",
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
         candidates = await knn_search_posts(
             es, [0.1, 0.2], num_candidates=10, search_field=MINILM_L12_EMBEDDING_FIELD
         )
@@ -60,29 +64,31 @@ class TestKnnSearchPosts:
 
     @pytest.mark.asyncio
     async def test_keeps_candidates_without_embeddings_for_later_hydration(self):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 0.95,
-                            "_source": {
-                                "at_uri": "at://post/1",
-                                "content": "hello",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 0.95,
+                                "_source": {
+                                    "at_uri": "at://post/1",
+                                    "content": "hello",
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                                },
                             },
-                        },
-                        {
-                            "_score": 0.8,
-                            "_source": {
-                                "at_uri": "at://post/2",
-                                "content": "missing embedding",
+                            {
+                                "_score": 0.8,
+                                "_source": {
+                                    "at_uri": "at://post/2",
+                                    "content": "missing embedding",
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
         candidates = await knn_search_posts(
             es, [0.1, 0.2], num_candidates=10, search_field=MINILM_L12_EMBEDDING_FIELD
         )
@@ -93,25 +99,30 @@ class TestKnnSearchPosts:
 
     @pytest.mark.asyncio
     async def test_passes_generator_name(self):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 0.8,
-                            "_source": {
-                                "at_uri": "at://post/1",
-                                "content": "hi",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 0.8,
+                                "_source": {
+                                    "at_uri": "at://post/1",
+                                    "content": "hi",
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
         candidates = await knn_search_posts(
-            es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
-            generator_name="post_similarity"
+            es,
+            [0.1, 0.2],
+            num_candidates=5,
+            search_field=MINILM_L12_EMBEDDING_FIELD,
+            generator_name="post_similarity",
         )
         assert candidates[0].generator_name == "post_similarity"
 
@@ -123,17 +134,18 @@ class TestKnnSearchPosts:
         )
         knn = es.calls[0]["knn"]
         assert es.calls[0]["query"] is None
-        assert {"range": {"created_at": {"gte": "now-168h"}}} in (
-            knn["filter"]["bool"]["filter"]
-        )
+        assert {"range": {"created_at": {"gte": "now-168h"}}} in (knn["filter"]["bool"]["filter"])
 
     @pytest.mark.asyncio
     async def test_video_only_true_sends_es_filter(self):
         """video_only is applied on the ES side inside knn.filter."""
         es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
         await knn_search_posts(
-            es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
-            video_only=True
+            es,
+            [0.1, 0.2],
+            num_candidates=5,
+            search_field=MINILM_L12_EMBEDDING_FIELD,
+            video_only=True,
         )
         knn = es.calls[0]["knn"]
         assert {"term": {"contains_video": True}} in knn["filter"]["bool"]["filter"]
@@ -142,21 +154,25 @@ class TestKnnSearchPosts:
     async def test_video_only_false_keeps_only_freshness_filter(self):
         es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
         await knn_search_posts(
-            es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
-            video_only=False
+            es,
+            [0.1, 0.2],
+            num_candidates=5,
+            search_field=MINILM_L12_EMBEDDING_FIELD,
+            video_only=False,
         )
         knn = es.calls[0]["knn"]
-        assert knn["filter"]["bool"]["filter"] == [
-            {"range": {"created_at": {"gte": "now-168h"}}}
-        ]
+        assert knn["filter"]["bool"]["filter"] == [{"range": {"created_at": {"gte": "now-168h"}}}]
 
     @pytest.mark.asyncio
     async def test_exclude_uris_is_an_es_filter(self):
         """exclude_uris is bitmap-friendly and stays in ES knn.filter."""
         es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
         await knn_search_posts(
-            es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
-            exclude_uris=["at://a", "at://b"]
+            es,
+            [0.1, 0.2],
+            num_candidates=5,
+            search_field=MINILM_L12_EMBEDDING_FIELD,
+            exclude_uris=["at://a", "at://b"],
         )
         knn = es.calls[0]["knn"]
         assert {"terms": {"at_uri": ["at://a", "at://b"]}} in knn["filter"]["bool"]["must_not"]
@@ -165,21 +181,26 @@ class TestKnnSearchPosts:
     async def test_ge_post_embedding_model_uuid_is_an_es_filter(self):
         es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
         await knn_search_posts(
-            es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
-            ge_post_embedding_model_uuid="model-uuid-123"
+            es,
+            [0.1, 0.2],
+            num_candidates=5,
+            search_field=MINILM_L12_EMBEDDING_FIELD,
+            ge_post_embedding_model_uuid="model-uuid-123",
         )
         knn = es.calls[0]["knn"]
-        assert (
-            {"term": {"ge_post_embedding_model_uuid": "model-uuid-123"}}
-            in knn["filter"]["bool"]["filter"]
-        )
+        assert {"term": {"ge_post_embedding_model_uuid": "model-uuid-123"}} in knn["filter"][
+            "bool"
+        ]["filter"]
 
     @pytest.mark.asyncio
     async def test_min_like_count_is_an_es_filter(self):
         es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
         await knn_search_posts(
-            es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
-            min_like_count=20
+            es,
+            [0.1, 0.2],
+            num_candidates=5,
+            search_field=MINILM_L12_EMBEDDING_FIELD,
+            min_like_count=20,
         )
         knn = es.calls[0]["knn"]
         assert {"range": {"like_count": {"gte": 20}}} in knn["filter"]["bool"]["filter"]
@@ -188,15 +209,17 @@ class TestKnnSearchPosts:
     async def test_ge_post_embedding_model_uuid_filter_combines_with_exclude_uris(self):
         es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
         await knn_search_posts(
-            es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
+            es,
+            [0.1, 0.2],
+            num_candidates=5,
+            search_field=MINILM_L12_EMBEDDING_FIELD,
             exclude_uris=["at://a", "at://b"],
             ge_post_embedding_model_uuid="model-uuid-123",
         )
         knn = es.calls[0]["knn"]
-        assert (
-            {"term": {"ge_post_embedding_model_uuid": "model-uuid-123"}}
-            in knn["filter"]["bool"]["filter"]
-        )
+        assert {"term": {"ge_post_embedding_model_uuid": "model-uuid-123"}} in knn["filter"][
+            "bool"
+        ]["filter"]
         assert {"terms": {"at_uri": ["at://a", "at://b"]}} in knn["filter"]["bool"]["must_not"]
 
     @pytest.mark.asyncio
@@ -204,8 +227,7 @@ class TestKnnSearchPosts:
         """No overfetch: k == num_candidates since replies are gone from the index."""
         es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
         await knn_search_posts(
-            es, [0.1, 0.2], num_candidates=10,
-            search_field=MINILM_L12_EMBEDDING_FIELD
+            es, [0.1, 0.2], num_candidates=10, search_field=MINILM_L12_EMBEDDING_FIELD
         )
         call = es.calls[0]
         assert call["size"] == 10

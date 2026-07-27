@@ -14,14 +14,14 @@ from .base import (
     list_rankers,
     register_ranker,
 )
+from .candidate_score import CandidateScoreRanker
+from .heavy_ranker import HeavyRanker
+from .perspective import PerspectiveRanker
 from .predict import (
     RankModelNotFoundError,
     run_predict,
 )
-from .candidate_score import CandidateScoreRanker
-from .perspective import PerspectiveRanker
 from .two_tower import TwoTowerRanker
-from .heavy_ranker import HeavyRanker
 
 _candidate_score = CandidateScoreRanker()
 register_ranker(_candidate_score)

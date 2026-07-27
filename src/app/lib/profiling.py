@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -59,7 +59,7 @@ def install_profiling(app: FastAPI) -> None:
             profiler.stop()
 
         rid = get_request_id() or "no-rid"
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         filename = f"{ts}-{rid}-{_path_slug(request.url.path)}.html"
         output_path = profile_dir / filename
         try:

@@ -1,5 +1,5 @@
 import base64
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -18,9 +18,7 @@ class FeedCursor(BaseModel):
 
     def encode(self) -> str:
         """Serialise to a URL-safe, opaque string."""
-        return base64.urlsafe_b64encode(
-            self.model_dump_json().encode()
-        ).decode()
+        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode()
 
     @classmethod
     def decode(cls, raw: str) -> "FeedCursor":
@@ -38,8 +36,7 @@ class FeedCursor(BaseModel):
 class CandidatePost(BaseModel):
     """A post returned by search or candidate generation."""
 
-    at_uri: str | None = Field(
-        default=None, description="The AT URI of the post (e.g. at://...)")
+    at_uri: str | None = Field(default=None, description="The AT URI of the post (e.g. at://...)")
     content: str | None = Field(default=None, description="The post text content")
     minilm_l12_embedding: str | None = Field(
         default=None, description="Base64-encoded float32 MiniLM L12 embedding (384-d)"
@@ -50,9 +47,7 @@ class CandidatePost(BaseModel):
     generator_name: str | None = Field(
         default=None, description="Name of the candidate generator that produced this post"
     )
-    author_did: str | None = Field(
-        default=None, description="AT Protocol DID of the post author"
-    )
+    author_did: str | None = Field(default=None, description="AT Protocol DID of the post author")
     author_username: str | None = Field(
         default=None,
         description="AT Protocol handle of the post author (resolved from author_did; "
@@ -61,9 +56,7 @@ class CandidatePost(BaseModel):
     contains_images: bool | None = Field(
         default=None, description="Whether the post embeds one or more images"
     )
-    contains_video: bool | None = Field(
-        default=None, description="Whether the post embeds video"
-    )
+    contains_video: bool | None = Field(default=None, description="Whether the post embeds video")
     image_count: int | None = Field(
         default=None, description="Number of images embedded in the post"
     )
@@ -256,6 +249,7 @@ class FeedConfig(BaseModel):
     )
     avatar: str | None = Field(
         None,
-        description="Path to avatar image relative to repo root (e.g. 'assets/icons/your-feed.png'). "
+        description="Path to avatar image relative to repo root "
+        "(e.g. 'assets/icons/your-feed.png'). "
         "Used by publish_feed.py at publish time; not read at runtime.",
     )

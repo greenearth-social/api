@@ -15,7 +15,6 @@ DID resolution (``atproto_server``, ``atproto_identity``).
 """
 
 import logging
-from typing import Optional
 
 from atproto_identity.cache.in_memory_cache import AsyncDidInMemoryCache
 from atproto_identity.resolver import AsyncIdResolver
@@ -41,6 +40,7 @@ BEARER_PREFIX = "Bearer "
 # and attached to ``app.state.id_resolver``.  Using an in-memory cache
 # avoids redundant DID document fetches for the same user across requests.
 
+
 def init_id_resolver() -> AsyncIdResolver:
     """Create an ``AsyncIdResolver`` with an in-memory DID cache."""
     cache = AsyncDidInMemoryCache()
@@ -51,9 +51,10 @@ def init_id_resolver() -> AsyncIdResolver:
 # Auth helpers
 # ---------------------------------------------------------------------------
 
+
 async def verify_auth_header(
     request: Request,
-    service_did: Optional[str] = None,
+    service_did: str | None = None,
 ) -> str:
     """Extract and verify the AT Protocol JWT from the request.
 
@@ -80,13 +81,11 @@ async def verify_auth_header(
         logger.warning("Authorization header present but not Bearer scheme")
         return ""
 
-    token = auth_header[len(BEARER_PREFIX):].strip()
+    token = auth_header[len(BEARER_PREFIX) :].strip()
     if not token:
         return ""
 
-    resolver: AsyncIdResolver | None = getattr(
-        request.app.state, "id_resolver", None
-    )
+    resolver: AsyncIdResolver | None = getattr(request.app.state, "id_resolver", None)
     if resolver is None:
         logger.error("id_resolver not initialised on app.state")
         return ""

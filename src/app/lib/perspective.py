@@ -10,7 +10,6 @@ import time
 import aiohttp
 
 from ..models import CandidatePost
-from .http_client import get_http_client
 from .pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from .telemetry import timed
 
@@ -39,6 +38,7 @@ class PerspectiveLanguageNotSupportedError(Exception):
         self.language = language
         msg = f"language not supported: {language}" if language else "language not supported"
         super().__init__(msg)
+
 
 # `perspective_baseline_minus_outrage_toxic` from the PRC reference
 # implementation (PRC paper's "Uprank Bridging, Downrank Toxic" condition —
@@ -94,7 +94,9 @@ def _raw_weighted_score_bounds(weights: dict[str, float]) -> tuple[float, float]
     return (lo, hi)
 
 
-def _change_bounds(raw: float, original_bounds: tuple[float, float], new_bounds: tuple[float, float]) -> float:
+def _change_bounds(
+    raw: float, original_bounds: tuple[float, float], new_bounds: tuple[float, float]
+) -> float:
     """Linearly map *raw* from *original_bounds* into *new_bounds*."""
     orig_lo, orig_hi = original_bounds
     if orig_hi <= orig_lo:
@@ -244,6 +246,7 @@ async def _rate_limit_acquire() -> bool:
         _rate_count += 1
         return True
 
+
 _client: PerspectiveClient | None = None
 
 
@@ -278,7 +281,9 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
         if not c.content or not c.content.strip():
             return None
         if not await _rate_limit_acquire():
-            logger.warning("Perspective API minute quota exhausted; using missing score for post %s", c.at_uri)
+            logger.warning(
+                "Perspective API minute quota exhausted; using missing score for post %s", c.at_uri
+            )
             return None
         try:
             return await client.score(c.content)
@@ -298,27 +303,29 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)
             ctx = current_pipeline_context()
             if ctx is not None:
-                ctx.record(DegradationEvent(
-                    stage=DegradationStage.RANK,
-                    component="perspective",
-                    cause=exc,
-                ))
+                ctx.record(
+                    DegradationEvent(
+                        stage=DegradationStage.RANK,
+                        component="perspective",
+                        cause=exc,
+                    )
+                )
             return None
         except Exception as exc:
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)
             ctx = current_pipeline_context()
             if ctx is not None:
-                ctx.record(DegradationEvent(
-                    stage=DegradationStage.RANK,
-                    component="perspective",
-                    cause=exc,
-                ))
+                ctx.record(
+                    DegradationEvent(
+                        stage=DegradationStage.RANK,
+                        component="perspective",
+                        cause=exc,
+                    )
+                )
             return None
 
     scorable = [c for c in candidates if c.at_uri]
     scores = await asyncio.gather(*(_score_one(c) for c in scorable))
     return {
-        c.at_uri: score
-        for c, score in zip(scorable, scores, strict=True)
-        if c.at_uri is not None
+        c.at_uri: score for c, score in zip(scorable, scores, strict=True) if c.at_uri is not None
     }

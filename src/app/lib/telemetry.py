@@ -84,6 +84,7 @@ async def timed(
 
         if record_metric:
             from .metrics import get_metric_collector
+
             collector = get_metric_collector()
             if collector is not None:
                 collector.record(label, elapsed_ms, **(metric_attrs or {}))

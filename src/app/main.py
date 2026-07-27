@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 
+
 def _is_deployed_environment() -> bool:
     """True when running in a deployed environment (stage/prod) rather than local dev or tests."""
     env = (os.environ.get("ENVIRONMENT") or os.environ.get("GE_ENVIRONMENT") or "").strip().lower()
@@ -37,16 +38,18 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-from .routers import candidates, diversify, feed_transparency, health, rank, skylight, xrpc
-from .security import RequireApiKey
+from elasticsearch import AsyncElasticsearch
+from starlette.routing import BaseRoute, Match
+from starlette.types import Scope
+
 from .lib.atproto_auth import init_id_resolver
-from .lib.firebase_auth import init_firebase_auth
 from .lib.es_client import SlowQueryLoggingES
 from .lib.feed_cache import FirestoreFeedCache
+from .lib.firebase_auth import init_firebase_auth
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
-from .lib.perspective import close_perspective_client
 from .lib.metrics import MetricCollector, set_metric_collector
+from .lib.perspective import close_perspective_client
 from .lib.posthog_client import get_posthog_client, init_posthog_client, set_posthog_client
 from .lib.profiling import install_profiling
 from .lib.request_context import (
@@ -55,10 +58,8 @@ from .lib.request_context import (
     set_endpoint,
     set_request_id,
 )
-
-from elasticsearch import AsyncElasticsearch
-from starlette.routing import BaseRoute, Match
-from starlette.types import Scope
+from .routers import candidates, diversify, feed_transparency, health, rank, skylight, xrpc
+from .security import RequireApiKey
 
 
 def _reject_dev_session_secret_in_deployment() -> None:

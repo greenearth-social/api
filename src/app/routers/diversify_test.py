@@ -25,7 +25,9 @@ def set_api_key():
 
 def test_auth_required():
     def _raise():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key"
+        )
 
     app.dependency_overrides[verify_api_key] = _raise
     try:

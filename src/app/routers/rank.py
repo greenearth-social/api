@@ -13,9 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ..lib.rankers import (
-    RankModelNotFoundError,
     RankerError,
     RankerExecutionError,
+    RankModelNotFoundError,
     list_rankers,
     run_predict,
 )
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 # Response models
 # ---------------------------------------------------------------------------
 
+
 class RankModelListResponse(BaseModel):
     """Lists available ranking models."""
 
@@ -40,6 +41,7 @@ class RankModelListResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
 
 @router.get("/rank/models", response_model=RankModelListResponse)
 async def rank_list_models() -> RankModelListResponse:

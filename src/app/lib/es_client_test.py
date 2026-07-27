@@ -9,7 +9,7 @@ from elastic_transport import ConnectionTimeout
 
 from . import es_client as es_client_module
 from .es_client import SlowQueryLoggingES
-from .request_context import set_request_id, reset_request_id
+from .request_context import reset_request_id, set_request_id
 
 
 class FakeEs:

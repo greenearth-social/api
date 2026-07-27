@@ -70,7 +70,9 @@ _OUTRAGE_EIGHTEENTH_ATTRS = [
     "ALIENATION_EXPERIMENTAL",
 ]
 _TOXIC_EIGHTH_ATTRS = ["TOXICITY", "IDENTITY_ATTACK", "INSULT", "THREAT"]
-_ALL_PRC_ATTRS = _BRIDGING_ATTRS + _OUTRAGE_SIXTH_ATTRS + _OUTRAGE_EIGHTEENTH_ATTRS + _TOXIC_EIGHTH_ATTRS
+_ALL_PRC_ATTRS = (
+    _BRIDGING_ATTRS + _OUTRAGE_SIXTH_ATTRS + _OUTRAGE_EIGHTEENTH_ATTRS + _TOXIC_EIGHTH_ATTRS
+)
 
 
 def _zero_attr() -> dict[str, float]:
@@ -117,6 +119,7 @@ class TestPrcScore:
 # ---------------------------------------------------------------------------
 # score_candidates
 # ---------------------------------------------------------------------------
+
 
 def _make_candidate(uri: str, content: str | None = "text", score: float = 1.0) -> CandidatePost:
     return CandidatePost(
@@ -327,6 +330,7 @@ class TestScoreCandidates:
     def test_empty_list_returns_empty(self):
         with patch("app.lib.perspective._get_client") as mock_get:
             import asyncio
+
             result = asyncio.run(score_candidates([]))
         mock_get.assert_not_called()
         assert result == {}
@@ -341,6 +345,7 @@ class TestScoreCandidates:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
+
             result = asyncio.run(score_candidates(candidates))
 
         assert result == {"at://a/1": 0.1, "at://a/2": 0.5, "at://a/3": 0.9}
@@ -354,6 +359,7 @@ class TestScoreCandidates:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
+
             result = asyncio.run(score_candidates(candidates))
 
         assert result == {"at://a/1": 0.0, "at://a/2": 0.8}
@@ -367,6 +373,7 @@ class TestScoreCandidates:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
+
             result = asyncio.run(score_candidates(candidates))
 
         assert result == {"at://a/1": None, "at://a/2": 0.8}
@@ -381,6 +388,7 @@ class TestScoreCandidates:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
+
             result = asyncio.run(score_candidates(candidates))
 
         assert result == {"at://a/1": None, "at://a/2": 0.7}
@@ -415,6 +423,7 @@ class TestScoreCandidates:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
+
             result = asyncio.run(score_candidates(candidates))
 
         assert result == {"at://a/1": None, "at://a/2": 0.7}
@@ -428,6 +437,7 @@ class TestScoreCandidates:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
+
             result = asyncio.run(score_candidates(candidates))
 
         fake.score.assert_not_called()
@@ -439,6 +449,7 @@ class TestScoreCandidates:
 
         with patch("app.lib.perspective._get_client", return_value=fake):
             import asyncio
+
             result = asyncio.run(score_candidates(candidates))
 
         assert len(result) == 5
@@ -520,9 +531,7 @@ class TestScoreCandidatesDegradation:
     @pytest.mark.asyncio
     async def test_language_not_supported_does_not_record_degradation(self, monkeypatch):
         mock_client = MagicMock()
-        mock_client.score = AsyncMock(
-            side_effect=PerspectiveLanguageNotSupportedError("ja")
-        )
+        mock_client.score = AsyncMock(side_effect=PerspectiveLanguageNotSupportedError("ja"))
         monkeypatch.setattr(perspective_module, "_client", mock_client)
 
         ctx = PipelineContext(feed_name="your-feed")

@@ -27,9 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 try:
-    _GENERATOR_TIMEOUT_SEC: float = float(
-        os.environ.get("GE_CANDIDATE_GENERATOR_TIMEOUT_SEC", "4")
-    )
+    _GENERATOR_TIMEOUT_SEC: float = float(os.environ.get("GE_CANDIDATE_GENERATOR_TIMEOUT_SEC", "4"))
 except ValueError:
     _GENERATOR_TIMEOUT_SEC = 4.0
 
@@ -37,6 +35,7 @@ except ValueError:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def allocate_counts(specs: list[GeneratorSpec], total: int) -> list[int]:
     """Distribute *total* candidates across specs proportionally to their weights.
@@ -46,7 +45,7 @@ def allocate_counts(specs: list[GeneratorSpec], total: int) -> list[int]:
     weight_sum = sum(s.weight for s in specs)
     raw = [(s.weight / weight_sum) * total for s in specs]
     floors = [math.floor(r) for r in raw]
-    remainders = [r - f for r, f in zip(raw, floors)]
+    remainders = [r - f for r, f in zip(raw, floors, strict=False)]
     leftover = total - sum(floors)
     # Award the leftover slots to the specs with the largest fractional part
     for idx in sorted(range(len(specs)), key=lambda i: -remainders[i]):
@@ -73,6 +72,7 @@ def dedup_candidates(candidates: list[CandidatePost]) -> list[CandidatePost]:
 # Errors
 # ---------------------------------------------------------------------------
 
+
 class GeneratorNotFoundError(Exception):
     """Raised when a requested generator name is not in the registry."""
 
@@ -96,6 +96,7 @@ class GeneratorError(Exception):
 # Pipeline
 # ---------------------------------------------------------------------------
 
+
 async def run_generate(
     request: CandidateGenerateRequest,
     es,
@@ -117,7 +118,7 @@ async def run_generate(
     # Resolve generators up front so missing-name errors raise deterministically
     # before any network work begins.
     active: list[tuple[GeneratorSpec, int, CandidateGenerator]] = []
-    for spec, count in zip(request.generators, counts):
+    for spec, count in zip(request.generators, counts, strict=False):
         if count <= 0:
             continue
         gen = get_generator(spec.name)
@@ -129,7 +130,13 @@ async def run_generate(
         spec: GeneratorSpec, count: int, gen: CandidateGenerator
     ) -> list[CandidateResult]:
         try:
-            async with timed(logger, "candidates.generate.duration_ms", record_metric=True, metric_attrs={"generator_name": spec.name}, count=count):
+            async with timed(
+                logger,
+                "candidates.generate.duration_ms",
+                record_metric=True,
+                metric_attrs={"generator_name": spec.name},
+                count=count,
+            ):
                 results = [
                     await asyncio.wait_for(
                         gen.generate(
@@ -179,17 +186,21 @@ async def run_generate(
                 )
             ctx = current_pipeline_context()
             if ctx is not None:
-                ctx.record(DegradationEvent(
-                    stage=DegradationStage.CANDIDATE_GEN,
-                    component=spec.name,
-                    cause=exc,
-                ))
-                return [CandidateResult(
-                    generator_name=spec.name,
-                    candidates=[],
-                    status=outcome,
-                    reason="generator_timeout" if outcome == "timeout" else "generator_error",
-                )]
+                ctx.record(
+                    DegradationEvent(
+                        stage=DegradationStage.CANDIDATE_GEN,
+                        component=spec.name,
+                        cause=exc,
+                    )
+                )
+                return [
+                    CandidateResult(
+                        generator_name=spec.name,
+                        candidates=[],
+                        status=outcome,
+                        reason="generator_timeout" if outcome == "timeout" else "generator_error",
+                    )
+                ]
             raise GeneratorError(spec.name, exc) from exc
 
     result_groups = await asyncio.gather(
@@ -264,11 +275,13 @@ async def run_generate(
                 )
             ctx = current_pipeline_context()
             if ctx is not None:
-                ctx.record(DegradationEvent(
-                    stage=DegradationStage.CANDIDATE_GEN,
-                    component=f"{request.infill}:infill",
-                    cause=exc,
-                ))
+                ctx.record(
+                    DegradationEvent(
+                        stage=DegradationStage.CANDIDATE_GEN,
+                        component=f"{request.infill}:infill",
+                        cause=exc,
+                    )
+                )
                 infill_result = CandidateResult(
                     generator_name=request.infill,
                     candidates=[],
@@ -283,7 +296,7 @@ async def run_generate(
             rec.record_generator_output(infill_result)
         deduped = dedup_candidates(deduped + infill_result.candidates)
 
-    final = deduped[:request.num_candidates]
+    final = deduped[: request.num_candidates]
     if rec is not None:
         rec.record_final_candidates(final)
     return CandidateGenerateResult(candidates=final)

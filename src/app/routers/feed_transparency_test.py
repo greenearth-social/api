@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ..main import app
 from ..documents import (
     DiversificationMeta,
     FeedSnapshotDocument,
@@ -17,6 +16,7 @@ from ..documents import (
     ModelScoreMeta,
     PipelineItemMeta,
 )
+from ..main import app
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -51,7 +51,7 @@ def _snapshot_doc(
     diversify: bool = True,
     **overrides,
 ) -> FeedSnapshotDocument:
-    now = generated_at or datetime(2026, 7, 12, 15, 30, tzinfo=timezone.utc)
+    now = generated_at or datetime(2026, 7, 12, 15, 30, tzinfo=UTC)
     meta = items_meta or [
         PipelineItemMeta(
             at_uri="at://did:plc:author/app.bsky.feed.post/post1",
@@ -92,15 +92,19 @@ def test_list_feeds_returns_summaries(mock_query, client):
     mock_query.return_value = [
         _snapshot_doc(
             request_id="req-1",
-            generated_at=datetime.now(timezone.utc),
+            generated_at=datetime.now(UTC),
             items=["at://a"],
-            items_meta=[PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)],
+            items_meta=[
+                PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)
+            ],
         ),
         _snapshot_doc(
             request_id="req-2",
-            generated_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            generated_at=datetime.now(UTC) - timedelta(minutes=5),
             items=["at://b"],
-            items_meta=[PipelineItemMeta(at_uri="at://b", rank=1, rank_score=1.0, after_rank_position=1)],
+            items_meta=[
+                PipelineItemMeta(at_uri="at://b", rank=1, rank_score=1.0, after_rank_position=1)
+            ],
         ),
     ]
 
@@ -120,9 +124,11 @@ def test_list_feeds_covers_every_feed_not_one_hardcoded_name(mock_query, client)
     client's call. Filtering server-side would also reintroduce the
     (feed_name, generated_at) composite index this query no longer needs.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     mock_query.return_value = [
-        _snapshot_doc(request_id="req-1", generated_at=now, items=["at://a"], feed_name="your-feed"),
+        _snapshot_doc(
+            request_id="req-1", generated_at=now, items=["at://a"], feed_name="your-feed"
+        ),
         _snapshot_doc(
             request_id="req-2",
             generated_at=now - timedelta(minutes=1),
@@ -162,7 +168,7 @@ def test_list_feeds_returns_401_without_auth():
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_collapses_identical_snapshots_and_keeps_newest(mock_query, client):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     newer = _snapshot_doc(
         request_id="req-1",
         generated_at=now,
@@ -190,7 +196,7 @@ def test_list_feeds_collapses_identical_snapshots_and_keeps_newest(mock_query, c
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_preserves_same_posts_in_different_order(mock_query, client):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     mock_query.return_value = [
         _snapshot_doc(
             request_id="req-1",
@@ -214,7 +220,7 @@ def test_list_feeds_preserves_same_posts_in_different_order(mock_query, client):
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_preserves_identical_posts_from_different_feeds(mock_query, client):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     mock_query.return_value = [
         _snapshot_doc(
             request_id="req-1",
@@ -240,21 +246,30 @@ def test_list_feeds_preserves_identical_posts_from_different_feeds(mock_query, c
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_newest_first_order(mock_query, client):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     newest = _snapshot_doc(
-        request_id="req-3", generated_at=now,
+        request_id="req-3",
+        generated_at=now,
         items=["at://c"],
-        items_meta=[PipelineItemMeta(at_uri="at://c", rank=1, rank_score=1.0, after_rank_position=1)],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://c", rank=1, rank_score=1.0, after_rank_position=1)
+        ],
     )
     middle = _snapshot_doc(
-        request_id="req-2", generated_at=now - timedelta(minutes=3),
+        request_id="req-2",
+        generated_at=now - timedelta(minutes=3),
         items=["at://b"],
-        items_meta=[PipelineItemMeta(at_uri="at://b", rank=1, rank_score=1.0, after_rank_position=1)],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://b", rank=1, rank_score=1.0, after_rank_position=1)
+        ],
     )
     oldest = _snapshot_doc(
-        request_id="req-1", generated_at=now - timedelta(minutes=6),
+        request_id="req-1",
+        generated_at=now - timedelta(minutes=6),
         items=["at://a"],
-        items_meta=[PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)
+        ],
     )
     mock_query.return_value = [newest, middle, oldest]
 
@@ -268,9 +283,10 @@ def test_list_feeds_newest_first_order(mock_query, client):
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_preserves_fully_overlapping_middle_snapshot(mock_query, client):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     newest = _snapshot_doc(
-        request_id="req-3", generated_at=now,
+        request_id="req-3",
+        generated_at=now,
         items=["at://a", "at://b", "at://c"],
         items_meta=[
             PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1),
@@ -279,7 +295,8 @@ def test_list_feeds_preserves_fully_overlapping_middle_snapshot(mock_query, clie
         ],
     )
     middle = _snapshot_doc(
-        request_id="req-2", generated_at=now - timedelta(minutes=3),
+        request_id="req-2",
+        generated_at=now - timedelta(minutes=3),
         items=["at://a", "at://b"],
         items_meta=[
             PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1),
@@ -287,9 +304,12 @@ def test_list_feeds_preserves_fully_overlapping_middle_snapshot(mock_query, clie
         ],
     )
     oldest = _snapshot_doc(
-        request_id="req-1", generated_at=now - timedelta(minutes=6),
+        request_id="req-1",
+        generated_at=now - timedelta(minutes=6),
         items=["at://d"],
-        items_meta=[PipelineItemMeta(at_uri="at://d", rank=1, rank_score=1.0, after_rank_position=1)],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://d", rank=1, rank_score=1.0, after_rank_position=1)
+        ],
     )
     mock_query.return_value = [newest, middle, oldest]
 
@@ -320,7 +340,7 @@ def test_get_feed_detail_returns_merged_data(mock_get_snapshot, mock_hydrate, cl
                 "avatar_url": "https://cdn.bsky.app/avatar.jpg",
             },
             "content": "Hello world",
-            "created_at": datetime(2026, 7, 12, 10, 0, tzinfo=timezone.utc),
+            "created_at": datetime(2026, 7, 12, 10, 0, tzinfo=UTC),
             "media": {
                 "image_urls": [],
                 "video_url": None,
@@ -676,12 +696,18 @@ def test_get_feed_detail_preserves_items_seen_in_newer_snapshots(
     doc = _snapshot_doc(
         items_meta=[
             PipelineItemMeta(
-                at_uri=uri1, rank=1, rank_score=0.92, after_rank_position=1,
+                at_uri=uri1,
+                rank=1,
+                rank_score=0.92,
+                after_rank_position=1,
                 generators=[GeneratorMeta(name="two_tower", score=0.85)],
                 model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92)],
             ),
             PipelineItemMeta(
-                at_uri=uri2, rank=2, rank_score=0.88, after_rank_position=2,
+                at_uri=uri2,
+                rank=2,
+                rank_score=0.88,
+                after_rank_position=2,
                 generators=[GeneratorMeta(name="popularity", score=0.80)],
                 model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.88)],
             ),
@@ -755,12 +781,8 @@ def test_get_feed_detail_filters_public_post_and_author_labels(
         **_hydrated(labeled_author, "author.bsky.social"),
     }
     hydrated[safe]["moderation"] = {"post_labels": [], "author_labels": []}
-    hydrated[labeled_post]["moderation"] = {
-        "post_labels": ["graphic-media"], "author_labels": []
-    }
-    hydrated[labeled_author]["moderation"] = {
-        "post_labels": [], "author_labels": ["porn"]
-    }
+    hydrated[labeled_post]["moderation"] = {"post_labels": ["graphic-media"], "author_labels": []}
+    hydrated[labeled_author]["moderation"] = {"post_labels": [], "author_labels": ["porn"]}
     mock_hydrate.return_value = hydrated
 
     response = client.get("/api/feeds/req-abc")
@@ -784,12 +806,18 @@ def test_get_feed_detail_returns_all_when_no_newer_snapshots(
     doc = _snapshot_doc(
         items_meta=[
             PipelineItemMeta(
-                at_uri=uri1, rank=1, rank_score=0.92, after_rank_position=1,
+                at_uri=uri1,
+                rank=1,
+                rank_score=0.92,
+                after_rank_position=1,
                 generators=[GeneratorMeta(name="two_tower", score=0.85)],
                 model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92)],
             ),
             PipelineItemMeta(
-                at_uri=uri2, rank=2, rank_score=0.88, after_rank_position=2,
+                at_uri=uri2,
+                rank=2,
+                rank_score=0.88,
+                after_rank_position=2,
                 generators=[GeneratorMeta(name="popularity", score=0.80)],
                 model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.88)],
             ),
@@ -813,9 +841,7 @@ def test_get_feed_detail_returns_all_when_no_newer_snapshots(
 
 @patch("app.routers.feed_transparency.hydrate_posts")
 @patch("app.routers.feed_transparency.get_feed_snapshot")
-def test_get_feed_detail_diverse_pipeline_metadata(
-    mock_get_snapshot, mock_hydrate, client
-):
+def test_get_feed_detail_diverse_pipeline_metadata(mock_get_snapshot, mock_hydrate, client):
     uri = "at://did:plc:author/app.bsky.feed.post/post1"
     doc = _snapshot_doc(
         items_meta=[

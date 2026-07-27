@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-
-async def _async_iter(items):
-    for item in items:
-        yield item
-
 
 from .post_hydration import (
     _empty_hydration,
@@ -22,6 +17,11 @@ from .post_hydration import (
     get_cached_hydrated_posts,
     hydrate_posts,
 )
+
+
+async def _async_iter(items):
+    for item in items:
+        yield item
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ def test_parse_basic_post():
     assert data["author"]["display_name"] == "Alice Chen"
     assert data["author"]["avatar_url"] == "https://cdn.bsky.app/img/avatar.jpg"
     assert data["content"] == "Hello world"
-    assert data["created_at"] == datetime(2026, 7, 12, 10, 0, tzinfo=timezone.utc)
+    assert data["created_at"] == datetime(2026, 7, 12, 10, 0, tzinfo=UTC)
     assert data["engagement"]["reply_count"] == 3
     assert data["engagement"]["repost_count"] == 12
     assert data["engagement"]["like_count"] == 47
@@ -159,23 +159,25 @@ def test_parse_post_with_video():
 
 
 def test_parse_post_missing_author():
-    uri, data = _parse_bsky_post({"uri": "at://a/app.bsky.feed.post/p1", "record": {}, "author": {}})
+    uri, data = _parse_bsky_post(
+        {"uri": "at://a/app.bsky.feed.post/p1", "record": {}, "author": {}}
+    )
     assert data["author"]["handle"] is None
     assert data["author"]["display_name"] is None
     assert data["author"]["avatar_url"] is None
 
 
 def test_parse_post_missing_engagement():
-    uri, data = _parse_bsky_post({"uri": "at://a/app.bsky.feed.post/p1", "record": {}, "author": {}})
+    uri, data = _parse_bsky_post(
+        {"uri": "at://a/app.bsky.feed.post/p1", "record": {}, "author": {}}
+    )
     assert data["engagement"]["reply_count"] == 0
     assert data["engagement"]["repost_count"] == 0
     assert data["engagement"]["like_count"] == 0
 
 
 def test_parse_post_invalid_created_at():
-    uri, data = _parse_bsky_post(
-        _post(record={"text": "x", "createdAt": "not-a-date"})
-    )
+    uri, data = _parse_bsky_post(_post(record={"text": "x", "createdAt": "not-a-date"}))
     assert data["created_at"] is None
 
 
@@ -202,9 +204,7 @@ def test_empty_hydration_has_all_keys():
 @pytest.mark.asyncio
 async def test_fetch_posts_batch_returns_posts():
     mock_resp = MagicMock()
-    mock_resp.json.return_value = {
-        "posts": [_post(record={"text": "fetched post"})]
-    }
+    mock_resp.json.return_value = {"posts": [_post(record={"text": "fetched post"})]}
 
     with patch("app.lib.post_hydration.get_http_client") as mock_client:
         mock_client.return_value.get = AsyncMock(return_value=mock_resp)
@@ -241,6 +241,7 @@ async def test_fetch_posts_batch_timeout_returns_empty():
 @pytest.mark.asyncio
 async def test_get_cached_hydrated_posts_hit():
     from .post_hydration import _post_rkey
+
     db = MagicMock()
     uri = "at://a/app.bsky.feed.post/p1"
     mock_doc = MagicMock()
@@ -248,7 +249,7 @@ async def test_get_cached_hydrated_posts_hit():
     mock_doc.id = _post_rkey(uri)
     mock_doc.to_dict.return_value = {
         "data": {"author": {"handle": "cached.bsky.social"}},
-        "expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        "expires_at": datetime(2099, 1, 1, tzinfo=UTC),
         "version": 2,
     }
     db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
@@ -262,6 +263,7 @@ async def test_get_cached_hydrated_posts_hit():
 @pytest.mark.asyncio
 async def test_get_cached_hydrated_posts_expired():
     from .post_hydration import _post_rkey
+
     db = MagicMock()
     uri = "at://a/app.bsky.feed.post/p1"
     mock_doc = MagicMock()
@@ -269,7 +271,7 @@ async def test_get_cached_hydrated_posts_expired():
     mock_doc.id = _post_rkey(uri)
     mock_doc.to_dict.return_value = {
         "data": {"author": {"handle": "stale.bsky.social"}},
-        "expires_at": datetime(2000, 1, 1, tzinfo=timezone.utc),
+        "expires_at": datetime(2000, 1, 1, tzinfo=UTC),
         "version": 2,
     }
     db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
@@ -282,6 +284,7 @@ async def test_get_cached_hydrated_posts_expired():
 @pytest.mark.asyncio
 async def test_get_cached_hydrated_posts_reloads_legacy_shape_without_moderation():
     from .post_hydration import _post_rkey
+
     db = MagicMock()
     uri = "at://a/app.bsky.feed.post/p1"
     mock_doc = MagicMock()
@@ -289,7 +292,7 @@ async def test_get_cached_hydrated_posts_reloads_legacy_shape_without_moderation
     mock_doc.id = _post_rkey(uri)
     mock_doc.to_dict.return_value = {
         "data": {"author": {"handle": "legacy.bsky.social"}},
-        "expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        "expires_at": datetime(2099, 1, 1, tzinfo=UTC),
     }
     db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
 
@@ -302,6 +305,7 @@ async def test_get_cached_hydrated_posts_reloads_legacy_shape_without_moderation
 @pytest.mark.asyncio
 async def test_get_cached_hydrated_posts_miss():
     from .post_hydration import _post_rkey
+
     db = MagicMock()
     uri = "at://a/app.bsky.feed.post/p1"
     mock_doc = MagicMock()
@@ -328,7 +332,9 @@ async def test_cache_hydrated_posts_writes():
 @pytest.mark.asyncio
 async def test_cache_hydrated_posts_catches_errors():
     db = MagicMock()
-    db.collection.return_value.document.return_value.set = AsyncMock(side_effect=RuntimeError("fail"))
+    db.collection.return_value.document.return_value.set = AsyncMock(
+        side_effect=RuntimeError("fail")
+    )
 
     # Should not raise.
     await cache_hydrated_posts(db, {"at://a/app.bsky.feed.post/p1": {"author": {}}})
@@ -349,6 +355,7 @@ async def test_hydrate_posts_empty_list():
 @pytest.mark.asyncio
 async def test_hydrate_posts_all_cached():
     from .post_hydration import _post_rkey
+
     db = MagicMock()
     uri = "at://a/app.bsky.feed.post/p1"
     mock_doc = MagicMock()
@@ -356,7 +363,7 @@ async def test_hydrate_posts_all_cached():
     mock_doc.id = _post_rkey(uri)
     mock_doc.to_dict.return_value = {
         "data": {"author": {"handle": "cached.bsky.social"}, "content": "cached content"},
-        "expires_at": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        "expires_at": datetime(2099, 1, 1, tzinfo=UTC),
         "version": 2,
     }
     db.get_all = MagicMock(return_value=_async_iter([mock_doc]))
@@ -382,4 +389,7 @@ async def test_hydrate_posts_miss_fetches_and_caches():
         result = await hydrate_posts(db, ["at://did:plc:author/app.bsky.feed.post/post1"])
 
     assert result["at://did:plc:author/app.bsky.feed.post/post1"]["content"] == "Hello world"
-    assert result["at://did:plc:author/app.bsky.feed.post/post1"]["author"]["handle"] == "alice.bsky.social"
+    assert (
+        result["at://did:plc:author/app.bsky.feed.post/post1"]["author"]["handle"]
+        == "alice.bsky.social"
+    )

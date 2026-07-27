@@ -21,15 +21,15 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 
-_metric_collector: "MetricCollector | None" = None
+_metric_collector: MetricCollector | None = None
 
 
-def set_metric_collector(collector: "MetricCollector | None") -> None:
+def set_metric_collector(collector: MetricCollector | None) -> None:
     global _metric_collector
     _metric_collector = collector
 
 
-def get_metric_collector() -> "MetricCollector | None":
+def get_metric_collector() -> MetricCollector | None:
     return _metric_collector
 
 
@@ -50,6 +50,7 @@ class MetricCollector:
             from opentelemetry.exporter.cloud_monitoring import (
                 CloudMonitoringMetricsExporter,
             )
+
             exporter = CloudMonitoringMetricsExporter(
                 prefix="custom.googleapis.com/greenearth-api",
                 # Cloud Run scales this service to multiple concurrent
@@ -80,7 +81,7 @@ class MetricCollector:
         reader: Any,
         service_name: str,
         env: str,
-    ) -> "MetricCollector":
+    ) -> MetricCollector:
         instance = cls.__new__(cls)
         instance._init(reader, service_name, env)
         return instance

@@ -15,12 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from typing import Any, Awaitable, Callable
+from typing import Any
 
-_current_cache: ContextVar["RequestCache | None"] = ContextVar(
-    "ge_request_cache", default=None
-)
+_current_cache: ContextVar[RequestCache | None] = ContextVar("ge_request_cache", default=None)
 
 
 class RequestCache:
@@ -35,9 +34,7 @@ class RequestCache:
         self._store: dict[Any, Any] = {}
         self._locks: dict[Any, asyncio.Lock] = {}
 
-    async def get_or_compute(
-        self, key: Any, factory: Callable[[], Awaitable[Any]]
-    ) -> Any:
+    async def get_or_compute(self, key: Any, factory: Callable[[], Awaitable[Any]]) -> Any:
         if key in self._store:
             return self._store[key]
         lock = self._locks.setdefault(key, asyncio.Lock())

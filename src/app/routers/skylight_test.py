@@ -1,9 +1,10 @@
 import os
+
 import pytest
 from fastapi.testclient import TestClient
 
-from ..main import app
 from ..lib.embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
+from ..main import app
 
 
 @pytest.fixture
@@ -21,7 +22,7 @@ def es_response():
                             MINILM_L12_EMBEDDING_KEY: [0.1, 0.2],
                             "all_MiniLM_L6_v2": [0.3, 0.4],
                         },
-                    }
+                    },
                 }
             ]
         }
@@ -31,21 +32,36 @@ def es_response():
 @pytest.fixture(autouse=True)
 def fake_app_es(es_response):
     class FakeEs:
-            async def search(self, *, index=None, query=None, size=None, **kwargs):
-                # If this is a lookup by at_uri terms, return a doc. Allow
-                # simulating a 'missing' at_uri that has no embeddings.
-                if isinstance(query, dict) and "terms" in query:
-                    at_list = query.get("terms", {}).get("at_uri")
-                    # If the test asks for an at_uri named "missing", return
-                    # a document without embeddings to trigger a 404 path.
-                    if isinstance(at_list, (list, tuple)) and "missing" in at_list:
-                        doc = {**es_response["hits"]["hits"][0]["_source"], "at_uri": "at://missing", "embeddings": {}}
-                        return {"hits": {"hits": [{"_source": doc}]}}
-                    return {"hits": {"hits": [{"_source": {**es_response["hits"]["hits"][0]["_source"], "at_uri": "at://1"}}]}}
-                # If it's a knn search (similar), return same hit list
-                if isinstance(query, dict) and "knn" in query:
-                    return es_response
+        async def search(self, *, index=None, query=None, size=None, **kwargs):
+            # If this is a lookup by at_uri terms, return a doc. Allow
+            # simulating a 'missing' at_uri that has no embeddings.
+            if isinstance(query, dict) and "terms" in query:
+                at_list = query.get("terms", {}).get("at_uri")
+                # If the test asks for an at_uri named "missing", return
+                # a document without embeddings to trigger a 404 path.
+                if isinstance(at_list, (list, tuple)) and "missing" in at_list:
+                    doc = {
+                        **es_response["hits"]["hits"][0]["_source"],
+                        "at_uri": "at://missing",
+                        "embeddings": {},
+                    }
+                    return {"hits": {"hits": [{"_source": doc}]}}
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_source": {
+                                    **es_response["hits"]["hits"][0]["_source"],
+                                    "at_uri": "at://1",
+                                }
+                            }
+                        ]
+                    }
+                }
+            # If it's a knn search (similar), return same hit list
+            if isinstance(query, dict) and "knn" in query:
                 return es_response
+            return es_response
 
     # ensure a predictable API key for tests and restore previous value
     prev = os.environ.get("API_KEY")

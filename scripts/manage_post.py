@@ -28,7 +28,7 @@ import sys
 from atproto import Client, client_utils
 from dotenv import load_dotenv
 
-LINK_RE = re.compile(r'\[(\[[^\]]+\]|[^\]]+)\]\((https?://[^)]+)\)')
+LINK_RE = re.compile(r"\[(\[[^\]]+\]|[^\]]+)\]\((https?://[^)]+)\)")
 
 
 def parse_content(text: str) -> list[dict]:
@@ -37,7 +37,7 @@ def parse_content(text: str) -> list[dict]:
     last = 0
     for m in LINK_RE.finditer(text):
         if m.start() > last:
-            segments.append({"type": "text", "text": text[last:m.start()]})
+            segments.append({"type": "text", "text": text[last : m.start()]})
         segments.append({"type": "link", "text": m.group(1), "url": m.group(2)})
         last = m.end()
     if last < len(text):

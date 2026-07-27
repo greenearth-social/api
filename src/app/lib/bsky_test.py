@@ -49,21 +49,25 @@ def fake_http_client(monkeypatch):
 class TestGetFollowedUserDids:
     @pytest.mark.asyncio
     async def test_returns_followed_dids_and_uses_query_params(self, fake_http_client):
-        fake_http_client.response = FakeResponse({
-            "follows": [
-                {"did": "did:plc:follow1"},
-                {"did": "did:plc:follow2"},
-            ]
-        })
+        fake_http_client.response = FakeResponse(
+            {
+                "follows": [
+                    {"did": "did:plc:follow1"},
+                    {"did": "did:plc:follow2"},
+                ]
+            }
+        )
 
         dids = await get_followed_user_dids("did:plc:user1", limit=50)
 
         assert dids == ["did:plc:follow1", "did:plc:follow2"]
-        assert fake_http_client.get_calls == [{
-            "url": "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows",
-            "params": {"actor": "did:plc:user1", "limit": 50},
-            "kwargs": {"timeout": bsky_module.FOLLOWS_HTTP_TIMEOUT},
-        }]
+        assert fake_http_client.get_calls == [
+            {
+                "url": "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows",
+                "params": {"actor": "did:plc:user1", "limit": 50},
+                "kwargs": {"timeout": bsky_module.FOLLOWS_HTTP_TIMEOUT},
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_paginates_follows_with_api_page_limit(self, fake_http_client):
@@ -101,13 +105,15 @@ class TestGetFollowedUserDids:
     @pytest.mark.asyncio
     async def test_caps_returned_dids_at_requested_total_limit(self, fake_http_client):
         fake_http_client.responses = [
-            FakeResponse({
-                "follows": [
-                    {"did": "did:plc:follow1"},
-                    {"did": "did:plc:follow2"},
-                ],
-                "cursor": "next-page",
-            }),
+            FakeResponse(
+                {
+                    "follows": [
+                        {"did": "did:plc:follow1"},
+                        {"did": "did:plc:follow2"},
+                    ],
+                    "cursor": "next-page",
+                }
+            ),
         ]
 
         dids = await get_followed_user_dids("did:plc:user1", limit=1)
@@ -124,16 +130,18 @@ class TestGetFollowedUserDids:
 
     @pytest.mark.asyncio
     async def test_skips_malformed_follow_entries(self, fake_http_client):
-        fake_http_client.response = FakeResponse({
-            "follows": [
-                {"did": "did:plc:follow1"},
-                {"handle": "missing.did"},
-                {"did": 123},
-                None,
-                "not-a-dict",
-                {"did": "did:plc:follow2"},
-            ]
-        })
+        fake_http_client.response = FakeResponse(
+            {
+                "follows": [
+                    {"did": "did:plc:follow1"},
+                    {"handle": "missing.did"},
+                    {"did": 123},
+                    None,
+                    "not-a-dict",
+                    {"did": "did:plc:follow2"},
+                ]
+            }
+        )
 
         dids = await get_followed_user_dids("did:plc:user1", limit=100)
 
@@ -246,9 +254,11 @@ class TestGetFollowedUserDids:
                 raise TimeoutError
 
         monkeypatch.setattr(bsky_module.asyncio, "timeout", ExpiringTimeout)
-        fake_http_client.response = FakeResponse({
-            "follows": [{"did": "did:plc:follow1"}],
-        })
+        fake_http_client.response = FakeResponse(
+            {
+                "follows": [{"did": "did:plc:follow1"}],
+            }
+        )
 
         dids = await get_followed_user_dids("did:plc:user1", limit=100)
 

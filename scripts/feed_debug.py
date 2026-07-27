@@ -28,7 +28,6 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import datetime
 from typing import NoReturn
 
 from rich import box
@@ -169,20 +168,10 @@ def _candidate_stats_rows(doc: FeedDebugDocument) -> list[tuple[str, str, str, s
 
     rows = []
     for label, candidates in groups.items():
-        placements = [
-            final_ranks[c.at_uri]
-            for c in candidates
-            if c.at_uri in final_ranks
-        ]
-        ranker_scores = [
-            heavy_scores[c.at_uri]
-            for c in candidates
-            if c.at_uri in heavy_scores
-        ]
+        placements = [final_ranks[c.at_uri] for c in candidates if c.at_uri in final_ranks]
+        ranker_scores = [heavy_scores[c.at_uri] for c in candidates if c.at_uri in heavy_scores]
         author_penalty_scores = [
-            author_penalties[c.at_uri]
-            for c in candidates
-            if c.at_uri in author_penalties
+            author_penalties[c.at_uri] for c in candidates if c.at_uri in author_penalties
         ]
         rows.append(
             (

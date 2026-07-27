@@ -26,12 +26,14 @@ class FakeEs:
         self.calls: list[dict] = []
 
     async def search(self, *, index=None, query=None, size=None, sort=None, **kwargs):
-        self.calls.append({
-            "index": index,
-            "query": query,
-            "size": size,
-            "sort": sort,
-        })
+        self.calls.append(
+            {
+                "index": index,
+                "query": query,
+                "size": size,
+                "sort": sort,
+            }
+        )
         return self._responses.get(index, self._default)
 
 
@@ -59,30 +61,32 @@ class TestFollowedUsersSearch:
             "get_followed_user_dids",
             fake_get_followed_user_dids,
         )
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 0.91,
-                            "_source": {
-                                "at_uri": "at://followed/1",
-                                "content": "followed post",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.6]},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 0.91,
+                                "_source": {
+                                    "at_uri": "at://followed/1",
+                                    "content": "followed post",
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.6]},
+                                },
                             },
-                        },
-                        {
-                            "_score": 0.72,
-                            "_source": {
-                                "at_uri": "at://followed/2",
-                                "content": "another followed post",
-                                "embeddings": {},
+                            {
+                                "_score": 0.72,
+                                "_source": {
+                                    "at_uri": "at://followed/2",
+                                    "content": "another followed post",
+                                    "embeddings": {},
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
 
         candidates = await followed_users_search(
             es,
@@ -149,26 +153,40 @@ class TestFollowedUsersSearch:
     @pytest.mark.asyncio
     async def test_exclude_uris_overfetches_and_filters_in_python(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 1.0,
-                            "_source": {"at_uri": "at://post/1", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 0.9,
-                            "_source": {"at_uri": "at://post/excluded", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 0.8,
-                            "_source": {"at_uri": "at://post/2", "content": "x", "embeddings": {}},
-                        },
-                    ]
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 1.0,
+                                "_source": {
+                                    "at_uri": "at://post/1",
+                                    "content": "x",
+                                    "embeddings": {},
+                                },
+                            },
+                            {
+                                "_score": 0.9,
+                                "_source": {
+                                    "at_uri": "at://post/excluded",
+                                    "content": "x",
+                                    "embeddings": {},
+                                },
+                            },
+                            {
+                                "_score": 0.8,
+                                "_source": {
+                                    "at_uri": "at://post/2",
+                                    "content": "x",
+                                    "embeddings": {},
+                                },
+                            },
+                        ]
+                    }
                 }
             }
-        })
+        )
 
         candidates = await followed_users_search(
             es,
@@ -225,22 +243,24 @@ class TestFollowedUsersSearch:
     @pytest.mark.asyncio
     async def test_generator_name_defaults_to_none(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 1.0,
-                            "_source": {
-                                "at_uri": "at://followed/1",
-                                "content": "post",
-                                "embeddings": {},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 1.0,
+                                "_source": {
+                                    "at_uri": "at://followed/1",
+                                    "content": "post",
+                                    "embeddings": {},
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
 
         candidates = await followed_users_search(es, "did:plc:user1", num_candidates=1)
 
@@ -255,22 +275,24 @@ class TestFollowedUsersCandidateGenerator:
     @pytest.mark.asyncio
     async def test_generate(self, generator, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 0.8,
-                            "_source": {
-                                "at_uri": "at://followed/1",
-                                "content": "followed post",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 0.8,
+                                "_source": {
+                                    "at_uri": "at://followed/1",
+                                    "content": "followed post",
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
 
         result = await generator.generate(es, "did:plc:user1", num_candidates=10)
 
@@ -285,9 +307,7 @@ class TestFollowedUsersCandidateGenerator:
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs()
 
-        await generator.generate(
-            es, "did:plc:user1", num_candidates=2, max_age_hours=48
-        )
+        await generator.generate(es, "did:plc:user1", num_candidates=2, max_age_hours=48)
 
         assert len(es.calls) == 1
         filters = es.calls[0]["query"]["bool"]["filter"]

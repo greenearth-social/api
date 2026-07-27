@@ -46,26 +46,30 @@ def test_candidate_post_from_hit_handles_missing_media():
 
 
 def test_candidate_post_from_hit_keeps_embedding_with_content_source():
-    candidate = candidate_post_from_hit({
-        "_source": {
-            "at_uri": "at://post/1",
-            "content": "hello",
-            "embeddings": {MINILM_L12_EMBEDDING_KEY: SAMPLE_EMBEDDING},
+    candidate = candidate_post_from_hit(
+        {
+            "_source": {
+                "at_uri": "at://post/1",
+                "content": "hello",
+                "embeddings": {MINILM_L12_EMBEDDING_KEY: SAMPLE_EMBEDDING},
+            }
         }
-    })
+    )
     assert candidate.minilm_l12_embedding is not None
 
 
 def test_candidate_post_from_hit_strips_embedding_without_nonblank_source_text():
-    candidate = candidate_post_from_hit({
-        "_source": {
-            "at_uri": "at://post/1",
-            "content": "   ",
-            "media": [{"alt_text": ""}, {"alt_text": "  "}, "bad"],
-            "video_transcript": 123,
-            "embeddings": {MINILM_L12_EMBEDDING_KEY: SAMPLE_EMBEDDING},
+    candidate = candidate_post_from_hit(
+        {
+            "_source": {
+                "at_uri": "at://post/1",
+                "content": "   ",
+                "media": [{"alt_text": ""}, {"alt_text": "  "}, "bad"],
+                "video_transcript": 123,
+                "embeddings": {MINILM_L12_EMBEDDING_KEY: SAMPLE_EMBEDDING},
+            }
         }
-    })
+    )
     assert candidate.minilm_l12_embedding is None
 
 

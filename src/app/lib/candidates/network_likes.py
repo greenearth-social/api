@@ -44,6 +44,7 @@ MAX_LIKES_SCANNED = 5_000
 # Query helper
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class LikedPostUriPage:
     uris: list[str]
@@ -141,11 +142,7 @@ async def fetch_posts_by_uris(
         if candidate.at_uri and candidate.at_uri not in exclude_set:
             candidates_by_uri[candidate.at_uri] = candidate
 
-    return [
-        candidates_by_uri[at_uri]
-        for at_uri in at_uris
-        if at_uri in candidates_by_uri
-    ]
+    return [candidates_by_uri[at_uri] for at_uri in at_uris if at_uri in candidates_by_uri]
 
 
 async def network_likes_search(
@@ -166,8 +163,7 @@ async def network_likes_search(
         )
     except FollowedUsersLookupError as exc:
         logger.warning(
-            "Skipping network_likes candidate generation for %s after follow "
-            "lookup failed: %s",
+            "Skipping network_likes candidate generation for %s after follow lookup failed: %s",
             user_did,
             exc,
         )

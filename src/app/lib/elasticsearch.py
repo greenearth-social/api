@@ -22,7 +22,7 @@ DEFAULT_LIKED_POSTS_LIMIT = 50
 POSTS_KNN_INDEX = "posts_recent"
 
 
-POST_EMBEDDING_SOURCE_FIELDS = [ "content" ]
+POST_EMBEDDING_SOURCE_FIELDS = ["content"]
 
 
 def _has_nonblank_string(value) -> bool:
@@ -72,9 +72,7 @@ async def fetch_recent_liked_post_uris(
         return []
 
     async def _fetch() -> list[str]:
-        async with timed(
-            logger, "es_recent_likes", n_users=len(user_dids), limit=limit
-        ):
+        async with timed(logger, "es_recent_likes", n_users=len(user_dids), limit=limit):
             query = {
                 "bool": {
                     "filter": [{"terms": {"author_did": user_dids}}],
@@ -129,9 +127,7 @@ async def fetch_recent_liked_post_uris_and_times(
         return [], []
 
     async def _fetch() -> tuple[list[str], list[str]]:
-        async with timed(
-            logger, "es_recent_likes_and_times", n_users=len(user_dids), limit=limit
-        ):
+        async with timed(logger, "es_recent_likes_and_times", n_users=len(user_dids), limit=limit):
             query = {
                 "bool": {
                     "filter": [

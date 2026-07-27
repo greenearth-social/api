@@ -30,30 +30,32 @@ class FakeEs:
 class TestRandomPostsSearch:
     @pytest.mark.asyncio
     async def test_returns_candidates_scored(self):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 0.91,
-                            "_source": {
-                                "at_uri": "at://random/1",
-                                "content": "random post",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.6]},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 0.91,
+                                "_source": {
+                                    "at_uri": "at://random/1",
+                                    "content": "random post",
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.6]},
+                                },
                             },
-                        },
-                        {
-                            "_score": 0.72,
-                            "_source": {
-                                "at_uri": "at://random/2",
-                                "content": "another random post",
-                                "embeddings": {},
+                            {
+                                "_score": 0.72,
+                                "_source": {
+                                    "at_uri": "at://random/2",
+                                    "content": "another random post",
+                                    "embeddings": {},
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
 
         candidates = await random_posts_search(es, num_candidates=5, generator_name="random_posts")
 
@@ -102,26 +104,40 @@ class TestRandomPostsSearch:
 
     @pytest.mark.asyncio
     async def test_exclude_uris_overfetches_and_filters_in_python(self):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 1.0,
-                            "_source": {"at_uri": "at://post/1", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 0.9,
-                            "_source": {"at_uri": "at://post/excluded", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 0.8,
-                            "_source": {"at_uri": "at://post/2", "content": "x", "embeddings": {}},
-                        },
-                    ]
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 1.0,
+                                "_source": {
+                                    "at_uri": "at://post/1",
+                                    "content": "x",
+                                    "embeddings": {},
+                                },
+                            },
+                            {
+                                "_score": 0.9,
+                                "_source": {
+                                    "at_uri": "at://post/excluded",
+                                    "content": "x",
+                                    "embeddings": {},
+                                },
+                            },
+                            {
+                                "_score": 0.8,
+                                "_source": {
+                                    "at_uri": "at://post/2",
+                                    "content": "x",
+                                    "embeddings": {},
+                                },
+                            },
+                        ]
+                    }
                 }
             }
-        })
+        )
 
         candidates = await random_posts_search(
             es,
@@ -154,22 +170,24 @@ class TestRandomPostsCandidateGenerator:
 
     @pytest.mark.asyncio
     async def test_generate(self, generator):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 0.8,
-                            "_source": {
-                                "at_uri": "at://random/1",
-                                "content": "random post",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 0.8,
+                                "_source": {
+                                    "at_uri": "at://random/1",
+                                    "content": "random post",
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
 
         result = await generator.generate(es, "did:plc:user1", num_candidates=10)
 

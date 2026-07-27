@@ -20,9 +20,9 @@ strips embeddings and truncates post content before storage.
 from __future__ import annotations
 
 import contextlib
+import math
 from contextvars import ContextVar
 from datetime import datetime
-import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -38,9 +38,7 @@ if TYPE_CHECKING:
 # full post) so debug documents stay well under Firestore's 1 MB limit.
 CONTENT_SNIPPET_MAX = 300
 
-_recorder: ContextVar["FeedDebugRecorder | None"] = ContextVar(
-    "ge_feed_debug_recorder", default=None
-)
+_recorder: ContextVar[FeedDebugRecorder | None] = ContextVar("ge_feed_debug_recorder", default=None)
 
 
 class FeedDebugRecorder:
@@ -55,11 +53,11 @@ class FeedDebugRecorder:
         self.regenerated = regenerated
         self.ranker_model: str | None = None
         self.diversify: bool = False
-        self.generate_request: "CandidateGenerateRequest | None" = None
-        self.generator_outputs: list["CandidateResult"] = []
-        self.final_candidates: list["CandidatePost"] = []
+        self.generate_request: CandidateGenerateRequest | None = None
+        self.generator_outputs: list[CandidateResult] = []
+        self.final_candidates: list[CandidatePost] = []
         self.user_features: list[tuple[str, list[str], int]] = []
-        self.ranking: "RankPredictResult | None" = None
+        self.ranking: RankPredictResult | None = None
         # (model_name, weight, {at_uri: normalized_score}) per configured rank
         # model, in the order they were run; populated only when ranking runs.
         self.model_scores: list[tuple[str, float, dict[str, float]]] = []
@@ -76,13 +74,13 @@ class FeedDebugRecorder:
 
     # -- recording -------------------------------------------------------
 
-    def set_generate_request(self, request: "CandidateGenerateRequest") -> None:
+    def set_generate_request(self, request: CandidateGenerateRequest) -> None:
         self.generate_request = request
 
-    def record_generator_output(self, result: "CandidateResult") -> None:
+    def record_generator_output(self, result: CandidateResult) -> None:
         self.generator_outputs.append(result)
 
-    def record_final_candidates(self, candidates: list["CandidatePost"]) -> None:
+    def record_final_candidates(self, candidates: list[CandidatePost]) -> None:
         self.final_candidates = list(candidates)
 
     def record_user_features(
@@ -90,7 +88,7 @@ class FeedDebugRecorder:
     ) -> None:
         self.user_features.append((source, list(liked_post_uris), num_embeddings))
 
-    def record_ranking(self, ranking: "RankPredictResult") -> None:
+    def record_ranking(self, ranking: RankPredictResult) -> None:
         self.ranking = ranking
 
     def record_model_scores(self, model_name: str, weight: float, scores: dict[str, float]) -> None:
@@ -130,7 +128,7 @@ class FeedDebugRecorder:
         generated_at: datetime,
         expires_at: datetime,
         author_usernames: dict[str, str] | None = None,
-    ) -> "FeedDebugDocument":
+    ) -> FeedDebugDocument:
         """Assemble a :class:`FeedDebugDocument`, stripping embeddings, truncating
         content, and stamping resolved author handles onto stored candidates.
         """
@@ -150,7 +148,7 @@ class FeedDebugRecorder:
 
         authors = author_usernames or {}
 
-        def sanitize(c: "CandidatePost") -> "CandidatePost":
+        def sanitize(c: CandidatePost) -> CandidatePost:
             content = c.content
             if content is not None and len(content) > CONTENT_SNIPPET_MAX:
                 content = content[:CONTENT_SNIPPET_MAX]
@@ -232,7 +230,7 @@ class FeedDebugRecorder:
         generated_at: datetime,
         expires_at: datetime,
         applied_social_radius: int | None = None,
-    ) -> "FeedSnapshotDocument":
+    ) -> FeedSnapshotDocument:
         """Assemble a lightweight :class:`FeedSnapshotDocument` with only the
         per-URI pipeline metadata needed by the transparency API.
 
@@ -261,8 +259,7 @@ class FeedDebugRecorder:
         gens_by_uri: dict[str, list[GeneratorMeta]] = {}
         for result in self.generator_outputs:
             finite_scores = [
-                c.score for c in result.candidates
-                if c.score is not None and math.isfinite(c.score)
+                c.score for c in result.candidates if c.score is not None and math.isfinite(c.score)
             ]
             lo = min(finite_scores) if finite_scores else None
             hi = max(finite_scores) if finite_scores else None
@@ -279,20 +276,22 @@ class FeedDebugRecorder:
         requested_by_name: dict[str, int] = {}
         if self.generate_request:
             from .candidates.generate import allocate_counts
+
             counts = allocate_counts(
                 self.generate_request.generators,
                 self.generate_request.num_candidates,
             )
             requested_by_name = {
                 spec.name: count
-                for spec, count in zip(self.generate_request.generators, counts)
+                for spec, count in zip(self.generate_request.generators, counts, strict=False)
             }
 
         diagnostics: list[GeneratorDiagnostic] = []
         specs = self.generate_request.generators if self.generate_request else []
         for spec in specs:
             staged = [
-                output for output in self.generator_outputs
+                output
+                for output in self.generator_outputs
                 if output.generator_name == spec.name and output.mode != "primary"
             ]
             if staged:
@@ -318,7 +317,8 @@ class FeedDebugRecorder:
                     remaining = max(0, remaining - len(returned_uris))
                 continue
             matching = [
-                output for output in self.generator_outputs
+                output
+                for output in self.generator_outputs
                 if output.generator_name == spec.name and output.mode == "primary"
             ]
             returned_uris = {
@@ -329,7 +329,8 @@ class FeedDebugRecorder:
             }
             output = matching[-1] if matching else None
             contributed = sum(
-                1 for uri in self.final_order
+                1
+                for uri in self.final_order
                 if any(g.name == spec.name for g in gens_by_uri.get(uri, []))
             )
             diagnostics.append(
@@ -413,13 +414,13 @@ class FeedDebugRecorder:
         return dids
 
 
-def current_recorder() -> "FeedDebugRecorder | None":
+def current_recorder() -> FeedDebugRecorder | None:
     """Return the recorder for the current request, or ``None`` if not debugging."""
     return _recorder.get()
 
 
 @contextlib.contextmanager
-def feed_debug_scope(recorder: "FeedDebugRecorder"):
+def feed_debug_scope(recorder: FeedDebugRecorder):
     """Install *recorder* as the current feed-debug recorder for the block."""
     token = _recorder.set(recorder)
     try:

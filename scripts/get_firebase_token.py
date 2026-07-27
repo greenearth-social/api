@@ -10,7 +10,6 @@ REST API — no service account key file needed.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import urllib.request
@@ -85,9 +84,7 @@ def main() -> None:
     print(f"Custom token created for {did}", file=sys.stderr)
 
     # 2. Exchange custom token for an ID token.
-    signin_body = json.dumps(
-        {"token": custom_token, "returnSecureToken": True}
-    ).encode()
+    signin_body = json.dumps({"token": custom_token, "returnSecureToken": True}).encode()
     signin_url = (
         "https://identitytoolkit.googleapis.com/v1/"
         f"accounts:signInWithCustomToken?key={FIREBASE_API_KEY}"

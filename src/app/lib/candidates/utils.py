@@ -2,7 +2,6 @@ from ...models import CandidatePost
 from ..elasticsearch import post_has_embedding_source, unwrap_es_response
 from ..embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
 
-
 # Fields every candidate generator should pull from ES via `_source`.
 # Critically, this does NOT include the 384-dim embedding array, even
 # though MMR and the two-tower ranker need it downstream. A kNN search
@@ -14,11 +13,11 @@ CANDIDATE_SOURCE_FIELDS = [
     "at_uri",
     "author_did",
     "content",
-    "contains_video",       # used for video_only filtering
-    "contains_images",      # media metadata (feed debugging)
-    "image_count",          # media metadata (feed debugging)
-    "video_count",          # media metadata (feed debugging)
-    "external_embed",       # link embed metadata (feed debugging)
+    "contains_video",  # used for video_only filtering
+    "contains_images",  # media metadata (feed debugging)
+    "image_count",  # media metadata (feed debugging)
+    "video_count",  # media metadata (feed debugging)
+    "external_embed",  # link embed metadata (feed debugging)
     "like_count",
 ]
 
@@ -41,11 +40,7 @@ def candidate_post_from_hit(
     src = hit.get("_source") or {}
     embeddings_obj = src.get("embeddings") or {}
 
-    l12 = (
-        embeddings_obj.get(MINILM_L12_EMBEDDING_KEY)
-        if isinstance(embeddings_obj, dict)
-        else None
-    )
+    l12 = embeddings_obj.get(MINILM_L12_EMBEDDING_KEY) if isinstance(embeddings_obj, dict) else None
 
     encoded = None
     if l12 is not None and post_has_embedding_source(src):
@@ -55,9 +50,7 @@ def candidate_post_from_hit(
             encoded = None
 
     external_embed = src.get("external_embed")
-    external_uri = (
-        external_embed.get("uri") if isinstance(external_embed, dict) else None
-    )
+    external_uri = external_embed.get("uri") if isinstance(external_embed, dict) else None
 
     return CandidatePost(
         author_did=src.get("author_did"),

@@ -7,11 +7,9 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from ..lib.atproto_auth import (
-    BEARER_PREFIX,
     init_id_resolver,
     verify_auth_header,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,6 +39,7 @@ def _build_app_with_auth_endpoint(*, attach_resolver: bool = True) -> FastAPI:
 # init_id_resolver
 # ---------------------------------------------------------------------------
 
+
 class TestInitIdResolver:
     def test_returns_async_id_resolver(self):
         resolver = init_id_resolver()
@@ -61,6 +60,7 @@ class TestInitIdResolver:
 # ---------------------------------------------------------------------------
 # verify_auth_header
 # ---------------------------------------------------------------------------
+
 
 class TestVerifyAuthHeader:
     """Tests for verify_auth_header using mocked JWT verification."""
@@ -100,9 +100,7 @@ class TestVerifyAuthHeader:
     def test_missing_resolver_returns_empty(self):
         app_no_resolver = _build_app_with_auth_endpoint(attach_resolver=False)
         client = TestClient(app_no_resolver)
-        resp = client.get(
-            "/auth-test", headers={"Authorization": "Bearer some.jwt.token"}
-        )
+        resp = client.get("/auth-test", headers={"Authorization": "Bearer some.jwt.token"})
         assert resp.json()["user_did"] == ""
 
     # --- successful verification ---

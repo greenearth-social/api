@@ -9,10 +9,10 @@ from ..candidates.popularity import (
 )
 from ..embeddings import MINILM_L12_EMBEDDING_KEY
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def generator():
@@ -36,33 +36,36 @@ class FakeEs:
 # Unit tests – popularity_search
 # ---------------------------------------------------------------------------
 
+
 class TestPopularitySearch:
     @pytest.mark.asyncio
     async def test_returns_candidates_scored(self):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 12.5,
-                            "_source": {
-                                "at_uri": "at://popular/1",
-                                "content": "trending post",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.6]},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 12.5,
+                                "_source": {
+                                    "at_uri": "at://popular/1",
+                                    "content": "trending post",
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.5, 0.6]},
+                                },
                             },
-                        },
-                        {
-                            "_score": 10.0,
-                            "_source": {
-                                "at_uri": "at://popular/2",
-                                "content": "another popular one",
-                                "embeddings": {},
+                            {
+                                "_score": 10.0,
+                                "_source": {
+                                    "at_uri": "at://popular/2",
+                                    "content": "another popular one",
+                                    "embeddings": {},
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
 
         candidates = await popularity_search(es, num_candidates=5, generator_name="popularity")
 
@@ -133,26 +136,40 @@ class TestPopularitySearch:
 
     @pytest.mark.asyncio
     async def test_exclude_uris_overfetches_and_filters_in_python(self):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 10.0,
-                            "_source": {"at_uri": "at://popular/1", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 9.0,
-                            "_source": {"at_uri": "at://popular/excluded", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 8.0,
-                            "_source": {"at_uri": "at://popular/2", "content": "x", "embeddings": {}},
-                        },
-                    ]
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 10.0,
+                                "_source": {
+                                    "at_uri": "at://popular/1",
+                                    "content": "x",
+                                    "embeddings": {},
+                                },
+                            },
+                            {
+                                "_score": 9.0,
+                                "_source": {
+                                    "at_uri": "at://popular/excluded",
+                                    "content": "x",
+                                    "embeddings": {},
+                                },
+                            },
+                            {
+                                "_score": 8.0,
+                                "_source": {
+                                    "at_uri": "at://popular/2",
+                                    "content": "x",
+                                    "embeddings": {},
+                                },
+                            },
+                        ]
+                    }
                 }
             }
-        })
+        )
 
         candidates = await popularity_search(
             es,
@@ -179,43 +196,47 @@ class TestPopularitySearch:
 
     @pytest.mark.asyncio
     async def test_handles_missing_embeddings(self):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 5.0,
-                            "_source": {
-                                "at_uri": "at://popular/3",
-                                "content": "no embeddings post",
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 5.0,
+                                "_source": {
+                                    "at_uri": "at://popular/3",
+                                    "content": "no embeddings post",
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
         candidates = await popularity_search(es, num_candidates=5)
         assert len(candidates) == 1
         assert candidates[0].minilm_l12_embedding is None
 
     @pytest.mark.asyncio
     async def test_generator_name_defaults_to_none(self):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 1.0,
-                            "_source": {
-                                "at_uri": "at://popular/4",
-                                "content": "post",
-                                "embeddings": {},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 1.0,
+                                "_source": {
+                                    "at_uri": "at://popular/4",
+                                    "content": "post",
+                                    "embeddings": {},
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
         candidates = await popularity_search(es, num_candidates=1)
         assert candidates[0].generator_name is None
 
@@ -224,6 +245,7 @@ class TestPopularitySearch:
 # Integration-style tests – full generator
 # ---------------------------------------------------------------------------
 
+
 class TestPopularityCandidateGenerator:
     @pytest.mark.asyncio
     async def test_name(self, generator):
@@ -231,22 +253,24 @@ class TestPopularityCandidateGenerator:
 
     @pytest.mark.asyncio
     async def test_generate(self, generator):
-        es = FakeEs(responses={
-            "posts_recent": {
-                "hits": {
-                    "hits": [
-                        {
-                            "_score": 8.0,
-                            "_source": {
-                                "at_uri": "at://popular/1",
-                                "content": "popular post",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+        es = FakeEs(
+            responses={
+                "posts_recent": {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 8.0,
+                                "_source": {
+                                    "at_uri": "at://popular/1",
+                                    "content": "popular post",
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
+                                },
                             },
-                        },
-                    ]
+                        ]
+                    }
                 }
             }
-        })
+        )
 
         result = await generator.generate(es, "did:plc:user1", num_candidates=10)
 

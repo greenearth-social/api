@@ -55,6 +55,8 @@ from dotenv import load_dotenv
 
 # Add the repo's src/ directory to the path so we can import app.*
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src"))  # type: ignore
+from datetime import UTC
+
 from app.feeds import FEEDS  # type: ignore
 
 DEFAULT_PDS = "https://bsky.social"
@@ -278,7 +280,7 @@ def publish_feed(
         access_jwt = session["accessJwt"]
         repo_did = session["did"]
 
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         avatar_blob = _upload_blob(client, pds, access_jwt, feed_cfg.avatar if feed_cfg else None)
         record: dict = {
@@ -287,17 +289,15 @@ def publish_feed(
             "displayName": display_name,
             "description": description,
             "acceptsInteractions": True,
-            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "createdAt": datetime.now(UTC).isoformat(),
         }
         if avatar_blob is not None:
             record["avatar"] = avatar_blob
 
-        result = _put_record(
-            client, pds, access_jwt, repo_did, feed_name, record
-        )
+        result = _put_record(client, pds, access_jwt, repo_did, feed_name, record)
 
     feed_uri = f"at://{repo_did}/app.bsky.feed.generator/{feed_name}"
-    print(f"Published feed record:")
+    print("Published feed record:")
     print(f"  URI:  {feed_uri}")
     print(f"  CID:  {result.get('cid', '?')}")
     print(f"  DID:  {generator_did}")
@@ -328,7 +328,7 @@ def delete_feed(
         _delete_record(client, pds, access_jwt, repo_did, feed_name)
 
     feed_uri = f"at://{repo_did}/app.bsky.feed.generator/{feed_name}"
-    print(f"Deleted feed record:")
+    print("Deleted feed record:")
     print(f"  URI:  {feed_uri}")
     print(f"  Name: {feed_name}")
 
@@ -415,7 +415,11 @@ def _resolve_feed_publish_params(
     """Return (published_rkey, display_name, description) for a feed based on routing rules."""
     is_greenearth = normalized_env == "prod" and feed_cfg.public
     if is_greenearth:
-        return rkey, feed_cfg.display_name, f"{feed_cfg.description}\nBuilt by GreenEarth (https://www.greenearth.social)."
+        return (
+            rkey,
+            feed_cfg.display_name,
+            f"{feed_cfg.description}\nBuilt by GreenEarth (https://www.greenearth.social).",
+        )
     published_rkey = feed_cfg.internal_rkey
     base_display_name = feed_cfg.internal_display_name
     if normalized_env in ("dev", "stage"):
@@ -461,7 +465,7 @@ def sync_feeds(
         existing_records = _list_records(client, pds, access_jwt, repo_did)
         existing_rkeys = {r["uri"].split("/")[-1] for r in existing_records}
 
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         desired_rkeys: set[str] = set()
         for rkey, feed_cfg in feed_items:
@@ -476,7 +480,7 @@ def sync_feeds(
                 "displayName": display_name,
                 "description": description,
                 "acceptsInteractions": True,
-                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "createdAt": datetime.now(UTC).isoformat(),
             }
             if avatar_blob is not None:
                 record["avatar"] = avatar_blob
@@ -489,7 +493,9 @@ def sync_feeds(
             # When syncing a visibility subset, restrict cleanup to rkeys owned
             # by feeds in this class. Without this, an --internal-only prod pass
             # would delete public feeds' Caterpie records left by a stage deploy.
-            class_rkeys = {cfg.internal_rkey for _, cfg in feed_items} | {rkey for rkey, _ in feed_items}
+            class_rkeys = {cfg.internal_rkey for _, cfg in feed_items} | {
+                rkey for rkey, _ in feed_items
+            }
             stale = (existing_rkeys & class_rkeys) - desired_rkeys
         for rkey in sorted(stale):
             _delete_record(client, pds, access_jwt, repo_did, rkey)
@@ -609,7 +615,9 @@ def main() -> None:
     # Validate mutually exclusive flags
     mode_flags = sum([args.publish_all, args.delete, args.delete_all, args.list, args.sync])
     if mode_flags > 1:
-        parser.error("Only one of --all, --delete, --delete-all, --list, or --sync can be used at a time.")
+        parser.error(
+            "Only one of --all, --delete, --delete-all, --list, or --sync can be used at a time."
+        )
 
     if args.public_only and args.internal_only:
         parser.error("--public-only and --internal-only are mutually exclusive.")
@@ -631,9 +639,7 @@ def main() -> None:
             parser.error("--environment is required for --sync.")
         generator_did = args.generator_did or os.environ.get("GE_FEED_GENERATOR_DID")
         if not generator_did:
-            parser.error(
-                "--generator-did is required for --sync (or set GE_FEED_GENERATOR_DID)"
-            )
+            parser.error("--generator-did is required for --sync (or set GE_FEED_GENERATOR_DID)")
         visibility: Literal["public", "internal"] | None = (
             "public" if args.public_only else ("internal" if args.internal_only else None)
         )

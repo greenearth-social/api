@@ -1,12 +1,11 @@
-"""Helpers for elasticsearch related to candidate generation
-"""
+"""Helpers for elasticsearch related to candidate generation"""
 
 import logging
 
 from ...models import CandidatePost, MaxAgeHours
 from ..elasticsearch import POSTS_KNN_INDEX
-from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 from ..telemetry import timed
+from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 
 logger = logging.getLogger(__name__)
 

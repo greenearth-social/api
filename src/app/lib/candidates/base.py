@@ -12,7 +12,6 @@ from pydantic import BaseModel, Field
 
 from ...models import CandidatePost, MaxAgeHours
 
-
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
@@ -21,7 +20,9 @@ from ...models import CandidatePost, MaxAgeHours
 class CandidateResult(BaseModel):
     """The output of a candidate generator invocation."""
 
-    generator_name: str = Field(..., description="Name of the generator that produced these candidates")
+    generator_name: str = Field(
+        ..., description="Name of the generator that produced these candidates"
+    )
     candidates: list[CandidatePost] = Field(default_factory=list)
     status: str = Field(default="success")
     reason: str | None = None
@@ -31,6 +32,7 @@ class CandidateResult(BaseModel):
 # ---------------------------------------------------------------------------
 # Abstract base
 # ---------------------------------------------------------------------------
+
 
 class CandidateGenerator(ABC):
     """Abstract base class for named candidate generators.
