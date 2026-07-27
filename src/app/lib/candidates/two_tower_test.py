@@ -173,7 +173,10 @@ class TestTwoTowerCandidateGenerator:
         ):
             await generator.generate(es, "did:plc:user1", max_age_hours=fresh_hours)
 
-        assert knn_search.await_args.kwargs["max_age_hours"] == fresh_hours
+        knn_search.assert_awaited_once()
+        await_args = knn_search.await_args
+        assert await_args is not None
+        assert await_args.kwargs["max_age_hours"] == fresh_hours
 
     @pytest.mark.asyncio
     async def test_generate_allows_zero_candidates_passthrough(self, generator):
