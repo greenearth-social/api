@@ -64,3 +64,40 @@ class TestFeedConfig:
     def test_avatar_can_be_set(self):
         cfg = _minimal_feed_cfg(avatar="assets/icons/test.png")
         assert cfg.avatar == "assets/icons/test.png"
+
+
+class TestCandidateGenerateRequest:
+    def test_defaults_to_seven_days(self):
+        request = CandidateGenerateRequest(
+            generators=[GeneratorSpec(name="test", weight=1.0)],
+            user_did="did:plc:test",
+            num_candidates=100,
+            video_only=False,
+            max_age_hours=168,
+            infill=None,
+        )
+        assert request.max_age_hours == 168
+
+    @pytest.mark.parametrize("hours", [6, 12, 24, 48, 72, 168])
+    def test_accepts_supported_freshness_windows(self, hours):
+        request = CandidateGenerateRequest(
+            generators=[GeneratorSpec(name="test", weight=1.0)],
+            user_did="did:plc:test",
+            num_candidates=100,
+            video_only=False,
+            max_age_hours=hours,
+            infill=None,
+        )
+        assert request.max_age_hours == hours
+
+    @pytest.mark.parametrize("hours", [0, 10, 169])
+    def test_rejects_unsupported_freshness_windows(self, hours):
+        with pytest.raises(ValidationError):
+            CandidateGenerateRequest(
+                generators=[GeneratorSpec(name="test", weight=1.0)],
+                user_did="did:plc:test",
+                num_candidates=100,
+                video_only=False,
+                max_age_hours=hours,
+                infill=None,
+            )

@@ -174,7 +174,16 @@ async def list_feeds(
     )
 
     summaries: list[FeedSummary] = []
+    seen_snapshots: set[tuple[str, tuple[str, ...]]] = set()
     for doc in docs:
+        # Treat the complete ordered post sequence as the snapshot identity.
+        # Documents are newest-first, so skipping a repeated key retains the
+        # newest load while preserving snapshots with different posts or order.
+        snapshot_key = (doc.feed_name, tuple(doc.items))
+        if snapshot_key in seen_snapshots:
+            continue
+        seen_snapshots.add(snapshot_key)
+
         summaries.append(
             FeedSummary(
                 request_id=doc.request_id,

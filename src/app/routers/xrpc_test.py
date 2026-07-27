@@ -2489,6 +2489,7 @@ class TestSocialRadiusOverride:
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
             social_radius=0,
+            freshness=1,
         )
         mock_pipeline.return_value = PipelineResult(["at://dummy/1", "at://dummy/2"], [])
 
@@ -2500,6 +2501,7 @@ class TestSocialRadiusOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS[0]
+        assert gen_request.max_age_hours == 12
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
@@ -2543,6 +2545,7 @@ class TestSocialRadiusOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
+        assert gen_request.max_age_hours == 168
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)

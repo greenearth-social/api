@@ -3,7 +3,7 @@
 
 import logging
 
-from ...models import CandidatePost
+from ...models import CandidatePost, MaxAgeHours
 from ..elasticsearch import POSTS_KNN_INDEX
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 from ..telemetry import timed
@@ -21,6 +21,7 @@ async def knn_search_posts(
     exclude_uris: list[str] | None = None,
     ge_post_embedding_model_uuid: str | None = None,
     min_like_count: int | None = None,
+    max_age_hours: MaxAgeHours = 168,
 ) -> list[CandidatePost]:
     """Run a kNN search against the ``posts_recent`` index and return candidate posts.
 
@@ -28,7 +29,11 @@ async def knn_search_posts(
     traversal. The ``posts_recent`` index contains only top-level posts (no
     replies), so no reply-exclusion filter is needed.
     """
-    filters: list[dict] = []
+    # Freshness filters returned candidate posts only. Actual availability can
+    # be shorter when posts_recent retains less data than the requested bound.
+    filters: list[dict] = [
+        {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}},
+    ]
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
@@ -71,4 +76,3 @@ async def knn_search_posts(
         )
 
     return candidate_posts_from_es_response(resp, generator_name=generator_name)
-
