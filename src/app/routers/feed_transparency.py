@@ -30,8 +30,8 @@ from ..models_feed_transparency import (
     FeedItemView,
     FeedListResponse,
     FeedSummary,
-    GeneratorView,
     GeneratorDiagnosticView,
+    GeneratorView,
     MediaView,
     ModelScoreView,
     Preferences,
@@ -169,9 +169,7 @@ async def list_feeds(
     # its own feed_name, so which of them to surface is the client's call.
     # Dropping the filter also drops the (feed_name, generated_at) composite
     # index this query used to need.
-    docs = await get_recent_feed_snapshots(
-        db, user_doc_id, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT
-    )
+    docs = await get_recent_feed_snapshots(db, user_doc_id, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT)
 
     summaries: list[FeedSummary] = []
     seen_snapshots: set[tuple[str, tuple[str, ...]]] = set()

@@ -13,10 +13,10 @@ from __future__ import annotations
 import contextlib
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class DegradationStage(str, Enum):
+class DegradationStage(StrEnum):
     CANDIDATE_GEN = "candidate_gen"
     RANK = "rank"
     EMBED_HYDRATION = "embed_hydration"
@@ -25,7 +25,7 @@ class DegradationStage(str, Enum):
 @dataclass
 class DegradationEvent:
     stage: DegradationStage
-    component: str    # e.g. "two_tower", "perspective", "fetch_post_embeddings"
+    component: str  # e.g. "two_tower", "perspective", "fetch_post_embeddings"
     cause: BaseException
 
 
@@ -44,9 +44,7 @@ class PipelineContext:
             raise event.cause
 
 
-_context: ContextVar[PipelineContext | None] = ContextVar(
-    "ge_pipeline_context", default=None
-)
+_context: ContextVar[PipelineContext | None] = ContextVar("ge_pipeline_context", default=None)
 
 
 def current_pipeline_context() -> PipelineContext | None:

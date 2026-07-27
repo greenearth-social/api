@@ -1,7 +1,7 @@
 import base64
 import importlib.util
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,7 +60,7 @@ class TestRequestIdFromFeedContext:
 class TestParseCreatedAt:
     def test_parses_z_suffix(self):
         dt = feed_view._parse_created_at("2026-07-21T16:18:15Z")
-        assert dt == datetime(2026, 7, 21, 16, 18, 15, tzinfo=timezone.utc)
+        assert dt == datetime(2026, 7, 21, 16, 18, 15, tzinfo=UTC)
 
     def test_none_returns_none(self):
         assert feed_view._parse_created_at(None) is None

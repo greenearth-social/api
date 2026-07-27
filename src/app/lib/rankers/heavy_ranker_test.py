@@ -1,7 +1,7 @@
 """Tests for the heavy ranker."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -12,7 +12,7 @@ from .heavy_ranker import HeavyRanker
 
 
 def _time(hour: int) -> datetime:
-    return datetime(2026, 1, 1, hour, tzinfo=timezone.utc)
+    return datetime(2026, 1, 1, hour, tzinfo=UTC)
 
 
 def test_score_bounds_match_inference_service_output_range():

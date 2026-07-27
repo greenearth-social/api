@@ -130,6 +130,7 @@ def test_equal_scores_diversity_drives_selection():
 # _cosine_similarity unit tests
 # ---------------------------------------------------------------------------
 
+
 def test_cosine_identical_vectors():
     assert _cosine_similarity([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
 
@@ -153,6 +154,7 @@ def test_cosine_zero_vector_b_returns_zero():
 # ---------------------------------------------------------------------------
 # mmr_rerank with cosine similarity active
 # ---------------------------------------------------------------------------
+
 
 def test_cosine_penalizes_topically_similar_cross_author_post():
     """A post from a different author but with an identical embedding is penalized
@@ -192,6 +194,7 @@ def test_content_penalty_decays_after_intervening_selection():
 # ---------------------------------------------------------------------------
 # per-pick scores
 # ---------------------------------------------------------------------------
+
 
 def test_first_pick_score_is_weighted_normalized_relevance():
     """The first pick carries no penalties: score = (1-BETA) * norm_relevance."""

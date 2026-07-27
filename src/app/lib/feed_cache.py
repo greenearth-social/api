@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
 
@@ -25,7 +25,9 @@ class FeedCache(ABC):
     """Backend-agnostic interface for storing and retrieving feed pages."""
 
     @abstractmethod
-    async def store(self, key: str, items: list[str], ttl_seconds: int = DEFAULT_TTL_SECONDS) -> None:
+    async def store(
+        self, key: str, items: list[str], ttl_seconds: int = DEFAULT_TTL_SECONDS
+    ) -> None:
         """Persist *items* (AT URIs) under *key* with the given TTL."""
         ...
 
@@ -48,7 +50,7 @@ class FeedCache(ABC):
             return None
         return FeedCacheDocument(
             items=items,
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_TTL_SECONDS),
+            expires_at=datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS),
         )
 
     async def store_document(self, key: str, document: FeedCacheDocument) -> None:
@@ -65,7 +67,7 @@ class FeedCache(ABC):
             return None
         return FeedCacheDocument(
             items=items,
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=DEFAULT_TTL_SECONDS),
+            expires_at=datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS),
             items_meta=new_items_meta,
         )
 
@@ -82,14 +84,12 @@ class FirestoreFeedCache(FeedCache):
     def __init__(self, db: AsyncClient) -> None:
         self._db = db
 
-    async def store(self, key: str, items: list[str], ttl_seconds: int = DEFAULT_TTL_SECONDS) -> None:
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    async def store(
+        self, key: str, items: list[str], ttl_seconds: int = DEFAULT_TTL_SECONDS
+    ) -> None:
+        expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
         cache_doc = FeedCacheDocument(items=items, expires_at=expires_at)
-        await (
-            self._db.collection(FEED_CACHE_COLLECTION)
-            .document(key)
-            .set(cache_doc.model_dump())
-        )
+        await self._db.collection(FEED_CACHE_COLLECTION).document(key).set(cache_doc.model_dump())
 
     async def retrieve(self, key: str) -> list[str] | None:
         document = await self.retrieve_document(key)
@@ -112,16 +112,14 @@ class FirestoreFeedCache(FeedCache):
         expires_at = cache_doc.expires_at
         # Firestore may return naive datetimes; treat them as UTC.
         if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) >= expires_at:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if datetime.now(UTC) >= expires_at:
             return None
 
         return cache_doc
 
     async def store_document(self, key: str, document: FeedCacheDocument) -> None:
-        await self._db.collection(FEED_CACHE_COLLECTION).document(key).set(
-            document.model_dump()
-        )
+        await self._db.collection(FEED_CACHE_COLLECTION).document(key).set(document.model_dump())
 
     async def append(self, key: str, new_items: list[str]) -> list[str] | None:
         ref = self._db.collection(FEED_CACHE_COLLECTION).document(key)
@@ -137,8 +135,8 @@ class FirestoreFeedCache(FeedCache):
             return None
         expires_at = cache_doc.expires_at
         if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) >= expires_at:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if datetime.now(UTC) >= expires_at:
             return None
         updated_items = cache_doc.items + new_items
         await ref.update({"items": updated_items})
@@ -166,16 +164,14 @@ class FirestoreFeedCache(FeedCache):
 
         expires_at = cache_doc.expires_at
         if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) >= expires_at:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if datetime.now(UTC) >= expires_at:
             return None
 
         updated_items = list(dict.fromkeys([*cache_doc.items, *new_items]))
         meta_by_uri = {meta.at_uri: meta for meta in cache_doc.items_meta}
         meta_by_uri.update({meta.at_uri: meta for meta in new_items_meta})
         updated_meta = [meta_by_uri[uri] for uri in updated_items if uri in meta_by_uri]
-        updated = cache_doc.model_copy(
-            update={"items": updated_items, "items_meta": updated_meta}
-        )
+        updated = cache_doc.model_copy(update={"items": updated_items, "items_meta": updated_meta})
         await ref.set(updated.model_dump())
         return updated

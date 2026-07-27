@@ -6,9 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-
 from publish_feed import (
-    ENV_DISPLAY_PREFIX,
     FEEDS,
     _create_session,
     _delete_record,
@@ -25,7 +23,6 @@ from publish_feed import (
     publish_feed,
     sync_feeds,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -85,7 +82,10 @@ class TestCreateSession:
 class TestPutRecord:
     def test_success(self):
         client = MagicMock(spec=httpx.Client)
-        put_response = {"uri": f"at://{REPO_DID}/app.bsky.feed.generator/{FEED_NAME}", "cid": "bafyabc"}
+        put_response = {
+            "uri": f"at://{REPO_DID}/app.bsky.feed.generator/{FEED_NAME}",
+            "cid": "bafyabc",
+        }
         client.post.return_value = _mock_response(200, put_response)
 
         result = _put_record(client, PDS, ACCESS_JWT, REPO_DID, FEED_NAME, {"test": "record"})
@@ -218,7 +218,12 @@ class TestUploadBlob:
     def test_uploads_jpg_with_correct_mime_type(self, tmp_path):
         img = tmp_path / "icon.jpg"
         img.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 8)
-        blob_ref = {"$type": "blob", "ref": {"$link": "bafyjpg"}, "mimeType": "image/jpeg", "size": 12}
+        blob_ref = {
+            "$type": "blob",
+            "ref": {"$link": "bafyjpg"},
+            "mimeType": "image/jpeg",
+            "size": 12,
+        }
         client = MagicMock(spec=httpx.Client)
         client.post.return_value = _mock_response(200, {"blob": blob_ref})
 
@@ -281,7 +286,11 @@ class TestPublishFeed:
 
         # Verify putRecord was called with the right record shape
         put_call = client.post.call_args_list[1]
-        record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
+        record = (
+            put_call.kwargs["json"]["record"]
+            if "json" in put_call.kwargs
+            else put_call[1]["json"]["record"]
+        )
         assert record["$type"] == "app.bsky.feed.generator"
         assert record["did"] == GENERATOR_DID
         assert record["displayName"] == "Unranked YF"  # from FEEDS config
@@ -291,7 +300,9 @@ class TestPublishFeed:
 
     @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_publishes_unknown_feed_uses_name_as_display(self, MockClient, mock_upload_blob, capsys):
+    def test_publishes_unknown_feed_uses_name_as_display(
+        self, MockClient, mock_upload_blob, capsys
+    ):
         """Publishing a feed not in FEEDS falls back to feed_name."""
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
@@ -302,7 +313,7 @@ class TestPublishFeed:
             _mock_response(200, {"cid": "bafyxyz"}),
         ]
 
-        result = publish_feed(
+        publish_feed(
             handle=HANDLE,
             password=PASSWORD,
             feed_name="unknown-feed",
@@ -311,7 +322,11 @@ class TestPublishFeed:
         )
 
         put_call = client.post.call_args_list[1]
-        record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
+        record = (
+            put_call.kwargs["json"]["record"]
+            if "json" in put_call.kwargs
+            else put_call[1]["json"]["record"]
+        )
         assert record["displayName"] == "unknown-feed"
         assert record["description"] == ""
 
@@ -339,7 +354,11 @@ class TestPublishFeed:
         )
 
         put_call = client.post.call_args_list[1]
-        record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
+        record = (
+            put_call.kwargs["json"]["record"]
+            if "json" in put_call.kwargs
+            else put_call[1]["json"]["record"]
+        )
         assert record["displayName"] == "Custom Name"
         assert record["description"] == "Custom desc"
 
@@ -366,7 +385,11 @@ class TestPublishFeed:
         )
 
         put_call = client.post.call_args_list[1]
-        record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
+        record = (
+            put_call.kwargs["json"]["record"]
+            if "json" in put_call.kwargs
+            else put_call[1]["json"]["record"]
+        )
         assert record["displayName"] == "GE Stg Unranked YF"
 
 
@@ -391,7 +414,9 @@ class TestDeleteFeed:
 
         # Verify deleteRecord was called
         delete_call = client.post.call_args_list[1]
-        body = delete_call.kwargs["json"] if "json" in delete_call.kwargs else delete_call[1]["json"]
+        body = (
+            delete_call.kwargs["json"] if "json" in delete_call.kwargs else delete_call[1]["json"]
+        )
         assert body["rkey"] == FEED_NAME
         assert body["collection"] == "app.bsky.feed.generator"
 
@@ -519,6 +544,7 @@ class TestMainCLI:
         with pytest.raises(SystemExit):
             with patch("sys.argv", ["publish_feed.py", "--handle", HANDLE, "--all", "--delete"]):
                 from publish_feed import main
+
                 main()
 
     def test_delete_requires_feed_name(self, monkeypatch):
@@ -526,6 +552,7 @@ class TestMainCLI:
         with pytest.raises(SystemExit):
             with patch("sys.argv", ["publish_feed.py", "--handle", HANDLE, "--delete"]):
                 from publish_feed import main
+
                 main()
 
     def test_publish_requires_feed_name_or_all(self, monkeypatch):
@@ -534,6 +561,7 @@ class TestMainCLI:
         with pytest.raises(SystemExit):
             with patch("sys.argv", ["publish_feed.py", "--handle", HANDLE, "--environment", "dev"]):
                 from publish_feed import main
+
                 main()
 
     def test_app_password_arg_takes_precedence_over_env(self, monkeypatch):
@@ -554,7 +582,9 @@ class TestMainCLI:
 
                 main()
 
-        mock_list.assert_called_once_with(handle=HANDLE, password=PASSWORD, pds="https://bsky.social")
+        mock_list.assert_called_once_with(
+            handle=HANDLE, password=PASSWORD, pds="https://bsky.social"
+        )
 
     def test_prompts_when_no_password_in_arg_or_env(self, monkeypatch):
         monkeypatch.delenv("GE_BSKY_APP_PASSWORD", raising=False)
@@ -567,7 +597,9 @@ class TestMainCLI:
                         main()
 
         mock_getpass.assert_called_once_with("App password: ")
-        mock_list.assert_called_once_with(handle=HANDLE, password=PASSWORD, pds="https://bsky.social")
+        mock_list.assert_called_once_with(
+            handle=HANDLE, password=PASSWORD, pds="https://bsky.social"
+        )
 
     def test_publish_all_requires_environment(self, monkeypatch):
         monkeypatch.setenv("GE_BSKY_APP_PASSWORD", PASSWORD)
@@ -732,7 +764,9 @@ class TestSyncFeeds:
 
     @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_internal_only_does_not_delete_public_feed_caterpie_records(self, MockClient, mock_upload_blob, capsys):
+    def test_internal_only_does_not_delete_public_feed_caterpie_records(
+        self, MockClient, mock_upload_blob, capsys
+    ):
         """A prod --internal-only sync must not delete public feeds' Caterpie
         records that were published by an earlier stage (unfiltered) deployment."""
         client = MagicMock()
@@ -740,12 +774,8 @@ class TestSyncFeeds:
         MockClient.return_value.__exit__ = MagicMock(return_value=False)
 
         # Simulate stage having already published all four feeds to Caterpie.
-        public_feed_rkeys = [
-            cfg.internal_rkey for cfg in FEEDS.values() if cfg.public
-        ]
-        internal_feed_rkeys = [
-            cfg.internal_rkey for cfg in FEEDS.values() if not cfg.public
-        ]
+        public_feed_rkeys = [cfg.internal_rkey for cfg in FEEDS.values() if cfg.public]
+        internal_feed_rkeys = [cfg.internal_rkey for cfg in FEEDS.values() if not cfg.public]
         stage_records = [
             {"uri": f"at://{REPO_DID}/app.bsky.feed.generator/{rkey}", "value": {}}
             for rkey in public_feed_rkeys + internal_feed_rkeys
@@ -863,10 +893,19 @@ class TestPublicInternalOnlyCLI:
             with pytest.raises(SystemExit):
                 with patch(
                     "sys.argv",
-                    ["publish_feed.py", "--handle", HANDLE, "--sync",
-                     "--environment", "prod", "--public-only", "--internal-only"],
+                    [
+                        "publish_feed.py",
+                        "--handle",
+                        HANDLE,
+                        "--sync",
+                        "--environment",
+                        "prod",
+                        "--public-only",
+                        "--internal-only",
+                    ],
                 ):
                     from publish_feed import main
+
                     main()
 
     def test_public_only_requires_sync(self, monkeypatch):
@@ -876,10 +915,18 @@ class TestPublicInternalOnlyCLI:
             with pytest.raises(SystemExit):
                 with patch(
                     "sys.argv",
-                    ["publish_feed.py", "--handle", HANDLE,
-                     "--all", "--environment", "prod", "--public-only"],
+                    [
+                        "publish_feed.py",
+                        "--handle",
+                        HANDLE,
+                        "--all",
+                        "--environment",
+                        "prod",
+                        "--public-only",
+                    ],
                 ):
                     from publish_feed import main
+
                     main()
 
     def test_internal_only_requires_sync(self, monkeypatch):
@@ -889,10 +936,10 @@ class TestPublicInternalOnlyCLI:
             with pytest.raises(SystemExit):
                 with patch(
                     "sys.argv",
-                    ["publish_feed.py", "--handle", HANDLE,
-                     "--list", "--internal-only"],
+                    ["publish_feed.py", "--handle", HANDLE, "--list", "--internal-only"],
                 ):
                     from publish_feed import main
+
                     main()
 
     def test_public_only_passes_visibility_public(self, monkeypatch):
@@ -902,10 +949,18 @@ class TestPublicInternalOnlyCLI:
             with patch("publish_feed.sync_feeds") as mock_sync:
                 with patch(
                     "sys.argv",
-                    ["publish_feed.py", "--handle", HANDLE, "--sync",
-                     "--environment", "prod", "--public-only"],
+                    [
+                        "publish_feed.py",
+                        "--handle",
+                        HANDLE,
+                        "--sync",
+                        "--environment",
+                        "prod",
+                        "--public-only",
+                    ],
                 ):
                     from publish_feed import main
+
                     main()
         mock_sync.assert_called_once()
         assert mock_sync.call_args.kwargs["visibility"] == "public"
@@ -917,10 +972,18 @@ class TestPublicInternalOnlyCLI:
             with patch("publish_feed.sync_feeds") as mock_sync:
                 with patch(
                     "sys.argv",
-                    ["publish_feed.py", "--handle", HANDLE, "--sync",
-                     "--environment", "prod", "--internal-only"],
+                    [
+                        "publish_feed.py",
+                        "--handle",
+                        HANDLE,
+                        "--sync",
+                        "--environment",
+                        "prod",
+                        "--internal-only",
+                    ],
                 ):
                     from publish_feed import main
+
                     main()
         mock_sync.assert_called_once()
         assert mock_sync.call_args.kwargs["visibility"] == "internal"
@@ -932,10 +995,10 @@ class TestPublicInternalOnlyCLI:
             with patch("publish_feed.sync_feeds") as mock_sync:
                 with patch(
                     "sys.argv",
-                    ["publish_feed.py", "--handle", HANDLE, "--sync",
-                     "--environment", "prod"],
+                    ["publish_feed.py", "--handle", HANDLE, "--sync", "--environment", "prod"],
                 ):
                     from publish_feed import main
+
                     main()
         mock_sync.assert_called_once()
         assert mock_sync.call_args.kwargs["visibility"] is None
@@ -976,7 +1039,11 @@ class TestPublishFeedAvatar:
         )
 
         put_call = client.post.call_args_list[1]
-        record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
+        record = (
+            put_call.kwargs["json"]["record"]
+            if "json" in put_call.kwargs
+            else put_call[1]["json"]["record"]
+        )
         assert record["avatar"] == BLOB_REF
 
     @patch("publish_feed._upload_blob")
@@ -1000,7 +1067,11 @@ class TestPublishFeedAvatar:
         )
 
         put_call = client.post.call_args_list[1]
-        record = put_call.kwargs["json"]["record"] if "json" in put_call.kwargs else put_call[1]["json"]["record"]
+        record = (
+            put_call.kwargs["json"]["record"]
+            if "json" in put_call.kwargs
+            else put_call[1]["json"]["record"]
+        )
         assert "avatar" not in record
 
     @patch("publish_feed._upload_blob")
@@ -1056,12 +1127,13 @@ class TestSyncFeedsAvatar:
             pds=PDS,
         )
 
-        put_calls = [
-            c for c in client.post.call_args_list
-            if "putRecord" in str(c)
-        ]
+        put_calls = [c for c in client.post.call_args_list if "putRecord" in str(c)]
         for call in put_calls:
-            record = call.kwargs["json"]["record"] if "json" in call.kwargs else call[1]["json"]["record"]
+            record = (
+                call.kwargs["json"]["record"]
+                if "json" in call.kwargs
+                else call[1]["json"]["record"]
+            )
             assert record["avatar"] == BLOB_REF
 
     @patch("publish_feed._upload_blob")

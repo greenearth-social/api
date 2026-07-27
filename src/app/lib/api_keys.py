@@ -7,16 +7,19 @@ Key format: gea_<8-char key_id><48-char secret>
 
 Storage: only the SHA-256 hash is written to Firestore.
 """
+
 from __future__ import annotations
 
 import hashlib
 import hmac
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
-from google.cloud.firestore import Increment  # type: ignore[import-untyped]
+from google.cloud.firestore import (
+    AsyncClient,  # type: ignore[import-untyped]
+    Increment,  # type: ignore[import-untyped]
+)
 
 from ..documents import ApiKeyDocument
 
@@ -56,7 +59,7 @@ def parse_key_id(full_key: str | None) -> str | None:
         return None
     if len(full_key) != FULL_KEY_LEN:
         return None
-    return full_key[len(KEY_PREFIX): len(KEY_PREFIX) + KEY_ID_LEN]
+    return full_key[len(KEY_PREFIX) : len(KEY_PREFIX) + KEY_ID_LEN]
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +84,7 @@ async def create_api_key(db: AsyncClient, email: str) -> tuple[ApiKeyDocument, s
     The plaintext key is returned exactly once and never stored.
     """
     key_id, full_key, key_hash = generate_key()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     doc = ApiKeyDocument(
         key_id=key_id,
         key_hash=key_hash,
@@ -117,21 +120,25 @@ async def authenticate_api_key(db: AsyncClient, full_key: str | None) -> ApiKeyD
     if not hmac.compare_digest(expected_hash, doc.key_hash):
         return None
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     current_period = now.strftime("%Y-%m")
     ref = db.collection(API_KEYS_COLLECTION).document(key_id)
 
     if doc.monthly_period != current_period:
-        await ref.update({
-            "last_used_at": now,
-            "monthly_call_count": 1,
-            "monthly_period": current_period,
-        })
+        await ref.update(
+            {
+                "last_used_at": now,
+                "monthly_call_count": 1,
+                "monthly_period": current_period,
+            }
+        )
     else:
-        await ref.update({
-            "last_used_at": now,
-            "monthly_call_count": Increment(1),
-        })
+        await ref.update(
+            {
+                "last_used_at": now,
+                "monthly_call_count": Increment(1),
+            }
+        )
 
     return doc
 

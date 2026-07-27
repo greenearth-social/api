@@ -16,6 +16,11 @@ select = [
 ]
 ignore = []
 
+[tool.ruff.lint.per-file-ignores]
+# main.py configures the root logger before importing app modules on purpose,
+# so those local imports intentionally sit below module-level statements.
+"src/app/main.py" = ["E402"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

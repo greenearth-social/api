@@ -2,9 +2,9 @@
 
 import math
 
+from ..models import CandidatePost
 from .embeddings import decode_float32_b64
 from .feed_debug import current_recorder
-from ..models import CandidatePost
 
 # Global diversity weight (relevance weight is 1-BETA)
 BETA = 0.7
@@ -134,7 +134,7 @@ def _calculate_content_sim(
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     if norm_a == 0.0 or norm_b == 0.0:

@@ -1,6 +1,7 @@
 """Tests for profile_es_queries helper functions."""
-import json
+
 import importlib.util
+import json
 import pathlib
 
 import pytest
@@ -21,7 +22,7 @@ def mod():
 
 
 SAMPLE_PAYLOAD = (
-    'slow_es_query rid=abc123 elapsed_ms=2654.3 index=posts_recent '
+    "slow_es_query rid=abc123 elapsed_ms=2654.3 index=posts_recent "
     'body={"knn":{"field":"embeddings.minilm_l12_v1","query_vector":[0.1,0.2],"k":300},"size":300}'
 )
 
@@ -76,9 +77,7 @@ def test_summarise_profile_extracts_max_shard_time(mod):
 
 def test_summarise_profile_handles_missing_fetch(mod):
     profile = {
-        "shards": [
-            {"id": "[shard0]", "searches": [{"query": [{"time_in_nanos": 500_000_000}]}]}
-        ]
+        "shards": [{"id": "[shard0]", "searches": [{"query": [{"time_in_nanos": 500_000_000}]}]}]
     }
     summary = mod.summarise_profile(profile)
     assert summary["max_fetch_ms"] == 0.0

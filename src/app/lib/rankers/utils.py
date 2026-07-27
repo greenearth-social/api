@@ -4,14 +4,12 @@ from ...models import RankedCandidate, RankPredictResult
 
 
 def get_rank_predict_results_from_candidates_and_scores(
-    candidate_posts,
-    scores,
-    valid_candidates
+    candidate_posts, scores, valid_candidates
 ) -> RankPredictResult:
     # Rank by the final scores, breaking ties by original order in candidates list
-    candidates_with_scores = zip(candidate_posts, scores)
+    candidates_with_scores = zip(candidate_posts, scores, strict=False)
     ranked_candidates = sorted(
-        enumerate(candidates_with_scores), # (index, (candidate, score))
+        enumerate(candidates_with_scores),  # (index, (candidate, score))
         key=lambda item: (
             -(item[1][1] if item[1][1] is not None else float("-inf")),
             item[0],

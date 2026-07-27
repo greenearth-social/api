@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from google.cloud.firestore import AsyncClient
@@ -54,7 +54,9 @@ async def _fetch_posts_batch(uris: list[str]) -> list[dict]:
             data = resp.json()
             return data.get("posts", []) if isinstance(data, dict) else []
         except httpx.HTTPStatusError as exc:
-            if attempt == 0 and (exc.response.status_code == 429 or 500 <= exc.response.status_code < 600):
+            if attempt == 0 and (
+                exc.response.status_code == 429 or 500 <= exc.response.status_code < 600
+            ):
                 await asyncio.sleep(0.5)
                 continue
             logger.warning(
@@ -94,8 +96,7 @@ def _parse_bsky_post(post: dict) -> tuple[str, dict]:
         return [
             value
             for label in raw_labels
-            if isinstance(label, dict)
-            and isinstance((value := label.get("val")), str)
+            if isinstance(label, dict) and isinstance((value := label.get("val")), str)
         ]
 
     moderation = {
@@ -185,12 +186,14 @@ async def get_cached_hydrated_posts(
     db: AsyncClient, at_uris: list[str]
 ) -> tuple[dict[str, dict], list[str]]:
     """Check the hydration cache.  Returns ``(cached_posts, missing_uris)``."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cached: dict[str, dict] = {}
     missing: list[str] = []
 
     uri_to_rkey = {uri: _post_rkey(uri) for uri in at_uris}
-    refs = [db.collection(HYDRATED_POSTS_COLLECTION).document(rkey) for rkey in uri_to_rkey.values()]
+    refs = [
+        db.collection(HYDRATED_POSTS_COLLECTION).document(rkey) for rkey in uri_to_rkey.values()
+    ]
 
     try:
         docs = [doc async for doc in db.get_all(refs)]
@@ -221,15 +224,18 @@ async def cache_hydrated_posts(db: AsyncClient, posts: dict[str, dict]) -> None:
 
     Failures are logged but not surfaced — the cache is a best-effort optimisation.
     """
-    expires = datetime.now(timezone.utc) + timedelta(hours=HYDRATION_CACHE_TTL_HOURS)
+    expires = datetime.now(UTC) + timedelta(hours=HYDRATION_CACHE_TTL_HOURS)
     batch = db.batch()
     for uri, data in posts.items():
         ref = db.collection(HYDRATED_POSTS_COLLECTION).document(_post_rkey(uri))
-        batch.set(ref, {
-            "data": data,
-            "expires_at": expires,
-            "version": HYDRATION_CACHE_VERSION,
-        })
+        batch.set(
+            ref,
+            {
+                "data": data,
+                "expires_at": expires,
+                "version": HYDRATION_CACHE_VERSION,
+            },
+        )
     try:
         await batch.commit()
     except Exception:

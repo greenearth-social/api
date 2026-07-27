@@ -3,19 +3,19 @@ import logging
 
 # The `elasticsearch` package exposes several specific exceptions; catch
 # client errors as general exceptions here to avoid import-time issues.
-from fastapi import APIRouter, HTTPException, Query, Request, Depends
-from ..security import verify_api_key
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from ..models import CandidatePost
 
+from ..lib.elasticsearch import POSTS_KNN_INDEX, unwrap_es_response
 from ..lib.embeddings import (
     MINILM_L12_EMBEDDING_FIELD,
     MINILM_L12_EMBEDDING_KEY,
     decode_float32_b64,
     encode_float32_b64,
 )
-from ..lib.elasticsearch import unwrap_es_response, POSTS_KNN_INDEX
 from ..lib.telemetry import timed
+from ..models import CandidatePost
+from ..security import verify_api_key
 
 router = APIRouter(tags=["skylight"], dependencies=[Depends(verify_api_key)])
 
@@ -99,7 +99,13 @@ def posts_response_to_results(resp) -> list[CandidatePost]:
 )
 async def skylight_search(
     request: Request,
-    q: str = Query(..., description="Elasticsearch query string syntax — supports field qualifiers, wildcards, and boolean operators"),
+    q: str = Query(
+        ...,
+        description=(
+            "Elasticsearch query string syntax — supports field qualifiers, "
+            "wildcards, and boolean operators"
+        ),
+    ),
     size: int = Query(10, ge=1, le=100, description="Maximum number of results to return (1–100)"),
 ) -> SkylightSearchResponse:
     """Search the `posts` index `content` field and return matching posts.
@@ -114,10 +120,8 @@ async def skylight_search(
     body = {
         "query": {
             "bool": {
-                "must": {
-                    "query_string": {"query": q, "fields": ["content"]}
-                },
-                "filter": [{"term": {"contains_video": True}}]
+                "must": {"query_string": {"query": q, "fields": ["content"]}},
+                "filter": [{"term": {"contains_video": True}}],
             }
         }
     }
@@ -143,7 +147,6 @@ async def skylight_search(
 
     results = posts_response_to_results(resp)
     return SkylightSearchResponse(results=results)
-
 
 
 @router.post(
@@ -199,8 +202,8 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
         for b64 in payload.embeddings:
             try:
                 vec = decode_float32_b64(b64)
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid base64 embedding")
+            except Exception as err:
+                raise HTTPException(status_code=400, detail="Invalid base64 embedding") from err
             vectors.append(vec)
 
     if not vectors:
@@ -236,7 +239,9 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
 
     try:
         async with timed(logger, "skylight_similar_knn", index=POSTS_KNN_INDEX, size=payload.size):
-            resp = await request.app.state.es.search(index=POSTS_KNN_INDEX, query=knn_q, size=payload.size)
+            resp = await request.app.state.es.search(
+                index=POSTS_KNN_INDEX, query=knn_q, size=payload.size
+            )
     except Exception as exc:
         logger.exception("Elasticsearch similar search failed")
         raise HTTPException(status_code=502, detail="Elasticsearch request failed") from exc

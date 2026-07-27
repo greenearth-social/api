@@ -1,4 +1,3 @@
-
 import os
 
 from dotenv import load_dotenv
@@ -9,4 +8,4 @@ from dotenv import load_dotenv
 # On Cloud Run, avoid loading local .env so emulator settings do not override
 # deployed environment configuration.
 if not os.environ.get("K_SERVICE"):
-	load_dotenv()
+    load_dotenv()

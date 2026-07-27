@@ -10,6 +10,7 @@ Run from the api/ directory:
 Reads Firestore connection from the same env vars as the API server:
     GE_FIRESTORE_PROJECT, GE_FIRESTORE_DATABASE, GE_FIRESTORE_EMULATOR_HOST
 """
+
 from __future__ import annotations
 
 import argparse
@@ -43,7 +44,10 @@ async def cmd_list() -> None:
     print("-" * 80)
     for k in keys:
         last_used = k.last_used_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-        print(f"{k.key_id:<10} {k.email:<30} {str(k.is_active):<8} {k.monthly_call_count:<10} {last_used}")
+        print(
+            f"{k.key_id:<10} {k.email:<30} {str(k.is_active):<8} "
+            f"{k.monthly_call_count:<10} {last_used}"
+        )
 
 
 async def cmd_revoke(key_id: str) -> None:

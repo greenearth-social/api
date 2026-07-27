@@ -1,6 +1,7 @@
 """Tests for telemetry.timed()."""
 
 import logging
+
 import pytest
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 

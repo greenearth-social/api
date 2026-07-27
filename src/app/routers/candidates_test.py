@@ -10,17 +10,19 @@ from ..lib.embeddings import MINILM_L12_EMBEDDING_KEY
 from ..main import app
 from ..security import verify_api_key
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def fake_app_es():
     """Set up a fake ES client and API key for every test, then clean up."""
 
     class FakeEs:
-        async def search(self, *, index=None, query=None, size=None, sort=None, _source=None, **kwargs):
+        async def search(
+            self, *, index=None, query=None, size=None, sort=None, _source=None, **kwargs
+        ):
             if index == "likes":
                 return {
                     "hits": {
@@ -115,6 +117,7 @@ HEADERS = {"X-API-Key": "testkey"}
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 def test_list_generators():
     client = TestClient(app, headers=HEADERS)
@@ -332,7 +335,9 @@ def test_generate_unknown_infill_returns_404():
 
 def test_generate_requires_auth():
     def _raise():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key"
+        )
 
     app.dependency_overrides[verify_api_key] = _raise
     try:

@@ -22,9 +22,9 @@ import os
 from typing import Annotated
 
 import firebase_admin  # type: ignore[import-untyped]
-from firebase_admin import auth, credentials  # type: ignore[import-untyped]
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from firebase_admin import auth, credentials  # type: ignore[import-untyped]
 
 from .firestore import user_doc_id
 
@@ -73,11 +73,11 @@ async def verify_firebase_auth(
 
     try:
         decoded = auth.verify_id_token(authorization.credentials)
-    except Exception:
+    except Exception as err:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
-        )
+        ) from err
 
     uid: str = decoded.get("uid", "")
     if not uid or not uid.startswith("did:plc:"):

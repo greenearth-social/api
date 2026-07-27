@@ -5,8 +5,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
-from fastapi import HTTPException, status
+from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
 
 from ..lib.rankers import RankerExecutionError
@@ -67,7 +66,7 @@ def test_predict_ranks_candidates_by_score_desc(app):
                 {"at_uri": "at://post/low", "score": 0.1, "generator_name": "random_posts"},
                 {"at_uri": "at://post/high", "score": 0.9, "generator_name": "popularity"},
                 {"at_uri": "at://post/mid", "score": 0.4},
-            ]
+            ],
         },
     )
 
@@ -110,7 +109,7 @@ def test_predict_keeps_duplicate_candidate_count_and_collapses_scores_by_uri(app
                 {"at_uri": "at://post/a", "score": 0.9, "content": "first"},
                 {"at_uri": "at://post/a", "score": 0.5, "content": "duplicate"},
                 {"at_uri": "at://post/b", "score": 0.7, "content": "second"},
-            ]
+            ],
         },
     )
 
@@ -180,7 +179,9 @@ def test_predict_requires_auth():
     from ..security import verify_api_key
 
     def _raise():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key"
+        )
 
     a = FastAPI()
     a.state.es = object()

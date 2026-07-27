@@ -2,7 +2,6 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
-
 MODULE_PATH = Path(__file__).with_name("feed_debug.py")
 spec = importlib.util.spec_from_file_location("feed_debug_cli", MODULE_PATH)
 assert spec and spec.loader
@@ -25,17 +24,13 @@ def _result(name: str, uris: list[str]):
 def _model_score(name: str, scores: dict[str, float]):
     return SimpleNamespace(
         model_name=name,
-        scores=[
-            SimpleNamespace(at_uri=uri, score=score)
-            for uri, score in scores.items()
-        ],
+        scores=[SimpleNamespace(at_uri=uri, score=score) for uri, score in scores.items()],
     )
 
 
 def _diversification(penalties: dict[str, float]):
     return [
-        SimpleNamespace(at_uri=uri, author_penalty=penalty)
-        for uri, penalty in penalties.items()
+        SimpleNamespace(at_uri=uri, author_penalty=penalty) for uri, penalty in penalties.items()
     ]
 
 
@@ -135,7 +130,9 @@ def test_discarded_table_labels_cutoff_reasons():
     doc = _doc(
         generators=["two_tower"],
         infill=None,
-        outputs=[_result("two_tower", ["at://p/1", "at://p/cut", "at://p/capped", "at://p/unranked"])],
+        outputs=[
+            _result("two_tower", ["at://p/1", "at://p/cut", "at://p/capped", "at://p/unranked"])
+        ],
         final_order=["at://p/1"],
         ranking=SimpleNamespace(
             rankings=[
@@ -147,9 +144,7 @@ def test_discarded_table_labels_cutoff_reasons():
         cutoff_uris={"rank_score": ["at://p/cut"], "share": ["at://p/capped"]},
     )
 
-    table = feed_debug._discarded_table(
-        doc, ["at://p/cut", "at://p/capped", "at://p/unranked"], {}
-    )
+    table = feed_debug._discarded_table(doc, ["at://p/cut", "at://p/capped", "at://p/unranked"], {})
 
     reasons = list(table.columns[1]._cells)
     assert reasons == ["rank floor", "share cap", "not ranked"]

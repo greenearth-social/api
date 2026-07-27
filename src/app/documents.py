@@ -12,7 +12,7 @@ Convention:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
@@ -21,7 +21,7 @@ from .models import CandidateGenerateRequest, CandidatePost, RankPredictResult
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class UserDocument(BaseModel):
@@ -67,8 +67,7 @@ class UserDocument(BaseModel):
         default=1.0,
         ge=0.5,
         le=1.5,
-        description="Politics multiplier: 0.5-1.5.  "
-        "Applied to political content scores.",
+        description="Politics multiplier: 0.5-1.5.  Applied to political content scores.",
     )
     purpose: float = Field(
         default=0.5,
@@ -87,8 +86,8 @@ class FeedCacheDocument(BaseModel):
 
     items: list[str] = Field(default_factory=list, description="Cached AT URI list")
     expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")
-    items_meta: list["PipelineItemMeta"] = Field(default_factory=list)
-    generator_diagnostics: list["GeneratorDiagnostic"] = Field(default_factory=list)
+    items_meta: list[PipelineItemMeta] = Field(default_factory=list)
+    generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
     applied_social_radius: int | None = None
     feed_name: str | None = None
     generated_at: datetime | None = None
@@ -271,7 +270,9 @@ class FeedDebugDocument(BaseModel):
     feed_name: str = Field(..., description="Feed rkey that was loaded")
     regenerated: bool = Field(
         default=False,
-        description="True when this capture came from the cursor-regeneration path rather than a fresh load",
+        description=(
+            "True when this capture came from the cursor-regeneration path rather than a fresh load"
+        ),
     )
 
     # Inputs
@@ -309,7 +310,9 @@ class FeedDebugDocument(BaseModel):
     )
     diversification: list[FeedDebugDiversificationEntry] = Field(
         default_factory=list,
-        description="Per-item diversification breakdown in final order (empty when diversify was off)",
+        description=(
+            "Per-item diversification breakdown in final order (empty when diversify was off)"
+        ),
     )
     n_retrieved: int = Field(
         default=0,
@@ -396,7 +399,9 @@ class FeedSnapshotDocument(BaseModel):
     debug tool and is only written for debug-flagged users.
     """
 
-    request_id: str = Field(..., description="Feed-cache key / feedContext id (also the document ID)")
+    request_id: str = Field(
+        ..., description="Feed-cache key / feedContext id (also the document ID)"
+    )
     items: list[str] = Field(default_factory=list, description="AT URIs in final served order")
     feed_name: str
     generated_at: datetime

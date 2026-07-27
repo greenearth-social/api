@@ -4,6 +4,11 @@ Provides an abstraction for named candidate generators that can be called
 internally (as a pipeline step) or via an API endpoint.
 """
 
+from ...models import (
+    CandidateGenerateRequest,
+    CandidateGenerateResult,
+    GeneratorSpec,
+)
 from .base import (
     CandidateGenerator,
     CandidateResult,
@@ -11,21 +16,16 @@ from .base import (
     list_generators,
     register_generator,
 )
-from ...models import (
-    CandidateGenerateRequest,
-    CandidateGenerateResult,
-    GeneratorSpec,
-)
+from .followed_users import FollowedUsersCandidateGenerator
 from .generate import (
     GeneratorError,
     GeneratorNotFoundError,
     run_generate,
 )
+from .network_likes import NetworkLikesCandidateGenerator
 from .popularity import PopularityCandidateGenerator
 from .post_similarity import PostSimilarityCandidateGenerator
 from .random_posts import RandomPostsCandidateGenerator
-from .followed_users import FollowedUsersCandidateGenerator
-from .network_likes import NetworkLikesCandidateGenerator
 from .two_tower import TwoTowerCandidateGenerator
 
 # Register built-in generators

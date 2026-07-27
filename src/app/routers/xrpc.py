@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from threading import Lock
 from typing import NamedTuple
@@ -47,7 +47,6 @@ from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
-from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     get_recent_discarded_uris,
@@ -61,6 +60,7 @@ from ..lib.firestore import (
     upsert_user,
     write_feed_debug,
 )
+from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.metrics import get_metric_collector
 from ..lib.pipeline_context import (
     DegradationEvent,
@@ -368,11 +368,13 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
         logger.exception("Embedding hydration failed; continuing without")
         ctx = current_pipeline_context()
         if ctx is not None:
-            ctx.record(DegradationEvent(
-                stage=DegradationStage.EMBED_HYDRATION,
-                component="fetch_post_embeddings",
-                cause=exc,
-            ))
+            ctx.record(
+                DegradationEvent(
+                    stage=DegradationStage.EMBED_HYDRATION,
+                    component="fetch_post_embeddings",
+                    cause=exc,
+                )
+            )
         return candidates
 
     encoded: dict[str, str] = {}
@@ -414,9 +416,7 @@ def _record_cutoff(feed_name: str, reason: str, uris: list[str]) -> None:
         return
     collector = get_metric_collector()
     if collector:
-        collector.record(
-            "feed.slate.cutoff_count", len(uris), feed_name=feed_name, reason=reason
-        )
+        collector.record("feed.slate.cutoff_count", len(uris), feed_name=feed_name, reason=reason)
     rec = current_recorder()
     if rec is not None:
         rec.record_cutoff(reason, uris)
@@ -520,12 +520,15 @@ async def _run_ranking_pipeline(
                 logger.exception("Ranking stage failed; falling back to unranked ordering")
                 if ctx is not None:
                     component = getattr(exc, "name", type(exc).__name__)
-                    ctx.record(DegradationEvent(
-                        stage=DegradationStage.RANK,
-                        component=component,
-                        cause=exc,
-                    ))
-                    # ctx.record re-raises exc when fail_fast=True, so reaching here means fail_fast=False
+                    ctx.record(
+                        DegradationEvent(
+                            stage=DegradationStage.RANK,
+                            component=component,
+                            cause=exc,
+                        )
+                    )
+                    # ctx.record re-raises exc when fail_fast=True, so reaching here
+                    # means fail_fast=False
                     ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
                 else:
                     raise
@@ -540,11 +543,7 @@ async def _run_ranking_pipeline(
             # ordered is sorted desc by the combined score, so everything from
             # the first sub-floor candidate on is below the floor.
             cut_idx = next(
-                (
-                    i
-                    for i, c in enumerate(ordered)
-                    if (c.score or 0.0) < feed_cfg.min_rank_score
-                ),
+                (i for i, c in enumerate(ordered) if (c.score or 0.0) < feed_cfg.min_rank_score),
                 len(ordered),
             )
             low_score_uris = [c.at_uri for c in ordered[cut_idx:] if c.at_uri]
@@ -575,9 +574,7 @@ async def _run_ranking_pipeline(
         if feed_cfg.max_render_share is not None:
             max_keep = max(1, math.floor(feed_cfg.max_render_share * n_retrieved))
             if len(final) > max_keep:
-                _record_cutoff(
-                    feed_name, "share", [c.at_uri for c in final[max_keep:] if c.at_uri]
-                )
+                _record_cutoff(feed_name, "share", [c.at_uri for c in final[max_keep:] if c.at_uri])
                 final = final[:max_keep]
 
         final_uris = [c.at_uri for c in final if c.at_uri]
@@ -592,9 +589,7 @@ async def _run_ranking_pipeline(
         if not final_uris and pre_cut_uris:
             # The quality gates rejected everything we retrieved.
             if collector:
-                collector.record(
-                    "feed.slate.empty_after_cutoff_count", 1, feed_name=feed_name
-                )
+                collector.record("feed.slate.empty_after_cutoff_count", 1, feed_name=feed_name)
             if EMPTY_SLATE_FAIL_OPEN:
                 logger.warning(
                     "Slate cutoffs emptied feed '%s' (%d candidates retrieved); failing open",
@@ -647,7 +642,7 @@ async def _run_pipeline_capturing(
     for now; PostHog per-user flag (issue 279) will pass it in when implemented.
     """
     recorder = FeedDebugRecorder(feed_name=feed_name, regenerated=regenerated)
-    generated_at = datetime.now(timezone.utc)
+    generated_at = datetime.now(UTC)
     ctx = PipelineContext(feed_name=feed_name)
 
     with feed_debug_scope(recorder), pipeline_context_scope(ctx):
@@ -727,10 +722,7 @@ def _snapshot_page(
 ) -> FeedSnapshotDocument:
     """Restrict pipeline metadata to posts actually returned in one page."""
     meta_by_uri = {meta.at_uri: meta for meta in snapshot.items_meta}
-    items_meta = [
-        meta_by_uri.get(uri, PipelineItemMeta(at_uri=uri))
-        for uri in uris
-    ]
+    items_meta = [meta_by_uri.get(uri, PipelineItemMeta(at_uri=uri)) for uri in uris]
     diagnostics = [
         diagnostic.model_copy(
             update={
@@ -874,7 +866,7 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
         )
         username = None
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     try:
         await upsert_user(db, user_did, username)
@@ -914,7 +906,7 @@ async def _resolve_handles(request: Request, dids: set[str]) -> dict[str, str]:
             return None
 
     handles = await asyncio.gather(*(_one(did) for did in did_list))
-    return {did: handle for did, handle in zip(did_list, handles) if handle}
+    return {did: handle for did, handle in zip(did_list, handles, strict=False) if handle}
 
 
 async def _write_feed_snapshot_background(
@@ -941,9 +933,7 @@ async def _write_feed_snapshot_background(
             )
             collector = get_metric_collector()
             if collector is not None:
-                collector.record(
-                    "feed.snapshot.truncated_count", 1, feed_name=snapshot.feed_name
-                )
+                collector.record("feed.snapshot.truncated_count", 1, feed_name=snapshot.feed_name)
     except Exception:
         logger.exception(
             "Failed to write feed snapshot for user '%s', request '%s'",
@@ -983,7 +973,7 @@ async def _write_feed_debug(
         logger.exception("Failed to write feed debug record for user '%s'", user_did)
 
 
-async def _record_interactions(db, interactions: list["Interaction"]) -> None:
+async def _record_interactions(db, interactions: list[Interaction]) -> None:
     """Verify each interaction's feedContext and persist the valid ones.
 
     The signed feedContext is the trust anchor: interactions with a missing or
@@ -1024,7 +1014,7 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
             event=event,
             feed_name=payload.feed,
             request_id=payload.rid,
-            feed_generated_at=datetime.fromtimestamp(payload.iat, tz=timezone.utc),
+            feed_generated_at=datetime.fromtimestamp(payload.iat, tz=UTC),
         )
         try:
             await record_interaction(db, doc)
@@ -1262,9 +1252,7 @@ async def get_feed_skeleton(
         if preset is not None:
             generators_override = {"generators": preset}
 
-    freshness_index = (
-        user_doc.freshness if user_doc is not None else DEFAULT_FRESHNESS_INDEX
-    )
+    freshness_index = user_doc.freshness if user_doc is not None else DEFAULT_FRESHNESS_INDEX
     max_age_hours = max_age_hours_for_freshness(freshness_index)
 
     feed_cache = _get_feed_cache(request)
@@ -1281,8 +1269,8 @@ async def get_feed_skeleton(
         if cursor is not None:
             try:
                 parsed = FeedCursor.decode(cursor)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid cursor")
+            except ValueError as err:
+                raise HTTPException(status_code=400, detail="Invalid cursor") from err
 
             async with timed(logger, "feedcache_retrieve", cache_id=parsed.id):
                 cache_doc = await feed_cache.retrieve_document(parsed.id)
@@ -1304,7 +1292,7 @@ async def get_feed_skeleton(
                         request_id=parsed.id,
                         items=cached_uris,
                         feed_name=cache_doc.feed_name or feed_name,
-                        generated_at=cache_doc.generated_at or datetime.now(timezone.utc),
+                        generated_at=cache_doc.generated_at or datetime.now(UTC),
                         expires_at=cache_doc.expires_at,
                         generator_diagnostics=cache_doc.generator_diagnostics,
                         applied_social_radius=cache_doc.applied_social_radius,
@@ -1458,13 +1446,9 @@ async def get_feed_skeleton(
             # later pages would skip posts.
             next_cursor = None
             if cache_uris:
-                cache_meta_by_uri = {
-                    meta.at_uri: meta for meta in generated_snapshot.items_meta
-                }
+                cache_meta_by_uri = {meta.at_uri: meta for meta in generated_snapshot.items_meta}
                 cache_items_meta = [
-                    cache_meta_by_uri[uri]
-                    for uri in cache_uris
-                    if uri in cache_meta_by_uri
+                    cache_meta_by_uri[uri] for uri in cache_uris if uri in cache_meta_by_uri
                 ]
                 async with timed(logger, "feedcache_store", cache_id=request_id):
                     await feed_cache.store_document(
@@ -1476,8 +1460,7 @@ async def get_feed_skeleton(
                             applied_social_radius=applied_social_radius,
                             feed_name=feed_name,
                             generated_at=generated_snapshot.generated_at,
-                            expires_at=datetime.now(timezone.utc)
-                            + timedelta(seconds=DEFAULT_TTL_SECONDS),
+                            expires_at=datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS),
                         ),
                     )
                 next_cursor = FeedCursor(id=request_id, offset=consumed).encode()

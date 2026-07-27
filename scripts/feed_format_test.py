@@ -1,5 +1,5 @@
 import importlib.util
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("feed_format.py")
@@ -14,7 +14,7 @@ media_badges = feed_format.media_badges
 
 
 def _ago(**kwargs) -> datetime:
-    return datetime.now(timezone.utc) - timedelta(**kwargs)
+    return datetime.now(UTC) - timedelta(**kwargs)
 
 
 class TestRelativeTime:
@@ -31,7 +31,7 @@ class TestRelativeTime:
         assert relative_time(_ago(days=4)) == "4d ago"
 
     def test_old_dates_fall_back_to_absolute(self):
-        old = datetime(2020, 1, 15, tzinfo=timezone.utc)
+        old = datetime(2020, 1, 15, tzinfo=UTC)
         assert relative_time(old) == "Jan 15, 2020"
 
     def test_bad_input_does_not_raise(self):

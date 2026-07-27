@@ -12,13 +12,13 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..models import CandidateGenerateRequest, CandidateGenerateResult
 from ..lib.candidates import (
     GeneratorError,
     GeneratorNotFoundError,
     list_generators,
     run_generate,
 )
+from ..models import CandidateGenerateRequest, CandidateGenerateResult
 from ..security import verify_api_key
 
 router = APIRouter(tags=["candidates"], dependencies=[Depends(verify_api_key)])
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
+
 
 class GeneratorListResponse(BaseModel):
     """Lists available generator names."""
@@ -42,6 +43,7 @@ class GeneratorListResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
 
 @router.get("/candidates/generators", response_model=GeneratorListResponse)
 async def candidates_list_generators() -> GeneratorListResponse:

@@ -206,7 +206,6 @@ FEEDS: dict[str, FeedConfig] = {
         min_rank_score=0.425,
         min_mmr_score=-0.05,
     ),
-
     ### (Private) Pure Candidate Generator Feeds, mostly for testing and debugging ###
     "post-similarity": FeedConfig(
         display_name="Post Similarity",

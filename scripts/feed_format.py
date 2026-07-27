@@ -7,7 +7,7 @@ they render them identically from here rather than drifting apart.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from rich.text import Text
 
@@ -15,7 +15,7 @@ from rich.text import Text
 def relative_time(dt: datetime) -> str:
     """Compact relative-time string for a tz-aware datetime."""
     try:
-        delta = datetime.now(timezone.utc) - dt
+        delta = datetime.now(UTC) - dt
         secs = delta.total_seconds()
         if secs < 60:
             return "just now"

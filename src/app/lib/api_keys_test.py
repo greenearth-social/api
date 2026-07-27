@@ -1,16 +1,26 @@
 """Tests for api_keys module."""
+
 from __future__ import annotations
 
 import hmac
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ..documents import ApiKeyDocument
 from ..lib.api_keys import (
+    API_KEYS_COLLECTION,
     FULL_KEY_LEN,
     KEY_PREFIX,
     _hash_key,
+    authenticate_api_key,
+    create_api_key,
     generate_key,
+    get_api_key_doc,
+    list_api_keys,
     parse_key_id,
+    revoke_api_key,
 )
 
 
@@ -69,20 +79,6 @@ class TestParseKeyId:
         assert parse_key_id("") is None
 
 
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
-
-from ..documents import ApiKeyDocument
-from ..lib.api_keys import (
-    API_KEYS_COLLECTION,
-    authenticate_api_key,
-    create_api_key,
-    get_api_key_doc,
-    list_api_keys,
-    revoke_api_key,
-)
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -94,7 +90,7 @@ def _make_doc_data(
     monthly_period: str = "2026-05",
     monthly_call_count: int = 0,
 ) -> dict:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     _, _, key_hash = generate_key()
     return {
         "key_id": key_id,
@@ -181,7 +177,7 @@ class TestCreateApiKey:
 
         doc, _ = await create_api_key(db, "alice@example.com")
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         assert doc.monthly_period == now.strftime("%Y-%m")
 
 
@@ -242,7 +238,7 @@ class TestAuthenticateApiKey:
     @pytest.mark.asyncio
     async def test_increments_call_count_same_month(self):
         key_id, full_key, key_hash = generate_key()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         data = _make_doc_data(key_id=key_id, monthly_period=now.strftime("%Y-%m"))
         data["key_hash"] = key_hash
         db, doc_ref = _mock_firestore(data, exists=True)

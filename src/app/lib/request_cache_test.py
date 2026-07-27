@@ -2,8 +2,6 @@
 
 import asyncio
 
-import pytest
-
 from .request_cache import (
     RequestCache,
     get_request_cache,

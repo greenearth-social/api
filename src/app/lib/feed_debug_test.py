@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from .candidates.base import CandidateResult
-from .diversify import BETA, mmr_rerank, AUTHOR_WEIGHT
-from .embeddings import encode_float32_b64
-from .feed_debug import (
-    CONTENT_SNIPPET_MAX,
-    FeedDebugRecorder,
-    current_recorder,
-    feed_debug_scope,
-)
 from ..models import (
     CandidateGenerateRequest,
     CandidatePost,
     GeneratorSpec,
     RankedCandidate,
     RankPredictResult,
+)
+from .candidates.base import CandidateResult
+from .diversify import AUTHOR_WEIGHT, BETA, mmr_rerank
+from .embeddings import encode_float32_b64
+from .feed_debug import (
+    CONTENT_SNIPPET_MAX,
+    FeedDebugRecorder,
+    current_recorder,
+    feed_debug_scope,
 )
 
 
@@ -87,7 +87,7 @@ class TestBuildDocument:
         return rec
 
     def _build(self, rec: FeedDebugRecorder, **kwargs):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return rec.build_document(
             request_id="req123",
             username="user.bsky.app",
@@ -197,12 +197,15 @@ def test_snapshot_diagnostics_use_one_followed_users_source():
     )
     recent = _candidate("at://p/recent")
     older = _candidate("at://p/older")
-    rec.record_generator_output(CandidateResult(
-        generator_name="followed_users", candidates=[recent, older],
-    ))
+    rec.record_generator_output(
+        CandidateResult(
+            generator_name="followed_users",
+            candidates=[recent, older],
+        )
+    )
     rec.record_final_candidates([recent, older])
     rec.record_final_order(["at://p/recent", "at://p/older"])
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     snapshot = rec.build_pipeline_metadata(
         request_id="req", generated_at=now, expires_at=now + timedelta(minutes=15)
@@ -322,7 +325,7 @@ class TestBuildPipelineMetadata:
         rec.final_order = ["at://a"]
         rec.order_after_rank = ["at://a"]
 
-        now = datetime(2026, 7, 12, 15, 30, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 12, 15, 30, tzinfo=UTC)
         expires = now + timedelta(minutes=15)
         snap = rec.build_pipeline_metadata(request_id="req-1", generated_at=now, expires_at=expires)
 
@@ -358,7 +361,7 @@ class TestBuildPipelineMetadata:
         rec.final_order = ["at://a", "at://b"]
         rec.order_after_rank = ["at://a", "at://b"]
 
-        now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 12, tzinfo=UTC)
         snap = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
 
         assert len(snap.items_meta) == 2
@@ -396,7 +399,7 @@ class TestBuildPipelineMetadata:
         rec.final_order = ["at://a", "at://b"]
         rec.order_after_rank = ["at://a", "at://b"]
 
-        now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 12, tzinfo=UTC)
         snap = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
 
         assert snap.ranker_model == "two_tower"
@@ -427,7 +430,7 @@ class TestBuildPipelineMetadata:
         rec.final_order = ["at://a"]
         rec.order_after_rank = ["at://a"]
 
-        now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 12, tzinfo=UTC)
         snap = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
 
         assert snap.diversify is True
@@ -454,7 +457,7 @@ class TestBuildPipelineMetadata:
         rec.final_order = ["at://a"]
         rec.order_after_rank = ["at://a"]
 
-        now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 12, tzinfo=UTC)
         snap = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
 
         assert snap.diversify is False

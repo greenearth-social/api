@@ -17,7 +17,9 @@ def _set_secret(monkeypatch):
 
 
 def _payload(**overrides) -> FeedContextPayload:
-    payload = FeedContextPayload(did="did:plc:abc123", feed="your-feed", rid="req-1", iat=1730000000)
+    payload = FeedContextPayload(
+        did="did:plc:abc123", feed="your-feed", rid="req-1", iat=1730000000
+    )
     return payload.model_copy(update=overrides) if overrides else payload
 
 

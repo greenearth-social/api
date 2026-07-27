@@ -31,6 +31,7 @@ FOLLOWS_RETRY_BACKOFF_SECONDS = 0.1
 # Followed users API query
 # ---------------------------------------------------------------------------
 
+
 class FollowedUsersLookupError(Exception):
     """Raised when followed-user lookup fails."""
 
@@ -55,10 +56,7 @@ async def _get_follows_page(
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPError as exc:
-            if (
-                attempt >= FOLLOWS_MAX_RETRIES
-                or not _is_retryable_follow_lookup_error(exc)
-            ):
+            if attempt >= FOLLOWS_MAX_RETRIES or not _is_retryable_follow_lookup_error(exc):
                 raise
             await asyncio.sleep(FOLLOWS_RETRY_BACKOFF_SECONDS)
 
@@ -114,8 +112,7 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
                 followed_dids.extend(
                     follow["did"]
                     for follow in follows
-                    if isinstance(follow, dict)
-                    and isinstance(follow.get("did"), str)
+                    if isinstance(follow, dict) and isinstance(follow.get("did"), str)
                 )
 
                 cursor = data.get("cursor")
@@ -124,21 +121,16 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
     except TimeoutError as exc:
         if followed_dids:
             logger.warning(
-                "Returning %s partial followed users for %s after follow lookup "
-                "exceeded %.1fs",
+                "Returning %s partial followed users for %s after follow lookup exceeded %.1fs",
                 len(followed_dids),
                 user_did,
                 FOLLOWS_LOOKUP_TIMEOUT_SECONDS,
             )
             return followed_dids[:limit]
-        raise FollowedUsersLookupError(
-            f"Failed to fetch followed users for {user_did}"
-        ) from exc
+        raise FollowedUsersLookupError(f"Failed to fetch followed users for {user_did}") from exc
     except FollowedUsersLookupError:
         raise
     except (httpx.HTTPError, ValueError) as exc:
-        raise FollowedUsersLookupError(
-            f"Failed to fetch followed users for {user_did}"
-        ) from exc
+        raise FollowedUsersLookupError(f"Failed to fetch followed users for {user_did}") from exc
 
     return followed_dids[:limit]

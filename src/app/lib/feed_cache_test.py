@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ..lib.feed_cache import (
-    DEFAULT_TTL_SECONDS,
     FEED_CACHE_COLLECTION,
     FirestoreFeedCache,
 )
 from ..models import FeedCursor
 
-
 # ---------------------------------------------------------------------------
 # FeedCursor model
 # ---------------------------------------------------------------------------
+
 
 class TestFeedCursor:
     def test_roundtrip_encode_decode(self):
@@ -34,18 +33,20 @@ class TestFeedCursor:
 
     def test_decode_bad_json_raises(self):
         import base64
+
         raw = base64.urlsafe_b64encode(b"not json").decode()
         with pytest.raises(ValueError, match="Invalid cursor"):
             FeedCursor.decode(raw)
 
     def test_decode_missing_fields_raises(self):
         import base64
+
         raw = base64.urlsafe_b64encode(b'{"v": 1}').decode()
         with pytest.raises(ValueError, match="Invalid cursor"):
             FeedCursor.decode(raw)
 
     def test_offset_must_be_non_negative(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             FeedCursor(id="x", offset=-1)
 
     def test_default_version(self):
@@ -56,6 +57,7 @@ class TestFeedCursor:
 # ---------------------------------------------------------------------------
 # Firestore helpers
 # ---------------------------------------------------------------------------
+
 
 def _mock_firestore_client() -> tuple[MagicMock, MagicMock, AsyncMock]:
     db = MagicMock()
@@ -69,6 +71,7 @@ def _mock_firestore_client() -> tuple[MagicMock, MagicMock, AsyncMock]:
 # ---------------------------------------------------------------------------
 # FirestoreFeedCache.store
 # ---------------------------------------------------------------------------
+
 
 class TestFirestoreFeedCacheStore:
     @pytest.mark.asyncio
@@ -86,13 +89,14 @@ class TestFirestoreFeedCacheStore:
         assert stored["items"] == ["at://a/1", "at://a/2"]
         assert "expires_at" in stored
         # expires_at should be roughly 10 minutes from now.
-        delta = stored["expires_at"] - datetime.now(timezone.utc)
+        delta = stored["expires_at"] - datetime.now(UTC)
         assert timedelta(seconds=590) < delta < timedelta(seconds=610)
 
 
 # ---------------------------------------------------------------------------
 # FirestoreFeedCache.retrieve
 # ---------------------------------------------------------------------------
+
 
 class TestFirestoreFeedCacheRetrieve:
     @pytest.mark.asyncio
@@ -104,7 +108,7 @@ class TestFirestoreFeedCacheRetrieve:
         snap.exists = True
         snap.to_dict.return_value = {
             "items": ["at://a/1"],
-            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "expires_at": datetime.now(UTC) + timedelta(minutes=5),
         }
         doc_ref.get.return_value = snap
 
@@ -120,7 +124,7 @@ class TestFirestoreFeedCacheRetrieve:
         snap.exists = True
         snap.to_dict.return_value = {
             "items": ["at://a/1"],
-            "expires_at": datetime.now(timezone.utc) - timedelta(minutes=1),
+            "expires_at": datetime.now(UTC) - timedelta(minutes=1),
         }
         doc_ref.get.return_value = snap
 
@@ -163,7 +167,7 @@ class TestFirestoreFeedCacheRetrieve:
         # A naive datetime in the future.
         snap.to_dict.return_value = {
             "items": ["at://a/1"],
-            "expires_at": datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=5),
+            "expires_at": datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5),
         }
         doc_ref.get.return_value = snap
 
@@ -175,6 +179,7 @@ class TestFirestoreFeedCacheRetrieve:
 # FirestoreFeedCache.append
 # ---------------------------------------------------------------------------
 
+
 class TestFirestoreFeedCacheAppend:
     @pytest.mark.asyncio
     async def test_appends_items_to_existing_doc(self):
@@ -185,7 +190,7 @@ class TestFirestoreFeedCacheAppend:
         snap.exists = True
         snap.to_dict.return_value = {
             "items": ["at://a/1"],
-            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+            "expires_at": datetime.now(UTC) + timedelta(minutes=5),
         }
         doc_ref.get.return_value = snap
 
@@ -214,7 +219,7 @@ class TestFirestoreFeedCacheAppend:
         snap.exists = True
         snap.to_dict.return_value = {
             "items": ["at://a/1"],
-            "expires_at": datetime.now(timezone.utc) - timedelta(minutes=1),
+            "expires_at": datetime.now(UTC) - timedelta(minutes=1),
         }
         doc_ref.get.return_value = snap
 

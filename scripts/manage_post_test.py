@@ -1,5 +1,5 @@
-import pytest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
+
 from manage_post import parse_content
 
 
@@ -50,6 +50,7 @@ def test_no_trailing_empty_text():
 
 def test_build_text_builder_plain():
     from manage_post import build_text_builder
+
     segments = [{"type": "text", "text": "hello world"}]
     tb = MagicMock()
     with patch("manage_post.client_utils.TextBuilder", return_value=tb):
@@ -60,6 +61,7 @@ def test_build_text_builder_plain():
 
 def test_build_text_builder_with_link():
     from manage_post import build_text_builder
+
     segments = [
         {"type": "text", "text": "visit "},
         {"type": "link", "text": "site", "url": "https://example.com"},
@@ -69,5 +71,3 @@ def test_build_text_builder_with_link():
         build_text_builder(segments)
     tb.text.assert_called_once_with("visit ")
     tb.link.assert_called_once_with("site", "https://example.com")
-
-

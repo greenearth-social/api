@@ -34,7 +34,11 @@ class TestPerspectiveRanker:
             new_callable=AsyncMock,
             return_value=scores,
         ):
-            result = asyncio.run(PerspectiveRanker().predict(es=object(), user_did="did:plc:user1", candidates=candidates))
+            result = asyncio.run(
+                PerspectiveRanker().predict(
+                    es=object(), user_did="did:plc:user1", candidates=candidates
+                )
+            )
 
         rankings = result.result.rankings
         assert [r.at_uri for r in rankings] == ["at://a/3", "at://a/2", "at://a/1"]
@@ -49,7 +53,11 @@ class TestPerspectiveRanker:
             new_callable=AsyncMock,
             return_value={"at://a/1": 0.42},
         ):
-            result = asyncio.run(PerspectiveRanker().predict(es=object(), user_did="did:plc:user1", candidates=candidates))
+            result = asyncio.run(
+                PerspectiveRanker().predict(
+                    es=object(), user_did="did:plc:user1", candidates=candidates
+                )
+            )
 
         assert result.result.rankings[0].rank_score == 0.42
 
@@ -63,7 +71,11 @@ class TestPerspectiveRanker:
             new_callable=AsyncMock,
             return_value={"at://a/1": 0.5},
         ) as mock_score:
-            result = asyncio.run(PerspectiveRanker().predict(es=object(), user_did="did:plc:user1", candidates=candidates))
+            result = asyncio.run(
+                PerspectiveRanker().predict(
+                    es=object(), user_did="did:plc:user1", candidates=candidates
+                )
+            )
 
         # score_candidates is only called with candidates that have an at_uri
         (scored_candidates,), _ = mock_score.call_args
@@ -80,7 +92,11 @@ class TestPerspectiveRanker:
             new_callable=AsyncMock,
             return_value={"at://a/1": 0.5},  # at://a/2 missing -> None
         ):
-            result = asyncio.run(PerspectiveRanker().predict(es=object(), user_did="did:plc:user1", candidates=candidates))
+            result = asyncio.run(
+                PerspectiveRanker().predict(
+                    es=object(), user_did="did:plc:user1", candidates=candidates
+                )
+            )
 
         by_uri = {r.at_uri: r.rank_score for r in result.result.rankings}
         assert by_uri == {"at://a/1": 0.5, "at://a/2": None}
@@ -102,7 +118,11 @@ class TestPerspectiveRanker:
                 "at://a/high": 0.85,
             },
         ):
-            result = asyncio.run(PerspectiveRanker().predict(es=object(), user_did="did:plc:user1", candidates=candidates))
+            result = asyncio.run(
+                PerspectiveRanker().predict(
+                    es=object(), user_did="did:plc:user1", candidates=candidates
+                )
+            )
 
         assert [(r.at_uri, r.rank, r.rank_score) for r in result.result.rankings] == [
             ("at://a/high", 1, 0.85),

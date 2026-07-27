@@ -16,7 +16,7 @@ class FeedSummary(BaseModel):
     generated_at: datetime
     feed_name: str
     applied_social_radius: int | None = None
-    generator_diagnostics: list["GeneratorDiagnosticView"] = Field(default_factory=list)
+    generator_diagnostics: list[GeneratorDiagnosticView] = Field(default_factory=list)
 
 
 class FeedListResponse(BaseModel):

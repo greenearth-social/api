@@ -19,9 +19,9 @@ via configuration.
 import logging
 
 from ...models import CandidatePost, MaxAgeHours
+from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
-from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ def recency_decay_scale(max_age_hours: MaxAgeHours) -> str:
 # ---------------------------------------------------------------------------
 # Query helper
 # ---------------------------------------------------------------------------
+
 
 async def popularity_search(
     es,
@@ -99,7 +100,8 @@ async def popularity_search(
                         "script": {
                             "source": (
                                 "double likes = params.missing; "
-                                "if (!doc['like_count'].empty) { likes = doc['like_count'].value; } "
+                                "if (!doc['like_count'].empty) { "
+                                "likes = doc['like_count'].value; } "
                                 "likes = Math.max(likes, 0.0); "
                                 "return params.factor * Math.log1p(likes);"
                             ),
@@ -136,6 +138,7 @@ async def popularity_search(
 # Generator class
 # ---------------------------------------------------------------------------
 
+
 class PopularityCandidateGenerator(CandidateGenerator):
     """Returns recent popular posts.
 
@@ -157,7 +160,11 @@ class PopularityCandidateGenerator(CandidateGenerator):
         max_age_hours: MaxAgeHours = 168,
     ) -> CandidateResult:
         candidates = await popularity_search(
-            es, num_candidates, generator_name=self.name, video_only=video_only,
-            exclude_uris=exclude_uris, max_age_hours=max_age_hours,
+            es,
+            num_candidates,
+            generator_name=self.name,
+            video_only=video_only,
+            exclude_uris=exclude_uris,
+            max_age_hours=max_age_hours,
         )
         return CandidateResult(generator_name=self.name, candidates=candidates)

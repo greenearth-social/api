@@ -8,20 +8,19 @@ Performs vector-matrix multiplication to get scores for each post, and returns t
 import asyncio
 import logging
 
-from ...models import RankedCandidate, CandidatePost, RankPredictResult
-from .base import Ranker, RankerExecutionError, RankerResult
+from ...models import CandidatePost, RankedCandidate, RankPredictResult
 from ..elasticsearch import fetch_post_embeddings_and_metadata
 from ..embeddings import decode_float32_b64
 from ..http_client import get_http_client
-from ..telemetry import timed
 from ..inference import (
-    get_inference_settings,
     build_inference_headers,
-    raise_inference_response_error,
     compute_user_embedding,
+    get_inference_settings,
+    raise_inference_response_error,
 )
+from ..telemetry import timed
+from .base import Ranker, RankerExecutionError, RankerResult
 from .utils import get_rank_predict_results_from_candidates_and_scores
-
 
 logger = logging.getLogger(__name__)
 TWO_TOWER_MODEL_NAME = "two_tower"
@@ -43,10 +42,11 @@ async def predict_post_tower_batch(
     if len(post_embeddings) != len(author_dids):
         raise RankerExecutionError(
             TWO_TOWER_MODEL_NAME,
-            f"number of post embeddings {len(post_embeddings)} does not match number of author DIDs {len(author_dids)}",
+            f"number of post embeddings {len(post_embeddings)} does not match "
+            f"number of author DIDs {len(author_dids)}",
         )
 
-    embeddings_and_authors = list(zip(post_embeddings, author_dids))
+    embeddings_and_authors = list(zip(post_embeddings, author_dids, strict=False))
     chunks = [
         embeddings_and_authors[i : i + POST_TOWER_BATCH_SIZE]
         for i in range(0, len(post_embeddings), POST_TOWER_BATCH_SIZE)
@@ -56,10 +56,10 @@ async def predict_post_tower_batch(
 
     async def _call_chunk(chunk: list[tuple[list[float], str]]) -> list[list[float]]:
         resp = await client.post(
-            url, 
+            url,
             json={
                 "post_embeddings": [emb for emb, _ in chunk],
-                "target_author_dids": [author_did for _, author_did in chunk]
+                "target_author_dids": [author_did for _, author_did in chunk],
             },
             headers=headers,
         )
@@ -72,9 +72,7 @@ async def predict_post_tower_batch(
             raise_inference_response_error("post-tower", resp.status_code, resp.text)
         return resp.json()["outputs"]
 
-    async with timed(
-        logger, "post_tower_http", n_posts=len(post_embeddings), n_chunks=len(chunks)
-    ):
+    async with timed(logger, "post_tower_http", n_posts=len(post_embeddings), n_chunks=len(chunks)):
         chunk_outputs = await asyncio.gather(*(_call_chunk(c) for c in chunks))
     return [item for chunk_out in chunk_outputs for item in chunk_out]
 
@@ -88,45 +86,43 @@ class TwoTowerRanker(Ranker):
 
     @property
     def score_bounds(self) -> tuple[float, float]:
-        # User tower and post tower each L2-normalize the output embeddings 
-        # (they sum to 1), so the dot product is in the range [-1,1]. 
+        # User tower and post tower each L2-normalize the output embeddings
+        # (they sum to 1), so the dot product is in the range [-1,1].
         # Said another way, the two tower performs cosine similarity.
         return (-1.0, 1.0)
 
-    async def predict(
-        self,
-        es,
-        user_did: str,
-        candidates: list[CandidatePost]
-    ) -> RankerResult:
-        inference_base_url, inference_api_key = (
-            get_inference_settings()
-        )
+    async def predict(self, es, user_did: str, candidates: list[CandidatePost]) -> RankerResult:
+        inference_base_url, inference_api_key = get_inference_settings()
 
         valid_candidates = [candidate for candidate in candidates if candidate.at_uri is not None]
-        candidates_by_uri = {candidate.at_uri: candidate for candidate in candidates if candidate.at_uri is not None}
+        candidates_by_uri = {
+            candidate.at_uri: candidate for candidate in candidates if candidate.at_uri is not None
+        }
 
         async def _compute_candidate_post_embeddings() -> (
             tuple[list[CandidatePost], list[list[float]]] | None
         ):
-            async with timed(
-                logger, "two_tower_post_side", n_candidates=len(candidates_by_uri)
-            ):
-                # Use embeddings already carried on CandidatePost when available (avoids an ES round-trip).
+            async with timed(logger, "two_tower_post_side", n_candidates=len(candidates_by_uri)):
+                # Use embeddings already carried on CandidatePost when available
+                # (avoids an ES round-trip).
                 uris_and_metadata: list[tuple[str, list[float], str, int]] = []
                 missing_uris: list[str] = []
                 for uri, candidate in candidates_by_uri.items():
                     if candidate.minilm_l12_embedding and candidate.author_did:
                         try:
                             vec = decode_float32_b64(candidate.minilm_l12_embedding)
-                            uris_and_metadata.append((uri, vec, candidate.author_did, candidate.like_count or 0))
+                            uris_and_metadata.append(
+                                (uri, vec, candidate.author_did, candidate.like_count or 0)
+                            )
                             continue
                         except Exception:
                             pass
                     missing_uris.append(uri)
 
                 if missing_uris:
-                    fetched = await fetch_post_embeddings_and_metadata(es, missing_uris, index="posts_recent")
+                    fetched = await fetch_post_embeddings_and_metadata(
+                        es, missing_uris, index="posts_recent"
+                    )
                     uris_and_metadata.extend(fetched)
 
                 if not uris_and_metadata:
@@ -137,12 +133,8 @@ class TwoTowerRanker(Ranker):
                     for at_uri, _, _, _ in uris_and_metadata
                     if at_uri in candidates_by_uri
                 ]
-                input_post_embeddings = [
-                    embedding for _, embedding, _, _ in uris_and_metadata
-                ]
-                author_dids = [
-                    author_did for _, _, author_did, _ in uris_and_metadata
-                ]
+                input_post_embeddings = [embedding for _, embedding, _, _ in uris_and_metadata]
+                author_dids = [author_did for _, _, author_did, _ in uris_and_metadata]
 
                 output_post_embeddings = await predict_post_tower_batch(
                     input_post_embeddings,
@@ -159,11 +151,7 @@ class TwoTowerRanker(Ranker):
 
         output_user_embedding, candidate_result = await asyncio.gather(
             compute_user_embedding(
-                user_did,
-                es,
-                inference_base_url,
-                inference_api_key,
-                TWO_TOWER_MODEL_NAME
+                user_did, es, inference_base_url, inference_api_key, TWO_TOWER_MODEL_NAME
             ),
             _compute_candidate_post_embeddings(),
         )
@@ -187,19 +175,21 @@ class TwoTowerRanker(Ranker):
 
         ranked_candidates_input, output_post_embeddings = candidate_result
 
-        # For each candidate post, take the dot product of its output embedding with the user output embedding
+        # For each candidate post, take the dot product of its output embedding
+        # with the user output embedding
         final_scores = []
         for post_embedding in output_post_embeddings:
             if len(post_embedding) != len(output_user_embedding):
                 raise RankerExecutionError(
                     self.name,
-                    f"embedding dimension mismatch: post={len(post_embedding)} user={len(output_user_embedding)}",
+                    f"embedding dimension mismatch: post={len(post_embedding)} "
+                    f"user={len(output_user_embedding)}",
                 )
-            final_scores.append(sum([ u*p for u,p in zip(post_embedding, output_user_embedding)]))
+            final_scores.append(
+                sum(u * p for u, p in zip(post_embedding, output_user_embedding, strict=False))
+            )
 
         result = get_rank_predict_results_from_candidates_and_scores(
-            ranked_candidates_input,
-            final_scores,
-            valid_candidates
+            ranked_candidates_input, final_scores, valid_candidates
         )
         return RankerResult(model=self.name, result=result)

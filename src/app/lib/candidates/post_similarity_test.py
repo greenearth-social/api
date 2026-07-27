@@ -12,6 +12,7 @@ from ..embeddings import MINILM_L12_EMBEDDING_KEY
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def generator():
     return PostSimilarityCandidateGenerator()
@@ -29,14 +30,16 @@ class FakeEs:
     async def search(
         self, *, index=None, query=None, knn=None, size=None, sort=None, _source=None, **kwargs
     ):
-        self.calls.append({
-            "index": index,
-            "query": query,
-            "knn": knn,
-            "size": size,
-            "sort": sort,
-            "_source": _source,
-        })
+        self.calls.append(
+            {
+                "index": index,
+                "query": query,
+                "knn": knn,
+                "size": size,
+                "sort": sort,
+                "_source": _source,
+            }
+        )
         return self._responses.get(index, self._default)
 
 
@@ -52,9 +55,11 @@ class TestAverageVectors:
         with pytest.raises(ValueError, match="No vectors"):
             average_vectors([])
 
+
 # ---------------------------------------------------------------------------
 # Integration-style tests – full generator
 # ---------------------------------------------------------------------------
+
 
 class TestPostSimilarityGenerator:
     @pytest.mark.asyncio
