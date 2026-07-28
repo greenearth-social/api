@@ -210,9 +210,14 @@ async def compute_user_embedding(
     inference_api_key: str,
     source: str,
     history_mode: HistoryMode,
-) -> list[float]:
+    allow_empty_history: bool = True,
+) -> list[float] | None:
     async with timed(logger, "two_tower_user_side", user_did=user_did):
         rec = current_recorder()
+
+        # override allow_empty_history when we are running just for cold start debug feed
+        if history_mode == "empty":
+            allow_empty_history = True
 
         match history_mode:
             case "actual":
@@ -224,6 +229,8 @@ async def compute_user_embedding(
                     logger.info("No likes found for user %s", user_did)
                     if rec is not None:
                         rec.record_user_features(source, [], 0)
+                    if not allow_empty_history:
+                        return None
                 else:
                     user_history_embedding_pairs: list[tuple[str, list[float], str, int]] = await fetch_post_embeddings_and_metadata(
                         es, user_history_liked_uris,
@@ -238,6 +245,8 @@ async def compute_user_embedding(
                             len(user_history_liked_uris),
                             user_did,
                         )
+                        if not allow_empty_history:
+                            return None
                     else:
                         user_history_vectors = [embedding for _, embedding, _, _ in user_history_embedding_pairs]
                         history_author_dids = [author_did for _, _, author_did, _ in user_history_embedding_pairs]

@@ -76,6 +76,9 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             )
 
         # run the user tower to get the user embedding
+        allow_empty_history = False
+        if self.history_mode == "empty":
+            allow_empty_history = True
         user_embedding = await compute_user_embedding(
             user_did,
             es,
@@ -83,7 +86,15 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             inference_api_key,
             self.name,
             self.history_mode,
+            allow_empty_history,
         )
+        if user_embedding is None:
+            return CandidateResult(
+                generator_name=self.name,
+                candidates=[],
+                status="not_run",
+                reason="no_user_like_history",
+            )
 
         # Freshness filters returned candidates, not the interaction history
         # used above to compute the user embedding. Cap the requested window at
