@@ -36,6 +36,10 @@ RANDOM_FEED_RKEY = "random"
 RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
 RANKED_FEED_RKEY = "your-feed"
 RANKED_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANKED_FEED_RKEY}"
+COLD_START_FEED_RKEY = "cold-start"
+COLD_START_FEED_URI = (
+    f"at://{SERVICE_DID}/app.bsky.feed.generator/{COLD_START_FEED_RKEY}"
+)
 BEST_OF_FRIENDS_FEED_RKEY = "best-of-friends"
 BEST_OF_FRIENDS_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{BEST_OF_FRIENDS_FEED_RKEY}"
 # The AppView sends the publisher DID in the feed URI, not the service DID.
@@ -2524,6 +2528,35 @@ class TestSocialRadiusOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS[4]
+
+    @patch("app.routers.xrpc.get_user")
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_applies_social_radius_to_cold_start(self, mock_pipeline, mock_get_user):
+        """Cold-start keeps the radius mix but uses empty-history two-tower."""
+        from ..documents import UserDocument
+        from .xrpc import PipelineResult
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=4,
+        )
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
+
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": COLD_START_FEED_URI, "limit": 30},
+        )
+
+        assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert [
+            (generator.name, generator.weight)
+            for generator in gen_request.generators
+        ] == [
+            ("followed_users", 0.20),
+            ("two_tower_empty_history", 0.40),
+            ("popularity", 0.40),
+        ]
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)

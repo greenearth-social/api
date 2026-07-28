@@ -52,8 +52,8 @@ class HeavyRanker(Ranker):
         async def _get_user_features() -> tuple[list[list[float]], list[str], list[str], list[int]]:
             rec = current_recorder()
 
-            match self.history_mode:    
-                case "actual": 
+            match self.history_mode:
+                case "actual":
                     async with timed(logger, "ranker_get_user_features", user_did=user_did):
                         user_history_vectors: list[list[float]] = []
                         history_author_dids: list[str] = []

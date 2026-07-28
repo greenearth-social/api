@@ -1251,15 +1251,24 @@ async def get_feed_skeleton(
 
     # Social Radius only reallocates the fixed candidate batch among sources;
     # it never increases the total candidate count or per-request batch cap.
-    # Apply its preference override to your-feed generator weights.
+    # Apply its preference override to personalized-feed generator weights.
+    # Cold-start uses the same source mix as your-feed, but forces the
+    # empty-history two-tower variant.
     # The override is computed once and threaded through model_copy in both
     # generation paths so the shared module-level template is never mutated.
     generators_override: dict = {}
     applied_social_radius: int | None = None
-    if feed_name == "your-feed":
+    if feed_name in ("your-feed", "cold-start"):
         applied_social_radius = user_doc.social_radius if user_doc is not None else 3
         preset = SOCIAL_RADIUS_PRESETS.get(applied_social_radius)
         if preset is not None:
+            if feed_name == "cold-start":
+                preset = [
+                    spec.model_copy(update={"name": "two_tower_empty_history"})
+                    if spec.name == "two_tower"
+                    else spec
+                    for spec in preset
+                ]
             generators_override = {"generators": preset}
 
     freshness_index = (
