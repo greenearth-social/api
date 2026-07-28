@@ -39,7 +39,7 @@ FEED_SNAPSHOTS_COLLECTION = "feed_snapshots"
 MAX_FEED_SNAPSHOT_ITEMS = 500
 
 # How long a seen-posts bucket lives before native Firestore TTL deletes it.
-SEEN_POSTS_RETENTION_DAYS = 5
+SEEN_POSTS_RETENTION_DAYS = 14
 
 # How long a discarded-posts bucket lives before native Firestore TTL deletes
 # it. Shorter than seen posts: the candidate pool refreshes quickly and ranker
