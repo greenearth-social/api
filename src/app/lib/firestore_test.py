@@ -696,6 +696,7 @@ def _feed_debug_doc() -> FeedDebugDocument:
             user_did=USER_DID,
             num_candidates=10,
             video_only=False,
+            max_age_hours=168,
             infill=None,
         ),
         final_order=["at://p/1", "at://p/2"],

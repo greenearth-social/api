@@ -5,6 +5,7 @@ import pytest
 from ..candidates.popularity import (
     PopularityCandidateGenerator,
     popularity_search,
+    recency_decay_scale,
 )
 from ..embeddings import MINILM_L12_EMBEDDING_KEY
 
@@ -100,6 +101,21 @@ class TestPopularitySearch:
         assert query["function_score"]["boost_mode"] == "replace"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("hours", "scale"),
+        [(6, "90m"), (24, "6h"), (168, "42h")],
+    )
+    async def test_selected_window_sets_cutoff_and_decay(self, hours, scale):
+        es = FakeEs()
+        await popularity_search(es, num_candidates=10, max_age_hours=hours)
+        function_score = es.calls[0]["query"]["function_score"]
+        filters = function_score["query"]["bool"]["filter"]
+        assert {"range": {"created_at": {"gte": f"now-{hours}h"}}} in filters
+        gauss = next(f["gauss"] for f in function_score["functions"] if "gauss" in f)
+        assert gauss["created_at"]["scale"] == scale
+        assert recency_decay_scale(hours) == scale
+
+    @pytest.mark.asyncio
     async def test_video_only_true_includes_filter(self):
         es = FakeEs()
         await popularity_search(es, num_candidates=10, video_only=True)
@@ -116,7 +132,7 @@ class TestPopularitySearch:
         assert any("range" in f for f in filters)
 
     @pytest.mark.asyncio
-    async def test_exclude_uris_overfetches_and_filters_in_python(self):
+    async def test_exclude_uris_pushed_into_query(self):
         es = FakeEs(responses={
             "posts_recent": {
                 "hits": {
@@ -124,10 +140,6 @@ class TestPopularitySearch:
                         {
                             "_score": 10.0,
                             "_source": {"at_uri": "at://popular/1", "content": "x", "embeddings": {}},
-                        },
-                        {
-                            "_score": 9.0,
-                            "_source": {"at_uri": "at://popular/excluded", "content": "x", "embeddings": {}},
                         },
                         {
                             "_score": 8.0,
@@ -145,8 +157,10 @@ class TestPopularitySearch:
         )
 
         inner_bool = es.calls[0]["query"]["function_score"]["query"]["bool"]
-        assert "must_not" not in inner_bool
-        assert es.calls[0]["size"] == 3  # num_candidates + len(exclude_uris)
+        assert inner_bool["must_not"] == [
+            {"terms": {"at_uri": ["at://popular/excluded"]}}
+        ]
+        assert es.calls[0]["size"] == 2  # no overfetch; ES handles exclusions
         assert [c.at_uri for c in candidates] == ["at://popular/1", "at://popular/2"]
 
     @pytest.mark.asyncio

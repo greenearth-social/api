@@ -57,7 +57,7 @@ class UserDocument(BaseModel):
         "Used to override the generator weights in your-feed.",
     )
     freshness: int = Field(
-        default=2,
+        default=5,
         ge=0,
         le=5,
         description="Freshness preference: 0=6h, 1=12h, 2=24h, 3=48h, 4=72h, 5=7d.  "

@@ -161,7 +161,7 @@ def test_list_feeds_returns_401_without_auth():
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
-def test_list_feeds_preserves_overlapping_snapshots(mock_query, client):
+def test_list_feeds_collapses_identical_snapshots_and_keeps_newest(mock_query, client):
     now = datetime.now(timezone.utc)
     newer = _snapshot_doc(
         request_id="req-1",
@@ -185,9 +185,57 @@ def test_list_feeds_preserves_overlapping_snapshots(mock_query, client):
 
     response = client.get("/api/feeds")
     data = response.json()
-    assert len(data["feeds"]) == 2
-    assert data["feeds"][0]["request_id"] == "req-1"
-    assert data["feeds"][1]["request_id"] == "req-2"
+    assert [feed["request_id"] for feed in data["feeds"]] == ["req-1"]
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_preserves_same_posts_in_different_order(mock_query, client):
+    now = datetime.now(timezone.utc)
+    mock_query.return_value = [
+        _snapshot_doc(
+            request_id="req-1",
+            generated_at=now,
+            items=["at://a", "at://b"],
+        ),
+        _snapshot_doc(
+            request_id="req-2",
+            generated_at=now - timedelta(minutes=5),
+            items=["at://b", "at://a"],
+        ),
+    ]
+
+    response = client.get("/api/feeds")
+
+    assert [feed["request_id"] for feed in response.json()["feeds"]] == [
+        "req-1",
+        "req-2",
+    ]
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_preserves_identical_posts_from_different_feeds(mock_query, client):
+    now = datetime.now(timezone.utc)
+    mock_query.return_value = [
+        _snapshot_doc(
+            request_id="req-1",
+            generated_at=now,
+            feed_name="your-feed",
+            items=["at://a", "at://b"],
+        ),
+        _snapshot_doc(
+            request_id="req-2",
+            generated_at=now - timedelta(minutes=5),
+            feed_name="best-of-friends",
+            items=["at://a", "at://b"],
+        ),
+    ]
+
+    response = client.get("/api/feeds")
+
+    assert [feed["request_id"] for feed in response.json()["feeds"]] == [
+        "req-1",
+        "req-2",
+    ]
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
@@ -481,7 +529,7 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
     assert response.status_code == 200
     data = response.json()
     assert data["social_radius"] == 3  # default
-    assert data["freshness"] == 2  # default
+    assert data["freshness"] == 5  # seven-day default
     assert data["politics"] == 1.0  # default
     assert data["purpose"] == 0.5  # default
 
