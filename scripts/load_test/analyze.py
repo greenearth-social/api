@@ -7,12 +7,12 @@ load-test traffic against real traffic over the run window.
 
 This script deliberately reads **nothing from Firestore** — all cohort/DID
 context it needs is stamped on every record in the results file — so it can be
-run after scripts/load_test_cleanup.py has already removed the test data.
+run after scripts/load_test/cleanup.py has already removed the test data.
 
 Run from the api/ directory (server-side sections need
 ``gcloud auth application-default login``):
 
-    pipenv run python scripts/load_test_analyze.py --results results.jsonl \
+    pipenv run python scripts/load_test/analyze.py --results results.jsonl \
         --environment stage
 
 ``--no-server`` skips the Cloud Monitoring / logs sections (client-side only).
@@ -31,9 +31,9 @@ from datetime import datetime, timedelta, timezone
 from rich.console import Console
 from rich.table import Table
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # scripts/
 
-from load_test_lib import CLOUD_RUN_SERVICES, GCP_PROJECT, percentiles
+from load_test.lib import CLOUD_RUN_SERVICES, GCP_PROJECT, percentiles
 
 console = Console()
 
@@ -213,9 +213,7 @@ def run(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze a Green Earth load-test run")
-    parser.add_argument(
-        "--results", nargs="+", required=True, help="JSONL file(s) from load_test.py"
-    )
+    parser.add_argument("--results", nargs="+", required=True, help="JSONL file(s) from run.py")
     parser.add_argument(
         "--environment",
         "--env",

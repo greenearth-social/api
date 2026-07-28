@@ -2,19 +2,19 @@
 """Generate simulated feed load against the Green Earth API (issue api#189).
 
 Drives ``getFeedSkeleton`` (plus cursor paging and ``sendInteractions``) for a
-set of real user DIDs selected by scripts/load_test_users.py. Requests carry the
+set of real user DIDs selected by scripts/load_test/select_users.py. Requests carry the
 load-test bypass headers (``X-Load-Test-Secret`` / ``X-Load-Test-DID``) so the
 server skips AT Protocol auth, tags all resulting data as test traffic, and
 skips analytics — see load_test_did in src/app/routers/xrpc.py.
 
 This script only *generates* load and records raw per-request results to a JSONL
-file. Analyze the results afterwards with scripts/load_test_analyze.py, which
+file. Analyze the results afterwards with scripts/load_test/analyze.py, which
 reads that file (and Cloud Monitoring / logs) and never touches Firestore — so
-you can run scripts/load_test_cleanup.py before analysis if you like.
+you can run scripts/load_test/cleanup.py before analysis if you like.
 
 Run from the api/ directory:
 
-    pipenv run python scripts/load_test.py --users load_test_users.json \
+    pipenv run python scripts/load_test/run.py --users load_test_users.json \
         --environment stage --rate 60 --duration 10 --out results.jsonl
 
 The secret is read from --secret, else $GE_LOAD_TEST_SECRET, else
@@ -41,9 +41,9 @@ import httpx
 from rich.console import Console
 from rich.table import Table
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # scripts/
 
-from load_test_lib import (
+from load_test.lib import (
     CLOUD_RUN_REGION,
     CLOUD_RUN_SERVICES,
     build_interactions,
@@ -344,7 +344,7 @@ def _print_summary(records: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate simulated feed load")
-    parser.add_argument("--users", required=True, help="JSON file from load_test_users.py")
+    parser.add_argument("--users", required=True, help="JSON file from select_users.py")
     parser.add_argument(
         "--environment",
         "--env",

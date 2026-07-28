@@ -12,8 +12,8 @@ Runs as a dry-run by default; pass ``--execute`` to actually delete.
 
 Run from the api/ directory:
 
-    pipenv run python scripts/load_test_cleanup.py --environment stage          # dry run
-    pipenv run python scripts/load_test_cleanup.py --environment stage --execute
+    pipenv run python scripts/load_test/cleanup.py --environment stage          # dry run
+    pipenv run python scripts/load_test/cleanup.py --environment stage --execute
 
 Firestore connection comes from the same env vars as the API server; the
 ``--environment`` flag sets them for stage/prod (see scripts/feed_debug.py).
@@ -31,10 +31,8 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from rich.console import Console
 from rich.table import Table
 
-sys.path.insert(0, os.path.dirname(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from load_test_lib import GCP_PROJECT
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # scripts/
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))  # src/
 
 from app.lib.feed_cache import FEED_CACHE_COLLECTION
 from app.lib.firestore import (
@@ -43,6 +41,7 @@ from app.lib.firestore import (
     init_firestore_client,
     user_doc_id,
 )
+from load_test.lib import GCP_PROJECT
 
 console = Console()
 

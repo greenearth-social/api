@@ -3,7 +3,8 @@
 import random
 
 import pytest
-from load_test_lib import (
+
+from load_test.lib import (
     COHORTS,
     build_interactions,
     feed_uri_from_describe,

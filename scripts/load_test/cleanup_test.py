@@ -1,9 +1,10 @@
-"""Tests for scripts/load_test_cleanup.py (Firestore mocked)."""
+"""Tests for scripts/load_test/cleanup.py (Firestore mocked)."""
 
 from unittest.mock import AsyncMock, MagicMock
 
-import load_test_cleanup as cleanup
 import pytest
+
+from load_test import cleanup
 
 
 class _AsyncIter:

@@ -13,7 +13,7 @@ Run from the api/ directory (Elasticsearch reached via a port-forward — see
 below):
 
     kubectl port-forward service/greenearth-es-http 9200:9200 -n greenearth-prod
-    pipenv run python scripts/load_test_users.py --environment prod \
+    pipenv run python scripts/load_test/select_users.py --environment prod \
         --es-password "$ELASTIC_PASSWORD" --count 100 --output load_test_users.json
 
 Firestore connection comes from the same env vars as the API server
@@ -37,12 +37,11 @@ from elasticsearch import Elasticsearch
 from rich.console import Console
 from rich.table import Table
 
-sys.path.insert(0, os.path.dirname(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from load_test_lib import COHORTS, GCP_PROJECT, split_counts
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # scripts/
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))  # src/
 
 from app.lib.firestore import USERS_COLLECTION, init_firestore_client
+from load_test.lib import COHORTS, GCP_PROJECT, split_counts
 
 console = Console()
 

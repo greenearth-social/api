@@ -3,8 +3,8 @@
 Kept separate from the scripts themselves so the pure logic — cohort sizing,
 session scheduling, page-depth sampling, interaction-payload assembly — can be
 unit-tested without touching Elasticsearch, Firestore, Cloud Monitoring, or the
-network. See scripts/load_test_users.py, load_test.py, load_test_analyze.py and
-load_test_cleanup.py for the runnable entry points.
+network. See select_users.py, run.py, analyze.py and cleanup.py in this package
+for the runnable entry points.
 """
 
 from __future__ import annotations
