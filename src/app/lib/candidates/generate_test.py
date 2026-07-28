@@ -12,6 +12,7 @@ from ...models import CandidateGenerateRequest, CandidatePost, GeneratorSpec, Ma
 from ..candidates import generate as generate_module
 from ..candidates.base import CandidateGenerator, CandidateResult
 from ..candidates.generate import GeneratorError, run_generate
+from ..config import set_fail_fast_for_request
 from ..feed_debug import FeedDebugRecorder, feed_debug_scope
 from ..metrics import MetricCollector, set_metric_collector
 from ..pipeline_context import (
@@ -218,6 +219,7 @@ class TestGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_no_swallow_raises_generator_error_promptly(self, monkeypatch):
+        set_fail_fast_for_request(True)
         # No PipelineContext installed → hard fail (GeneratorError)
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
@@ -232,6 +234,7 @@ class TestGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_no_swallow_records_metric_before_raising(self, monkeypatch):
+        set_fail_fast_for_request(True)
         # No PipelineContext installed → hard fail (GeneratorError)
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
@@ -344,6 +347,7 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_timeout_no_swallow_raises_generator_error_with_is_infill(self, monkeypatch):
+        set_fail_fast_for_request(True)
         # No PipelineContext → hard fail
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {
@@ -362,6 +366,7 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_timeout_no_swallow_records_metric(self, monkeypatch):
+        set_fail_fast_for_request(True)
         # No PipelineContext → hard fail
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {
