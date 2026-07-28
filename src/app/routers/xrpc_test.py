@@ -644,7 +644,12 @@ class TestGetFeedSkeleton:
     # --- primary generator failure ---
 
     def test_primary_failure_falls_back_to_infill(self):
-        """If primary raises, we still get infill results."""
+        """If primary raises, we still get infill results.
+
+        The XRPC handler installs a PipelineContext for every render, so a failing
+        primary generator is recorded as a degradation event rather than raising,
+        and the feed is served with partial results from infill/other generators.
+        """
         infill = _make_candidates("infill", 3, "popularity")
 
         primary_gen = AsyncMock()
@@ -1204,7 +1209,8 @@ class TestGetFeedSkeletonAuth:
 
     def test_username_resolution_failure_is_logged_but_non_fatal(self, caplog):
         """Username resolution runs in a background task; failures are logged
-        but don't block the response."""
+        but don't block the response, and the session is still recorded
+        without the handle."""
         from unittest.mock import MagicMock
 
         mock_payload = MagicMock()
@@ -1226,7 +1232,7 @@ class TestGetFeedSkeletonAuth:
             )
 
         assert resp.status_code == 200
-        assert "Failed to resolve username" in caplog.text
+        assert "Could not resolve handle" in caplog.text
 
     def test_firestore_upsert_failure_is_logged_but_non_fatal(self, caplog):
         """Firestore user upserts run in a background task; failures are
@@ -1524,18 +1530,59 @@ class TestRankedFeed:
         # Should follow rank_score order (p/2 first), not generator score (p/0 first).
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
-    def test_ranking_failure_returns_500(self):
-        """When ranking raises, the feed fails with a 500."""
+    def test_ranking_failure_soft_fails_to_unranked(self):
+        """When ranking raises, the feed soft-fails and returns candidates in unranked order."""
         candidates = _make_candidates("p", 3, with_embedding=True)
 
         with self._patch_generators(candidates), \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, side_effect=RuntimeError("inference down")):
-            resp = TestClient(app, raise_server_exceptions=False).get(
+            resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": RANKED_FEED_URI},
             )
 
-        assert resp.status_code == 500
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert len(posts) == 3
+
+
+# ---------------------------------------------------------------------------
+# Embedding hydration timeout
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingHydrationTimeout:
+    """A hung `fetch_post_embeddings` call must not block the pipeline past
+    `GE_EMBED_HYDRATION_TIMEOUT_SEC` — it should fall back to unhydrated
+    candidates via the existing error path, same as any other hydration
+    failure."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_falls_back_to_unhydrated_candidates(self, monkeypatch):
+        from ..lib.pipeline_context import (
+            DegradationStage,
+            PipelineContext,
+            pipeline_context_scope,
+        )
+        from ..routers import xrpc as xrpc_module
+
+        monkeypatch.setattr(xrpc_module, "_EMBED_HYDRATION_TIMEOUT_SEC", 0.01)
+
+        async def _hangs(*args, **kwargs):
+            await asyncio.sleep(9999)
+
+        candidates = [CandidatePost(at_uri="at://post/1", score=0.5)]
+
+        with patch(
+            "app.routers.xrpc.fetch_post_embeddings", side_effect=_hangs
+        ), pipeline_context_scope(PipelineContext(feed_name="f")) as ctx:
+            result = await xrpc_module._hydrate_embeddings(object(), candidates)
+
+        assert result == candidates
+        assert len(ctx.degradations) == 1
+        assert ctx.degradations[0].stage == DegradationStage.EMBED_HYDRATION
+        assert ctx.degradations[0].component == "fetch_post_embeddings"
+        assert isinstance(ctx.degradations[0].cause, asyncio.TimeoutError)
 
 
 # ---------------------------------------------------------------------------
@@ -1616,11 +1663,11 @@ class TestSlateCutoffs:
 
     def test_rank_floor_cuts_low_scores_and_records_discards(self, monkeypatch):
         """Sub-floor candidates are cut (boundary-equal kept) and persisted as discarded."""
-        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
         candidates = _make_candidates("p", 4, with_embedding=True)
         discarded = AsyncMock()
 
-        data = self._get_feed(candidates, self._rank_result([0.5, 0.2, 0.0, -0.3]), discarded)
+        data = self._get_feed(candidates, self._rank_result([0.8, 0.6, 0.5, 0.4]), discarded)
 
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/0", "at://p/1", "at://p/2"]
@@ -1669,11 +1716,11 @@ class TestSlateCutoffs:
 
     def test_fail_open_serves_precut_slate_when_everything_cut(self, monkeypatch):
         """If the gates reject everything retrieved, the pre-cutoff slate is served."""
-        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
         candidates = _make_candidates("p", 3, with_embedding=True)
         discarded = AsyncMock()
 
-        data = self._get_feed(candidates, self._rank_result([-0.1, -0.2, -0.3]), discarded)
+        data = self._get_feed(candidates, self._rank_result([0.4, 0.3, 0.2]), discarded)
 
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/0", "at://p/1", "at://p/2"]
@@ -1686,21 +1733,21 @@ class TestSlateCutoffs:
         from app.routers import xrpc as xrpc_mod
 
         monkeypatch.setattr(xrpc_mod, "EMPTY_SLATE_FAIL_OPEN", False)
-        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
         candidates = _make_candidates("p", 3, with_embedding=True)
 
-        data = self._get_feed(candidates, self._rank_result([-0.1, -0.2, -0.3]))
+        data = self._get_feed(candidates, self._rank_result([0.4, 0.3, 0.2]))
 
         assert data["feed"] == []
         assert "cursor" not in data
 
     def test_discarded_uris_excluded_on_fresh_request(self, monkeypatch):
         """Feeds with a rank floor exclude previously-discarded posts from generation."""
-        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
         candidates = _make_candidates("p", 2, with_embedding=True)
         gen_patch, primary_gen = self._patch_generators(candidates)
 
-        rank_result = self._rank_result([0.5, 0.4])
+        rank_result = self._rank_result([0.7, 0.6])
         with gen_patch, \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result), \
              patch("app.routers.xrpc.record_discarded_posts", new_callable=AsyncMock), \
@@ -1750,9 +1797,9 @@ class TestSlateCutoffs:
         reader = InMemoryMetricReader()
         set_metric_collector(MetricCollector._from_reader(reader, service_name="t", env="test"))
         try:
-            monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.0)
+            monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
             candidates = _make_candidates("p", 4, with_embedding=True)
-            self._get_feed(candidates, self._rank_result([0.5, 0.2, 0.0, -0.3]))
+            self._get_feed(candidates, self._rank_result([0.8, 0.6, 0.5, 0.4]))
 
             metrics = {}
             metrics_data = reader.get_metrics_data()
@@ -1838,18 +1885,39 @@ class TestBestOfFriendsFeed:
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
-    def test_ranking_failure_returns_500(self):
-        """When the two-tower ranker raises, the feed returns HTTP 500."""
+    def test_ranking_failure_soft_fails_to_unranked(self):
+        """When the two-tower ranker raises, the feed soft-fails and returns candidates in unranked order."""
         candidates = _make_candidates("p", 3, with_embedding=True)
 
         with self._patch_generators(candidates), \
              patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, side_effect=RuntimeError("inference down")):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": BEST_OF_FRIENDS_FEED_URI},
+            )
+
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert len(posts) == 3
+
+    def test_pipeline_timeout_returns_504(self, monkeypatch):
+        """When the pipeline exceeds GE_FEED_REQUEST_TIMEOUT_SEC, the feed
+        returns HTTP 504 instead of hanging until the Cloud Run request
+        timeout kills the connection."""
+        monkeypatch.setenv("GE_FEED_REQUEST_TIMEOUT_SEC", "0.05")
+        candidates = _make_candidates("p", 3, with_embedding=True)
+
+        async def _slow_run_predict(*args, **kwargs):
+            await asyncio.sleep(1)
+
+        with self._patch_generators(candidates), \
+             patch("app.routers.xrpc.run_predict", side_effect=_slow_run_predict):
             resp = TestClient(app, raise_server_exceptions=False).get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": BEST_OF_FRIENDS_FEED_URI},
             )
 
-        assert resp.status_code == 500
+        assert resp.status_code == 504
 
 
 # ---------------------------------------------------------------------------
@@ -2638,6 +2706,7 @@ class TestSocialRadiusOverride:
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
             social_radius=0,
+            freshness=1,
         )
         mock_pipeline.return_value = PipelineResult(["at://dummy/1", "at://dummy/2"], [])
 
@@ -2649,6 +2718,7 @@ class TestSocialRadiusOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS[0]
+        assert gen_request.max_age_hours == 12
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
@@ -2692,6 +2762,7 @@ class TestSocialRadiusOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
+        assert gen_request.max_age_hours == 168
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
@@ -2815,6 +2886,38 @@ class TestGetFeedSkeletonMetrics:
             "status_code": "401",
         }
 
+    def test_pipeline_timeout_records_failure_count_504(self, monkeypatch):
+        monkeypatch.setenv("GE_FEED_REQUEST_TIMEOUT_SEC", "0.05")
+
+        async def _slow_generate(*args, **kwargs):
+            await asyncio.sleep(1)
+
+        with (
+            patch(
+                "app.lib.candidates.generate.get_generator",
+                side_effect=lambda name: AsyncMock(generate=_slow_generate),
+            ),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value="did:plc:user",
+            ),
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+
+        assert response.status_code == 504
+        failure_calls = [
+            call for call in self.mc.calls if call[0] == "feed.render.failure_count"
+        ]
+        assert len(failure_calls) == 1
+        assert failure_calls[0][2] == {
+            "feed_name": FEED_RKEY,
+            "status_code": "504",
+        }
+
     def test_failure_records_no_success_count(self):
         client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2826,6 +2929,113 @@ class TestGetFeedSkeletonMetrics:
         assert [
             call for call in self.mc.calls if call[0] == "feed.render.success_count"
         ] == []
+
+
+class TestDevSession:
+    """The development stand-in for a signed-in user (dev_session_did).
+
+    Distinct from the probe bypass on purpose: a probe is monitoring traffic
+    excluded from user data, while this has to be indistinguishable from a real
+    session downstream so the snapshot/user-record path can be exercised
+    locally.
+    """
+
+    def _request(self, headers: dict[str, str]):
+        from unittest.mock import MagicMock
+
+        request = MagicMock()
+        request.headers = headers
+        return request
+
+    def test_disabled_when_no_secret_is_configured(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.delenv("GE_DEV_SESSION_SECRET", raising=False)
+        request = self._request(
+            {"X-Dev-Session": "anything", "X-Dev-Session-DID": "did:plc:abc"}
+        )
+        assert dev_session_did(request) is None
+
+    def test_ignores_a_wrong_secret(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        request = self._request(
+            {"X-Dev-Session": "wrong", "X-Dev-Session-DID": "did:plc:abc"}
+        )
+        assert dev_session_did(request) is None
+
+    def test_ignores_a_request_with_no_headers(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        assert dev_session_did(self._request({})) is None
+
+    def test_returns_the_did_when_the_secret_matches(self, monkeypatch):
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        request = self._request(
+            {"X-Dev-Session": "correct", "X-Dev-Session-DID": "did:plc:abc"}
+        )
+        assert dev_session_did(request) == "did:plc:abc"
+
+    def test_rejects_a_did_that_is_not_did_plc(self, monkeypatch):
+        # The secret matched, so this is a developer mistake worth reporting
+        # rather than stray traffic to ignore.
+        from fastapi import HTTPException
+
+        from ..routers.xrpc import dev_session_did
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "correct")
+        request = self._request(
+            {"X-Dev-Session": "correct", "X-Dev-Session-DID": "alice.bsky.social"}
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            dev_session_did(request)
+        assert excinfo.value.status_code == 400
+
+
+class TestDevSessionStartupGuard:
+    """It must be impossible to serve deployed traffic with this enabled."""
+
+    @pytest.mark.asyncio
+    async def test_refuses_to_start_when_enabled_in_a_deployed_environment(
+        self, monkeypatch
+    ):
+        from ..main import app, lifespan
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "anything")
+        monkeypatch.setenv("GE_ELASTICSEARCH_API_KEY", "k")
+        monkeypatch.setenv("GE_FEED_CONTEXT_SECRET", "s")
+        monkeypatch.setenv("ENVIRONMENT", "prod")
+
+        with pytest.raises(RuntimeError, match="GE_DEV_SESSION_SECRET"):
+            async with lifespan(app):
+                pass
+
+    def test_deployed_environment_is_fine_without_it(self, monkeypatch):
+        # Guard must key on the variable, not merely on being deployed. This
+        # calls the guard directly rather than entering the lifespan: a clean
+        # startup goes on to build real GCP clients, which needs credentials
+        # CI doesn't have.
+        from ..main import _reject_dev_session_secret_in_deployment
+
+        monkeypatch.delenv("GE_DEV_SESSION_SECRET", raising=False)
+        monkeypatch.setenv("ENVIRONMENT", "prod")
+
+        _reject_dev_session_secret_in_deployment()
+
+    def test_local_environment_may_set_it(self, monkeypatch):
+        from ..main import _reject_dev_session_secret_in_deployment
+
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "anything")
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+        monkeypatch.delenv("GE_ENVIRONMENT", raising=False)
+
+        _reject_dev_session_secret_in_deployment()
+
+
 class TestPosthogTracking:
     """Verify PostHog events are emitted from XRPC background handlers."""
 
@@ -2852,6 +3062,44 @@ class TestPosthogTracking:
                 assert call_kwargs.args[1] == "did:plc:abc"
                 assert call_kwargs.args[2] == "alice.bsky.app"
                 assert call_kwargs.args[3] == "your-feed"
+
+    @pytest.mark.asyncio
+    async def test_record_session_survives_handle_resolution_failure(self):
+        """A DID that won't resolve must not cost us the session record.
+
+        Resolution goes over the network to the PLC directory, so it fails for
+        reasons unrelated to the user existing. Before this, one such failure
+        skipped the user upsert, the feed-activity write and the analytics
+        event outright.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ..routers.xrpc import _record_session
+
+        db = AsyncMock()
+        request = MagicMock()
+        request.app.state.id_resolver = AsyncMock()
+        request.app.state.id_resolver.did.resolve = AsyncMock(
+            side_effect=RuntimeError("PLC directory unavailable")
+        )
+
+        with patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()):
+            with patch("app.routers.xrpc.track_session") as mock_track:
+                with patch("app.routers.xrpc.upsert_user", new=AsyncMock()) as mock_upsert:
+                    with patch(
+                        "app.routers.xrpc.upsert_feed_activity", new=AsyncMock()
+                    ) as mock_activity:
+                        await _record_session(request, "did:plc:abc", "your-feed", db)
+
+        mock_upsert.assert_awaited_once()
+        upsert_args = mock_upsert.await_args
+        assert upsert_args is not None
+        # The DID is the identity; the handle is enrichment we simply lack.
+        assert upsert_args.args[1] == "did:plc:abc"
+        assert upsert_args.args[2] is None
+        mock_activity.assert_awaited_once()
+        mock_track.assert_called_once()
+        assert mock_track.call_args.args[2] is None
 
     @pytest.mark.asyncio
     async def test_record_interactions_calls_track_interaction(self):
@@ -2882,3 +3130,79 @@ class TestPosthogTracking:
                 assert call_kwargs.args[2] == "interactionLike"
                 assert call_kwargs.args[3] == "your-feed"
                 assert call_kwargs.args[4] == "at://did/post/1"
+
+
+class TestFailFastFeatureFlag:
+    """Verify that get_feed_skeleton evaluates the PostHog flag and wires it to fail_fast()."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_authenticated_user(self):
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser"):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_upsert(self):
+        with (
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock),
+            patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_pipeline(self):
+        empty_snapshot = MagicMock()
+        empty_snapshot.items = []
+        empty_snapshot.generator_diagnostics = []
+        empty_snapshot.items_meta = []
+        with patch(
+            "app.routers.xrpc._run_pipeline_capturing",
+            new_callable=AsyncMock,
+            return_value=(empty_snapshot, []),
+        ):
+            yield
+
+    def test_flag_enabled_calls_set_fail_fast_true(self):
+        """When PostHog returns True for the user, set_fail_fast_for_request(True) is called."""
+        mock_ph = MagicMock()
+        mock_ph.feature_enabled.return_value = True
+
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        mock_set.assert_called_once_with(True)
+
+    def test_flag_disabled_calls_set_fail_fast_false(self):
+        """When PostHog returns False, set_fail_fast_for_request(False) is called."""
+        mock_ph = MagicMock()
+        mock_ph.feature_enabled.return_value = False
+
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        mock_set.assert_called_once_with(False)
+
+    def test_none_posthog_client_calls_set_fail_fast_false(self):
+        """When PostHog client is None (local dev), set_fail_fast_for_request(False) is called."""
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=None),
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        mock_set.assert_called_once_with(False)

@@ -86,6 +86,7 @@ def test_search_returns_embedding():
                 "image_count": None,
                 "video_count": None,
                 "external_uri": None,
+                "like_count": None,
             }
         ]
     }
@@ -112,6 +113,7 @@ def test_similar_with_at_uris():
                 "image_count": None,
                 "video_count": None,
                 "external_uri": None,
+                "like_count": None,
             }
         ]
     }
@@ -138,6 +140,7 @@ def test_similar_with_embeddings():
                 "image_count": None,
                 "video_count": None,
                 "external_uri": None,
+                "like_count": None,
             }
         ]
     }

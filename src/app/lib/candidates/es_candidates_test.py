@@ -116,15 +116,16 @@ class TestKnnSearchPosts:
         assert candidates[0].generator_name == "post_similarity"
 
     @pytest.mark.asyncio
-    async def test_no_filters_when_no_args(self):
-        """No filter clause sent to ES when there is nothing to filter on."""
+    async def test_default_freshness_filter_is_inside_knn(self):
         es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
         await knn_search_posts(
             es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD
         )
         knn = es.calls[0]["knn"]
         assert es.calls[0]["query"] is None
-        assert "filter" not in knn
+        assert {"range": {"created_at": {"gte": "now-168h"}}} in (
+            knn["filter"]["bool"]["filter"]
+        )
 
     @pytest.mark.asyncio
     async def test_video_only_true_sends_es_filter(self):
@@ -138,15 +139,16 @@ class TestKnnSearchPosts:
         assert {"term": {"contains_video": True}} in knn["filter"]["bool"]["filter"]
 
     @pytest.mark.asyncio
-    async def test_video_only_false_omits_filter(self):
-        """When video_only is False and no exclude_uris, no filter is sent."""
+    async def test_video_only_false_keeps_only_freshness_filter(self):
         es = FakeEs(responses={"posts_recent": {"hits": {"hits": []}}})
         await knn_search_posts(
             es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
             video_only=False
         )
         knn = es.calls[0]["knn"]
-        assert "filter" not in knn
+        assert knn["filter"]["bool"]["filter"] == [
+            {"range": {"created_at": {"gte": "now-168h"}}}
+        ]
 
     @pytest.mark.asyncio
     async def test_exclude_uris_is_an_es_filter(self):

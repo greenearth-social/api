@@ -212,33 +212,6 @@ ensure_firestore_database() {
     fi
 }
 
-# Enable a Firestore TTL policy on <collection-group>.expires_at.
-#
-# ``fields ttls update`` starts a long-running operation; without ``--async``
-# gcloud blocks and polls until it finishes — even when the policy is already
-# ACTIVE — so this step otherwise hangs for minutes per collection. We submit
-# asynchronously instead: the policy activates in the background (a deletion
-# policy has no urgency) and re-runs return immediately. stdout (the operation
-# resource) is suppressed; real errors still surface on stderr.
-ensure_ttl_policy() {
-    local collection_group="$1"
-    local firestore_db
-    firestore_db="$(get_firestore_database)"
-
-    log_info "Ensuring TTL policy on ${collection_group}.expires_at (async)..."
-    if gcloud firestore fields ttls update expires_at \
-        --collection-group="$collection_group" \
-        --database="$firestore_db" \
-        --project="$PROJECT_ID" \
-        --enable-ttl \
-        --async \
-        --quiet >/dev/null; then
-        log_info "TTL policy update submitted for ${collection_group}.expires_at (activates in the background)"
-    else
-        log_warn "Could not submit TTL policy update for ${collection_group}.expires_at (non-fatal)"
-    fi
-}
-
 ensure_firestore_api_key_secret() {
     local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
     local key_display_name
@@ -443,9 +416,8 @@ create_service_account() {
 
 ensure_frontend_deployer_roles() {
     # The frontend repo (greenearth-social/frontend) deploys Cloud Functions,
-    # Firebase Hosting, and Firebase Rules via this service account. Stage
-    # deploys don't touch Cloud Functions, so these roles are only needed
-    # for prod. See https://github.com/greenearth-social/api/issues/273
+    # Firebase Hosting, and Firestore configuration via this service account.
+    # See https://github.com/greenearth-social/api/issues/273
     local deployer_sa="firebase-adminsdk-fbsvc@$PROJECT_ID.iam.gserviceaccount.com"
     local runtime_sa="21637448064-compute@developer.gserviceaccount.com"
 
@@ -457,6 +429,7 @@ ensure_frontend_deployer_roles() {
         "roles/firebasehosting.admin"
         "roles/cloudfunctions.admin"
         "roles/firebaserules.admin"
+        "roles/datastore.indexAdmin"
     )
 
     for role in "${project_roles[@]}"; do
@@ -784,12 +757,8 @@ main() {
     validate_config
     setup_gcp_project
     create_service_account
+    ensure_frontend_deployer_roles
     ensure_firestore_database
-    ensure_ttl_policy feed_cache
-    ensure_ttl_policy seen_posts
-    ensure_ttl_policy discarded_posts
-    ensure_ttl_policy feed_debug
-    ensure_ttl_policy feed_snapshots
     ensure_firestore_api_key_secret
     ensure_inference_api_key_secret_access
     ensure_feed_context_secret
@@ -810,10 +779,6 @@ main() {
     setup_posthog_secret
     check_vpc_connector
     setup_feed_probe_cloud_scheduler
-
-    if [ "$ENVIRONMENT" = "prod" ]; then
-        ensure_frontend_deployer_roles
-    fi
 
     echo ""
     log_info "✓ GCP setup complete!"

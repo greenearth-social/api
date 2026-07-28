@@ -15,9 +15,12 @@ PostHog events emitted:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from posthog import Posthog
+
+logger = logging.getLogger(__name__)
 
 _posthog_client: Posthog | None = None
 
@@ -38,20 +41,26 @@ def init_posthog_client(api_key: str, host: str) -> Posthog:
 def track_session(
     client: Posthog | None,
     user_did: str,
-    username: str,
+    username: str | None,
     feed_name: str,
     timestamp: datetime,
 ) -> None:
-    """Capture a feedLoaded event and update the user's person properties."""
+    """Capture a feedLoaded event and update the user's person properties.
+
+    ``username`` may be ``None`` when the handle couldn't be resolved. The
+    event is still captured — it's keyed on the DID — but the person property
+    is left alone rather than set to null, so a transient resolution failure
+    doesn't erase a handle PostHog already has.
+    """
     if client is None:
         return
+    properties: dict[str, object] = {"feed_name": feed_name}
+    if username is not None:
+        properties["$set"] = {"username": username}
     client.capture(
         distinct_id=user_did,
         event="feedLoaded",
-        properties={
-            "feed_name": feed_name,
-            "$set": {"username": username},
-        },
+        properties=properties,
         timestamp=timestamp,
     )
 
@@ -81,3 +90,19 @@ def track_interaction(
         properties=properties,
         timestamp=timestamp,
     )
+
+
+def evaluate_fail_fast_flag(client: Posthog | None, user_did: str) -> bool:
+    """Evaluate the fail-fast-feed PostHog feature flag for this user.
+
+    Returns True only when the client is present and the flag is enabled for
+    user_did. Soft-fails to False on any SDK exception so a PostHog outage
+    never breaks feed serving.
+    """
+    if client is None:
+        return False
+    try:
+        return bool(client.feature_enabled("fail-fast-feed", user_did))
+    except Exception:
+        logger.warning("PostHog feature flag evaluation failed for %s", user_did)
+        return False

@@ -41,13 +41,14 @@ from ..documents import (
 from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
-from ..lib.config import fail_fast
+from ..lib.config import fail_fast, set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
 from ..lib.elasticsearch import fetch_post_embeddings
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
+from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     get_recent_discarded_uris,
@@ -62,6 +63,14 @@ from ..lib.firestore import (
     write_feed_debug,
 )
 from ..lib.metrics import get_metric_collector
+from ..lib.posthog_client import evaluate_fail_fast_flag, get_posthog_client, track_interaction, track_session
+from ..lib.pipeline_context import (
+    DegradationEvent,
+    DegradationStage,
+    PipelineContext,
+    current_pipeline_context,
+    pipeline_context_scope,
+)
 from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
 from ..lib.rankers import run_predict
 from ..lib.request_cache import request_cache_scope
@@ -79,6 +88,13 @@ router = APIRouter(tags=["xrpc"])
 
 FEED_SNAPSHOT_RETENTION_SECONDS = 900  # 15 minutes
 INITIAL_REQUEST_REUSE_SECONDS = 5
+
+try:
+    _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
+        os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5")
+    )
+except ValueError:
+    _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
 
 
 @dataclass
@@ -175,6 +191,40 @@ def _get_hostname() -> str:
 
 def _feed_uri(feed_name: str) -> str:
     return f"at://{_get_service_did()}/app.bsky.feed.generator/{feed_name}"
+
+
+def dev_session_did(request: Request) -> str | None:
+    """DID for a development session, or ``None`` when the request isn't one.
+
+    ``getFeedSkeleton`` normally authenticates an AT Protocol JWT signed by the
+    caller's Bluesky identity. A local environment has no such identity and no
+    way to mint one, so without this there is no way to exercise the
+    signed-in-user path — the one that writes feed snapshots, user records and
+    activity — outside production.
+
+    Deliberately *not* the Cloud Scheduler probe bypass, which exists for
+    monitoring and is excluded from user data for that reason. This stands in
+    for a real session and is treated as one everywhere downstream.
+
+    Enabled only by ``GE_DEV_SESSION_SECRET``, which ``main.lifespan`` refuses
+    to start with in a deployed environment. Requests supply the secret in
+    ``X-Dev-Session`` and the user in ``X-Dev-Session-DID``.
+    """
+    secret = os.environ.get("GE_DEV_SESSION_SECRET")
+    if not secret:
+        return None
+    if not hmac.compare_digest(request.headers.get("X-Dev-Session", ""), secret):
+        return None
+
+    did = request.headers.get("X-Dev-Session-DID", "").strip()
+    if not did.startswith("did:plc:"):
+        # The secret matched, so this is a developer getting it wrong rather
+        # than stray traffic — say so instead of falling through to a 401.
+        raise HTTPException(
+            status_code=400,
+            detail="X-Dev-Session-DID must be a did:plc DID",
+        )
+    return did
 
 
 async def _resolve_username(request: Request, user_did: str) -> str:
@@ -309,15 +359,22 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
 
     try:
         async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
-            pairs = await fetch_post_embeddings(es, missing, index="posts_recent")
-    except Exception:
+            pairs = await asyncio.wait_for(
+                fetch_post_embeddings(es, missing, index="posts_recent"),
+                timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
+            )
+    except Exception as exc:
         # If the refetch fails, MMR falls back to author-only similarity
         # and the two-tower ranker has its own refetch path. Don't fail
-        # the request over a hydration hiccup — unless GE_FAIL_FAST is set,
-        # in which case degraded serving is disabled and we surface the error.
-        logger.exception("Embedding hydration failed")
-        if fail_fast():
-            raise
+        # the request over a hydration hiccup.
+        logger.exception("Embedding hydration failed; continuing without")
+        ctx = current_pipeline_context()
+        if ctx is not None:
+            ctx.record(DegradationEvent(
+                stage=DegradationStage.EMBED_HYDRATION,
+                component="fetch_post_embeddings",
+                cause=exc,
+            ))
         return candidates
 
     encoded: dict[str, str] = {}
@@ -395,6 +452,8 @@ async def _run_ranking_pipeline(
                 spec.name for spec in feed_cfg.rank_request_template.models
             )
 
+    ctx = current_pipeline_context()
+
     async with request_cache_scope():
         async with timed(
             logger,
@@ -441,23 +500,37 @@ async def _run_ranking_pipeline(
             rank_req = feed_cfg.rank_request_template.model_copy(
                 update={"candidates": candidates, "user_did": gen_request.user_did}
             )
-            async with timed(
-                logger,
-                "run_predict",
-                n_candidates=len(candidates),
-                n_models=len(rank_req.models),
-            ):
-                rank_result = await run_predict(rank_req, es)
-            if rec is not None:
-                rec.record_ranking(rank_result)
-            # Reorder CandidatePosts by model rank and stamp rank_score onto each
-            # so MMR uses the model's relevance scores, not the generator scores.
-            by_uri = {c.at_uri: c for c in candidates if c.at_uri}
-            ordered = [
-                by_uri[r.at_uri].model_copy(update={"score": r.rank_score})
-                for r in rank_result.rankings
-                if r.at_uri in by_uri
-            ]
+            try:
+                async with timed(
+                    logger,
+                    "run_predict",
+                    n_candidates=len(candidates),
+                    n_models=len(rank_req.models),
+                ):
+                    rank_result = await run_predict(rank_req, es)
+                if rec is not None:
+                    rec.record_ranking(rank_result)
+                # Reorder CandidatePosts by model rank and stamp rank_score onto each
+                # so MMR uses the model's relevance scores, not the generator scores.
+                by_uri = {c.at_uri: c for c in candidates if c.at_uri}
+                ordered = [
+                    by_uri[r.at_uri].model_copy(update={"score": r.rank_score})
+                    for r in rank_result.rankings
+                    if r.at_uri in by_uri
+                ]
+            except Exception as exc:
+                logger.exception("Ranking stage failed; falling back to unranked ordering")
+                if ctx is not None:
+                    component = getattr(exc, "name", type(exc).__name__)
+                    ctx.record(DegradationEvent(
+                        stage=DegradationStage.RANK,
+                        component=component,
+                        cause=exc,
+                    ))
+                    # ctx.record re-raises exc when fail_fast=True, so reaching here means fail_fast=False
+                    ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
+                else:
+                    raise
         else:
             ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
 
@@ -534,6 +607,14 @@ async def _run_ranking_pipeline(
 
         if rec is not None:
             rec.record_final_order(final_uris)
+
+        # Emit once per render. When fail_fast=True, exceptions propagate before
+        # reaching here, so the metric is only emitted for soft-failed (degraded)
+        # renders — not for hard failures.
+        if ctx is not None and ctx.degradations and not ctx.fail_fast:
+            if collector is not None:
+                collector.record("feed.render.degraded_count", 1, feed_name=ctx.feed_name)
+
         return PipelineResult(final_uris, low_score_uris)
 
 
@@ -562,11 +643,16 @@ async def _run_pipeline_capturing(
     the snapshot is built for every request; ``_run_ranking_pipeline``'s own
     return value carries the URIs cut for low rank score so the caller can
     persist them as discarded, alongside the snapshot.
+
+    A PipelineContext is also installed for every render so degradation events
+    and the feed.render.degraded_count metric are always tracked. fail_fast=False
+    for now; PostHog per-user flag (issue 279) will pass it in when implemented.
     """
     recorder = FeedDebugRecorder(feed_name=feed_name, regenerated=regenerated)
     generated_at = datetime.now(timezone.utc)
+    ctx = PipelineContext(feed_name=feed_name)
 
-    with feed_debug_scope(recorder):
+    with feed_debug_scope(recorder), pipeline_context_scope(ctx):
         pipeline_result = await _run_ranking_pipeline(
             feed_cfg, gen_request, request.app.state.es, feed_name=feed_name
         )
@@ -586,6 +672,55 @@ async def _run_pipeline_capturing(
         )
 
     return snapshot, pipeline_result.low_score_uris
+
+
+def _feed_request_timeout_sec() -> float:
+    """Internal deadline for the feed pipeline, read fresh per call so it can
+    be overridden per-request in tests. Set below the Bluesky AppView's 10s
+    abort on getFeedSkeleton calls (see #291) so a downstream hang (ES,
+    ranker) surfaces as a logged 504 instead of losing the race against the
+    client's own timeout with nothing recorded.
+    """
+    return float(os.environ.get("GE_FEED_REQUEST_TIMEOUT_SEC", "9"))
+
+
+async def _run_pipeline_capturing_with_timeout(
+    request: Request,
+    db,
+    feed_cfg: FeedConfig,
+    gen_request: CandidateGenerateRequest,
+    *,
+    feed_name: str,
+    user_did: str,
+    request_id: str,
+    regenerated: bool,
+    debug_enabled: bool,
+    applied_social_radius: int | None = None,
+) -> tuple[FeedSnapshotDocument, list[str]]:
+    """Enforce ``GE_FEED_REQUEST_TIMEOUT_SEC`` around ``_run_pipeline_capturing``."""
+    try:
+        return await asyncio.wait_for(
+            _run_pipeline_capturing(
+                request,
+                db,
+                feed_cfg,
+                gen_request,
+                feed_name=feed_name,
+                user_did=user_did,
+                request_id=request_id,
+                regenerated=regenerated,
+                debug_enabled=debug_enabled,
+                applied_social_radius=applied_social_radius,
+            ),
+            timeout=_feed_request_timeout_sec(),
+        )
+    except TimeoutError:
+        logger.error(
+            "Feed pipeline exceeded internal timeout (%.0fs) for feed '%s'",
+            _feed_request_timeout_sec(),
+            feed_name,
+        )
+        raise HTTPException(status_code=504, detail="Feed generation timed out") from None
 
 
 def _snapshot_page(
@@ -771,11 +906,20 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
     isn't paying for firebase roundtrips.
     Failures are logged but do not surface to the caller.
     """
+    # Handle resolution goes over the network to the PLC directory, so it fails
+    # for reasons that have nothing to do with this user existing — a directory
+    # blip, a DID document that's briefly unresolvable. Treat it as enrichment:
+    # losing the handle shouldn't also lose the session record, which is keyed
+    # on the DID we already have.
     try:
         username = await _resolve_username(request, user_did)
     except Exception:
-        logger.exception("Failed to resolve username for %s in background", user_did)
-        return
+        logger.warning(
+            "Could not resolve handle for %s; recording session without it",
+            user_did,
+            exc_info=True,
+        )
+        username = None
 
     now = datetime.now(timezone.utc)
 
@@ -1107,7 +1251,16 @@ async def get_feed_skeleton(
     is_probe = bool(_probe_secret) and hmac.compare_digest(
         request.headers.get("X-Probe-Secret", ""), _probe_secret
     )
-    if is_probe:
+    # A development session is a stand-in for a signed-in user, so it takes
+    # precedence over the probe bypass and clears is_probe: the request must be
+    # treated as real traffic downstream, including writing feed snapshots.
+    _dev_session_did = dev_session_did(request)
+    if _dev_session_did is not None:
+        is_probe = False
+
+    if _dev_session_did is not None:
+        user_did = _dev_session_did
+    elif is_probe:
         user_did = os.environ.get("GE_PROBE_USER_DID", "did:plc:s4tl2ajfsnstzuxtegl7r33g")
     else:
         user_did = await verify_auth_header(request, service_did=_get_service_did())
@@ -1132,6 +1285,8 @@ async def get_feed_skeleton(
 
     _spawn_background(_record_session(request, user_did, feed_name, db))
 
+    set_fail_fast_for_request(evaluate_fail_fast_flag(get_posthog_client(), user_did))
+
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
     # to no-debug rather than breaking feed serving.
@@ -1143,7 +1298,9 @@ async def get_feed_skeleton(
     except Exception:
         logger.exception("Failed to read debug flag for user '%s'", user_did)
 
-    # Apply social-radius preference override to your-feed generator weights.
+    # Social Radius only reallocates the fixed candidate batch among sources;
+    # it never increases the total candidate count or per-request batch cap.
+    # Apply its preference override to your-feed generator weights.
     # The override is computed once and threaded through model_copy in both
     # generation paths so the shared module-level template is never mutated.
     generators_override: dict = {}
@@ -1153,6 +1310,11 @@ async def get_feed_skeleton(
         preset = SOCIAL_RADIUS_PRESETS.get(applied_social_radius)
         if preset is not None:
             generators_override = {"generators": preset}
+
+    freshness_index = (
+        user_doc.freshness if user_doc is not None else DEFAULT_FRESHNESS_INDEX
+    )
+    max_age_hours = max_age_hours_for_freshness(freshness_index)
 
     feed_cache = _get_feed_cache(request)
 
@@ -1224,11 +1386,12 @@ async def get_feed_skeleton(
                         "user_did": user_did,
                         "num_candidates": batch,
                         "exclude_uris": exclude_uris,
+                        "max_age_hours": max_age_hours,
                         **generators_override,
                     }
                 )
 
-                generated_snapshot, low_score_uris = await _run_pipeline_capturing(
+                generated_snapshot, low_score_uris = await _run_pipeline_capturing_with_timeout(
                     request,
                     db,
                     feed_cfg,
@@ -1299,6 +1462,7 @@ async def get_feed_skeleton(
                     "user_did": user_did,
                     "num_candidates": batch,
                     "exclude_uris": exclude_uris,
+                    "max_age_hours": max_age_hours,
                     **generators_override,
                 }
             )
@@ -1308,7 +1472,7 @@ async def get_feed_skeleton(
             # Generated up front so it can key the debug record too.
             request_id = uuid.uuid4().hex
 
-            generated_snapshot, low_score_uris = await _run_pipeline_capturing(
+            generated_snapshot, low_score_uris = await _run_pipeline_capturing_with_timeout(
                 request,
                 db,
                 feed_cfg,

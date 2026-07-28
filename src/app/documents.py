@@ -57,7 +57,7 @@ class UserDocument(BaseModel):
         "Used to override the generator weights in your-feed.",
     )
     freshness: int = Field(
-        default=2,
+        default=5,
         ge=0,
         le=5,
         description="Freshness preference: 0=6h, 1=12h, 2=24h, 3=48h, 4=72h, 5=7d.  "
@@ -212,7 +212,7 @@ class FeedDebugScoreEntry(BaseModel):
 class FeedDebugModelScoreEntry(BaseModel):
     """One rank model's contribution to the combined ranking.
 
-    Captures the model's normalized (to [-1, 1]) per-candidate scores and its
+    Captures the model's normalized (to [0, 1]) per-candidate scores and its
     configured relative weight — i.e. the inputs to the weighted-average
     combination — so the combined score in ``ranking`` can be explained.
     The final combined score is intentionally *not* duplicated here.
@@ -222,7 +222,7 @@ class FeedDebugModelScoreEntry(BaseModel):
     weight: float = Field(..., description="Configured relative weight for this model")
     scores: list[FeedDebugScoreEntry] = Field(
         default_factory=list,
-        description="Per-candidate scores after normalization to [-1, 1]",
+        description="Per-candidate scores after normalization to [0, 1]",
     )
 
 
@@ -302,7 +302,7 @@ class FeedDebugDocument(BaseModel):
     )
     model_scores: list[FeedDebugModelScoreEntry] = Field(
         default_factory=list,
-        description="Per-model normalized ([-1, 1]) scores and configured weight, "
+        description="Per-model normalized ([0, 1]) scores and configured weight, "
         "in the order rank models ran (empty when no ranking ran)",
     )
     order_after_rank: list[str] = Field(

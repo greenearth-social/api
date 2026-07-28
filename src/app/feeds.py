@@ -94,19 +94,18 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
         avatar="assets/icons/green-earth.png",
-        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5utph3ka26",
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mrash36z5b2c",
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
-        # min_rank_score=-0.15 is calibrated from real combined rank_score
-        # distributions pulled from stage feed_debug records for this feed (242
-        # ranked candidates across 4 real loads): the theoretical [-1, 1] midpoint
-        # (0.0) sits around the empirical p40-50, so it would cut roughly half of
-        # all candidates by itself; -0.15 sits at ~p12-13, trimming only the clear
-        # tail and leaving max_render_share as the dominant lever on render volume.
+        # min_rank_score=0.425 maps the old -0.15 floor into the current [0, 1]
+        # combined rank-score range. That value was calibrated from stage
+        # feed_debug records for this feed (242 ranked candidates across 4 real
+        # loads), where it sat at ~p12-13 and trimmed only the clear tail,
+        # leaving max_render_share as the dominant lever on render volume.
         # See "cutoff-preview" below for the live preview of this feed's pipeline
         # with the same thresholds.
         max_render_share=0.5,
-        min_rank_score=-0.15,
+        min_rank_score=0.425,
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
@@ -141,7 +140,7 @@ FEEDS: dict[str, FeedConfig] = {
         # wasn't separately sampled, so treat it as a starting point to revisit
         # once its own metrics are live.
         max_render_share=0.5,
-        min_rank_score=-0.15,
+        min_rank_score=0.425,
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="followed_users", weight=1.0)],
@@ -185,22 +184,26 @@ FEEDS: dict[str, FeedConfig] = {
         # Values below are calibrated from real combined rank_score and MMR
         # pick_score distributions pulled from stage feed_debug records (242
         # ranked candidates across 4 real "your-feed" loads from 2 debug-enabled
-        # stage users, 2026-07-14 to 2026-07-21), not the theoretical [-1, 1]
-        # midpoint used as the initial guess for your-feed/best-of-friends.
+        # stage users, 2026-07-14 to 2026-07-21). Those records used the old
+        # [-1, 1] combined rank-score range, so the rank-score numbers below
+        # are mapped into the current [0, 1] range.
         #
-        # Empirically the combined score skews well below 0 (p10=-0.21,
-        # p25=-0.07, p50=+0.07) — a floor at the theoretical midpoint (0.0)
-        # would cut roughly half of all candidates by itself, before MMR or the
-        # share cap get a say. min_rank_score=-0.15 sits at ~p12-13, trimming
-        # only the clearly-bad tail and leaving max_render_share as the
-        # dominant lever on render volume, matching the issue's 10-50% band.
+        # Empirically the old combined score skewed below the old midpoint
+        # (old p10=-0.21, p25=-0.07, p50=+0.07; current p10=0.395,
+        # p25=0.465, p50=0.535). A floor at the current midpoint (0.5) would
+        # cut roughly half of all candidates by itself, before MMR or the share
+        # cap get a say. min_rank_score=0.425 is the old -0.15 floor mapped via
+        # (score + 1) / 2; it sits at ~p12-13, trimming only the clearly-bad
+        # tail and leaving max_render_share as the dominant lever on render
+        # volume, matching the issue's 10-50% band.
         #
-        # MMR pick_score p10=+0.01, and the observed minimums (-0.52, -0.08,
-        # -0.08, -0.06) show -0.05 already sits below almost all real picks —
-        # it only fires on genuine outliers, so it's left at the same starting
-        # value used for your-feed/best-of-friends.
+        # MMR pick_score is a post-diversification penalized score, not a rank
+        # score, so it can still be negative. The old observed p10=+0.01 and
+        # minimums (-0.52, -0.08, -0.08, -0.06) show -0.05 already sits below
+        # almost all real picks; keep it as the starting point until fresh
+        # post-migration debug records are available.
         max_render_share=0.5,
-        min_rank_score=-0.15,
+        min_rank_score=0.425,
         min_mmr_score=-0.05,
     ),
 

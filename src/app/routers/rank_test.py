@@ -71,25 +71,25 @@ def test_predict_ranks_candidates_by_score_desc(app):
         },
     )
 
-    # candidate_score's bounds are [0, 1]; run_predict normalizes raw scores
-    # into [-1, 1] (rank_score = 2*raw - 1) before combining/ranking.
+    # candidate_score's bounds are [0, 1], so run_predict keeps the raw scores
+    # in [0, 1] before combining/ranking.
     assert resp.status_code == 200
     assert resp.json() == {
         "rankings": [
             {
                 "at_uri": "at://post/high",
                 "rank": 1,
-                "rank_score": pytest.approx(0.8),
+                "rank_score": pytest.approx(0.9),
             },
             {
                 "at_uri": "at://post/mid",
                 "rank": 2,
-                "rank_score": pytest.approx(-0.2),
+                "rank_score": pytest.approx(0.4),
             },
             {
                 "at_uri": "at://post/low",
                 "rank": 3,
-                "rank_score": pytest.approx(-0.8),
+                "rank_score": pytest.approx(0.1),
             },
         ],
     }
@@ -119,17 +119,17 @@ def test_predict_keeps_duplicate_candidate_count_and_collapses_scores_by_uri(app
         {
             "at_uri": "at://post/b",
             "rank": 1,
-            "rank_score": pytest.approx(0.4),
+            "rank_score": pytest.approx(0.7),
         },
         {
             "at_uri": "at://post/a",
             "rank": 2,
-            "rank_score": pytest.approx(0.0),
+            "rank_score": pytest.approx(0.5),
         },
         {
             "at_uri": "at://post/a",
             "rank": 3,
-            "rank_score": pytest.approx(0.0),
+            "rank_score": pytest.approx(0.5),
         },
     ]
 

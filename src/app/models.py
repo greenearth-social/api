@@ -1,5 +1,5 @@
 import base64
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -73,6 +73,9 @@ class CandidatePost(BaseModel):
     external_uri: str | None = Field(
         default=None, description="URI of an external link embed, when present"
     )
+    like_count: int | None = Field(
+        default=None, description="Number of likes the post has received"
+    )
 
 
 class GeneratorSpec(BaseModel):
@@ -82,6 +85,9 @@ class GeneratorSpec(BaseModel):
     weight: float = Field(
         1.0, gt=0, description="Relative weight — proportional share of total candidates"
     )
+
+
+MaxAgeHours = Literal[6, 12, 24, 48, 72, 168]
 
 
 class CandidateGenerateRequest(BaseModel):
@@ -99,6 +105,13 @@ class CandidateGenerateRequest(BaseModel):
     user_did: str = Field(..., description="AT Protocol DID of the user")
     num_candidates: int = Field(100, ge=1, le=1000, description="Total candidates to return")
     video_only: bool = Field(False, description="When true, only return posts containing video")
+    # Freshness always means the candidate post's created_at timestamp. Actual
+    # availability may be shorter than this upper bound when an environment's
+    # backing index retention is shorter (notably stage).
+    max_age_hours: MaxAgeHours = Field(
+        168,
+        description="Maximum candidate-post age in hours (6h through 7d).",
+    )
     exclude_uris: list[str] = Field(
         default_factory=list,
         description=(
@@ -146,7 +159,7 @@ class RankPredictRequest(BaseModel):
         min_length=1,
         description=(
             "Rank models to run and combine. Each model's scores are normalized "
-            "to [-1, 1] using its theoretical bounds, then combined via a "
+            "to [0, 1] using its theoretical bounds, then combined via a "
             "weighted average using the configured relative weights."
         ),
     )
@@ -228,7 +241,9 @@ class FeedConfig(BaseModel):
     )
     min_rank_score: float | None = Field(
         None,
-        description="Combined rank-score floor in [-1, 1]. Candidates scoring below it "
+        ge=0.0,
+        le=1.0,
+        description="Combined rank-score floor in [0, 1]. Candidates scoring below it "
         "are cut from the slate and recorded as discarded so future generation "
         "excludes them. Only applies when rank_request_template is set. None disables.",
     )

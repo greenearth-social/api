@@ -65,6 +65,27 @@ def test_track_session_captures_feed_loaded():
     )
 
 
+def test_track_session_without_a_handle_still_captures_the_event():
+    # The event is keyed on the DID, so an unresolved handle shouldn't cost us
+    # the analytics signal...
+    mock = MagicMock()
+    track_session(mock, USER_DID, None, "your-feed", NOW)
+    mock.capture.assert_called_once_with(
+        distinct_id=USER_DID,
+        event="feedLoaded",
+        properties={"feed_name": "your-feed"},
+        timestamp=NOW,
+    )
+
+
+def test_track_session_without_a_handle_leaves_the_person_property_alone():
+    # ...and must not null out a username PostHog already knows.
+    mock = MagicMock()
+    track_session(mock, USER_DID, None, "your-feed", NOW)
+    properties = mock.capture.call_args.kwargs["properties"]
+    assert "$set" not in properties
+
+
 def test_track_interaction_none_client_is_noop():
     track_interaction(None, USER_DID, "interactionLike", "your-feed", "at://did/post/1", NOW)
 
@@ -97,3 +118,36 @@ def test_real_posthog_client_is_disabled_in_tests():
     can never cause a test run to send live analytics events."""
     client = init_posthog_client("phc_key", "https://us.i.posthog.com")
     assert client.disabled is True
+
+
+from app.lib.posthog_client import evaluate_fail_fast_flag
+
+
+def test_evaluate_fail_fast_flag_none_client_returns_false():
+    assert evaluate_fail_fast_flag(None, "did:plc:abc123") is False
+
+
+def test_evaluate_fail_fast_flag_enabled_returns_true():
+    mock = MagicMock()
+    mock.feature_enabled.return_value = True
+    result = evaluate_fail_fast_flag(mock, "did:plc:abc123")
+    assert result is True
+    mock.feature_enabled.assert_called_once_with("fail-fast-feed", "did:plc:abc123")
+
+
+def test_evaluate_fail_fast_flag_disabled_returns_false():
+    mock = MagicMock()
+    mock.feature_enabled.return_value = False
+    assert evaluate_fail_fast_flag(mock, "did:plc:abc123") is False
+
+
+def test_evaluate_fail_fast_flag_sdk_exception_returns_false():
+    mock = MagicMock()
+    mock.feature_enabled.side_effect = RuntimeError("network error")
+    assert evaluate_fail_fast_flag(mock, "did:plc:abc123") is False
+
+
+def test_evaluate_fail_fast_flag_sdk_returns_none_returns_false():
+    mock = MagicMock()
+    mock.feature_enabled.return_value = None
+    assert evaluate_fail_fast_flag(mock, "did:plc:abc123") is False

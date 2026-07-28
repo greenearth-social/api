@@ -9,7 +9,10 @@ import logging
 import os
 import time
 
-from .elasticsearch import fetch_recent_liked_post_uris, fetch_post_embeddings_and_authors
+from .elasticsearch import (
+    fetch_recent_liked_post_uris_and_times,
+    fetch_post_embeddings_and_metadata,
+)
 from .feed_debug import current_recorder
 from .telemetry import timed
 from .request_context import get_request_id
@@ -159,8 +162,10 @@ async def predict_heavy_ranker_single_user(
     history_embeddings: list[list[float]],
     history_author_dids: list[str],
     history_liked_at_times: list[str],
+    history_like_counts: list[int],
     candidate_post_embeddings: list[list[float]],
     candidate_author_dids: list[str],
+    candidate_like_counts: list[int],
     *,
     base_url: str,
     api_key: str,
@@ -171,8 +176,10 @@ async def predict_heavy_ranker_single_user(
         "history_embeddings": history_embeddings,
         "history_author_dids": history_author_dids,
         "history_liked_at_times": history_liked_at_times,
+        "history_prior_cumulative_likes": history_like_counts,
         "candidate_post_embeddings": candidate_post_embeddings,
         "candidate_author_dids": candidate_author_dids,
+        "candidate_prior_cumulative_likes": candidate_like_counts,
     }
 
     client = get_http_client()
@@ -204,7 +211,7 @@ async def compute_user_embedding(
     async with timed(logger, "two_tower_user_side", user_did=user_did):
         user_history_vectors: list[list[float]] = []
         history_author_dids: list[str] = []
-        user_history_liked_uris = await fetch_recent_liked_post_uris(es, user_did)
+        user_history_liked_uris, _ = await fetch_recent_liked_post_uris_and_times(es, user_did)
 
         rec = current_recorder()
 
@@ -213,7 +220,7 @@ async def compute_user_embedding(
             if rec is not None:
                 rec.record_user_features(source, [], 0)
         else:
-            user_history_embedding_pairs: list[tuple[str, list[float], str]] = await fetch_post_embeddings_and_authors(
+            user_history_embedding_pairs: list[tuple[str, list[float], str, int]] = await fetch_post_embeddings_and_metadata(
                 es, user_history_liked_uris,
             )
             if rec is not None:
@@ -227,8 +234,8 @@ async def compute_user_embedding(
                     user_did,
                 )
             else:
-                user_history_vectors = [embedding for _, embedding, _ in user_history_embedding_pairs]
-                history_author_dids = [author_did for _, _, author_did in user_history_embedding_pairs]
+                user_history_vectors = [embedding for _, embedding, _, _ in user_history_embedding_pairs]
+                history_author_dids = [author_did for _, _, author_did, _ in user_history_embedding_pairs]
 
         output_user_embedding_list = await predict_user_tower_single(
             user_history_vectors,

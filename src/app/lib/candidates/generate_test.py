@@ -1,4 +1,6 @@
-"""Tests for per-generator timeout/cancellation and failure metrics in run_generate."""
+"""Tests for run_generate pipeline degradation behavior."""
+
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -6,12 +8,18 @@ from typing import cast
 
 import pytest
 
-from ...models import CandidateGenerateRequest, CandidatePost, GeneratorSpec
+from ...models import CandidateGenerateRequest, CandidatePost, GeneratorSpec, MaxAgeHours
 from ..candidates import generate as generate_module
 from ..candidates.base import CandidateGenerator, CandidateResult
 from ..candidates.generate import GeneratorError, run_generate
+from ..config import set_fail_fast_for_request
 from ..feed_debug import FeedDebugRecorder, feed_debug_scope
 from ..metrics import MetricCollector, set_metric_collector
+from ..pipeline_context import (
+    DegradationStage,
+    PipelineContext,
+    pipeline_context_scope,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +35,10 @@ class _HangingGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self, es, user_did, num_candidates=100, video_only=False,
+        exclude_uris=None, max_age_hours=168,
+    ):
         await asyncio.sleep(9999)
         raise AssertionError("unreachable")
 
@@ -41,7 +52,10 @@ class _FailingGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self, es, user_did, num_candidates=100, video_only=False,
+        exclude_uris=None, max_age_hours=168,
+    ):
         raise self._exc
 
 
@@ -53,7 +67,10 @@ class _EmptyGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self, es, user_did, num_candidates=100, video_only=False,
+        exclude_uris=None, max_age_hours=168,
+    ):
         return CandidateResult(generator_name=self.name, candidates=[])
 
 
@@ -67,12 +84,16 @@ class _StaticGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self, es, user_did, num_candidates=100, video_only=False,
+        exclude_uris=None, max_age_hours=168,
+    ):
         self.calls.append(
             {
                 "num_candidates": num_candidates,
                 "video_only": video_only,
                 "exclude_uris": exclude_uris,
+                "max_age_hours": max_age_hours,
             }
         )
         excluded = set(exclude_uris or [])
@@ -90,7 +111,10 @@ class _FailThenReturnGenerator(CandidateGenerator):
     def name(self) -> str:
         return self._name
 
-    async def generate(self, es, user_did, num_candidates=100, video_only=False, exclude_uris=None):
+    async def generate(
+        self, es, user_did, num_candidates=100, video_only=False,
+        exclude_uris=None, max_age_hours=168,
+    ):
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("primary failed")
@@ -116,6 +140,7 @@ def _make_request(
     num_candidates: int = 5,
     infill: str | None = None,
     exclude_uris: list[str] | None = None,
+    max_age_hours: MaxAgeHours = 168,
 ) -> CandidateGenerateRequest:
     return CandidateGenerateRequest(
         generators=[GeneratorSpec(name=generator_name, weight=1.0)],
@@ -124,6 +149,7 @@ def _make_request(
         video_only=False,
         infill=infill,
         exclude_uris=exclude_uris or [],
+        max_age_hours=max_age_hours,
     )
 
 
@@ -143,6 +169,7 @@ def _reset_metric_collector():
 
 # ---------------------------------------------------------------------------
 # Main generator timeout tests
+# (soft-fail now requires a PipelineContext; hard-fail is the no-context default)
 # ---------------------------------------------------------------------------
 
 
@@ -154,7 +181,9 @@ class TestGeneratorTimeout:
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
-        result = await run_generate(_make_request("post_similarity"), es=None)
+        ctx = PipelineContext(feed_name="test-feed")
+        with pipeline_context_scope(ctx):
+            result = await run_generate(_make_request("post_similarity"), es=None)
 
         assert result.candidates == []
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -172,8 +201,10 @@ class TestGeneratorTimeout:
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
 
-        with caplog.at_level(logging.WARNING):
-            await run_generate(_make_request("post_similarity"), es=None)
+        ctx = PipelineContext(feed_name="test-feed")
+        with pipeline_context_scope(ctx):
+            with caplog.at_level(logging.WARNING):
+                await run_generate(_make_request("post_similarity"), es=None)
 
         timeout_warnings = [
             r for r in caplog.records
@@ -188,7 +219,8 @@ class TestGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_no_swallow_raises_generator_error_promptly(self, monkeypatch):
-        monkeypatch.setenv("GE_FAIL_FAST", "true")
+        set_fail_fast_for_request(True)
+        # No PipelineContext installed → hard fail (GeneratorError)
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
 
@@ -202,7 +234,8 @@ class TestGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_no_swallow_records_metric_before_raising(self, monkeypatch):
-        monkeypatch.setenv("GE_FAIL_FAST", "true")
+        set_fail_fast_for_request(True)
+        # No PipelineContext installed → hard fail (GeneratorError)
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
         mc = FakeMetricCollector()
@@ -224,7 +257,9 @@ class TestGeneratorTimeout:
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
-        result = await run_generate(_make_request("network_likes"), es=None)
+        ctx = PipelineContext(feed_name="test-feed")
+        with pipeline_context_scope(ctx):
+            result = await run_generate(_make_request("network_likes"), es=None)
 
         assert result.candidates == []
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -237,24 +272,30 @@ class TestGeneratorTimeout:
         }
 
     @pytest.mark.asyncio
-    async def test_swallowed_primary_failure_records_empty_debug_output(self, monkeypatch):
+    async def test_swallowed_primary_failure_records_infill_debug_output(self, monkeypatch):
+        # With PipelineContext: primary failure is degraded (an empty
+        # status="error" CandidateResult is recorded, not skipped, so debug/
+        # transparency views can show why the generator contributed nothing),
+        # and the infill success is recorded separately.
         gen = _FailThenReturnGenerator("popular", [_candidate("at://infill/1", "popular")])
         _stub_generators(monkeypatch, {"popular": gen})
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
 
-        with feed_debug_scope(rec):
-            result = await run_generate(
-                _make_request("popular", num_candidates=1, infill="popular"),
-                es=None,
-            )
+        ctx = PipelineContext(feed_name="test-feed")
+        with pipeline_context_scope(ctx):
+            with feed_debug_scope(rec):
+                result = await run_generate(
+                    _make_request("popular", num_candidates=1, infill="popular"),
+                    es=None,
+                )
 
         assert [c.at_uri for c in result.candidates] == ["at://infill/1"]
         assert [
-            (output.generator_name, [c.at_uri for c in output.candidates])
+            (output.generator_name, output.status, [c.at_uri for c in output.candidates])
             for output in rec.generator_outputs
         ] == [
-            ("popular", []),
-            ("popular", ["at://infill/1"]),
+            ("popular", "error", []),
+            ("popular", "success", ["at://infill/1"]),
         ]
 
     @pytest.mark.asyncio
@@ -287,10 +328,12 @@ class TestInfillGeneratorTimeout:
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
-        result = await run_generate(
-            _make_request("random", num_candidates=5, infill="popular"),
-            es=None,
-        )
+        ctx = PipelineContext(feed_name="test-feed")
+        with pipeline_context_scope(ctx):
+            result = await run_generate(
+                _make_request("random", num_candidates=5, infill="popular"),
+                es=None,
+            )
 
         assert result.candidates == []
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -304,7 +347,8 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_timeout_no_swallow_raises_generator_error_with_is_infill(self, monkeypatch):
-        monkeypatch.setenv("GE_FAIL_FAST", "true")
+        set_fail_fast_for_request(True)
+        # No PipelineContext → hard fail
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {
             "random": _EmptyGenerator("random"),
@@ -322,7 +366,8 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_timeout_no_swallow_records_metric(self, monkeypatch):
-        monkeypatch.setenv("GE_FAIL_FAST", "true")
+        set_fail_fast_for_request(True)
+        # No PipelineContext → hard fail
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {
             "random": _EmptyGenerator("random"),
@@ -352,10 +397,12 @@ class TestInfillGeneratorTimeout:
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
-        result = await run_generate(
-            _make_request("random", num_candidates=5, infill="popular"),
-            es=None,
-        )
+        ctx = PipelineContext(feed_name="test-feed")
+        with pipeline_context_scope(ctx):
+            result = await run_generate(
+                _make_request("random", num_candidates=5, infill="popular"),
+                es=None,
+            )
 
         assert result.candidates == []
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -424,9 +471,150 @@ class TestInfillGeneratorTimeout:
             "at://primary/1",
             "at://primary/2",
         ]
+        assert primary.calls[0]["max_age_hours"] == 168
+        assert infill.calls[0]["max_age_hours"] == 168
         assert [c.at_uri for c in result.candidates] == [
             "at://primary/1",
             "at://primary/2",
             "at://infill/1",
             "at://infill/2",
         ]
+
+
+# ---------------------------------------------------------------------------
+# New: PipelineContext degradation tests
+# ---------------------------------------------------------------------------
+
+
+def _request(*generator_names: str) -> CandidateGenerateRequest:
+    return CandidateGenerateRequest(
+        generators=[GeneratorSpec(name=n, weight=1.0) for n in generator_names],
+        user_did="did:plc:user",
+        num_candidates=10,
+        video_only=False,
+        infill=None,
+        max_age_hours=168,
+    )
+
+
+class _FakeGenerator(CandidateGenerator):
+    def __init__(self, name_: str, *, fail: bool = False, cause: Exception | None = None):
+        self._name = name_
+        self._fail = fail
+        self._cause = cause or RuntimeError(f"{name_} failed")
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def generate(
+        self,
+        es,
+        user_did,
+        num_candidates=100,
+        video_only=False,
+        exclude_uris=None,
+        max_age_hours=168,
+    ):
+        if self._fail:
+            raise self._cause
+        return CandidateResult(
+            generator_name=self._name,
+            candidates=[CandidatePost(at_uri=f"at://{self._name}/1", score=1.0)],
+        )
+
+
+def _make_failing(name: str, *, cause: Exception | None = None) -> _FakeGenerator:
+    return _FakeGenerator(name, fail=True, cause=cause)
+
+
+def _make_success(name: str) -> _FakeGenerator:
+    return _FakeGenerator(name, fail=False)
+
+
+class TestNoPipelineContext:
+    @pytest.mark.asyncio
+    async def test_generator_failure_raises_without_context(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.lib.candidates.generate.get_generator",
+            lambda name: _make_failing(name),
+        )
+        with pytest.raises(GeneratorError):
+            await run_generate(_request("two_tower"), es=object())
+
+    @pytest.mark.asyncio
+    async def test_generator_success_returns_candidates(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.lib.candidates.generate.get_generator",
+            lambda name: _make_success(name),
+        )
+        result = await run_generate(_request("two_tower"), es=object())
+        assert len(result.candidates) == 1
+        assert result.candidates[0].at_uri == "at://two_tower/1"
+
+
+class TestWithPipelineContext:
+    @pytest.mark.asyncio
+    async def test_generator_failure_records_degradation_and_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.lib.candidates.generate.get_generator",
+            lambda name: _make_failing(name),
+        )
+        ctx = PipelineContext(feed_name="your-feed")
+        with pipeline_context_scope(ctx):
+            result = await run_generate(_request("two_tower"), es=object())
+
+        assert result.candidates == []
+        assert len(ctx.degradations) == 1
+        assert ctx.degradations[0].stage == DegradationStage.CANDIDATE_GEN
+        assert ctx.degradations[0].component == "two_tower"
+
+    @pytest.mark.asyncio
+    async def test_partial_results_when_one_of_two_generators_fails(self, monkeypatch):
+        def _get(name: str):
+            return _make_failing(name) if name == "two_tower" else _make_success(name)
+
+        monkeypatch.setattr("app.lib.candidates.generate.get_generator", _get)
+        ctx = PipelineContext(feed_name="your-feed")
+        with pipeline_context_scope(ctx):
+            result = await run_generate(_request("two_tower", "followed_users"), es=object())
+
+        assert len(result.candidates) == 1
+        assert result.candidates[0].at_uri == "at://followed_users/1"
+        assert len(ctx.degradations) == 1
+
+    @pytest.mark.asyncio
+    async def test_generator_failure_reraises_when_fail_fast(self, monkeypatch):
+        cause = RuntimeError("es connection refused")
+        monkeypatch.setattr(
+            "app.lib.candidates.generate.get_generator",
+            lambda name: _make_failing(name, cause=cause),
+        )
+        ctx = PipelineContext(feed_name="your-feed", fail_fast=True)
+        with pipeline_context_scope(ctx):
+            with pytest.raises(RuntimeError, match="es connection refused"):
+                await run_generate(_request("two_tower"), es=object())
+
+    @pytest.mark.asyncio
+    async def test_infill_failure_records_degradation(self, monkeypatch):
+        """Infill generator failure should also be tracked."""
+        def _get(name: str):
+            if name == "followed_users":
+                return _make_success(name)
+            return _make_failing(name)
+
+        monkeypatch.setattr("app.lib.candidates.generate.get_generator", _get)
+        ctx = PipelineContext(feed_name="your-feed")
+        req = CandidateGenerateRequest(
+            generators=[GeneratorSpec(name="followed_users", weight=1.0)],
+            user_did="did:plc:user",
+            num_candidates=10,
+            video_only=False,
+            infill="popularity",
+            max_age_hours=168,
+        )
+        with pipeline_context_scope(ctx):
+            result = await run_generate(req, es=object())
+
+        assert len(result.candidates) == 1
+        assert any(d.component == "popularity:infill" for d in ctx.degradations)

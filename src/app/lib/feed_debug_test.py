@@ -30,6 +30,7 @@ def _request() -> CandidateGenerateRequest:
         user_did="did:plc:user",
         num_candidates=10,
         video_only=False,
+        max_age_hours=168,
         infill="popularity",
     )
 
@@ -137,19 +138,19 @@ class TestBuildDocument:
 
     def test_includes_model_scores(self):
         rec = self._recorder()
-        rec.record_model_scores("two_tower", 1.0, {"at://p/1": 0.8, "at://p/2": -0.2})
-        rec.record_model_scores("perspective", 2.0, {"at://p/1": -0.5, "at://p/2": 0.1})
+        rec.record_model_scores("two_tower", 1.0, {"at://p/1": 0.8, "at://p/2": 0.2})
+        rec.record_model_scores("perspective", 2.0, {"at://p/1": 0.25, "at://p/2": 0.1})
         doc = self._build(rec)
 
         assert [e.model_name for e in doc.model_scores] == ["two_tower", "perspective"]
         assert doc.model_scores[0].weight == 1.0
         assert {s.at_uri: s.score for s in doc.model_scores[0].scores} == {
             "at://p/1": 0.8,
-            "at://p/2": -0.2,
+            "at://p/2": 0.2,
         }
         assert doc.model_scores[1].weight == 2.0
         assert {s.at_uri: s.score for s in doc.model_scores[1].scores} == {
-            "at://p/1": -0.5,
+            "at://p/1": 0.25,
             "at://p/2": 0.1,
         }
 
@@ -186,7 +187,7 @@ class TestBuildDocument:
         assert rec.author_dids() == {"did:plc:a", "did:plc:b"}
 
 
-def test_snapshot_diagnostics_keep_friend_fallback_modes_separate():
+def test_snapshot_diagnostics_use_one_followed_users_source():
     rec = FeedDebugRecorder(feed_name="your-feed", regenerated=False)
     rec.set_generate_request(
         CandidateGenerateRequest(
@@ -194,18 +195,14 @@ def test_snapshot_diagnostics_keep_friend_fallback_modes_separate():
             user_did="did:plc:user",
             num_candidates=3,
             video_only=False,
+            max_age_hours=168,
             infill=None,
         )
     )
     recent = _candidate("at://p/recent")
     older = _candidate("at://p/older")
     rec.record_generator_output(CandidateResult(
-        generator_name="followed_users", candidates=[recent],
-        mode="direct_friends_recent",
-    ))
-    rec.record_generator_output(CandidateResult(
-        generator_name="followed_users", candidates=[older],
-        mode="direct_friends_7d",
+        generator_name="followed_users", candidates=[recent, older],
     ))
     rec.record_final_candidates([recent, older])
     rec.record_final_order(["at://p/recent", "at://p/older"])
@@ -215,11 +212,9 @@ def test_snapshot_diagnostics_keep_friend_fallback_modes_separate():
         request_id="req", generated_at=now, expires_at=now + timedelta(minutes=15)
     )
 
-    assert [diagnostic.mode for diagnostic in snapshot.generator_diagnostics] == [
-        "direct_friends_recent", "direct_friends_7d"
-    ]
-    assert [diagnostic.requested_count for diagnostic in snapshot.generator_diagnostics] == [3, 2]
-    assert [diagnostic.contributed_count for diagnostic in snapshot.generator_diagnostics] == [1, 1]
+    assert [diagnostic.mode for diagnostic in snapshot.generator_diagnostics] == ["primary"]
+    assert [diagnostic.requested_count for diagnostic in snapshot.generator_diagnostics] == [3]
+    assert [diagnostic.contributed_count for diagnostic in snapshot.generator_diagnostics] == [2]
 
 
 class TestModelScoreCapture:
@@ -228,11 +223,11 @@ class TestModelScoreCapture:
     def test_records_one_entry_per_model_in_order(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
         rec.record_model_scores("two_tower", 1.0, {"at://p/1": 0.8})
-        rec.record_model_scores("perspective", 2.0, {"at://p/1": -0.5})
+        rec.record_model_scores("perspective", 2.0, {"at://p/1": 0.25})
 
         assert rec.model_scores == [
             ("two_tower", 1.0, {"at://p/1": 0.8}),
-            ("perspective", 2.0, {"at://p/1": -0.5}),
+            ("perspective", 2.0, {"at://p/1": 0.25}),
         ]
 
     def test_copies_scores_dict_defensively(self):
@@ -327,6 +322,7 @@ class TestBuildPipelineMetadata:
                 user_did="did:plc:user",
                 num_candidates=30,
                 video_only=False,
+                max_age_hours=168,
                 infill=None,
             )
         )
@@ -353,6 +349,7 @@ class TestBuildPipelineMetadata:
                 user_did="did:plc:user",
                 num_candidates=30,
                 video_only=False,
+                max_age_hours=168,
                 infill=None,
             )
         )
@@ -389,6 +386,7 @@ class TestBuildPipelineMetadata:
                 user_did="did:plc:user",
                 num_candidates=30,
                 video_only=False,
+                max_age_hours=168,
                 infill=None,
             )
         )
@@ -425,6 +423,7 @@ class TestBuildPipelineMetadata:
                 user_did="did:plc:user",
                 num_candidates=30,
                 video_only=False,
+                max_age_hours=168,
                 infill=None,
             )
         )
@@ -455,6 +454,7 @@ class TestBuildPipelineMetadata:
                 user_did="did:plc:user",
                 num_candidates=30,
                 video_only=False,
+                max_age_hours=168,
                 infill=None,
             )
         )

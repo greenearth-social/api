@@ -68,6 +68,50 @@ class ExplodingRanker:
         raise RuntimeError("downstream boom")
 
 
+class HangingRanker:
+    """A ranker that never returns within any reasonable per-model timeout."""
+
+    def __init__(self, name: str):
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def score_bounds(self) -> tuple[float, float]:
+        return (0.0, 1.0)
+
+    async def predict(self, es, user_did, candidates):
+        await asyncio.sleep(9999)
+
+
+class TimingOutRanker:
+    """A ranker that raises TimeoutError immediately.
+
+    Used instead of an actual hang + short timeout when the assertion also
+    depends on a concurrently-running ranker's results, since racing a
+    real sub-second `asyncio.wait_for` deadline against another task's
+    completion is inherently timing-sensitive (flaky under CI scheduling
+    jitter). This exercises the same except-TimeoutError handling in
+    `_run_one` without depending on wall-clock timing.
+    """
+
+    def __init__(self, name: str):
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def score_bounds(self) -> tuple[float, float]:
+        return (0.0, 1.0)
+
+    async def predict(self, es, user_did, candidates):
+        raise TimeoutError("simulated timeout")
+
+
 def _request(models: list[RankModelSpec], candidates: list[CandidatePost]) -> RankPredictRequest:
     return RankPredictRequest(
         models=models,
@@ -108,15 +152,15 @@ def test_run_predict_raises_for_unknown_model(monkeypatch):
 
 def test_run_predict_normalizes_and_combines_with_weights(monkeypatch):
     """Each model's raw scores are linearly mapped from its `score_bounds` into
-    [-1, 1], then combined via a weighted average (weights normalized to sum
+    [0, 1], then combined via a weighted average (weights normalized to sum
     to 1)."""
     candidates = [
         CandidatePost(at_uri="at://post/a", score=0.5),
         CandidatePost(at_uri="at://post/b", score=0.5),
     ]
 
-    # Model "x": bounds [0, 1] -> raw 1.0 normalizes to 1.0, raw 0.0 to -1.0
-    # Model "y": bounds [-10, 10] -> raw 0.0 normalizes to 0.0 for both
+    # Model "x": bounds [0, 1] -> raw 1.0 normalizes to 1.0, raw 0.0 to 0.0
+    # Model "y": bounds [-10, 10] -> raw 0.0 normalizes to 0.5 for both
     rankers = {
         "x": StubRanker("x", (0.0, 1.0), {"at://post/a": 1.0, "at://post/b": 0.0}),
         "y": StubRanker("y", (-10.0, 10.0), {"at://post/a": 0.0, "at://post/b": 0.0}),
@@ -136,11 +180,11 @@ def test_run_predict_normalizes_and_combines_with_weights(monkeypatch):
         )
     )
 
-    # combined(a) = (3/4)*1.0 + (1/4)*0.0 = 0.75
-    # combined(b) = (3/4)*(-1.0) + (1/4)*0.0 = -0.75
+    # combined(a) = (3/4)*1.0 + (1/4)*0.5 = 0.875
+    # combined(b) = (3/4)*0.0 + (1/4)*0.5 = 0.125
     assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
-        ("at://post/a", 1, pytest.approx(0.75)),
-        ("at://post/b", 2, pytest.approx(-0.75)),
+        ("at://post/a", 1, pytest.approx(0.875)),
+        ("at://post/b", 2, pytest.approx(0.125)),
     ]
 
 
@@ -198,9 +242,9 @@ def test_run_predict_uses_ranker_median_for_explicit_missing_score(monkeypatch):
     )
 
     assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
-        ("at://post/a", 1, pytest.approx(0.75)),
-        ("at://post/b", 2, pytest.approx(0.0)),
-        ("at://post/c", 3, pytest.approx(-0.75)),
+        ("at://post/a", 1, pytest.approx(0.875)),
+        ("at://post/b", 2, pytest.approx(0.5)),
+        ("at://post/c", 3, pytest.approx(0.125)),
     ]
 
 
@@ -240,9 +284,9 @@ def test_run_predict_uses_ranker_median_for_omitted_score(monkeypatch):
     )
 
     assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
-        ("at://post/a", 1, pytest.approx(0.75)),
-        ("at://post/b", 2, pytest.approx(0.0)),
-        ("at://post/c", 3, pytest.approx(-0.75)),
+        ("at://post/a", 1, pytest.approx(0.875)),
+        ("at://post/b", 2, pytest.approx(0.5)),
+        ("at://post/c", 3, pytest.approx(0.125)),
     ]
 
 
@@ -273,8 +317,60 @@ def test_run_predict_ignores_ranker_with_no_valid_scores(monkeypatch):
 
     assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
         ("at://post/a", 1, pytest.approx(1.0)),
-        ("at://post/b", 2, pytest.approx(-1.0)),
+        ("at://post/b", 2, pytest.approx(0.0)),
     ]
+
+
+def test_run_predict_excludes_timed_out_ranker_without_losing_fast_ranker(monkeypatch):
+    """A ranker that exceeds the per-model timeout is excluded from the
+    combination (same as an empty-result ranker), and does not cause a
+    concurrently-running fast ranker's results to be discarded."""
+    candidates = [
+        CandidatePost(at_uri="at://post/a", score=0.5),
+        CandidatePost(at_uri="at://post/b", score=0.5),
+    ]
+    rankers = {
+        "x": StubRanker("x", (0.0, 1.0), {"at://post/a": 1.0, "at://post/b": 0.0}),
+        "slow": TimingOutRanker("slow"),
+    }
+    monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
+
+    result = asyncio.run(
+        predict_module.run_predict(
+            _request(
+                models=[
+                    RankModelSpec(name="x", weight=1.0),
+                    RankModelSpec(name="slow", weight=9.0),
+                ],
+                candidates=candidates,
+            ),
+            es=object(),
+        )
+    )
+
+    assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
+        ("at://post/a", 1, pytest.approx(1.0)),
+        ("at://post/b", 2, pytest.approx(0.0)),
+    ]
+
+
+def test_run_predict_wait_for_actually_times_out_a_hanging_ranker(monkeypatch):
+    """Sanity check that a genuinely hanging ranker is bounded by
+    `_RANK_MODEL_TIMEOUT_SEC` via `asyncio.wait_for`, not just handled when
+    the exception is raised directly (as in the test above)."""
+    monkeypatch.setattr(predict_module, "_RANK_MODEL_TIMEOUT_SEC", 0.01)
+    candidates = [CandidatePost(at_uri="at://post/a", score=0.5)]
+    rankers = {"slow": HangingRanker("slow")}
+    monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
+
+    result = asyncio.run(
+        predict_module.run_predict(
+            _request(models=[RankModelSpec(name="slow", weight=1.0)], candidates=candidates),
+            es=object(),
+        )
+    )
+
+    assert result.rankings == []
 
 
 def test_run_predict_records_empty_model_scores_for_empty_ranker(monkeypatch):
@@ -305,7 +401,7 @@ def test_run_predict_records_empty_model_scores_for_empty_ranker(monkeypatch):
         )
 
     assert rec.model_scores == [
-        ("x", 1.0, {"at://post/a": pytest.approx(1.0), "at://post/b": pytest.approx(-1.0)}),
+        ("x", 1.0, {"at://post/a": pytest.approx(1.0), "at://post/b": pytest.approx(0.0)}),
         ("empty", 9.0, {}),
     ]
 
@@ -348,7 +444,7 @@ def test_run_predict_treats_zero_scores_as_valid(monkeypatch):
     )
 
     assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
-        ("at://post/a", 1, pytest.approx(0.0)),
+        ("at://post/a", 1, pytest.approx(0.5)),
     ]
 
 
@@ -383,8 +479,8 @@ def test_run_predict_records_normalized_model_scores_and_weight(monkeypatch):
         )
 
     assert rec.model_scores == [
-        ("x", 2.0, {"at://post/a": pytest.approx(1.0), "at://post/b": pytest.approx(-1.0)}),
-        ("y", 1.0, {"at://post/a": pytest.approx(0.5), "at://post/b": pytest.approx(-0.5)}),
+        ("x", 2.0, {"at://post/a": pytest.approx(1.0), "at://post/b": pytest.approx(0.0)}),
+        ("y", 1.0, {"at://post/a": pytest.approx(0.75), "at://post/b": pytest.approx(0.25)}),
     ]
 
 
@@ -410,7 +506,7 @@ def test_run_predict_preserves_duplicate_candidate_count(monkeypatch):
     )
 
     assert [r.at_uri for r in result.rankings] == ["at://post/a", "at://post/a", "at://post/b"]
-    assert all(r.rank_score == pytest.approx(0.0) for r in result.rankings)
+    assert all(r.rank_score == pytest.approx(0.5) for r in result.rankings)
     assert [r.rank for r in result.rankings] == [1, 2, 3]
 
 

@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["feed-transparency"], prefix="/api/feeds")
 
 CACHE_WINDOW_MINUTES = 15
-TARGET_FEED_NAME = "your-feed"
 DEFAULT_LIST_LIMIT = 20
 PUBLIC_MODERATION_LABELS = frozenset(
     {
@@ -166,12 +165,25 @@ async def list_feeds(
     db: AsyncClient = request.app.state.firestore
     cutoff = datetime.now(UTC) - timedelta(minutes=CACHE_WINDOW_MINUTES)
 
+    # Every feed the user loaded, not one hardcoded name: each summary carries
+    # its own feed_name, so which of them to surface is the client's call.
+    # Dropping the filter also drops the (feed_name, generated_at) composite
+    # index this query used to need.
     docs = await get_recent_feed_snapshots(
-        db, user_doc_id, feed_name=TARGET_FEED_NAME, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT
+        db, user_doc_id, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT
     )
 
     summaries: list[FeedSummary] = []
+    seen_snapshots: set[tuple[str, tuple[str, ...]]] = set()
     for doc in docs:
+        # Treat the complete ordered post sequence as the snapshot identity.
+        # Documents are newest-first, so skipping a repeated key retains the
+        # newest load while preserving snapshots with different posts or order.
+        snapshot_key = (doc.feed_name, tuple(doc.items))
+        if snapshot_key in seen_snapshots:
+            continue
+        seen_snapshots.add(snapshot_key)
+
         summaries.append(
             FeedSummary(
                 request_id=doc.request_id,

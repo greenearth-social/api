@@ -113,6 +113,33 @@ def test_list_feeds_returns_summaries(mock_query, client):
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_covers_every_feed_not_one_hardcoded_name(mock_query, client):
+    """Snapshots are returned whatever feed produced them.
+
+    Each summary carries its own feed_name, so choosing which to surface is the
+    client's call. Filtering server-side would also reintroduce the
+    (feed_name, generated_at) composite index this query no longer needs.
+    """
+    now = datetime.now(timezone.utc)
+    mock_query.return_value = [
+        _snapshot_doc(request_id="req-1", generated_at=now, items=["at://a"], feed_name="your-feed"),
+        _snapshot_doc(
+            request_id="req-2",
+            generated_at=now - timedelta(minutes=1),
+            items=["at://b"],
+            feed_name="popularity",
+        ),
+    ]
+
+    response = client.get("/api/feeds")
+
+    assert response.status_code == 200
+    assert [f["feed_name"] for f in response.json()["feeds"]] == ["your-feed", "popularity"]
+    # No feed_name filter reaches the query.
+    assert "feed_name" not in mock_query.call_args.kwargs
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_empty(mock_query, client):
     mock_query.return_value = []
 
@@ -134,7 +161,7 @@ def test_list_feeds_returns_401_without_auth():
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
-def test_list_feeds_preserves_overlapping_snapshots(mock_query, client):
+def test_list_feeds_collapses_identical_snapshots_and_keeps_newest(mock_query, client):
     now = datetime.now(timezone.utc)
     newer = _snapshot_doc(
         request_id="req-1",
@@ -158,9 +185,57 @@ def test_list_feeds_preserves_overlapping_snapshots(mock_query, client):
 
     response = client.get("/api/feeds")
     data = response.json()
-    assert len(data["feeds"]) == 2
-    assert data["feeds"][0]["request_id"] == "req-1"
-    assert data["feeds"][1]["request_id"] == "req-2"
+    assert [feed["request_id"] for feed in data["feeds"]] == ["req-1"]
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_preserves_same_posts_in_different_order(mock_query, client):
+    now = datetime.now(timezone.utc)
+    mock_query.return_value = [
+        _snapshot_doc(
+            request_id="req-1",
+            generated_at=now,
+            items=["at://a", "at://b"],
+        ),
+        _snapshot_doc(
+            request_id="req-2",
+            generated_at=now - timedelta(minutes=5),
+            items=["at://b", "at://a"],
+        ),
+    ]
+
+    response = client.get("/api/feeds")
+
+    assert [feed["request_id"] for feed in response.json()["feeds"]] == [
+        "req-1",
+        "req-2",
+    ]
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_preserves_identical_posts_from_different_feeds(mock_query, client):
+    now = datetime.now(timezone.utc)
+    mock_query.return_value = [
+        _snapshot_doc(
+            request_id="req-1",
+            generated_at=now,
+            feed_name="your-feed",
+            items=["at://a", "at://b"],
+        ),
+        _snapshot_doc(
+            request_id="req-2",
+            generated_at=now - timedelta(minutes=5),
+            feed_name="best-of-friends",
+            items=["at://a", "at://b"],
+        ),
+    ]
+
+    response = client.get("/api/feeds")
+
+    assert [feed["request_id"] for feed in response.json()["feeds"]] == [
+        "req-1",
+        "req-2",
+    ]
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
@@ -454,7 +529,7 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
     assert response.status_code == 200
     data = response.json()
     assert data["social_radius"] == 3  # default
-    assert data["freshness"] == 2  # default
+    assert data["freshness"] == 5  # seven-day default
     assert data["politics"] == 1.0  # default
     assert data["purpose"] == 0.5  # default
 
@@ -756,7 +831,7 @@ def test_get_feed_detail_diverse_pipeline_metadata(
                 ],
                 model_scores=[
                     ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92),
-                    ModelScoreMeta(name="perspective", weight=1.0, score=-0.15),
+                    ModelScoreMeta(name="perspective", weight=1.0, score=0.425),
                 ],
             )
         ],
@@ -799,4 +874,4 @@ def test_get_feed_detail_diverse_pipeline_metadata(
     assert item["model_scores"][0]["weight"] == 1.0
     assert item["model_scores"][0]["score"] == 0.92
     assert item["model_scores"][1]["weight"] == 1.0
-    assert item["model_scores"][1]["score"] == -0.15
+    assert item["model_scores"][1]["score"] == 0.425
