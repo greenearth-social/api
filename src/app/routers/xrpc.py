@@ -776,27 +776,31 @@ def _get_feed_cache(request: Request) -> FeedCache:
     return cache
 
 
-def _diversity_scores_from_items_meta(items_meta: list[PipelineItemMeta]) -> dict[str, float]:
-    """Build an ``{at_uri: diversity_score}`` lookup from pipeline metadata.
+def _similarity_scores_from_items_meta(items_meta: list[PipelineItemMeta]) -> dict[str, float]:
+    """Build an ``{at_uri: similarity_score}`` lookup from pipeline metadata.
 
     Items without diversification info (diversify disabled, or not yet
     joined) are simply absent from the result.
     """
     return {
-        meta.at_uri: meta.diversification.diversity_score
+        meta.at_uri: meta.diversification.similarity_score
         for meta in items_meta
         if meta.diversification is not None
     }
 
 
-def _record_diversity_metric(
+def _record_similarity_metric(
     page_uris: list[str],
     scores_by_uri: dict[str, float],
     feed_name: str,
     batch: int,
     exclude_uri: str | None = None,
 ) -> None:
-    """Emit the mean diversity score for one served page.
+    """Emit the mean similarity score for one served page.
+
+    Lower is better: the score is each item's combined author+content
+    similarity to the items selected before it, so a rising mean means the
+    feed is getting more homogenous.
 
     Silently emits nothing when no URI in the page has a known score (e.g.
     diversify is disabled for this feed). ``exclude_uri`` (the pinned post,
@@ -814,7 +818,7 @@ def _record_diversity_metric(
     if mc is None:
         return
     mc.record(
-        "feed.mean_diversity_score",
+        "feed.mean_similarity_score",
         sum(scores) / len(scores),
         feed_name=feed_name,
         batch=str(batch),
@@ -1348,8 +1352,8 @@ async def get_feed_skeleton(
                         # next request will fall into the regeneration branch
                         # below, which fetches fresh candidates.
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
-                    scores_by_uri = _diversity_scores_from_items_meta(cache_doc.items_meta)
-                    _record_diversity_metric(
+                    scores_by_uri = _similarity_scores_from_items_meta(cache_doc.items_meta)
+                    _record_similarity_metric(
                         page, scores_by_uri, feed_name, batch=parsed.offset // limit
                     )
                     feed_context = _make_feed_context(user_did, feed_name, parsed.id)
@@ -1420,10 +1424,10 @@ async def get_feed_skeleton(
                         # lands at end-of-cache and regenerates again (the
                         # ranking session restarts with fresh exclusions).
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
-                        scores_by_uri = _diversity_scores_from_items_meta(
+                        scores_by_uri = _similarity_scores_from_items_meta(
                             generated_snapshot.items_meta
                         )
-                        _record_diversity_metric(
+                        _record_similarity_metric(
                             page, scores_by_uri, feed_name, batch=parsed.offset // limit
                         )
                         feed_context = _make_feed_context(user_did, feed_name, parsed.id)
@@ -1501,8 +1505,8 @@ async def get_feed_skeleton(
                 page = generated_page
                 consumed = len(generated_page)
 
-            scores_by_uri = _diversity_scores_from_items_meta(generated_snapshot.items_meta)
-            _record_diversity_metric(
+            scores_by_uri = _similarity_scores_from_items_meta(generated_snapshot.items_meta)
+            _record_similarity_metric(
                 page, scores_by_uri, feed_name, batch=0, exclude_uri=feed_cfg.pinned_post_uri
             )
 

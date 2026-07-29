@@ -123,7 +123,7 @@ class InMemoryFeedCache(FeedCache):
     """Trivial in-memory feed cache for tests.
 
     Stores full :class:`FeedCacheDocument` objects (with ``items_meta``) so
-    tests that exercise diversity/observability data on cursor pages served
+    tests that exercise similarity/observability data on cursor pages served
     purely from cache can set up realistic fixtures, mirroring
     ``FirestoreFeedCache``'s document-based methods.
     """
@@ -2347,7 +2347,7 @@ class TestDiversityScoreMetric:
         ]
 
     def test_metric_emitted_on_initial_request(self):
-        """The real MMR pipeline runs; the served page's mean diversity score
+        """The real MMR pipeline runs; the served page's mean similarity score
         (from items_meta) is emitted for batch 0."""
         collector = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, collector))
@@ -2361,16 +2361,18 @@ class TestDiversityScoreMetric:
 
         set_metric_collector(None)
         assert resp.status_code == 200
-        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_similarity_score"]
         assert len(metric_calls) == 1
         _, value, attrs = metric_calls[0]
         assert attrs["feed_name"] == FEED_RKEY
         assert attrs["batch"] == "0"
-        assert 0.0 <= value <= 1.0
+        # Every candidate has a distinct author and no embedding, so no pick is
+        # similar to anything selected before it.
+        assert value == pytest.approx(0.0)
 
     def test_metric_emitted_on_cursor_request_from_cache_items_meta(self):
         """A cursor page served purely from FeedCache (no pipeline call) reads
-        its diversity scores from items_meta already stored on the cache
+        its similarity scores from items_meta already stored on the cache
         document, requiring no extra Firestore read."""
         collector = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, collector))
@@ -2391,12 +2393,14 @@ class TestDiversityScoreMetric:
 
         set_metric_collector(None)
         assert resp2.status_code == 200
-        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_similarity_score"]
         assert len(metric_calls) == 2
         batches = {c[2]["batch"] for c in metric_calls}
         assert batches == {"0", "1"}
         batch_1_value = next(v for _, v, attrs in metric_calls if attrs["batch"] == "1")
-        assert 0.0 <= batch_1_value <= 1.0
+        # Distinct authors, no embeddings — nothing on this page is similar to
+        # anything selected before it.
+        assert batch_1_value == pytest.approx(0.0)
 
     def test_metric_not_emitted_when_no_scores(self):
         """When diversification is off, no items carry diversification info,
@@ -2421,14 +2425,14 @@ class TestDiversityScoreMetric:
 
         set_metric_collector(None)
         assert resp.status_code == 200
-        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_similarity_score"]
         assert len(metric_calls) == 0
 
     def test_metric_excludes_pinned_post_from_mean(self):
-        """The pinned post is forced to the front regardless of its diversity
-        score, so it must not be averaged into the mean-diversity metric,
+        """The pinned post is forced to the front regardless of its similarity
+        score, so it must not be averaged into the mean-similarity metric,
         even when it happens to also be one of the organically-generated
-        candidates (and so does carry a real diversity score)."""
+        candidates (and so does carry a real similarity score)."""
         from ..lib.diversify import mmr_rerank as real_mmr_rerank
         from ..lib.feed_debug import FeedDebugRecorder, feed_debug_scope
         from app.routers import xrpc as xrpc_mod
@@ -2473,28 +2477,29 @@ class TestDiversityScoreMetric:
         assert len(post_uris) == 5
 
         # Ground truth: run the same production diversification independently
-        # (same input, same order) to know each candidate's real diversity
+        # (same input, same order) to know each candidate's real similarity
         # score, then compute the expected mean over the served non-pinned
         # items only.
         ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
         rec = FeedDebugRecorder(feed_name="random", regenerated=False)
         with feed_debug_scope(rec):
             real_mmr_rerank(ordered)
-        diversity_by_uri = {uri: d for uri, _, _, _, _, d in rec.diversification}
+        similarity_by_uri = {uri: s for uri, _, _, _, _, s in rec.diversification}
 
-        non_pinned_scores = [diversity_by_uri[uri] for uri in post_uris[1:]]
+        non_pinned_scores = [similarity_by_uri[uri] for uri in post_uris[1:]]
         expected_mean = sum(non_pinned_scores) / len(non_pinned_scores)
 
-        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_diversity_score"]
+        metric_calls = [c for c in collector.calls if c[0] == "feed.mean_similarity_score"]
         assert len(metric_calls) == 1
         _, value, attrs = metric_calls[0]
         assert attrs["batch"] == "0"
         assert value == pytest.approx(expected_mean)
         # Pinned is always the first MMR pick here (highest score), so its
-        # own diversity score is 1.0 — distinct from the computed mean,
-        # proving the exclusion is actually doing something.
-        assert diversity_by_uri[pinned_uri] == 1.0
-        assert value != pytest.approx(1.0)
+        # own similarity score is 0.0 — distinct from the computed mean (the
+        # rest share an author, so they score above 0), proving the exclusion
+        # is actually doing something.
+        assert similarity_by_uri[pinned_uri] == 0.0
+        assert value > 0.0
 
 # ---------------------------------------------------------------------------
 # Pinned post

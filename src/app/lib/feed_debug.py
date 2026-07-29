@@ -66,7 +66,7 @@ class FeedDebugRecorder:
         self.order_after_rank: list[str] = []
         self.final_order: list[str] = []
         # (at_uri, relevance, score, author_penalty, content_penalty,
-        # diversity_score) in final selection order; populated only when
+        # similarity_score) in final selection order; populated only when
         # diversification runs.
         self.diversification: list[tuple[str, float, float, float, float, float]] = []
         # Candidates retrieved by generation (post-dedup), the denominator for
@@ -113,7 +113,7 @@ class FeedDebugRecorder:
         self, entries: list[tuple[str, float, float, float, float, float]]
     ) -> None:
         """Record per-item diversification breakdown: (at_uri, relevance, score,
-        author_penalty, content_penalty, diversity_score) in final selection order."""
+        author_penalty, content_penalty, similarity_score) in final selection order."""
         self.diversification = list(entries)
 
     def record_n_retrieved(self, n: int) -> None:
@@ -201,9 +201,9 @@ class FeedDebugRecorder:
                 score=score,
                 author_penalty=author_penalty,
                 content_penalty=content_penalty,
-                diversity_score=diversity_score,
+                similarity_score=similarity_score,
             )
-            for at_uri, relevance, score, author_penalty, content_penalty, diversity_score
+            for at_uri, relevance, score, author_penalty, content_penalty, similarity_score
             in self.diversification
         ]
 
@@ -368,7 +368,7 @@ class FeedDebugRecorder:
 
         # Per-URI diversification.
         div_by_uri: dict[str, DiversificationMeta] = {}
-        for at_uri, relevance, score, author_penalty, content_penalty, diversity_score in (
+        for at_uri, relevance, score, author_penalty, content_penalty, similarity_score in (
             self.diversification
         ):
             div_by_uri[at_uri] = DiversificationMeta(
@@ -376,7 +376,7 @@ class FeedDebugRecorder:
                 score=score,
                 author_penalty=author_penalty,
                 content_penalty=content_penalty,
-                diversity_score=diversity_score,
+                similarity_score=similarity_score,
             )
 
         items_meta = []
