@@ -36,7 +36,7 @@ def post_has_embedding_source(src: dict) -> bool:
     return False
 
 
-def _embedding_from_fields(hit: dict) -> list[float] | None:
+def embedding_from_fields(hit: dict) -> list[float] | None:
     """Extract the MiniLM L12 vector from a hit's ``fields`` retrieval result.
 
     The ``fields`` API wraps every field's value(s) in an outer list, so a
@@ -226,7 +226,7 @@ async def fetch_post_embeddings(
                     continue
                 if not post_has_embedding_source(src):
                     continue
-                vec = _embedding_from_fields(hit)
+                vec = embedding_from_fields(hit)
                 if vec:
                     embeddings_by_uri[at_uri] = vec
 
@@ -291,7 +291,7 @@ async def fetch_post_embeddings_and_metadata(
                     continue
                 if not post_has_embedding_source(src):
                     continue
-                vec = _embedding_from_fields(hit)
+                vec = embedding_from_fields(hit)
                 if vec:
                     embeddings_by_uri[at_uri] = vec
                 author_did = src.get("author_did")

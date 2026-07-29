@@ -10,12 +10,18 @@ from ..models import CandidatePost
 
 from ..lib.embeddings import (
     MINILM_L12_EMBEDDING_FIELD,
-    MINILM_L12_EMBEDDING_KEY,
     decode_float32_b64,
     encode_float32_b64,
 )
-from ..lib.elasticsearch import unwrap_es_response, POSTS_KNN_INDEX
+from ..lib.elasticsearch import embedding_from_fields, unwrap_es_response, POSTS_KNN_INDEX
 from ..lib.telemetry import timed
+
+# Fields pulled from `_source` for skylight results/lookups. Deliberately
+# excludes `embeddings` (~65% of a post doc's `_source` size) — the MiniLM
+# L12 vector is fetched separately via the `fields` retrieval API, which
+# reads it from the indexed dense_vector data instead of decompressing the
+# full stored `_source` blob.
+SKYLIGHT_SOURCE_FIELDS = ["at_uri", "author_did", "content"]
 
 router = APIRouter(tags=["skylight"], dependencies=[Depends(verify_api_key)])
 
@@ -63,13 +69,7 @@ def posts_response_to_results(resp) -> list[CandidatePost]:
 
     for hit in data.get("hits", {}).get("hits", []):
         src = hit.get("_source", {}) or {}
-        embeddings_obj = src.get("embeddings") or {}
-
-        l12 = (
-            embeddings_obj.get(MINILM_L12_EMBEDDING_KEY)
-            if isinstance(embeddings_obj, dict)
-            else None
-        )
+        l12 = embedding_from_fields(hit)
 
         encoded = None
         if l12 is not None:
@@ -128,7 +128,13 @@ async def skylight_search(
     # fake/spy object that implements an async `search(...)` method.
     es = request.app.state.es
     try:
-        resp = await es.search(index="posts", query=body.get("query"), size=size)
+        resp = await es.search(
+            index="posts",
+            query=body.get("query"),
+            size=size,
+            _source=SKYLIGHT_SOURCE_FIELDS,
+            fields=[MINILM_L12_EMBEDDING_FIELD],
+        )
     except Exception as exc:
         try:
             body_str = json.dumps(body, ensure_ascii=False)
@@ -175,7 +181,11 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
         lookup_query = {"terms": {"at_uri": payload.at_uris}}
         try:
             hits_resp = await request.app.state.es.search(
-                index="posts", query=lookup_query, size=len(payload.at_uris)
+                index="posts",
+                query=lookup_query,
+                size=len(payload.at_uris),
+                _source=SKYLIGHT_SOURCE_FIELDS,
+                fields=[MINILM_L12_EMBEDDING_FIELD],
             )
         except Exception as exc:
             logger.exception("Failed to lookup at_uris for similar search")
@@ -184,12 +194,9 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
         hits_data = unwrap_es_response(hits_resp)
 
         for hit in hits_data.get("hits", {}).get("hits", []):
-            src = hit.get("_source", {}) or {}
-            emb = src.get("embeddings", {}) if isinstance(src.get("embeddings"), dict) else None
-            if emb:
-                l12 = emb.get(MINILM_L12_EMBEDDING_KEY)
-                if l12:
-                    vectors.append(l12)
+            l12 = embedding_from_fields(hit)
+            if l12:
+                vectors.append(l12)
 
         if payload.at_uris and not vectors and not payload.embeddings:
             raise HTTPException(status_code=404, detail="No embeddings found for supplied at_uris")
@@ -236,7 +243,13 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
 
     try:
         async with timed(logger, "skylight_similar_knn", index=POSTS_KNN_INDEX, size=payload.size):
-            resp = await request.app.state.es.search(index=POSTS_KNN_INDEX, query=knn_q, size=payload.size)
+            resp = await request.app.state.es.search(
+                index=POSTS_KNN_INDEX,
+                query=knn_q,
+                size=payload.size,
+                _source=SKYLIGHT_SOURCE_FIELDS,
+                fields=[MINILM_L12_EMBEDDING_FIELD],
+            )
     except Exception as exc:
         logger.exception("Elasticsearch similar search failed")
         raise HTTPException(status_code=502, detail="Elasticsearch request failed") from exc

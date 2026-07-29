@@ -3,7 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ..main import app
-from ..lib.embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
+from ..lib.embeddings import MINILM_L12_EMBEDDING_FIELD, encode_float32_b64
 
 
 @pytest.fixture
@@ -17,11 +17,8 @@ def es_response():
                         "at_uri": "at://1",
                         "content": "hello world",
                         "contains_video": True,
-                        "embeddings": {
-                            MINILM_L12_EMBEDDING_KEY: [0.1, 0.2],
-                            "all_MiniLM_L6_v2": [0.3, 0.4],
-                        },
-                    }
+                    },
+                    "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
                 }
             ]
         }
@@ -31,7 +28,7 @@ def es_response():
 @pytest.fixture(autouse=True)
 def fake_app_es(es_response):
     class FakeEs:
-            async def search(self, *, index=None, query=None, size=None, **kwargs):
+            async def search(self, *, index=None, query=None, size=None, _source=None, fields=None, **kwargs):
                 # If this is a lookup by at_uri terms, return a doc. Allow
                 # simulating a 'missing' at_uri that has no embeddings.
                 if isinstance(query, dict) and "terms" in query:
@@ -39,9 +36,19 @@ def fake_app_es(es_response):
                     # If the test asks for an at_uri named "missing", return
                     # a document without embeddings to trigger a 404 path.
                     if isinstance(at_list, (list, tuple)) and "missing" in at_list:
-                        doc = {**es_response["hits"]["hits"][0]["_source"], "at_uri": "at://missing", "embeddings": {}}
-                        return {"hits": {"hits": [{"_source": doc}]}}
-                    return {"hits": {"hits": [{"_source": {**es_response["hits"]["hits"][0]["_source"], "at_uri": "at://1"}}]}}
+                        hit = {
+                            "_source": {
+                                **es_response["hits"]["hits"][0]["_source"],
+                                "at_uri": "at://missing",
+                            },
+                            "fields": {},
+                        }
+                        return {"hits": {"hits": [hit]}}
+                    hit = {
+                        "_source": {**es_response["hits"]["hits"][0]["_source"], "at_uri": "at://1"},
+                        "fields": es_response["hits"]["hits"][0]["fields"],
+                    }
+                    return {"hits": {"hits": [hit]}}
                 # If it's a knn search (similar), return same hit list
                 if isinstance(query, dict) and "knn" in query:
                     return es_response
