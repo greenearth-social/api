@@ -99,7 +99,7 @@ class SeenPostsDocument(BaseModel):
 
     One document per user per day under the ``seen_posts`` subcollection; the
     document ID is the ``YYYY-MM-DD`` date.  ``expires_at`` anchors the native
-    Firestore TTL policy so buckets self-delete ~5 days after the day they cover.
+    Firestore TTL policy so buckets self-delete ~14 days after the day they cover.
     """
 
     post_uris: list[str] = Field(default_factory=list, description="Seen post AT URIs for this day")
