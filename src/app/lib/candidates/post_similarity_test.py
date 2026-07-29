@@ -6,7 +6,7 @@ from ..candidates.post_similarity import (
     PostSimilarityCandidateGenerator,
     average_vectors,
 )
-from ..embeddings import MINILM_L12_EMBEDDING_KEY
+from ..embeddings import MINILM_L12_EMBEDDING_FIELD
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -88,15 +88,15 @@ class TestPostSimilarityGenerator:
                                         "_source": {
                                             "at_uri": "at://post/2",
                                             "content": "liked post two",
-                                            "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.0, 1.0]},
-                                        }
+                                        },
+                                        "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.0, 1.0]]},
                                     },
                                     {
                                         "_source": {
                                             "at_uri": "at://post/1",
                                             "content": "liked post one",
-                                            "embeddings": {MINILM_L12_EMBEDDING_KEY: [1.0, 0.0]},
-                                        }
+                                        },
+                                        "fields": {MINILM_L12_EMBEDDING_FIELD: [[1.0, 0.0]]},
                                     },
                                 ]
                             }

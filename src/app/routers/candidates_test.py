@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
-from ..lib.embeddings import MINILM_L12_EMBEDDING_KEY
+from ..lib.embeddings import MINILM_L12_EMBEDDING_FIELD, MINILM_L12_EMBEDDING_KEY
 from ..main import app
 from ..security import verify_api_key
 
@@ -39,15 +39,15 @@ def fake_app_es():
                                     "_source": {
                                         "at_uri": "at://post/2",
                                         "content": "liked post two",
-                                        "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
-                                    }
+                                    },
+                                    "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
                                 },
                                 {
                                     "_source": {
                                         "at_uri": "at://post/1",
                                         "content": "liked post one",
-                                        "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
-                                    }
+                                    },
+                                    "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
                                 },
                             ]
                         }
