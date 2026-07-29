@@ -99,6 +99,7 @@ class TestTwoTowerCandidateGenerator:
             "api-key",
             TWO_TOWER_GENERATOR_NAME,
             "actual",
+            False,
         )
         knn_search.assert_awaited_once_with(
             es,
@@ -151,12 +152,42 @@ class TestTwoTowerCandidateGenerator:
             "api-key",
             TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME,
             "empty",
+            True,
         )
         assert knn_search.await_args is not None
         assert knn_search.await_args.kwargs["generator_name"] == (
             TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME
         )
         assert result.generator_name == TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME
+
+    @pytest.mark.asyncio
+    async def test_generate_skips_knn_when_actual_history_is_empty(self, generator):
+        with (
+            patch(GET_INFERENCE_SETTINGS, return_value=INFERENCE_SETTINGS),
+            patch(
+                GET_CACHED_POST_TOWER_UUID,
+                new_callable=AsyncMock,
+                return_value="post-tower-uuid",
+            ),
+            patch(
+                COMPUTE_USER_EMBEDDING,
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as compute_user_embedding,
+            patch(
+                KNN_SEARCH_POSTS,
+                new_callable=AsyncMock,
+            ) as knn_search,
+        ):
+            result = await generator.generate(object(), "did:plc:user1")
+
+        assert compute_user_embedding.await_args is not None
+        assert compute_user_embedding.await_args.args[-2:] == ("actual", False)
+        knn_search.assert_not_awaited()
+        assert result.generator_name == TWO_TOWER_GENERATOR_NAME
+        assert result.candidates == []
+        assert result.status == "not_run"
+        assert result.reason == "no_user_like_history"
 
     @pytest.mark.asyncio
     async def test_generate_uses_default_options(self, generator):
