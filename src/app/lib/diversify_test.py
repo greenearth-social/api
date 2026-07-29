@@ -59,12 +59,13 @@ def test_author_penalty_decays_after_intervening_selection():
     uris = [c.at_uri for c, _ in result]
 
     assert uris == ["at://alice/1", "at://bob/1", "at://alice/2"]
-    _, rel, score, author_pen, content_pen = rec.diversification[2]
+    _, rel, score, author_pen, content_pen, similarity_score = rec.diversification[2]
     expected_author_penalty = BETA * AUTHOR_WEIGHT * math.exp(-1 / DECAY_TAU)
     assert rel == pytest.approx(1.0)
     assert author_pen == pytest.approx(expected_author_penalty)
     assert content_pen == pytest.approx(0.0)
     assert score == pytest.approx((1 - BETA) * 1.0 - expected_author_penalty)
+    assert similarity_score == pytest.approx(expected_author_penalty / BETA)
 
 
 def test_missing_author_dids_do_not_count_as_same_author():
@@ -181,12 +182,13 @@ def test_content_penalty_decays_after_intervening_selection():
     uris = [c.at_uri for c, _ in result]
 
     assert uris == ["at://topic/1", "at://other/1", "at://topic/2"]
-    _, rel, score, author_pen, content_pen = rec.diversification[2]
+    _, rel, score, author_pen, content_pen, similarity_score = rec.diversification[2]
     expected_content_penalty = BETA * (1 - AUTHOR_WEIGHT) * math.exp(-1 / DECAY_TAU)
     assert rel == pytest.approx(1.0)
     assert author_pen == pytest.approx(0.0)
     assert content_pen == pytest.approx(expected_content_penalty)
     assert score == pytest.approx((1 - BETA) * 1.0 - expected_content_penalty)
+    assert similarity_score == pytest.approx(expected_content_penalty / BETA)
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +218,7 @@ def test_pick_scores_match_recorded_diversification_scores():
 
     assert [c.at_uri for c, _ in result] == [uri for uri, *_ in rec.diversification]
     assert [s for _, s in result] == pytest.approx(
-        [score for _, _, score, _, _ in rec.diversification]
+        [score for _, _, score, _, _, _ in rec.diversification]
     )
 
 
@@ -240,3 +242,83 @@ def test_cosine_similarity_value_matches_manual_calculation():
     # cosine([3,4],[4,3]) = (12+12)/(5*5) = 24/25
     expected_cosine = 24 / 25
     assert _cosine_similarity(vec_a, vec_b) == pytest.approx(expected_cosine, rel=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Similarity score
+# ---------------------------------------------------------------------------
+
+class TestMmrRerankSimilarityScore:
+    def test_single_candidate_short_circuits_without_diag(self):
+        """The len<=1 fast path never runs the MMR loop, so no diag entry is
+        recorded for it — there's nothing to diversify against."""
+        posts = [_post("at://a/1", 1.0, "did:plc:a")]
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        with feed_debug_scope(rec):
+            result = mmr_rerank(posts)
+        assert result == [(posts[0], pytest.approx(1 - BETA))]
+        assert rec.diversification == []
+
+    def test_first_pick_always_scores_0(self):
+        """Nothing is selected before the first pick, so it is similar to nothing."""
+        posts = [
+            _post("at://a/1", 1.0, "did:plc:a"),
+            _post("at://b/1", 0.5, "did:plc:b"),
+        ]
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        with feed_debug_scope(rec):
+            mmr_rerank(posts)
+        assert rec.diversification[0][5] == 0.0
+
+    def test_same_author_raises_similarity(self):
+        posts = [
+            _post("at://a/1", 1.0, "did:plc:a"),
+            _post("at://a/2", 0.9, "did:plc:a"),  # same author — high similarity penalty
+            _post("at://b/1", 0.5, "did:plc:b"),
+        ]
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        with feed_debug_scope(rec):
+            mmr_rerank(posts)
+        scores_by_uri = {uri: sim for uri, _, _, _, _, sim in rec.diversification}
+        assert scores_by_uri["at://a/1"] == 0.0
+        assert scores_by_uri["at://a/2"] > scores_by_uri["at://b/1"]
+
+    def test_score_is_the_penalty_the_pick_was_made_on(self):
+        """The recorded score is exactly total_penalty / BETA, the combined
+        similarity the MMR penalties are derived from."""
+        posts = [
+            _post("at://a/1", 1.0, "did:plc:a"),
+            _post("at://a/2", 0.9, "did:plc:a"),
+        ]
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        with feed_debug_scope(rec):
+            mmr_rerank(posts)
+        _, _, _, author_pen, content_pen, similarity_score = rec.diversification[1]
+        assert similarity_score == pytest.approx((author_pen + content_pen) / BETA)
+
+    def test_homogenous_slate_scores_above_one_and_stays_ordered(self):
+        """A run of same-author picks pushes similarity past 1.0. The old
+        ``max(0.0, 1.0 - sim)`` form floored all of these to 0.0, collapsing
+        really homogenous slates into merely repetitive ones; recording the
+        raw similarity keeps them distinguishable."""
+        posts = [_post(f"at://a/{i}", float(i), "did:plc:a") for i in range(5)]
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        with feed_debug_scope(rec):
+            mmr_rerank(posts)
+        sims = [sim for *_, sim in rec.diversification]
+
+        # Each successive same-author pick is more similar than the last.
+        assert sims == sorted(sims)
+        assert sims[0] == 0.0
+        # The 4th and 5th picks both exceed 1.0 — under the floored form they
+        # were both 0.0 and indistinguishable.
+        assert sims[3] > 1.0
+        assert sims[4] > sims[3]
+
+    def test_scores_are_never_negative_for_author_only_similarity(self):
+        posts = [_post(f"at://a/{i}", float(i), "did:plc:a") for i in range(5)]
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        with feed_debug_scope(rec):
+            mmr_rerank(posts)
+        for *_, sim in rec.diversification:
+            assert sim >= 0.0
