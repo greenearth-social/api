@@ -113,6 +113,16 @@ def test_generator_output_stats_labels_primary_and_infill_with_average_rank():
         ("popularity", "1", "2.0", "0.80", "0.200"),
         ("infill popularity", "2", "4.0", "0.10", "0.000"),
     ]
+    assert [
+        column.header
+        for column in feed_debug._candidate_stats_table(doc).columns
+    ] == [
+        "generator",
+        "count",
+        "placement",
+        "heavy_ranker",
+        "author_penalty",
+    ]
 
 
 def test_generator_output_stats_includes_missing_primary_as_zero():
@@ -182,4 +192,41 @@ def test_generator_output_stats_counts_duplicate_candidates_in_average():
 
     assert feed_debug._candidate_stats_rows(doc) == [
         ("two_tower", "3", "1.7", "0.60", "0.400"),
+    ]
+
+
+def test_candidate_stats_uses_single_empty_history_heavy_ranker_column():
+    doc = _doc(
+        generators=["two_tower_empty_history"],
+        infill=None,
+        outputs=[
+            _result(
+                "two_tower_empty_history",
+                ["at://p/1", "at://p/2"],
+            )
+        ],
+        final_order=["at://p/2", "at://p/1"],
+        model_scores=[
+            _model_score(
+                "heavy_ranker_empty_history",
+                {"at://p/1": 0.2, "at://p/2": 0.8},
+            ),
+            _model_score(
+                "perspective",
+                {"at://p/1": -1.0, "at://p/2": -1.0},
+            ),
+        ],
+    )
+
+    assert feed_debug._candidate_stats_rows(doc) == [
+        ("two_tower_empty_history", "2", "1.5", "0.50", "—"),
+    ]
+
+    table = feed_debug._candidate_stats_table(doc)
+    assert [column.header for column in table.columns] == [
+        "generator",
+        "count",
+        "placement",
+        "heavy_ranker_empty_history",
+        "author_penalty",
     ]

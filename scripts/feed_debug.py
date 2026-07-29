@@ -55,7 +55,10 @@ from app.lib.firestore import (
 )
 
 console = Console()
-HEAVY_RANKER_MODEL_NAME = "heavy_ranker"
+HEAVY_RANKER_MODEL_NAMES = (
+    "heavy_ranker",
+    "heavy_ranker_empty_history",
+)
 
 # GCP project + Firestore database per environment. Both environments live in
 # the same project and are separated by database (see scripts/gcp_setup.sh).
@@ -148,6 +151,13 @@ def _generator_candidate_groups(doc: FeedDebugDocument) -> dict[str, list]:
     return groups
 
 
+def _active_heavy_ranker_model_name(doc: FeedDebugDocument) -> str:
+    for entry in doc.model_scores:
+        if entry.model_name in HEAVY_RANKER_MODEL_NAMES:
+            return entry.model_name
+    return HEAVY_RANKER_MODEL_NAMES[0]
+
+
 def _candidate_stats_rows(doc: FeedDebugDocument) -> list[tuple[str, str, str, str, str]]:
     """Candidate stats by generator.
 
@@ -157,8 +167,9 @@ def _candidate_stats_rows(doc: FeedDebugDocument) -> list[tuple[str, str, str, s
     final_ranks = {uri: i + 1 for i, uri in enumerate(doc.final_order)}
     author_penalties = {entry.at_uri: entry.author_penalty for entry in doc.diversification}
     heavy_scores: dict[str, float] = {}
+    heavy_ranker_model_name = _active_heavy_ranker_model_name(doc)
     for entry in doc.model_scores:
-        if entry.model_name == HEAVY_RANKER_MODEL_NAME:
+        if entry.model_name == heavy_ranker_model_name:
             heavy_scores = {score.at_uri: score.score for score in entry.scores}
             break
 
@@ -341,7 +352,11 @@ def _candidate_stats_table(doc: FeedDebugDocument) -> Table:
     table.add_column("generator", style="cyan")
     table.add_column("count", justify="right", style="green")
     table.add_column("placement", justify="right", style="yellow")
-    table.add_column("heavy_ranker", justify="right", style="white")
+    table.add_column(
+        _active_heavy_ranker_model_name(doc),
+        justify="right",
+        style="white",
+    )
     table.add_column("author_penalty", justify="right", style="magenta")
     for (
         label,

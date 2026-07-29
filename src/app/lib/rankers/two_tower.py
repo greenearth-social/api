@@ -163,17 +163,24 @@ class TwoTowerRanker(Ranker):
                 es,
                 inference_base_url,
                 inference_api_key,
-                TWO_TOWER_MODEL_NAME
+                TWO_TOWER_MODEL_NAME,
+                "actual",
             ),
             _compute_candidate_post_embeddings(),
         )
 
-        if candidate_result is None:
-            logger.info(
-                "No embeddings found for %d candidate posts of user %s",
-                len(candidates_by_uri),
-                user_did,
-            )
+        if candidate_result is None or output_user_embedding is None:
+            if candidate_result is None:
+                logger.info(
+                    "No embeddings found for %d candidate posts of user %s",
+                    len(candidates_by_uri),
+                    user_did,
+                )
+            if output_user_embedding is None:
+                logger.info(
+                    "Could not compute user embedding for user %s",
+                    user_did,
+                )
             rankings = [
                 RankedCandidate(
                     at_uri=candidate.at_uri,
