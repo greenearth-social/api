@@ -59,44 +59,46 @@ Two conclusions drive the design: workload 3 needs a store where filters and vec
 
 The traction preference itself is **preserved, as a swappable mechanism** rather than a membership rule — any of:
 
-- **(a) Two-tower modeling** — traction as a model feature, learned rather than imposed;
+- **(a) Query-time filtering** — filterable kNN where the store supports it, overfetch+filter otherwise. Near-parity with today's behavior on day one;
 - **(b) Ranking-pass shaping** — score adjustment in the heavy ranker;
-- **(c) Query-time filtering** — filterable kNN where the store supports it, overfetch+filter otherwise. This gives near-parity with today's behavior on day one, with (a)/(b) as later refinements.
+- **(c) Two-tower modeling** — traction as a model feature, learned rather than imposed.
 
-The choice among (a)/(b)/(c) is deliberately deferred; (c) is the launch default because it requires no model changes.
+The choice among (a)/(b)/(c) is deliberately deferred; (a) is the launch default because it requires no model changes, with (b)/(c) as later refinements.
 
 ### 4.2 Algorithm: HNSW + scalar quantization, tuned for latency
 
-| Algorithm | Mechanics | Verdict for us |
-|---|---|---|
-| Flat (brute force) | SIMD dot-product against every vector; no index structure | Exact, simplest; ~10–30ms @773k but ~200–500ms @16.5M — only viable for the filtered corpus (kept alive only via option A, §4.3) |
-| IVF | k-means partitions; query probes nearest cells | Recall drifts under churn; periodic retrain conflicts with streaming inserts |
-| **HNSW (chosen)** | Multi-layer proximity graph; greedy coarse→fine descent, O(log n) | **Inserts are native** (insert = search + link); 0.95–0.99 recall; ~1–5ms; the industry default |
-| Filterable HNSW (Qdrant) | Extra payload-aware edges keep the graph connected under filters | Best-in-class filtered ANN; relevant to option B |
-| **SQ int8/fp16 (chosen, stacked)** | Scalar-quantize each dimension | 2–4× memory reduction at ≈zero recall cost |
-| PQ | Subvector codebooks; distance via lookup tables | 8–32× smaller but real recall cost + rerank; built for ≥100M vectors |
-| Binary / RaBitQ | 1 bit/dim + exact rerank of a shortlist | Modern favorite at large scale (ES "BBQ", Qdrant BQ); unnecessary at 16.5M |
-| ScaNN | Anisotropic quantization optimized for inner-product ranking | Best CPU benchmarks; powers Vertex AI; more tuning surface than we need |
-| DiskANN / Vamana | Flat graph traversed from SSD | For corpora that can't fit RAM — ours fits trivially |
+Our requirements: **native streaming inserts** (no periodic retrain), **p99 ≲10ms** at 16.5M×128d, **RAM-resident** after quantization, **recall ≥0.9**, **TTL-compatible deletes**.
+
+| Algorithm | Mechanics | Meets requirements? | Verdict for us |
+|---|---|---|---|
+| Flat (brute force) | SIMD dot-product against every vector; no index structure | ✗ — ~200–500ms @16.5M | Exact and simplest at small scale (~10–30ms @773k); only viable for the filtered corpus (kept alive only via option B, §4.3) |
+| IVF | k-means partitions; query probes nearest cells | ✗ — periodic retrain conflicts with streaming inserts | Recall drifts under churn |
+| **HNSW (chosen)** | Multi-layer proximity graph; greedy coarse→fine descent, O(log n) | **✓** — inserts native (insert = search + link), ~1–5ms, 0.95–0.99 recall | The industry default |
+| Filterable HNSW (Qdrant) | Extra payload-aware edges keep the graph connected under filters | **✓** — HNSW plus stronger filtering | Best-in-class filtered ANN; relevant to option C |
+| **SQ int8/fp16 (chosen, stacked)** | Scalar-quantize each dimension | **✓** — companion to HNSW, not a standalone index | 2–4× memory reduction at ≈zero recall cost |
+| PQ | Subvector codebooks; distance via lookup tables | ✗ — recall cost + rerank complexity solve a ≥100M-vector problem we don't have | 8–32× smaller |
+| Binary / RaBitQ | 1 bit/dim + exact rerank of a shortlist | ✓ — but unnecessary at 16.5M | Modern favorite at large scale (ES "BBQ", Qdrant BQ) |
+| ScaNN | Anisotropic quantization optimized for inner-product ranking | ✗ — codebook training conflicts with streaming inserts; tuning surface we don't need | Best CPU benchmarks; powers Vertex AI |
+| DiskANN / Vamana | Flat graph traversed from SSD | ✗ — solves a RAM constraint we don't have; slow inserts | For corpora that can't fit memory |
 
 Tuning bias: modest `ef_search`, recall target ~0.9–0.95 (per design goal 2). Known caveat: HNSW deletes are tombstoned and reclaimed by vacuum/rebuild; our deletes are pure TTL at the window edge, and the chosen store (§4.3) handles expiry natively.
 
 ### 4.3 Index home: Memorystore prototype-first; Qdrant as escalation; in-process struck down
 
-| | (A) In-process in inference-service | **(C) Memorystore Redis vector search (chosen)** | (B) Qdrant (self-hosted) |
+| | **(A) Memorystore Redis vector search (chosen)** | (B) In-process in inference-service | (C) Qdrant (self-hosted) |
 |---|---|---|---|
-| ANN | Flat exact over filtered corpus | HNSW; tag/numeric hybrid filters — adequate for `video_only` + window (+ traction via 4.1c) | Filterable HNSW + named vectors — best-in-class |
-| Window expiry | Own rebuild machinery | **Native key TTL** — index follows `EXPIRE` | Cron delete-by-filter + vacuum |
-| KV consolidation | None | **Same store serves Phase 2 KV** (hydration, user/author-ID embeddings, api#330 pools) | Payload retrieve-by-ID covers hydration; list/set/counter shapes still want a Redis |
-| A/B embeddings | Two arrays | Separate vector fields/indexes | Named vectors per point (elegant) |
-| Ops | None new, but per-instance memory duplication at 100× | Managed; low enablement complexity | New self-hosted stateful service |
-| Production precedent | Meta (FAISS), Spotify (Voyager) for this class | GCP-managed RediSearch | X (Twitter) recommendation stack |
+| ANN | HNSW; tag/numeric hybrid filters — adequate for `video_only` + window (+ traction via 4.1a) | Flat exact over filtered corpus | Filterable HNSW + named vectors — best-in-class |
+| Window expiry | **Native key TTL** — index follows `EXPIRE` | Own rebuild machinery | Cron delete-by-filter + vacuum |
+| KV consolidation | **Same store serves Phase 2 KV** (hydration, user/author-ID embeddings, api#330 pools) | None | Payload retrieve-by-ID covers hydration; list/set/counter shapes still want a Redis |
+| A/B embeddings | Separate vector fields/indexes | Two arrays | Named vectors per point (elegant) |
+| Ops | Managed; low enablement complexity | None new, but per-instance memory duplication at 100× | New self-hosted stateful service |
+| Production precedent | GCP-managed RediSearch | Meta (FAISS), Spotify (Voyager) for this class | X (Twitter) recommendation stack |
 
-**(A)** is retained here because its merits are real: full feature parity with today's known-working query patterns and the fastest possible prototype (no services to enable). It is **struck down as the proposal** because it is probably throwaway work post-launch — wrong for feature flexibility (A/B, filters, per-like updates) and for cost at 100× (index duplicated per autoscaled instance).
+**(A)** is the proposal: it collapses the ANN home and the Phase 2 KV into one managed layer, Memorystore enablement is low-complexity, and native TTL is the cleanest expiry answer of the three. Gated by the bake-off spike (§6).
 
-**(C)** is the proposal: it collapses the ANN home and the Phase 2 KV into one managed layer, Memorystore enablement is low-complexity, and native TTL is the cleanest expiry answer of the three. Gated by the bake-off spike (§6).
+**(B)** is retained here because its merits are real: full feature parity with today's known-working query patterns and the fastest possible prototype (no services to enable). It is **struck down as the proposal** because it is probably throwaway work post-launch — wrong for feature flexibility (A/B, filters, per-like updates) and for cost at 100× (index duplicated per autoscaled instance).
 
-**(B)** is the documented escalation with crisp triggers: Redis filter expressiveness proves inadequate (e.g., traction filtering needs filter-aware graph links), named vectors become load-bearing for A/B, or index scale/latency limits are hit. X's production use makes this a de-risked fallback, at the cost of operating a stateful service (plus likely retaining a small Redis for list/set-shaped data anyway).
+**(C)** is the documented escalation with crisp triggers: Redis filter expressiveness proves inadequate (e.g., traction filtering needs filter-aware graph links), named vectors become load-bearing for A/B, or index scale/latency limits are hit. X's production use makes this a de-risked fallback, at the cost of operating a stateful service (plus likely retaining a small Redis for list/set-shaped data anyway).
 
 ### 4.4 Freshness and the ingest contract: pull, don't push (until Phase 3)
 
@@ -135,15 +137,18 @@ sequenceDiagram
 **Background processes keeping stores fresh:**
 
 ```mermaid
-flowchart LR
-    ING["ingex<br/>(unchanged until Phase 3)"] --> ES[(Elasticsearch<br/>source of truth)]
-    ES -->|"Phase 1: corpus pull every 5–10 min;<br/>upsert with 14d TTL"| ANN["Memorystore<br/>vector index"]
-    ES -->|"Phase 2: interval refresh +<br/>on-miss cache-aside fill"| KV["Memorystore KV<br/>hydration · user-ID emb ·<br/>author-ID emb · pools (api#330)"]
-    ING -. "Phase 3 (conditional): Pub/Sub upserts<br/>replace both interval pulls" .-> ANN
-    ING -. "Phase 3 (conditional)" .-> KV
+flowchart TB
+    ING["ingex — unchanged until Phase 3"] --> ES[("Elasticsearch — source of truth")]
+    ES --> B1["Phase 1: corpus builder<br/>pull every 5–10 min, upsert with 14d TTL"]
+    B1 --> ANN["Memorystore vector index"]
+    ES --> B2["Phase 2: KV refresher<br/>interval refresh + on-miss cache-aside fill"]
+    B2 --> KV["Memorystore KV<br/>hydration · user-ID emb · author-ID emb · pools (api#330)"]
+    ING -.-> B3["Phase 3 (conditional): Pub/Sub upserts<br/>replace both interval pulls"]
+    B3 -.-> ANN
+    B3 -.-> KV
 ```
 
-(ANN index and KV are one Memorystore instance under option C; drawn separately to show they fail independently.)
+(ANN index and KV are one Memorystore instance under option A; drawn separately to show they fail independently.)
 
 ### Phase details
 
@@ -167,7 +172,7 @@ flowchart LR
 
 ## 6. Validation plan and open questions
 
-1. **Bake-off spike (C vs B):** load the real 16.5M×128d corpus into Memorystore vector search and Qdrant (both a container pull); measure p50/p99 at target QPS, recall@100 vs exact ground truth, memory, insert throughput, TTL/expiry behavior, and filter expressiveness for the §4.1(c) traction filter. This produces the doc's final empirical numbers and settles §4.3.
+1. **Bake-off spike (A vs C):** load the real 16.5M×128d corpus into Memorystore vector search and Qdrant (both a container pull); measure p50/p99 at target QPS, recall@100 vs exact ground truth, memory, insert throughput, TTL/expiry behavior, and filter expressiveness for the §4.1(a) traction filter. This produces the doc's final empirical numbers and settles §4.3.
 2. **100× load tests** (in progress, owned separately): may re-rank §4.3 or re-scope ES capacity assumptions; workload table numbers refresh after.
 3. **Post-recovery measurement pass:** re-baseline generator latencies post-#312; corpus counts; liked-post age distribution (sizes the hydration cache hot window and predicts cache-aside hit rate); builder pull timing.
 4. **Shadow-mode criteria before flag flip:** overlap@k against ES kNN consistent with the recall target; two_tower p95 within budget at shadow QPS; zero increase in degraded renders.
@@ -182,40 +187,45 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    API[api service]
-    ING[ingex]
-    ES[("Elasticsearch<br/>4 data nodes · ~5TB<br/>all workloads compete for one page cache")]
-
-    API -->|"① likes lookup — routed terms, ≤50 docs, ~0.1 QPS"| ES
-    API -->|"② hydration by at_uri — ~20KB docs,<br/>random reads over ~4.5TB"| ES
-    API -->|"③ two-tower kNN 128d — filters force<br/>brute-force scan; p95 at timeout under pressure"| ES
-    API -->|"④ windowed scans — popularity function_score,<br/>followed/network author terms"| ES
-    ING -->|"⑤ firehose upserts — ~25 posts/s, ~220 likes/s,<br/>like_count increments"| ES
+    API[api service] --> W1["① likes lookup<br/>routed terms, ≤50 docs, ~0.1 QPS"]
+    API --> W2["② hydration by at_uri<br/>~20KB docs, random reads over ~4.5TB"]
+    API --> W3["③ two-tower kNN 128d<br/>filters force brute-force scan;<br/>p95 at timeout under pressure"]
+    API --> W4["④ windowed scans<br/>popularity function_score,<br/>followed/network author terms"]
+    ING[ingex] --> W5["⑤ firehose upserts<br/>~25 posts/s, ~220 likes/s,<br/>like_count increments"]
+    W1 --> ES
+    W2 --> ES
+    W3 --> ES
+    W4 --> ES
+    W5 --> ES[("Elasticsearch<br/>4 data nodes · ~5TB<br/>one shared page cache")]
 ```
 
 **A2. Future workload pattern (deltas dashed; scale notes inline).**
 
 ```mermaid
 flowchart LR
-    API[api service]
-    ING[ingex]
-    ES[("Elasticsearch")]
-
-    API -->|"① likes — 100× QPS"| ES
-    API -->|"② hydration — 100× QPS, + replies alias,<br/>docs ~10× smaller post-#312"| ES
-    API -->|"③ two-tower kNN — 100× QPS, corpus 16.5M @14d<br/>(all posts, retrievable from t=0)"| ES
-    API -.->|"③b NEW: A/B dual post embeddings,<br/>dims may vary per variant"| ES
-    API -->|"④ author scans — 100× QPS<br/>(popularity retired to cache, api#330)"| ES
-    ING -->|"⑤ ingest — volume unchanged"| ES
-    ING -.->|"⑥ NEW: per-like EWMA user-ID embedding<br/>updates ~220/s (ES worst case: full doc rewrite)"| ES
-    API -.->|"⑦ LATER: social graph fetches,<br/>author reach metrics"| ES
+    API[api service] --> F1["① likes — 100× QPS"]
+    API --> F2["② hydration — 100× QPS, + replies alias,<br/>docs ~10× smaller post-#312"]
+    API --> F3["③ two-tower kNN — 100× QPS,<br/>corpus 16.5M @14d (all posts, retrievable from t=0)"]
+    API -.-> F3b["③b NEW: A/B dual post embeddings,<br/>dims may vary per variant"]
+    API --> F4["④ author scans — 100× QPS<br/>(popularity retired to cache, api#330)"]
+    ING[ingex] --> F5["⑤ ingest — volume unchanged"]
+    ING -.-> F6["⑥ NEW: per-like EWMA user-ID embedding<br/>updates ~220/s (ES worst case: full doc rewrite)"]
+    API -.-> F7["⑦ LATER: social graph fetches,<br/>author reach metrics"]
+    F1 --> ES[("Elasticsearch")]
+    F2 --> ES
+    F3 --> ES
+    F3b -.-> ES
+    F4 --> ES
+    F5 --> ES
+    F6 -.-> ES
+    F7 -.-> ES
 ```
 
 A2 drawn against ES to show what the cluster would absorb *without* this proposal; the design moves ③/③b/⑥ (and ②'s cache tier) onto Memorystore.
 
 ## Appendix B — Market scan (what comparable systems run)
 
-- **X (Twitter):** Qdrant in the recommendation stack — the strongest precedent for option B at social-media scale.
+- **X (Twitter):** Qdrant in the recommendation stack — the strongest precedent for option C at social-media scale.
 - **Meta:** embedding retrieval served from precomputed FAISS indices inside the search backend.
 - **Pinterest:** in-house distributed ANN behind two-tower retrieval (now alongside generative retrieval, PinRec).
 - **Spotify:** Voyager — an in-process HNSW library — replacing Annoy; evidence that embedded libraries, not vector-DB servers, are the norm for this workload class at the small end.
