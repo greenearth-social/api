@@ -234,13 +234,6 @@ deploy_api_service() {
     # the client's own timeout with nothing recorded on our side (see #270).
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FEED_REQUEST_TIMEOUT_SEC=9"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_POSTHOG_HOST=$GE_POSTHOG_HOST"
-    # NOTE: keep this false until the Perspective API timeout and ES generator
-    # connection errors under investigation in #270/#271 are resolved --
-    # enabling fail-fast while those are unaddressed would turn silent,
-    # swallowed failures into user-visible "feed unavailable" errors on every
-    # occurrence.
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_FAIL_FAST=false"
-
     if [ -n "$GE_INFERENCE_BASE_URL" ]; then
         deploy_cmd="$deploy_cmd --set-env-vars=GE_INFERENCE_BASE_URL=$GE_INFERENCE_BASE_URL"
     fi

@@ -253,7 +253,7 @@ async def fetch_post_embeddings_and_metadata(
         return []
 
     async def _fetch() -> list[tuple[str, list[float], str, int]]:
-        async with timed(logger, "es_post_embeddings", n_uris=len(at_uris)):
+        async with timed(logger, "es_post_embeddings_and_metadata", n_uris=len(at_uris)):
             query = {"terms": {"at_uri": at_uris}}
 
             resp = await es.search(

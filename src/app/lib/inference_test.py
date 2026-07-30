@@ -1,6 +1,7 @@
 """Tests for shared inference helpers."""
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -153,6 +154,127 @@ async def test_predict_heavy_ranker_single_user_raises_for_http_error(monkeypatc
             base_url="https://inference.example",
             api_key="secret",
         )
+
+
+@pytest.mark.asyncio
+async def test_compute_user_embedding_with_empty_history_skips_elasticsearch(
+    monkeypatch,
+):
+    fetch_recent_likes = AsyncMock()
+    fetch_history_embeddings = AsyncMock()
+    predict_user_tower = AsyncMock(return_value=[[0.1, 0.2]])
+    monkeypatch.setattr(
+        inference_module,
+        "fetch_recent_liked_post_uris_and_times",
+        fetch_recent_likes,
+    )
+    monkeypatch.setattr(
+        inference_module,
+        "fetch_post_embeddings_and_metadata",
+        fetch_history_embeddings,
+    )
+    monkeypatch.setattr(
+        inference_module,
+        "predict_user_tower_single",
+        predict_user_tower,
+    )
+
+    result = await inference_module.compute_user_embedding(
+        "did:plc:user1",
+        es=object(),
+        inference_base_url="https://inference.example",
+        inference_api_key="secret",
+        source="two_tower_empty_history",
+        history_mode="empty",
+    )
+
+    assert result == [0.1, 0.2]
+    fetch_recent_likes.assert_not_awaited()
+    fetch_history_embeddings.assert_not_awaited()
+    predict_user_tower.assert_awaited_once_with(
+        [],
+        [],
+        base_url="https://inference.example",
+        api_key="secret",
+    )
+
+
+@pytest.mark.asyncio
+async def test_compute_user_embedding_disallows_empty_actual_history(monkeypatch):
+    fetch_recent_likes = AsyncMock(return_value=([], []))
+    fetch_history_embeddings = AsyncMock()
+    predict_user_tower = AsyncMock()
+    monkeypatch.setattr(
+        inference_module,
+        "fetch_recent_liked_post_uris_and_times",
+        fetch_recent_likes,
+    )
+    monkeypatch.setattr(
+        inference_module,
+        "fetch_post_embeddings_and_metadata",
+        fetch_history_embeddings,
+    )
+    monkeypatch.setattr(
+        inference_module,
+        "predict_user_tower_single",
+        predict_user_tower,
+    )
+
+    result = await inference_module.compute_user_embedding(
+        "did:plc:user1",
+        es=object(),
+        inference_base_url="https://inference.example",
+        inference_api_key="secret",
+        source="two_tower",
+        history_mode="actual",
+        allow_empty_history=False,
+    )
+
+    assert result is None
+    fetch_recent_likes.assert_awaited_once()
+    fetch_history_embeddings.assert_not_awaited()
+    predict_user_tower.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compute_user_embedding_disallows_actual_history_without_embeddings(
+    monkeypatch,
+):
+    fetch_recent_likes = AsyncMock(
+        return_value=(["at://did:plc:author/app.bsky.feed.post/1"], [123]),
+    )
+    fetch_history_embeddings = AsyncMock(return_value=[])
+    predict_user_tower = AsyncMock()
+    monkeypatch.setattr(
+        inference_module,
+        "fetch_recent_liked_post_uris_and_times",
+        fetch_recent_likes,
+    )
+    monkeypatch.setattr(
+        inference_module,
+        "fetch_post_embeddings_and_metadata",
+        fetch_history_embeddings,
+    )
+    monkeypatch.setattr(
+        inference_module,
+        "predict_user_tower_single",
+        predict_user_tower,
+    )
+
+    result = await inference_module.compute_user_embedding(
+        "did:plc:user1",
+        es=object(),
+        inference_base_url="https://inference.example",
+        inference_api_key="secret",
+        source="two_tower",
+        history_mode="actual",
+        allow_empty_history=False,
+    )
+
+    assert result is None
+    fetch_recent_likes.assert_awaited_once()
+    fetch_history_embeddings.assert_awaited_once()
+    predict_user_tower.assert_not_awaited()
 
 
 @pytest.mark.asyncio

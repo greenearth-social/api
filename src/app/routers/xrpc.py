@@ -41,6 +41,7 @@ from ..documents import (
 from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
+from ..lib.config import fail_fast, set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
 from ..lib.elasticsearch import fetch_post_embeddings
 from ..lib.embeddings import encode_float32_b64
@@ -62,6 +63,7 @@ from ..lib.firestore import (
     write_feed_debug,
 )
 from ..lib.metrics import get_metric_collector
+from ..lib.posthog_client import evaluate_fail_fast_flag, get_posthog_client, track_interaction, track_session
 from ..lib.pipeline_context import (
     DegradationEvent,
     DegradationStage,
@@ -813,6 +815,55 @@ def _get_feed_cache(request: Request) -> FeedCache:
     return cache
 
 
+def _similarity_scores_from_items_meta(items_meta: list[PipelineItemMeta]) -> dict[str, float]:
+    """Build an ``{at_uri: similarity_score}`` lookup from pipeline metadata.
+
+    Items without diversification info (diversify disabled, or not yet
+    joined) are simply absent from the result.
+    """
+    return {
+        meta.at_uri: meta.diversification.similarity_score
+        for meta in items_meta
+        if meta.diversification is not None
+    }
+
+
+def _record_similarity_metric(
+    page_uris: list[str],
+    scores_by_uri: dict[str, float],
+    feed_name: str,
+    batch: int,
+    exclude_uri: str | None = None,
+) -> None:
+    """Emit the mean similarity score for one served page.
+
+    Lower is better: the score is each item's combined author+content
+    similarity to the items selected before it, so a rising mean means the
+    feed is getting more homogenous.
+
+    Silently emits nothing when no URI in the page has a known score (e.g.
+    diversify is disabled for this feed). ``exclude_uri`` (the pinned post,
+    when present) is always excluded from the mean even if it happens to
+    carry a score, since it wasn't organically selected by MMR.
+    """
+    scores = [
+        scores_by_uri[uri]
+        for uri in page_uris
+        if uri in scores_by_uri and uri != exclude_uri
+    ]
+    if not scores:
+        return
+    mc = get_metric_collector()
+    if mc is None:
+        return
+    mc.record(
+        "feed.mean_similarity_score",
+        sum(scores) / len(scores),
+        feed_name=feed_name,
+        batch=str(batch),
+    )
+
+
 # ---------------------------------------------------------------------------
 # feedContext helpers
 # ---------------------------------------------------------------------------
@@ -1321,6 +1372,8 @@ async def get_feed_skeleton(
         _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
     )
 
+    set_fail_fast_for_request(evaluate_fail_fast_flag(get_posthog_client(), user_did))
+
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
     # to no-debug rather than breaking feed serving.
@@ -1334,15 +1387,24 @@ async def get_feed_skeleton(
 
     # Social Radius only reallocates the fixed candidate batch among sources;
     # it never increases the total candidate count or per-request batch cap.
-    # Apply its preference override to your-feed generator weights.
+    # Apply its preference override to personalized-feed generator weights.
+    # Cold-start uses the same source mix as your-feed, but forces the
+    # empty-history two-tower variant.
     # The override is computed once and threaded through model_copy in both
     # generation paths so the shared module-level template is never mutated.
     generators_override: dict = {}
     applied_social_radius: int | None = None
-    if feed_name == "your-feed":
+    if feed_name in ("your-feed", "cold-start"):
         applied_social_radius = user_doc.social_radius if user_doc is not None else 3
         preset = SOCIAL_RADIUS_PRESETS.get(applied_social_radius)
         if preset is not None:
+            if feed_name == "cold-start":
+                preset = [
+                    spec.model_copy(update={"name": "two_tower_empty_history"})
+                    if spec.name == "two_tower"
+                    else spec
+                    for spec in preset
+                ]
             generators_override = {"generators": preset}
 
     freshness_index = (
@@ -1382,6 +1444,10 @@ async def get_feed_skeleton(
                         # next request will fall into the regeneration branch
                         # below, which fetches fresh candidates.
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                    scores_by_uri = _similarity_scores_from_items_meta(cache_doc.items_meta)
+                    _record_similarity_metric(
+                        page, scores_by_uri, feed_name, batch=parsed.offset // limit
+                    )
                     feed_context = _make_feed_context(
                         user_did, feed_name, parsed.id, load_test=is_load_test
                     )
@@ -1452,6 +1518,12 @@ async def get_feed_skeleton(
                         # lands at end-of-cache and regenerates again (the
                         # ranking session restarts with fresh exclusions).
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
+                        scores_by_uri = _similarity_scores_from_items_meta(
+                            generated_snapshot.items_meta
+                        )
+                        _record_similarity_metric(
+                            page, scores_by_uri, feed_name, batch=parsed.offset // limit
+                        )
                         feed_context = _make_feed_context(
                             user_did, feed_name, parsed.id, load_test=is_load_test
                         )
@@ -1528,6 +1600,11 @@ async def get_feed_skeleton(
                 generated_page = all_uris[:limit]
                 page = generated_page
                 consumed = len(generated_page)
+
+            scores_by_uri = _similarity_scores_from_items_meta(generated_snapshot.items_meta)
+            _record_similarity_metric(
+                page, scores_by_uri, feed_name, batch=0, exclude_uri=feed_cfg.pinned_post_uri
+            )
 
             if not is_probe:
                 await _write_feed_snapshot_background(

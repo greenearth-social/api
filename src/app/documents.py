@@ -112,7 +112,7 @@ class SeenPostsDocument(BaseModel):
 
     One document per user per day under the ``seen_posts`` subcollection; the
     document ID is the ``YYYY-MM-DD`` date.  ``expires_at`` anchors the native
-    Firestore TTL policy so buckets self-delete ~5 days after the day they cover.
+    Firestore TTL policy so buckets self-delete ~14 days after the day they cover.
     """
 
     post_uris: list[str] = Field(default_factory=list, description="Seen post AT URIs for this day")
@@ -267,6 +267,11 @@ class FeedDebugDiversificationEntry(BaseModel):
     content_penalty: float = Field(
         default=0.0, description="Penalty from embedding (content) similarity to selected items"
     )
+    similarity_score: float = Field(
+        default=0.0,
+        description="Combined author+content similarity to already-selected items "
+        "(0=no similarity; higher=less diverse; not capped at 1)",
+    )
 
 
 class FeedDebugDocument(BaseModel):
@@ -360,6 +365,7 @@ class DiversificationMeta(BaseModel):
     score: float
     author_penalty: float = 0.0
     content_penalty: float = 0.0
+    similarity_score: float = 0.0
 
 
 class GeneratorMeta(BaseModel):

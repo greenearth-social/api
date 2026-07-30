@@ -8,12 +8,13 @@ from ...models import CandidatePost
 from ..candidates import get_generator, list_generators
 from ..candidates.two_tower import (
     MIN_LIKE_COUNT,
-    TWO_TOWER_GENERATOR_NAME,
     TWO_TOWER_MAX_AGE_CAP_HOURS,
     TwoTowerCandidateGenerator,
 )
 from ..embeddings import GE_POST_EMBEDDING_FIELD
 
+TWO_TOWER_GENERATOR_NAME = "two_tower"
+TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME = "two_tower_empty_history"
 GET_INFERENCE_SETTINGS = "app.lib.candidates.two_tower.get_inference_settings"
 COMPUTE_USER_EMBEDDING = "app.lib.candidates.two_tower.compute_user_embedding"
 GET_CACHED_POST_TOWER_UUID = "app.lib.candidates.two_tower.get_cached_post_tower_uuid"
@@ -23,7 +24,10 @@ INFERENCE_SETTINGS = ("https://inference", "api-key")
 
 @pytest.fixture
 def generator():
-    return TwoTowerCandidateGenerator()
+    return TwoTowerCandidateGenerator(
+        name=TWO_TOWER_GENERATOR_NAME,
+        history_mode="actual",
+    )
 
 
 class TestTwoTowerCandidateGenerator:
@@ -34,6 +38,12 @@ class TestTwoTowerCandidateGenerator:
         registered = get_generator(TWO_TOWER_GENERATOR_NAME)
         assert isinstance(registered, TwoTowerCandidateGenerator)
         assert TWO_TOWER_GENERATOR_NAME in list_generators()
+
+    def test_empty_history_variant_registered_as_builtin_generator(self):
+        registered = get_generator(TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME)
+        assert isinstance(registered, TwoTowerCandidateGenerator)
+        assert registered.history_mode == "empty"
+        assert TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME in list_generators()
 
     @pytest.mark.asyncio
     async def test_generate_runs_user_tower_then_ge_post_knn(self, generator):
@@ -88,6 +98,8 @@ class TestTwoTowerCandidateGenerator:
             "https://inference",
             "api-key",
             TWO_TOWER_GENERATOR_NAME,
+            "actual",
+            False,
         )
         knn_search.assert_awaited_once_with(
             es,
@@ -103,6 +115,79 @@ class TestTwoTowerCandidateGenerator:
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == candidates
+
+    @pytest.mark.asyncio
+    async def test_generate_forwards_empty_history_mode(self):
+        generator = TwoTowerCandidateGenerator(
+            name=TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME,
+            history_mode="empty",
+        )
+        es = object()
+        user_embedding = [0.1, 0.2, 0.3]
+
+        with (
+            patch(GET_INFERENCE_SETTINGS, return_value=INFERENCE_SETTINGS),
+            patch(
+                GET_CACHED_POST_TOWER_UUID,
+                new_callable=AsyncMock,
+                return_value="post-tower-uuid",
+            ),
+            patch(
+                COMPUTE_USER_EMBEDDING,
+                new_callable=AsyncMock,
+                return_value=user_embedding,
+            ) as compute_user_embedding,
+            patch(
+                KNN_SEARCH_POSTS,
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as knn_search,
+        ):
+            result = await generator.generate(es, "did:plc:user1")
+
+        compute_user_embedding.assert_awaited_once_with(
+            "did:plc:user1",
+            es,
+            "https://inference",
+            "api-key",
+            TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME,
+            "empty",
+            True,
+        )
+        assert knn_search.await_args is not None
+        assert knn_search.await_args.kwargs["generator_name"] == (
+            TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME
+        )
+        assert result.generator_name == TWO_TOWER_EMPTY_HISTORY_GENERATOR_NAME
+
+    @pytest.mark.asyncio
+    async def test_generate_skips_knn_when_actual_history_is_empty(self, generator):
+        with (
+            patch(GET_INFERENCE_SETTINGS, return_value=INFERENCE_SETTINGS),
+            patch(
+                GET_CACHED_POST_TOWER_UUID,
+                new_callable=AsyncMock,
+                return_value="post-tower-uuid",
+            ),
+            patch(
+                COMPUTE_USER_EMBEDDING,
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as compute_user_embedding,
+            patch(
+                KNN_SEARCH_POSTS,
+                new_callable=AsyncMock,
+            ) as knn_search,
+        ):
+            result = await generator.generate(object(), "did:plc:user1")
+
+        assert compute_user_embedding.await_args is not None
+        assert compute_user_embedding.await_args.args[-2:] == ("actual", False)
+        knn_search.assert_not_awaited()
+        assert result.generator_name == TWO_TOWER_GENERATOR_NAME
+        assert result.candidates == []
+        assert result.status == "not_run"
+        assert result.reason == "no_user_like_history"
 
     @pytest.mark.asyncio
     async def test_generate_uses_default_options(self, generator):

@@ -44,8 +44,17 @@ register_generator(_followed_users)
 _network_likes = NetworkLikesCandidateGenerator()
 register_generator(_network_likes)
 
-_two_tower = TwoTowerCandidateGenerator()
+_two_tower = TwoTowerCandidateGenerator(
+    name="two_tower",
+    history_mode="actual",
+)
 register_generator(_two_tower)
+
+_two_tower_empty_history = TwoTowerCandidateGenerator(
+    name="two_tower_empty_history",
+    history_mode="empty",
+)
+register_generator(_two_tower_empty_history)
 
 __all__ = [
     "CandidateGenerator",

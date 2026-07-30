@@ -160,7 +160,6 @@ class TestFirestoreFeedCacheRetrieve:
 
         snap = MagicMock()
         snap.exists = True
-        # A naive datetime in the future.
         snap.to_dict.return_value = {
             "items": ["at://a/1"],
             "expires_at": datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=5),
