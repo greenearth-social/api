@@ -9,12 +9,12 @@
 
 Feed serving cost on our Elasticsearch cluster is dominated by page-cache residency — the same query runs 26ms warm and 30s cold — and our single worst query (two-tower kNN) is structurally hostile to ES: its filters force Lucene out of the HNSW graph into brute-force vector scans. Capacity work (api#312) buys headroom, but the workload analysis below shows the serving path has outgrown a single search cluster, and roadmap features (per-like embedding updates, A/B post embeddings, 100× user scale) make that gap permanent.
 
-**Proposal:** move two-tower kNN into a vector-capable cache layer (Memorystore for Redis, prototype-first), add a KV layer on the same store for hydration and roadmap embeddings, and let ES do what it's good at — source of truth, routed lookups, author scans. ingex is unchanged until a conditional Phase 3. Each phase ships independently, is gated by PostHog flags with shadow-mode validation, and degrades back to today's ES paths on failure.
+**Proposal:** move two-tower kNN into a vector-capable cache layer (Memorystore for Redis, prototype-first), add roadmap embedding stores (user-ID, author-ID) on the same layer — with a hydration cache held as a trigger-conditioned option (§5.1) — and let ES do what it's good at — source of truth, routed lookups, author scans, hydration. ingex is unchanged until a conditional Phase 3. Each phase ships independently, is gated by PostHog flags with shadow-mode validation, and degrades back to today's ES paths on failure.
 
 | Phase | Ships | Measurable outcome |
 |---|---|---|
 | **1** | two-tower kNN off ES → Memorystore vector search | Eliminates the dominant ES query; two_tower p95 off the timeout ceiling |
-| **2** | KV on same store: hydration cache, user-ID + author-ID embeddings | Launch derisk (Aug 17); unblocks user-ID embedding roadmap |
+| **2** | Roadmap embedding stores on same layer: user-ID + author-ID embeddings | Unblocks user-ID embedding roadmap; hydration cache kept one flag away (§5.1) |
 | **3** *(conditional)* | Pub/Sub streaming from ingex | Only if sub-minute freshness or per-like updates become requirements |
 
 ---
@@ -89,7 +89,7 @@ Tuning bias: modest `ef_search`, recall target ~0.9–0.95 (per design goal 2). 
 |---|---|---|---|
 | ANN | HNSW; tag/numeric hybrid filters — adequate for `video_only` + window (+ traction via 4.1a) | Flat exact over filtered corpus | Filterable HNSW + named vectors — best-in-class |
 | Window expiry | **Native key TTL** — index follows `EXPIRE` | Own rebuild machinery | Cron delete-by-filter + vacuum |
-| KV consolidation | **Same store serves Phase 2 KV** (hydration, user/author-ID embeddings, api#330 pools) | None | Payload retrieve-by-ID covers hydration; list/set/counter shapes still want a Redis |
+| KV consolidation | **Same store serves Phase 2 KV** (user/author-ID embeddings, api#330 pools, §5.1 hydration cache if triggered) | None | Payload retrieve-by-ID covers hydration; list/set/counter shapes still want a Redis |
 | A/B embeddings | Separate vector fields/indexes | Two arrays | Named vectors per point (elegant) |
 | Ops | Managed; low enablement complexity | None new, but per-instance memory duplication at 100× | New self-hosted stateful service |
 | Production precedent | GCP-managed RediSearch | Meta (FAISS), Spotify (Voyager) for this class | X (Twitter) recommendation stack |
@@ -123,14 +123,14 @@ sequenceDiagram
 
     BSKY->>API: getFeedSkeleton
     API->>ES: user's likes (routed, ≤50) — unchanged
-    API->>KV: liked-post features + embeddings (mget)
-    KV-->>API: hits (misses fall back to ES, cache-aside)
-    API->>INF: user embedding (reads user-ID emb from KV)
+    API->>ES: liked-post features + embeddings — unchanged
+    API->>KV: user-ID + author-ID embeddings (P2)
+    API->>INF: user embedding
     INF-->>API: user embedding
     API->>ANN: kNN(user_emb, k + overfetch, window/video filters)
     ANN-->>API: [(at_uri, score)]
-    API->>KV: hydrate candidates (ES fallback on miss)
-    Note over API,KV: Incremental opportunity: per-document caching lets one<br/>consolidated hydration serve candidates AND the downstream<br/>MMR/ranker refetch (today: two call-level-cached fetches)
+    API->>ES: hydrate candidates (terms by at_uri)
+    Note over API,ES: §5.1 trigger-conditioned: cache-aside Memorystore tier in front of<br/>both hydration reads; enables one consolidated per-document fetch<br/>serving candidates AND the downstream MMR/ranker refetch
     API->>API: dedup → diversify → rank → render
 ```
 
@@ -141,8 +141,8 @@ flowchart TB
     ING["ingex — unchanged until Phase 3"] --> ES[("Elasticsearch — source of truth")]
     ES --> B1["Phase 1: corpus builder<br/>pull every 5–10 min, upsert with 14d TTL"]
     B1 --> ANN["Memorystore vector index"]
-    ES --> B2["Phase 2: KV refresher<br/>interval refresh + on-miss cache-aside fill"]
-    B2 --> KV["Memorystore KV<br/>hydration · user-ID emb · author-ID emb · pools (api#330)"]
+    ES --> B2["Phase 2: embedding refresher<br/>batch compute/refresh from ES on interval"]
+    B2 --> KV["Memorystore KV<br/>user-ID emb · author-ID emb · pools (api#330)<br/>· hydration cache (§5.1, if triggered)"]
     ING -.-> B3["Phase 3 (conditional): Pub/Sub upserts<br/>replace both interval pulls"]
     B3 -.-> ANN
     B3 -.-> KV
@@ -152,12 +152,22 @@ flowchart TB
 
 ### Phase details
 
-| | Phase 1 — kNN off ES | Phase 2 — KV layer (fast follow, pre–Aug 17 target) | Phase 3 — streaming (conditional) |
+| | Phase 1 — kNN off ES | Phase 2 — roadmap embedding stores | Phase 3 — streaming (conditional) |
 |---|---|---|---|
-| Ships | Vector index + builder; two_tower queries Memorystore | Hydration cache (cache-aside); user-ID + author-ID embedding stores | Pub/Sub producer in ingex; consumer replaces interval pulls |
-| Why now | Removes ES's dominant query; unblocks #324 (window cap removal) | Derisks launch while #312 `_source` gains phase in (~2 weeks via ILM); unblocks user-ID embedding roadmap | Only on §4.4 triggers |
-| Synergies | — | Natural home for api#330 popularity pools (design deferred to that issue; nothing here depends on its choice) | Enables per-like EWMA updates |
+| Ships | Vector index + builder; two_tower queries Memorystore | user-ID + author-ID embedding stores, batch-refreshed from ES | Pub/Sub producer in ingex; consumer replaces interval pulls |
+| Why now | Removes ES's dominant query; unblocks #324 (window cap removal) | Sole viable store for the data ES handles worst (per-like updates); timed by the embedding roadmap | Only on §4.4 triggers |
+| Synergies | — | Natural home for api#330 popularity pools (design deferred to that issue; nothing here depends on its choice); hydration cache slots in here if §5.1 triggers fire | Enables per-like EWMA updates |
 | Rollout | PostHog flag; shadow mode logging overlap@k + latency vs ES kNN; per-generator flip | PostHog flag; read-path comparison against direct ES | Dual-write validation window |
+
+### 5.1 Trigger-conditioned add-on: hydration cache
+
+Hydration stays on ES by default. Post-#312 it is ~1–2KB point lookups by `at_uri` — squarely ES's strength — and a cache would add a staleness semantic to `like_count`, a hydrated field the ranker consumes. A cache-aside hydration tier on the already-running Memorystore instance is therefore designed but not built: one flag away, activated by any of:
+
+1. **Load tests** show hydration p95 over budget at 100× (diverse consumption histories are exactly the page-cache-hostile access pattern);
+2. **Launch timing** — #312's `_source` gains have not phased in by launch (ILM ageout ≈ 2 weeks, no forced migration);
+3. **Measured read amplification** once replies hydration and per-candidate embedding reads land.
+
+If activated, it also enables the consolidated per-document hydration noted in the serving diagram: one fetch serves candidate hydration and the downstream MMR/ranker refetch (today: two call-level-cached fetches with disjoint cache keys).
 
 ### Failure behavior
 
@@ -165,7 +175,7 @@ flowchart TB
 |---|---|
 | Builder can't reach ES | Serve last-good index (stale candidates are invisible degradation); alert at >30 min stale |
 | Memorystore vector index down | ES kNN path retained behind the flag as emergency fallback |
-| Memorystore KV down / miss | Cache-aside falls through to ES — recent data at higher latency, never no data |
+| Memorystore KV down / miss | Embedding reads degrade gracefully (models tolerate the missing feature); hydration cache, if §5.1-enabled, falls through to ES — never no data |
 | ES down | Same blast radius as today; no new failure mode introduced |
 
 ---
@@ -174,10 +184,10 @@ flowchart TB
 
 1. **Bake-off spike (A vs C):** load the real 16.5M×128d corpus into Memorystore vector search and Qdrant (both a container pull); measure p50/p99 at target QPS, recall@100 vs exact ground truth, memory, insert throughput, TTL/expiry behavior, and filter expressiveness for the §4.1(a) traction filter. This produces the doc's final empirical numbers and settles §4.3.
 2. **100× load tests** (in progress, owned separately): may re-rank §4.3 or re-scope ES capacity assumptions; workload table numbers refresh after.
-3. **Post-recovery measurement pass:** re-baseline generator latencies post-#312; corpus counts; liked-post age distribution (sizes the hydration cache hot window and predicts cache-aside hit rate); builder pull timing.
+3. **Post-recovery measurement pass:** re-baseline generator latencies post-#312; corpus counts; liked-post age distribution (informs the §5.1 hydration-cache trigger: hot-window size and predicted hit rate); builder pull timing.
 4. **Shadow-mode criteria before flag flip:** overlap@k against ES kNN consistent with the recall target; two_tower p95 within budget at shadow QPS; zero increase in degraded renders.
 
-**Open questions:** final traction mechanism (§4.1 a/b/c beyond the launch default); hydration cache hot-window size (pending liked-post age measurement); whether load tests keep ES viable for workload-4 author scans at 100× or move them onto the roadmap.
+**Open questions:** final traction mechanism (§4.1 a/b/c beyond the launch default); whether any §5.1 hydration-cache trigger fires (load tests, #312 phase-in timing vs launch); whether load tests keep ES viable for workload-4 author scans at 100× or move them onto the roadmap.
 
 ---
 
@@ -221,7 +231,7 @@ flowchart LR
     F7 -.-> ES
 ```
 
-A2 drawn against ES to show what the cluster would absorb *without* this proposal; the design moves ③/③b/⑥ (and ②'s cache tier) onto Memorystore.
+A2 drawn against ES to show what the cluster would absorb *without* this proposal; the design moves ③/③b/⑥ onto Memorystore, and ②'s cache tier is trigger-conditioned (§5.1).
 
 ## Appendix B — Market scan (what comparable systems run)
 
