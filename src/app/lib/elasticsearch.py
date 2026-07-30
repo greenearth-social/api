@@ -39,13 +39,11 @@ def post_has_embedding_source(src: dict) -> bool:
 def embedding_from_fields(hit: dict) -> list[float] | None:
     """Extract the MiniLM L12 vector from a hit's ``fields`` retrieval result.
 
-    The ``fields`` API wraps every field's value(s) in an outer list, so a
-    single dense_vector value comes back as ``[[...]]``.
+    Unlike ``docvalue_fields`` (which wraps each value in an outer list),
+    the ``fields`` API returns a ``dense_vector`` value as a flat list of
+    floats directly — verified against prod (ES 9.0.0).
     """
-    values = (hit.get("fields") or {}).get(MINILM_L12_EMBEDDING_FIELD)
-    if not values:
-        return None
-    vec = values[0]
+    vec = (hit.get("fields") or {}).get(MINILM_L12_EMBEDDING_FIELD)
     return vec if vec else None
 
 

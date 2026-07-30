@@ -18,7 +18,7 @@ def es_response():
                         "content": "hello world",
                         "contains_video": True,
                     },
-                    "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                    "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                 }
             ]
         }

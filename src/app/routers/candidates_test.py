@@ -40,14 +40,14 @@ def fake_app_es():
                                         "at_uri": "at://post/2",
                                         "content": "liked post two",
                                     },
-                                    "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                                    "fields": {MINILM_L12_EMBEDDING_FIELD: [0.3, 0.4]},
                                 },
                                 {
                                     "_source": {
                                         "at_uri": "at://post/1",
                                         "content": "liked post one",
                                     },
-                                    "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                                    "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                                 },
                             ]
                         }

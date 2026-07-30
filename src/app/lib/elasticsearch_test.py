@@ -182,11 +182,11 @@ class TestFetchPostEmbeddingsAndMetadata:
                     "hits": [
                         {
                             "_source": {"at_uri": "at://2", "content": "two"},
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.3, 0.4]},
                         },
                         {
                             "_source": {"at_uri": "at://1", "content": "one"},
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                         },
                     ]
                 }
@@ -220,7 +220,7 @@ class TestFetchPostEmbeddingsAndMetadata:
                     "hits": [
                         {
                             "_source": {"at_uri": "at://1", "content": "one"},
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                         },
                         {
                             "_source": {"at_uri": "at://2"},
@@ -242,7 +242,7 @@ class TestFetchPostEmbeddingsAndMetadata:
                     "hits": [
                         {
                             "_source": {"at_uri": "at://1", "content": "one"},
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                         },
                         {
                             "_source": {
@@ -251,7 +251,7 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "media": [{"alt_text": ""}],
                                 "video_transcript": None,
                             },
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.3, 0.4]},
                         },
                     ]
                 }
@@ -276,7 +276,7 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "like_count": 22,
                                 "content": "two",
                             },
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.3, 0.4]},
                         },
                         {
                             "_source": {
@@ -285,7 +285,7 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "like_count": 11,
                                 "content": "one",
                             },
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                         },
                     ]
                 }
@@ -312,7 +312,7 @@ class TestFetchPostEmbeddingsAndMetadata:
                     "hits": [
                         {
                             "_source": {"at_uri": "at://1", "content": "one"},
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                         },
                         {
                             "_source": {
@@ -321,7 +321,7 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "like_count": "2",
                                 "content": "two",
                             },
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.3, 0.4]},
                         },
                         {
                             "_source": {
@@ -352,7 +352,7 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "author_did": "did:plc:one",
                                 "content": "some content",
                             },
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                         },
                         {
                             "_source": {
@@ -362,7 +362,7 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "media": [{"alt_text": "   "}],
                                 "video_transcript": "",
                             },
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.3, 0.4]},
                         },
                     ]
                 }
@@ -381,11 +381,11 @@ class TestFetchPostEmbeddings:
                     "hits": [
                         {
                             "_source": {"at_uri": "at://2", "content": "two"},
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.3, 0.4]},
                         },
                         {
                             "_source": {"at_uri": "at://1", "content": "one"},
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                         },
                     ]
                 }
@@ -414,7 +414,7 @@ class TestFetchPostEmbeddings:
                     "hits": [
                         {
                             "_source": {"at_uri": "at://1", "content": "one"},
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                         },
                         {
                             "_source": {"at_uri": "at://2"},
@@ -436,7 +436,7 @@ class TestFetchPostEmbeddings:
                     "hits": [
                         {
                             "_source": {"at_uri": "at://1", "content": "one"},
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
                         },
                         {
                             "_source": {
@@ -445,7 +445,7 @@ class TestFetchPostEmbeddings:
                                 "media": [{"alt_text": ""}],
                                 "video_transcript": None,
                             },
-                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [0.3, 0.4]},
                         },
                     ]
                 }
