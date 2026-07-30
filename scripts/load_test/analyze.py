@@ -99,7 +99,54 @@ def _client_summary(records: list[dict]) -> None:
     )
 
 
-def _server_metrics(project: str, start: datetime, end: datetime) -> None:
+# OTel resource attribute service.namespace (set to the environment in
+# metrics.py) surfaces as this monitored-resource label in Cloud Monitoring.
+# It separates stage from prod, which share the project and the metric type.
+ENV_RESOURCE_LABEL = "namespace"
+
+# The percentiles to pull, mapped to Cloud Monitoring per-series aligners. The
+# distribution metric is reduced server-side, so we never reconstruct it
+# client-side (no cumulative double-counting, no mean-of-means).
+_PERCENTILE_ALIGNERS = {
+    50: "ALIGN_PERCENTILE_50",
+    95: "ALIGN_PERCENTILE_95",
+    99: "ALIGN_PERCENTILE_99",
+}
+
+
+def build_percentile_request(
+    monitoring_v3,
+    project: str,
+    metric_type: str,
+    env: str,
+    interval,
+    percentile: int,
+    alignment_seconds: int,
+):
+    """Build a ListTimeSeries request for one percentile, grouped by traffic class.
+
+    Server-side aggregation aligns each series to the requested percentile over
+    the whole window, then reduces across series (e.g. per-instance) within each
+    ``traffic`` label. Filtered to one environment so stage and prod — which
+    write the same metric type to the same project — are never mixed.
+    """
+    aligner = getattr(monitoring_v3.Aggregation.Aligner, _PERCENTILE_ALIGNERS[percentile])
+    aggregation = monitoring_v3.Aggregation(
+        alignment_period={"seconds": alignment_seconds},
+        per_series_aligner=aligner,
+        cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_MEAN,
+        group_by_fields=["metric.label.traffic"],
+    )
+    return monitoring_v3.ListTimeSeriesRequest(
+        name=f"projects/{project}",
+        filter=f'metric.type = "{metric_type}" AND resource.labels.{ENV_RESOURCE_LABEL} = "{env}"',
+        interval=interval,
+        aggregation=aggregation,
+        view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+    )
+
+
+def _server_metrics(project: str, env: str, start: datetime, end: datetime) -> None:
     try:
         from google.cloud import monitoring_v3
     except ImportError:
@@ -113,47 +160,52 @@ def _server_metrics(project: str, start: datetime, end: datetime) -> None:
             "end_time": {"seconds": int(end.timestamp())},
         }
     )
-
-    console.print("\n[bold]Server-side feed.render.duration_ms by traffic class[/bold]")
-    table = Table(box=None)
-    table.add_column("traffic")
-    table.add_column("samples", justify="right")
-    table.add_column("p50", justify="right")
-    table.add_column("p95", justify="right")
-    table.add_column("p99", justify="right")
-
+    # One alignment bucket spanning the whole window: each series collapses to a
+    # single aligned percentile point.
+    alignment_seconds = max(60, int((end - start).total_seconds()))
     metric = f"{METRIC_PREFIX}/feed.render.duration_ms"
-    request = monitoring_v3.ListTimeSeriesRequest(
-        name=f"projects/{project}",
-        filter=f'metric.type = "{metric}"',
-        interval=interval,
-        view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
+
+    console.print(
+        f"\n[bold]Server-side feed.render.duration_ms by traffic class[/bold] "
+        f"[dim]({env})[/dim]"
     )
-    by_traffic: dict[str, list[float]] = defaultdict(list)
+
+    # traffic -> {percentile -> value}
+    by_traffic: dict[str, dict[int, float]] = defaultdict(dict)
     try:
-        for series in client.list_time_series(request=request):
-            traffic = series.metric.labels.get("traffic", "(unlabeled)")
-            for point in series.points:
-                dist = point.value.distribution_value
-                # Approximate: use the distribution mean weighted by count.
-                if dist.count:
-                    by_traffic[traffic].extend([dist.mean] * min(int(dist.count), 1000))
+        for percentile in _PERCENTILE_ALIGNERS:
+            request = build_percentile_request(
+                monitoring_v3, project, metric, env, interval, percentile, alignment_seconds
+            )
+            for series in client.list_time_series(request=request):
+                traffic = series.metric.labels.get("traffic", "(unlabeled)")
+                if series.points:
+                    # Mean across aligned points (usually one) for this series.
+                    vals = [p.value.double_value for p in series.points]
+                    by_traffic[traffic][percentile] = sum(vals) / len(vals)
     except Exception as exc:  # pragma: no cover - network dependent
         console.print(f"[yellow]Cloud Monitoring query failed: {exc}[/yellow]")
         return
 
     if not by_traffic:
-        console.print("[yellow]No feed.render.duration_ms series in the window.[/yellow]")
+        console.print(
+            "[yellow]No feed.render.duration_ms series in the window "
+            f"(check the '{ENV_RESOURCE_LABEL}' resource label matches '{env}').[/yellow]"
+        )
         return
+
+    table = Table(box=None)
+    table.add_column("traffic")
+    table.add_column("p50", justify="right")
+    table.add_column("p95", justify="right")
+    table.add_column("p99", justify="right")
     for traffic in sorted(by_traffic):
         vals = by_traffic[traffic]
-        lat = percentiles(vals)
         table.add_row(
             traffic,
-            str(len(vals)),
-            f"{lat[50]:.0f}",
-            f"{lat[95]:.0f}",
-            f"{lat[99]:.0f}",
+            f"{vals.get(50, 0):.0f}",
+            f"{vals.get(95, 0):.0f}",
+            f"{vals.get(99, 0):.0f}",
         )
     console.print(table)
 
@@ -207,7 +259,7 @@ def run(args: argparse.Namespace) -> None:
 
     if args.no_server:
         return
-    _server_metrics(args.project, start, end)
+    _server_metrics(args.project, args.environment, start, end)
     _server_logs(CLOUD_RUN_SERVICES[args.environment], args.project, start, end)
 
 

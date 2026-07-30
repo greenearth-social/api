@@ -65,6 +65,10 @@ def sample_page_depth(rng: random.Random, mean_pages: float) -> int:
         raise ValueError("mean_pages must be >= 1")
     # Geometric with support {1, 2, ...} has mean 1/p, so p = 1/mean_pages.
     p = 1.0 / mean_pages
+    # mean_pages == 1 → p == 1 → every session is exactly one page. Short-circuit
+    # before the log, which would otherwise be log(1 - p) = log(0).
+    if p >= 1.0:
+        return 1
     # inverse-CDF sample; clamp the random draw away from 0 and 1.
     u = min(max(rng.random(), 1e-9), 1 - 1e-9)
     depth = 1 + int(math.log(1 - u) / math.log(1 - p))

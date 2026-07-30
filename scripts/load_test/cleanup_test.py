@@ -125,3 +125,98 @@ async def test_delete_flagged_dry_run_does_not_delete():
     count = await cleanup._delete_flagged(db, "feed_cache", execute=False)
     assert count == 1
     doc1.reference.delete.assert_not_called()
+
+
+def _flagged_doc(user_did: str):
+    doc = MagicMock()
+    doc.to_dict.return_value = {"user_did": user_did, "load_test": True}
+    doc.reference.delete = AsyncMock()
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_delete_flagged_restrict_filters_by_user_field():
+    keep = _flagged_doc("did:plc:a")
+    drop = _flagged_doc("did:plc:z")
+    db = _make_db(user_stream=[], flagged_stream=[keep, drop])
+    count = await cleanup._delete_flagged(
+        db, "interactions", execute=True, restrict={"did:plc:a"}, user_field="user_did"
+    )
+    assert count == 1
+    keep.reference.delete.assert_awaited_once()
+    drop.reference.delete.assert_not_called()
+
+
+# --- dev fail-closed ---------------------------------------------------------
+
+
+def test_dev_requires_emulator(monkeypatch):
+    monkeypatch.delenv("GE_FIRESTORE_EMULATOR_HOST", raising=False)
+    monkeypatch.delenv("FIRESTORE_EMULATOR_HOST", raising=False)
+    with pytest.raises(SystemExit):
+        cleanup._configure_environment("dev")
+
+
+def test_dev_with_emulator_ok(monkeypatch):
+    monkeypatch.setenv("GE_FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
+    cleanup._configure_environment("dev")  # no raise
+
+
+# --- suffixed activity-bucket cleanup ---------------------------------------
+
+
+def _bucket_doc(doc_id: str):
+    doc = MagicMock()
+    doc.id = doc_id
+    doc.reference.delete = AsyncMock()
+    return doc
+
+
+def _make_bucket_db(buckets_by_collection: dict[str, list]):
+    """Mock users/{did}/{collection}/ subcollection streams."""
+    db = MagicMock()
+
+    def _collection(name):
+        if name == cleanup.USERS_COLLECTION:
+            user_coll = MagicMock()
+
+            def _document(_doc_id):
+                user_doc = MagicMock()
+
+                def _subcollection(coll_name):
+                    sub = MagicMock()
+                    sub.stream.side_effect = lambda: _AsyncIter(
+                        list(buckets_by_collection.get(coll_name, []))
+                    )
+                    return sub
+
+                user_doc.collection.side_effect = _subcollection
+                return user_doc
+
+            user_coll.document.side_effect = _document
+            return user_coll
+        return MagicMock()
+
+    db.collection.side_effect = _collection
+    return db
+
+
+@pytest.mark.asyncio
+async def test_delete_suffixed_buckets_deletes_only_suffixed():
+    from app.lib.firestore import (
+        DISCARDED_POSTS_COLLECTION,
+        LOAD_TEST_BUCKET_SUFFIX,
+        SEEN_POSTS_COLLECTION,
+    )
+
+    lt = _bucket_doc("2026-06-02" + LOAD_TEST_BUCKET_SUFFIX)
+    real = _bucket_doc("2026-06-02")
+    db = _make_bucket_db(
+        {SEEN_POSTS_COLLECTION: [lt, real], DISCARDED_POSTS_COLLECTION: []}
+    )
+
+    count = await cleanup._delete_suffixed_buckets(db, {"did:plc:a"}, execute=True)
+
+    assert count == 1
+    lt.reference.delete.assert_awaited_once()
+    real.reference.delete.assert_not_called()

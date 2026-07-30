@@ -55,6 +55,11 @@ class TestSamplePageDepth:
         with pytest.raises(ValueError):
             sample_page_depth(random.Random(0), 0.5)
 
+    def test_mean_pages_one_always_returns_one(self):
+        # p == 1 would make log(1 - p) = log(0); must not crash.
+        rng = random.Random(3)
+        assert all(sample_page_depth(rng, 1) == 1 for _ in range(50))
+
 
 class TestSessionStartOffsets:
     def test_deterministic_and_sorted(self):

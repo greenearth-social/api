@@ -490,7 +490,7 @@ class TestGetFeedSkeleton:
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": FEED_URI, "limit": 3},
             ).json()
-            key = ("did:plc:testuser", FEED_RKEY, 3)
+            key = ("did:plc:testuser", FEED_RKEY, 3, False)
             xrpc_mod._initial_requests[key].created_at -= (
                 xrpc_mod.INITIAL_REQUEST_REUSE_SECONDS + 1
             )
@@ -1680,6 +1680,38 @@ class TestSlateCutoffs:
         assert discarded.await_args
         assert discarded.await_args.args[1] == "did:plc:testuser"
         assert discarded.await_args.args[2] == ["at://p/3"]
+        # Real traffic writes to the real bucket.
+        assert discarded.await_args.kwargs.get("load_test") is False
+
+    def test_load_test_discards_routed_to_load_test_bucket(self, monkeypatch):
+        """Discards are still written under load test (exercising the exclusion
+        path) but routed to the user's separate load-test bucket."""
+        monkeypatch.setenv("GE_LOAD_TEST_SECRET", "lt-secret")
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
+        candidates = _make_candidates("p", 4, with_embedding=True)
+        discarded = AsyncMock()
+
+        gen_patch, _ = self._patch_generators(candidates)
+        with gen_patch, \
+             patch(
+                 "app.routers.xrpc.run_predict",
+                 new_callable=AsyncMock,
+                 return_value=self._rank_result([0.8, 0.6, 0.5, 0.4]),
+             ), \
+             patch("app.routers.xrpc.record_discarded_posts", discarded):
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+                headers={
+                    "X-Load-Test-Secret": "lt-secret",
+                    "X-Load-Test-DID": "did:plc:loadtestuser",
+                },
+            )
+
+        discarded.assert_awaited_once()
+        assert discarded.await_args is not None
+        assert discarded.await_args.args[2] == ["at://p/3"]
+        assert discarded.await_args.kwargs.get("load_test") is True
 
     def test_share_cap_limits_slate(self, monkeypatch):
         """At most max_render_share of the retrieved candidates are rendered."""
@@ -2076,7 +2108,9 @@ class TestSendInteractions:
         ):
             await _record_interactions(db, interactions)
 
-        seen_rec.assert_called_once_with(db, "did:plc:u", ["at://post/1", "at://post/2"])
+        seen_rec.assert_called_once_with(
+            db, "did:plc:u", ["at://post/1", "at://post/2"], load_test=False
+        )
 
     @pytest.mark.asyncio
     async def test_non_seen_events_do_not_record_seen_posts(self):
@@ -2136,10 +2170,12 @@ class TestSendInteractions:
         track.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_load_test_seen_event_does_not_denormalize_seen_posts(self, monkeypatch):
-        """Load-test 'seen' events must not enter a real user's seen-posts set.
+    async def test_load_test_seen_recorded_to_separate_bucket(self, monkeypatch):
+        """Load-test 'seen' events are recorded, but into the user's load-test
+        bucket (load_test=True), never mixed with their real seen posts.
 
-        A mixed batch records seen posts only for the genuine interaction.
+        A mixed batch produces two record_seen_posts calls — real and load-test —
+        each routed by the feedContext lt claim.
         """
         from app.feeds import FEEDS
         from app.routers.xrpc import Interaction, _record_interactions
@@ -2165,7 +2201,9 @@ class TestSendInteractions:
         ):
             await _record_interactions(db, interactions)
 
-        seen_rec.assert_called_once_with(db, "did:plc:u", ["at://post/real"])
+        seen_rec.assert_any_call(db, "did:plc:u", ["at://post/real"], load_test=False)
+        seen_rec.assert_any_call(db, "did:plc:u", ["at://post/lt"], load_test=True)
+        assert seen_rec.await_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -2469,11 +2507,14 @@ class TestLoadTestSession:
         )
         assert resp.status_code == 401
 
-    def test_writes_observability_snapshot(self):
-        """The deliberate contrast with the probe: load test writes real data."""
+    def test_writes_then_deletes_observability_snapshot(self):
+        """Load test performs the snapshot write (contrast with the probe, which
+        skips it) but deletes it immediately so it never reaches the user-facing
+        transparency feed."""
         with (
             _patch_unranked_your_feed_generators(_make_candidates("p", 3)),
             patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock) as snapshot_write,
+            patch("app.routers.xrpc.delete_feed_snapshot", new_callable=AsyncMock) as snapshot_del,
         ):
             resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2482,6 +2523,62 @@ class TestLoadTestSession:
             )
         assert resp.status_code == 200
         snapshot_write.assert_awaited()
+        snapshot_del.assert_awaited()
+
+    def test_real_request_snapshot_not_deleted(self):
+        """A real session's snapshot is written and kept (no delete-after)."""
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 3)),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value="did:plc:realuser",
+            ),
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock) as snapshot_write,
+            patch("app.routers.xrpc.delete_feed_snapshot", new_callable=AsyncMock) as snapshot_del,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+        assert resp.status_code == 200
+        snapshot_write.assert_awaited()
+        snapshot_del.assert_not_awaited()
+
+    def test_dedup_key_isolates_real_from_load_test(self):
+        """A real and a load-test initial request for the same (did, feed, limit)
+        must not share a response — otherwise the follower inherits the leader's
+        lt provenance."""
+        from app.routers import xrpc as xrpc_mod
+
+        # Point both traffic classes at the same DID so only the traffic flag
+        # differs in the reuse key.
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 3)),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value=self.LT_DID,
+            ),
+        ):
+            real = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            ).json()
+            lt = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+                headers=self._headers(),
+            ).json()
+
+        # Two separate reuse entries were created (one per traffic class).
+        keys = {k[3] for k in xrpc_mod._initial_requests}
+        assert keys == {True, False}
+        real_ctx = decode_feed_context(real["feed"][0]["feedContext"])
+        lt_ctx = decode_feed_context(lt["feed"][0]["feedContext"])
+        assert real_ctx is not None and lt_ctx is not None
+        assert real_ctx.lt is False
+        assert lt_ctx.lt is True
 
     def test_feed_context_carries_lt_flag(self):
         with _patch_unranked_your_feed_generators(_make_candidates("p", 3)):

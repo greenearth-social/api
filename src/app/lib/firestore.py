@@ -38,6 +38,14 @@ FEED_DEBUG_COLLECTION = "feed_debug"
 FEED_SNAPSHOTS_COLLECTION = "feed_snapshots"
 MAX_FEED_SNAPSHOT_ITEMS = 500
 
+# Suffix appended to a daily-bucket document ID (``YYYY-MM-DD``) for load-test
+# traffic. Test buckets live in the same subcollection as real ones so the
+# exclusion read path is exercised identically (``_get_recent_bucket_uris``
+# streams every non-expired bucket), but the distinct ID lets a cleanup script
+# delete exactly the synthetic buckets without touching a real user's data.
+# The suffix sorts after any time-of-day, so lexical ID order stays chronological.
+LOAD_TEST_BUCKET_SUFFIX = "-load-test"
+
 # How long a seen-posts bucket lives before native Firestore TTL deletes it.
 SEEN_POSTS_RETENTION_DAYS = 14
 
@@ -346,6 +354,8 @@ async def _record_daily_bucket_uris(
     collection: str,
     post_uris: list[str],
     retention_days: int,
+    *,
+    load_test: bool = False,
 ) -> None:
     """Append post URIs to the user's ``collection`` bucket for the current UTC day.
 
@@ -354,13 +364,25 @@ async def _record_daily_bucket_uris(
     ``expires_at`` (re-stamped on each write) drives the native Firestore TTL
     so the bucket self-deletes ~``retention_days`` days after its last update.
     No-op when there is nothing to record.
+
+    Load-test traffic (``load_test=True``) is routed to a separate bucket
+    (``YYYY-MM-DD-load-test``) carrying a ``load_test`` marker, so it never
+    mixes into a real user's exclusion data and a cleanup script can delete it
+    precisely. The read path (``_get_recent_bucket_uris``) picks up both, so the
+    exclusion behaviour under test is identical to production.
     """
     if not post_uris:
         return
 
     now = datetime.now(timezone.utc)
     bucket_id = now.strftime("%Y-%m-%d")
+    if load_test:
+        bucket_id += LOAD_TEST_BUCKET_SUFFIX
     expires_at = now + timedelta(days=retention_days)
+
+    doc: dict[str, object] = {"post_uris": ArrayUnion(post_uris), "expires_at": expires_at}
+    if load_test:
+        doc["load_test"] = True
 
     ref = (
         db.collection(USERS_COLLECTION)
@@ -368,10 +390,7 @@ async def _record_daily_bucket_uris(
         .collection(collection)
         .document(bucket_id)
     )
-    await ref.set(
-        {"post_uris": ArrayUnion(post_uris), "expires_at": expires_at},
-        merge=True,
-    )
+    await ref.set(doc, merge=True)
 
 
 async def _get_recent_bucket_uris(
@@ -411,10 +430,17 @@ async def _get_recent_bucket_uris(
     return result
 
 
-async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+async def record_seen_posts(
+    db: AsyncClient, user_did: str, post_uris: list[str], *, load_test: bool = False
+) -> None:
     """Append seen post URIs to the user's bucket for the current UTC day."""
     await _record_daily_bucket_uris(
-        db, user_did, SEEN_POSTS_COLLECTION, post_uris, SEEN_POSTS_RETENTION_DAYS
+        db,
+        user_did,
+        SEEN_POSTS_COLLECTION,
+        post_uris,
+        SEEN_POSTS_RETENTION_DAYS,
+        load_test=load_test,
     )
 
 
@@ -425,14 +451,21 @@ async def get_recent_seen_uris(
     return await _get_recent_bucket_uris(db, user_did, SEEN_POSTS_COLLECTION, max_uris)
 
 
-async def record_discarded_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+async def record_discarded_posts(
+    db: AsyncClient, user_did: str, post_uris: list[str], *, load_test: bool = False
+) -> None:
     """Append low-ranker-score post URIs to the user's bucket for the current UTC day.
 
     Discarded posts scored below a feed's ``min_rank_score`` and will never be
     displayed, so future candidate generation excludes them.
     """
     await _record_daily_bucket_uris(
-        db, user_did, DISCARDED_POSTS_COLLECTION, post_uris, DISCARDED_POSTS_RETENTION_DAYS
+        db,
+        user_did,
+        DISCARDED_POSTS_COLLECTION,
+        post_uris,
+        DISCARDED_POSTS_RETENTION_DAYS,
+        load_test=load_test,
     )
 
 
@@ -643,6 +676,22 @@ async def get_feed_snapshot(
     if data is None:
         return None
     return FeedSnapshotDocument.model_validate(data)
+
+
+async def delete_feed_snapshot(db: AsyncClient, user_did: str, request_id: str) -> None:
+    """Delete a single feed snapshot.
+
+    Used to remove load-test snapshots right after they are written: the write
+    exercises the real transactional path (part of what the load test measures),
+    but the document must not linger in the user-facing transparency feed.
+    """
+    await (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(FEED_SNAPSHOTS_COLLECTION)
+        .document(request_id)
+        .delete()
+    )
 
 
 async def get_recent_feed_snapshots(

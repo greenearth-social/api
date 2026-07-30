@@ -51,6 +51,7 @@ from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_sco
 from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
+    delete_feed_snapshot,
     get_recent_discarded_uris,
     get_recent_seen_uris,
     get_user,
@@ -63,7 +64,6 @@ from ..lib.firestore import (
     write_feed_debug,
 )
 from ..lib.metrics import get_metric_collector
-from ..lib.posthog_client import evaluate_fail_fast_flag, get_posthog_client, track_interaction, track_session
 from ..lib.pipeline_context import (
     DegradationEvent,
     DegradationStage,
@@ -71,7 +71,12 @@ from ..lib.pipeline_context import (
     current_pipeline_context,
     pipeline_context_scope,
 )
-from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
+from ..lib.posthog_client import (
+    evaluate_fail_fast_flag,
+    get_posthog_client,
+    track_interaction,
+    track_session,
+)
 from ..lib.rankers import run_predict
 from ..lib.request_cache import request_cache_scope
 from ..lib.request_context import set_traffic
@@ -105,17 +110,24 @@ class _InitialRequestEntry:
 
 
 _initial_request_lock = Lock()
-_initial_requests: dict[tuple[str, str, int], _InitialRequestEntry] = {}
+_initial_requests: dict[tuple[str, str, int, bool], _InitialRequestEntry] = {}
 
 
 def _claim_initial_request(
     user_did: str,
     feed_name: str,
     limit: int,
+    is_load_test: bool,
 ) -> tuple[bool, Future[FeedSkeletonResponse]]:
-    """Elect one generator for identical initial requests within a short window."""
+    """Elect one generator for identical initial requests within a short window.
+
+    ``is_load_test`` is part of the key so real and load-test requests for the
+    same (user, feed, limit) never share a response: the shared response carries
+    the leader's signed feedContext (with its ``lt`` claim), and a follower of
+    the other traffic class would otherwise inherit the wrong provenance.
+    """
     now = time.monotonic()
-    key = (user_did, feed_name, limit)
+    key = (user_did, feed_name, limit, is_load_test)
     with _initial_request_lock:
         expired = [
             existing_key
@@ -138,12 +150,13 @@ def _complete_initial_request(
     user_did: str,
     feed_name: str,
     limit: int,
+    is_load_test: bool,
     future: Future[FeedSkeletonResponse],
     *,
     response: FeedSkeletonResponse | None = None,
     error: BaseException | None = None,
 ) -> None:
-    key = (user_did, feed_name, limit)
+    key = (user_did, feed_name, limit, is_load_test)
     if error is not None:
         with _initial_request_lock:
             entry = _initial_requests.get(key)
@@ -941,10 +954,16 @@ async def _generation_exclusions(db, user_did: str, feed_cfg: FeedConfig) -> lis
     return list(dict.fromkeys(seen_uris + discarded_uris))
 
 
-async def _record_discarded(db, user_did: str, post_uris: list[str]) -> None:
-    """Persist low-rank-score post URIs in the background; failures are logged."""
+async def _record_discarded(
+    db, user_did: str, post_uris: list[str], *, load_test: bool = False
+) -> None:
+    """Persist low-rank-score post URIs in the background; failures are logged.
+
+    Load-test traffic writes to the user's separate load-test bucket so the
+    exclusion path is exercised without polluting their real discarded set.
+    """
     try:
-        await record_discarded_posts(db, user_did, post_uris)
+        await record_discarded_posts(db, user_did, post_uris, load_test=load_test)
     except Exception:
         logger.exception("Failed to record discarded posts for user '%s'", user_did)
 
@@ -1030,11 +1049,20 @@ async def _write_feed_snapshot_background(
     user_did: str,
     request_id: str,
     snapshot,
+    *,
+    load_test: bool = False,
 ) -> None:
     """Create or extend the lightweight feed snapshot in a background task.
 
     Separated from ``_run_pipeline_capturing`` so the Firestore write stays
     off the feed-serving hot path. Failures are logged, never surfaced.
+
+    Load-test traffic (``load_test=True``) still performs the write — that
+    transactional path is part of what the load test exercises — but the
+    snapshot is deleted immediately afterward. Snapshots are read only by the
+    user-facing transparency feed, so a synthetic one must not linger there;
+    delete-after keeps it out of the UI without a provenance field the
+    transparency reader would have to filter on.
     """
     if not snapshot.items:
         return
@@ -1052,6 +1080,8 @@ async def _write_feed_snapshot_background(
                 collector.record(
                     "feed.snapshot.truncated_count", 1, feed_name=snapshot.feed_name
                 )
+        if load_test:
+            await delete_feed_snapshot(db, user_did, request_id)
     except Exception:
         logger.exception(
             "Failed to write feed snapshot for user '%s', request '%s'",
@@ -1104,8 +1134,10 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
     always stored regardless.
     """
     # Seen URIs collected per user so we can record them with a single write
-    # per user after the per-interaction loop.
-    seen_by_user: dict[str, list[str]] = {}
+    # per user after the per-interaction loop. Keyed by (did, load_test) so a
+    # load-test session's seen posts land in that user's separate load-test
+    # bucket instead of polluting their real exclusion data.
+    seen_by_user: dict[tuple[str, bool], list[str]] = {}
 
     for ix in interactions:
         payload = decode_feed_context(ix.feed_context or "")
@@ -1123,12 +1155,8 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
             and ix.item
             and feed_cfg is not None
             and feed_cfg.exclude_seen_posts
-            # Never let a load-test "seen" event enter a real user's seen-posts
-            # exclusion set: it would silently hide posts from their real feed
-            # for days for content they never actually saw.
-            and not payload.lt
         ):
-            seen_by_user.setdefault(payload.did, []).append(ix.item)
+            seen_by_user.setdefault((payload.did, payload.lt), []).append(ix.item)
 
         doc = InteractionDocument(
             user_did=payload.did,
@@ -1161,9 +1189,9 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
                     "Failed to track PostHog interaction '%s' for user '%s'", event, payload.did
                 )
 
-    for did, uris in seen_by_user.items():
+    for (did, load_test), uris in seen_by_user.items():
         try:
-            await record_seen_posts(db, did, uris)
+            await record_seen_posts(db, did, uris, load_test=load_test)
         except Exception:
             logger.exception("Failed to record seen posts for user '%s'", did)
 
@@ -1467,6 +1495,7 @@ async def get_feed_skeleton(
                             user_did,
                             parsed.id,
                             _snapshot_page(cached_snapshot, page),
+                            load_test=is_load_test,
                         )
                     return FeedSkeletonResponse(
                         feed=_skeleton_items(page, feed_context),
@@ -1502,7 +1531,9 @@ async def get_feed_skeleton(
                     applied_social_radius=applied_social_radius,
                 )
                 if low_score_uris:
-                    _spawn_background(_record_discarded(db, user_did, low_score_uris))
+                    _spawn_background(
+                        _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
+                    )
                 new_uris = generated_snapshot.items
                 if new_uris:
                     async with timed(logger, "feedcache_append", cache_id=parsed.id):
@@ -1533,6 +1564,7 @@ async def get_feed_skeleton(
                                 user_did,
                                 parsed.id,
                                 _snapshot_page(generated_snapshot, page),
+                                load_test=is_load_test,
                             )
                         return FeedSkeletonResponse(
                             feed=_skeleton_items(page, feed_context),
@@ -1549,7 +1581,9 @@ async def get_feed_skeleton(
         # ------------------------------------------------------------------
         reuse_future: Future[FeedSkeletonResponse] | None = None
         if cursor is None and not is_probe:
-            is_leader, reuse_future = _claim_initial_request(user_did, feed_name, limit)
+            is_leader, reuse_future = _claim_initial_request(
+                user_did, feed_name, limit, is_load_test
+            )
             if not is_leader:
                 reused = await asyncio.wrap_future(reuse_future)
                 return reused.model_copy(deep=True)
@@ -1585,7 +1619,9 @@ async def get_feed_skeleton(
                 applied_social_radius=applied_social_radius,
             )
             if low_score_uris:
-                _spawn_background(_record_discarded(db, user_did, low_score_uris))
+                _spawn_background(
+                    _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
+                )
             all_uris = generated_snapshot.items
 
             # Pinned posts are a Bluesky presentation concern and are deliberately
@@ -1612,6 +1648,7 @@ async def get_feed_skeleton(
                     user_did,
                     request_id,
                     _snapshot_page(generated_snapshot, generated_page),
+                    load_test=is_load_test,
                 )
 
             # Store every non-empty batch — even a (possibly cutoff-shortened)
@@ -1659,6 +1696,7 @@ async def get_feed_skeleton(
                     user_did,
                     feed_name,
                     limit,
+                    is_load_test,
                     reuse_future,
                     response=response.model_copy(deep=True),
                 )
@@ -1669,6 +1707,7 @@ async def get_feed_skeleton(
                     user_did,
                     feed_name,
                     limit,
+                    is_load_test,
                     reuse_future,
                     error=error,
                 )
