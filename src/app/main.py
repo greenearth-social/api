@@ -37,7 +37,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-from .routers import candidates, diversify, feed_transparency, health, rank, skylight, xrpc
+from .routers import candidates, diversify, feed_transparency, health, rank, redirect, skylight, xrpc
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
 from .lib.firebase_auth import init_firebase_auth
@@ -346,6 +346,7 @@ app.include_router(feed_transparency.router)
 app.include_router(health.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)
+app.include_router(redirect.router)
 app.include_router(xrpc.router)
 
 
