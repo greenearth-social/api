@@ -35,6 +35,12 @@ class FeedContextPayload(BaseModel):
     feed: str = Field(..., description="Feed rkey the token was issued for")
     rid: str = Field(..., description="Request id (also the feed-cache key) for this response")
     iat: int = Field(..., description="Issued-at time, unix seconds")
+    lt: bool = Field(
+        default=False,
+        description="True when issued to a load-test session; marks interactions derived "
+        "from this feed as test data. Absent on tokens issued before this field existed, "
+        "which decode to False.",
+    )
 
 
 def _secret() -> bytes:

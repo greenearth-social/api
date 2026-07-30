@@ -490,7 +490,7 @@ class TestGetFeedSkeleton:
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": FEED_URI, "limit": 3},
             ).json()
-            key = ("did:plc:testuser", FEED_RKEY, 3)
+            key = ("did:plc:testuser", FEED_RKEY, 3, False)
             xrpc_mod._initial_requests[key].created_at -= (
                 xrpc_mod.INITIAL_REQUEST_REUSE_SECONDS + 1
             )
@@ -1209,6 +1209,7 @@ class TestGetFeedSkeletonAuth:
             app.state.firestore,
             "did:plc:autheduser",
             TEST_USERNAME,
+            is_load_test=False,
         )
 
     def test_username_resolution_failure_is_logged_but_non_fatal(self, caplog):
@@ -1679,6 +1680,38 @@ class TestSlateCutoffs:
         assert discarded.await_args
         assert discarded.await_args.args[1] == "did:plc:testuser"
         assert discarded.await_args.args[2] == ["at://p/3"]
+        # Real traffic writes to the real bucket.
+        assert discarded.await_args.kwargs.get("load_test") is False
+
+    def test_load_test_discards_routed_to_load_test_bucket(self, monkeypatch):
+        """Discards are still written under load test (exercising the exclusion
+        path) but routed to the user's separate load-test bucket."""
+        monkeypatch.setenv("GE_LOAD_TEST_SECRET", "lt-secret")
+        monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
+        candidates = _make_candidates("p", 4, with_embedding=True)
+        discarded = AsyncMock()
+
+        gen_patch, _ = self._patch_generators(candidates)
+        with gen_patch, \
+             patch(
+                 "app.routers.xrpc.run_predict",
+                 new_callable=AsyncMock,
+                 return_value=self._rank_result([0.8, 0.6, 0.5, 0.4]),
+             ), \
+             patch("app.routers.xrpc.record_discarded_posts", discarded):
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+                headers={
+                    "X-Load-Test-Secret": "lt-secret",
+                    "X-Load-Test-DID": "did:plc:loadtestuser",
+                },
+            )
+
+        discarded.assert_awaited_once()
+        assert discarded.await_args is not None
+        assert discarded.await_args.args[2] == ["at://p/3"]
+        assert discarded.await_args.kwargs.get("load_test") is True
 
     def test_share_cap_limits_slate(self, monkeypatch):
         """At most max_render_share of the retrieved candidates are rendered."""
@@ -1929,10 +1962,10 @@ class TestBestOfFriendsFeed:
 # ---------------------------------------------------------------------------
 
 
-def _make_token(did="did:plc:interactor", feed="your-feed", rid="req-1", iat=1730000000):
+def _make_token(did="did:plc:interactor", feed="your-feed", rid="req-1", iat=1730000000, lt=False):
     from app.lib.feed_context import FeedContextPayload, encode_feed_context
 
-    return encode_feed_context(FeedContextPayload(did=did, feed=feed, rid=rid, iat=iat))
+    return encode_feed_context(FeedContextPayload(did=did, feed=feed, rid=rid, iat=iat, lt=lt))
 
 
 class TestShortEvent:
@@ -2075,7 +2108,9 @@ class TestSendInteractions:
         ):
             await _record_interactions(db, interactions)
 
-        seen_rec.assert_called_once_with(db, "did:plc:u", ["at://post/1", "at://post/2"])
+        seen_rec.assert_called_once_with(
+            db, "did:plc:u", ["at://post/1", "at://post/2"], load_test=False
+        )
 
     @pytest.mark.asyncio
     async def test_non_seen_events_do_not_record_seen_posts(self):
@@ -2113,6 +2148,62 @@ class TestSendInteractions:
 
         rec.assert_called_once()  # raw interaction is still stored
         seen_rec.assert_not_called()  # but not denormalized
+
+    @pytest.mark.asyncio
+    async def test_load_test_interaction_is_tagged_and_skips_analytics(self):
+        """An lt=True token tags the stored doc and never reaches PostHog."""
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        like = "app.bsky.feed.defs#interactionLike"
+        ix = Interaction(item="at://post/1", event=like, feed_context=_make_token(lt=True))
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.track_interaction") as track,
+        ):
+            await _record_interactions(db, [ix])
+
+        rec.assert_awaited_once()
+        assert rec.await_args is not None
+        assert rec.await_args.args[1].load_test is True
+        track.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_load_test_seen_recorded_to_separate_bucket(self, monkeypatch):
+        """Load-test 'seen' events are recorded, but into the user's load-test
+        bucket (load_test=True), never mixed with their real seen posts.
+
+        A mixed batch produces two record_seen_posts calls — real and load-test —
+        each routed by the feedContext lt claim.
+        """
+        from app.feeds import FEEDS
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        monkeypatch.setattr(FEEDS["your-feed"], "exclude_seen_posts", True)
+        seen = "app.bsky.feed.defs#interactionSeen"
+        interactions = [
+            Interaction(
+                item="at://post/lt",
+                event=seen,
+                feed_context=_make_token(did="did:plc:u", feed="your-feed", lt=True),
+            ),
+            Interaction(
+                item="at://post/real",
+                event=seen,
+                feed_context=_make_token(did="did:plc:u", feed="your-feed", lt=False),
+            ),
+        ]
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
+        ):
+            await _record_interactions(db, interactions)
+
+        seen_rec.assert_any_call(db, "did:plc:u", ["at://post/real"], load_test=False)
+        seen_rec.assert_any_call(db, "did:plc:u", ["at://post/lt"], load_test=True)
+        assert seen_rec.await_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -2323,6 +2414,262 @@ class TestGetFeedSkeletonProbe:
             headers={"X-Probe-Secret": self.PROBE_SECRET},
         )
         assert resp.status_code == 401
+
+
+class TestLoadTestSession:
+    """Simulated load-test traffic (load_test_did).
+
+    Unlike the probe, a load-test request is treated as a real session
+    downstream (writes snapshots and user records) so the cold-start path is
+    exercised — but every record is tagged as test data and analytics are
+    skipped. Enabled by GE_LOAD_TEST_SECRET, which — unlike the dev session — is
+    allowed in deployed environments.
+    """
+
+    LT_SECRET = "test-load-test-secret-abc"
+    LT_DID = "did:plc:loadtestuser"
+
+    def _headers(self, secret: str | None = None, did: str | None = None) -> dict[str, str]:
+        return {
+            "X-Load-Test-Secret": secret if secret is not None else self.LT_SECRET,
+            "X-Load-Test-DID": did if did is not None else self.LT_DID,
+        }
+
+    @pytest.fixture(autouse=True)
+    def _set_secret(self, monkeypatch):
+        monkeypatch.setenv("GE_LOAD_TEST_SECRET", self.LT_SECRET)
+
+    @pytest.fixture(autouse=True)
+    def _no_at_proto_auth(self):
+        with patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value=None):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore(self):
+        with (
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock),
+            patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock),
+        ):
+            yield
+
+    # --- load_test_did header parsing (unit) ------------------------------
+
+    def _request(self, headers: dict[str, str]):
+        request = MagicMock()
+        request.headers = headers
+        return request
+
+    def test_helper_disabled_without_secret(self, monkeypatch):
+        from ..routers.xrpc import load_test_did
+
+        monkeypatch.delenv("GE_LOAD_TEST_SECRET", raising=False)
+        assert load_test_did(self._request(self._headers())) is None
+
+    def test_helper_returns_did_on_match(self):
+        from ..routers.xrpc import load_test_did
+
+        assert load_test_did(self._request(self._headers())) == self.LT_DID
+
+    def test_helper_rejects_non_plc_did(self):
+        from fastapi import HTTPException
+
+        from ..routers.xrpc import load_test_did
+
+        with pytest.raises(HTTPException) as excinfo:
+            load_test_did(self._request(self._headers(did="alice.bsky.social")))
+        assert excinfo.value.status_code == 400
+
+    # --- endpoint behavior ------------------------------------------------
+
+    def test_correct_secret_returns_200(self):
+        with _patch_unranked_your_feed_generators(_make_candidates("p", 3)):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers=self._headers(),
+            )
+        assert resp.status_code == 200
+
+    def test_wrong_secret_returns_401(self):
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": FEED_URI},
+            headers=self._headers(secret="nope"),
+        )
+        assert resp.status_code == 401
+
+    def test_env_unset_ignores_header(self, monkeypatch):
+        monkeypatch.delenv("GE_LOAD_TEST_SECRET", raising=False)
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": FEED_URI},
+            headers=self._headers(),
+        )
+        assert resp.status_code == 401
+
+    def test_writes_then_deletes_observability_snapshot(self):
+        """Load test performs the snapshot write (contrast with the probe, which
+        skips it) but deletes it immediately so it never reaches the user-facing
+        transparency feed."""
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 3)),
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock) as snapshot_write,
+            patch("app.routers.xrpc.delete_feed_snapshot", new_callable=AsyncMock) as snapshot_del,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers=self._headers(),
+            )
+        assert resp.status_code == 200
+        snapshot_write.assert_awaited()
+        snapshot_del.assert_awaited()
+
+    def test_real_request_snapshot_not_deleted(self):
+        """A real session's snapshot is written and kept (no delete-after)."""
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 3)),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value="did:plc:realuser",
+            ),
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock) as snapshot_write,
+            patch("app.routers.xrpc.delete_feed_snapshot", new_callable=AsyncMock) as snapshot_del,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+        assert resp.status_code == 200
+        snapshot_write.assert_awaited()
+        snapshot_del.assert_not_awaited()
+
+    def test_dedup_key_isolates_real_from_load_test(self):
+        """A real and a load-test initial request for the same (did, feed, limit)
+        must not share a response — otherwise the follower inherits the leader's
+        lt provenance."""
+        from app.routers import xrpc as xrpc_mod
+
+        # Point both traffic classes at the same DID so only the traffic flag
+        # differs in the reuse key.
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 3)),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value=self.LT_DID,
+            ),
+        ):
+            real = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+            ).json()
+            lt = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3},
+                headers=self._headers(),
+            ).json()
+
+        # Two separate reuse entries were created (one per traffic class).
+        keys = {k[3] for k in xrpc_mod._initial_requests}
+        assert keys == {True, False}
+        real_ctx = decode_feed_context(real["feed"][0]["feedContext"])
+        lt_ctx = decode_feed_context(lt["feed"][0]["feedContext"])
+        assert real_ctx is not None and lt_ctx is not None
+        assert real_ctx.lt is False
+        assert lt_ctx.lt is True
+
+    def test_feed_context_carries_lt_flag(self):
+        with _patch_unranked_your_feed_generators(_make_candidates("p", 3)):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers=self._headers(),
+            )
+        assert resp.status_code == 200
+        token = resp.json()["feed"][0]["feedContext"]
+        payload = decode_feed_context(token)
+        assert payload is not None
+        assert payload.lt is True
+
+    def test_real_request_feed_context_lt_false(self):
+        """Same feed with a real (JWT) session yields lt=False tokens."""
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 3)),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value="did:plc:realuser",
+            ),
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+        assert resp.status_code == 200
+        payload = decode_feed_context(resp.json()["feed"][0]["feedContext"])
+        assert payload is not None
+        assert payload.lt is False
+
+    def test_dev_session_outranks_load_test(self, monkeypatch):
+        """Both header sets present → dev session wins, is_load_test off."""
+        monkeypatch.setenv("GE_DEV_SESSION_SECRET", "dev-secret")
+        with _patch_unranked_your_feed_generators(_make_candidates("p", 3)):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers={
+                    **self._headers(),
+                    "X-Dev-Session": "dev-secret",
+                    "X-Dev-Session-DID": "did:plc:devuser",
+                },
+            )
+        assert resp.status_code == 200
+        payload = decode_feed_context(resp.json()["feed"][0]["feedContext"])
+        assert payload is not None
+        assert payload.did == "did:plc:devuser"
+        assert payload.lt is False
+
+    @pytest.mark.asyncio
+    async def test_record_session_tags_user_and_skips_analytics(self):
+        """upsert_user gets is_load_test=True; feed-activity and PostHog skipped."""
+        from ..routers.xrpc import _record_session
+
+        db = AsyncMock()
+        request = MagicMock()
+        request.app.state.id_resolver = AsyncMock()
+        did_doc = MagicMock()
+        did_doc.get_handle.return_value = "lt.bsky.app"
+        request.app.state.id_resolver.did.resolve = AsyncMock(return_value=did_doc)
+
+        with (
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock) as upsert,
+            patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock) as activity,
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.track_session") as track,
+        ):
+            await _record_session(request, self.LT_DID, "your-feed", db, is_load_test=True)
+
+        upsert.assert_awaited_once()
+        assert upsert.await_args is not None
+        assert upsert.await_args.kwargs.get("is_load_test") is True
+        activity.assert_not_awaited()
+        track.assert_not_called()
+
+    def test_traffic_label_set_per_mode(self):
+        """set_traffic is stamped with the right class for a load-test request."""
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 3)),
+            patch("app.routers.xrpc.set_traffic") as set_traffic,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+                headers=self._headers(),
+            )
+        assert resp.status_code == 200
+        set_traffic.assert_called_with("load_test")
 
 
 # ---------------------------------------------------------------------------

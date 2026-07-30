@@ -189,6 +189,7 @@ deploy_api_service() {
     local firestore_api_key_secret="firestore-api-key-stage"
     local feed_context_secret="feed-context-secret-stage"
     local probe_secret="probe-secret-stage"
+    local load_test_secret="load-test-secret-stage"
     local perspective_api_key_secret="perspective-api-key-stage"
     local posthog_api_key_secret="posthog-api-key-stage"
     local firestore_database="greenearth-stage"
@@ -198,6 +199,7 @@ deploy_api_service() {
         firestore_api_key_secret="firestore-api-key-prod"
         feed_context_secret="feed-context-secret-prod"
         probe_secret="probe-secret-prod"
+        load_test_secret="load-test-secret-prod"
         perspective_api_key_secret="perspective-api-key-prod"
         posthog_api_key_secret="posthog-api-key-prod"
         firestore_database="greenearth-prod"
@@ -242,6 +244,7 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-secrets=GE_FIRESTORE_API_KEY=$firestore_api_key_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_FEED_CONTEXT_SECRET=$feed_context_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_PROBE_SECRET=$probe_secret:latest"
+    deploy_cmd="$deploy_cmd --set-secrets=GE_LOAD_TEST_SECRET=$load_test_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_PERSPECTIVE_API_KEY=$perspective_api_key_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_POSTHOG_API_KEY=$posthog_api_key_secret:latest"
 

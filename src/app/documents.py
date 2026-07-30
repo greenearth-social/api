@@ -77,6 +77,13 @@ class UserDocument(BaseModel):
         description="Purpose preference: 0.2=engaging, 0.5=balanced, 0.8=constructive.  "
         "Used to weight engaging vs constructive content.",
     )
+    created_by_load_test: bool = Field(
+        default=False,
+        description="True when this document was created by a load-test session and no real "
+        "request has been seen since. Such users are synthetic and are deletable by "
+        "scripts/load_test/cleanup.py; a later real request clears this flag "
+        "(the user 'becomes ours' and their data is preserved).",
+    )
 
 
 class FeedCacheDocument(BaseModel):
@@ -92,6 +99,12 @@ class FeedCacheDocument(BaseModel):
     applied_social_radius: int | None = None
     feed_name: str | None = None
     generated_at: datetime | None = None
+    load_test: bool = Field(
+        default=False,
+        description="True when this cache entry was created by a load-test session. The cache "
+        "collection is keyed by request_id (not user), so this tag is how "
+        "scripts/load_test/cleanup.py finds and removes test-created entries.",
+    )
 
 
 class SeenPostsDocument(BaseModel):
@@ -180,6 +193,12 @@ class InteractionDocument(BaseModel):
     )
     created_at: datetime = Field(
         default_factory=_utcnow, description="When the interaction was received"
+    )
+    load_test: bool = Field(
+        default=False,
+        description="True when the interaction came from a load-test session (carried on the "
+        "signed feedContext 'lt' claim). Excluded from analytics and deletable by "
+        "scripts/load_test/cleanup.py.",
     )
 
 

@@ -38,6 +38,14 @@ FEED_DEBUG_COLLECTION = "feed_debug"
 FEED_SNAPSHOTS_COLLECTION = "feed_snapshots"
 MAX_FEED_SNAPSHOT_ITEMS = 500
 
+# Suffix appended to a daily-bucket document ID (``YYYY-MM-DD``) for load-test
+# traffic. Test buckets live in the same subcollection as real ones so the
+# exclusion read path is exercised identically (``_get_recent_bucket_uris``
+# streams every non-expired bucket), but the distinct ID lets a cleanup script
+# delete exactly the synthetic buckets without touching a real user's data.
+# The suffix sorts after any time-of-day, so lexical ID order stays chronological.
+LOAD_TEST_BUCKET_SUFFIX = "-load-test"
+
 # How long a seen-posts bucket lives before native Firestore TTL deletes it.
 SEEN_POSTS_RETENTION_DAYS = 14
 
@@ -107,7 +115,9 @@ async def get_user(db: AsyncClient, user_did: str) -> UserDocument | None:
     return UserDocument.model_validate(data)
 
 
-async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> UserDocument:
+async def upsert_user(
+    db: AsyncClient, user_did: str, username: str | None, *, is_load_test: bool = False
+) -> UserDocument:
     """Create or update a user document.
 
     On first visit the document is created with all timestamps set to now.
@@ -118,6 +128,21 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> U
     (the DID is the identity; the handle is enrichment). A ``None`` never
     overwrites a handle we already know — a transient resolution failure
     shouldn't erase good data.
+
+    Load testing (``is_load_test=True``):
+
+    - A newly created document is tagged ``created_by_load_test=True`` so a
+      cleanup script can later delete users that only ever existed as test
+      traffic (letting the cold-start path be re-run for the same DID).
+    - When the document already exists it is left **untouched** — no
+      ``last_seen_at`` bump. A load test samples real users, and bumping their
+      activity on every run would corrupt the very activity data the user
+      selection reads. The read already happened; skipping the write is free.
+
+    Real traffic (``is_load_test=False``) on a document previously created by a
+    load test clears the tag and resets ``created_at`` to now: a real person has
+    now shown up, so the user "becomes ours", their data must be preserved, and
+    their first-seen time should reflect the first *real* visit.
     """
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     doc = await ref.get()
@@ -131,9 +156,21 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> U
                 f"Firestore document exists but to_dict() returned None for {user_did}"
             )
 
+        if is_load_test:
+            # Never mutate a real user's record from synthetic traffic.
+            return UserDocument.model_validate(data)
+
         update_fields: dict[str, object] = {"last_seen_at": now}
         if username is not None and data.get("username") != username:
             update_fields["username"] = username
+            update_fields["updated_at"] = now
+
+        if data.get("created_by_load_test"):
+            # A real request has arrived for a load-test-created user: they are
+            # ours now. Clear the deletable flag and treat this as their true
+            # first visit so growth analytics don't count the synthetic one.
+            update_fields["created_by_load_test"] = False
+            update_fields["created_at"] = now
             update_fields["updated_at"] = now
 
         await ref.update(update_fields)
@@ -147,6 +184,7 @@ async def upsert_user(db: AsyncClient, user_did: str, username: str | None) -> U
         created_at=now,
         updated_at=now,
         last_seen_at=now,
+        created_by_load_test=is_load_test,
     )
     await ref.set(user.model_dump())
     return user
@@ -210,6 +248,10 @@ async def set_user_preferences(
     Uses ``merge=True`` so the preference is created alongside a minimal
     user document when the user has not yet loaded a feed in Bluesky.
     The full user document is filled in later by ``upsert_user``.
+
+    Setting preferences is a real person acting, so it also clears any
+    ``created_by_load_test`` tag — a load-test-created user who adopts us via
+    the web UI (before any real feed load) must not be deletable.
     """
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     await ref.set(
@@ -219,6 +261,7 @@ async def set_user_preferences(
             "freshness": freshness,
             "politics": politics,
             "purpose": purpose,
+            "created_by_load_test": False,
         },
         merge=True,
     )
@@ -311,6 +354,8 @@ async def _record_daily_bucket_uris(
     collection: str,
     post_uris: list[str],
     retention_days: int,
+    *,
+    load_test: bool = False,
 ) -> None:
     """Append post URIs to the user's ``collection`` bucket for the current UTC day.
 
@@ -319,13 +364,25 @@ async def _record_daily_bucket_uris(
     ``expires_at`` (re-stamped on each write) drives the native Firestore TTL
     so the bucket self-deletes ~``retention_days`` days after its last update.
     No-op when there is nothing to record.
+
+    Load-test traffic (``load_test=True``) is routed to a separate bucket
+    (``YYYY-MM-DD-load-test``) carrying a ``load_test`` marker, so it never
+    mixes into a real user's exclusion data and a cleanup script can delete it
+    precisely. The read path (``_get_recent_bucket_uris``) picks up both, so the
+    exclusion behaviour under test is identical to production.
     """
     if not post_uris:
         return
 
     now = datetime.now(timezone.utc)
     bucket_id = now.strftime("%Y-%m-%d")
+    if load_test:
+        bucket_id += LOAD_TEST_BUCKET_SUFFIX
     expires_at = now + timedelta(days=retention_days)
+
+    doc: dict[str, object] = {"post_uris": ArrayUnion(post_uris), "expires_at": expires_at}
+    if load_test:
+        doc["load_test"] = True
 
     ref = (
         db.collection(USERS_COLLECTION)
@@ -333,10 +390,7 @@ async def _record_daily_bucket_uris(
         .collection(collection)
         .document(bucket_id)
     )
-    await ref.set(
-        {"post_uris": ArrayUnion(post_uris), "expires_at": expires_at},
-        merge=True,
-    )
+    await ref.set(doc, merge=True)
 
 
 async def _get_recent_bucket_uris(
@@ -376,10 +430,17 @@ async def _get_recent_bucket_uris(
     return result
 
 
-async def record_seen_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+async def record_seen_posts(
+    db: AsyncClient, user_did: str, post_uris: list[str], *, load_test: bool = False
+) -> None:
     """Append seen post URIs to the user's bucket for the current UTC day."""
     await _record_daily_bucket_uris(
-        db, user_did, SEEN_POSTS_COLLECTION, post_uris, SEEN_POSTS_RETENTION_DAYS
+        db,
+        user_did,
+        SEEN_POSTS_COLLECTION,
+        post_uris,
+        SEEN_POSTS_RETENTION_DAYS,
+        load_test=load_test,
     )
 
 
@@ -390,14 +451,21 @@ async def get_recent_seen_uris(
     return await _get_recent_bucket_uris(db, user_did, SEEN_POSTS_COLLECTION, max_uris)
 
 
-async def record_discarded_posts(db: AsyncClient, user_did: str, post_uris: list[str]) -> None:
+async def record_discarded_posts(
+    db: AsyncClient, user_did: str, post_uris: list[str], *, load_test: bool = False
+) -> None:
     """Append low-ranker-score post URIs to the user's bucket for the current UTC day.
 
     Discarded posts scored below a feed's ``min_rank_score`` and will never be
     displayed, so future candidate generation excludes them.
     """
     await _record_daily_bucket_uris(
-        db, user_did, DISCARDED_POSTS_COLLECTION, post_uris, DISCARDED_POSTS_RETENTION_DAYS
+        db,
+        user_did,
+        DISCARDED_POSTS_COLLECTION,
+        post_uris,
+        DISCARDED_POSTS_RETENTION_DAYS,
+        load_test=load_test,
     )
 
 
@@ -608,6 +676,22 @@ async def get_feed_snapshot(
     if data is None:
         return None
     return FeedSnapshotDocument.model_validate(data)
+
+
+async def delete_feed_snapshot(db: AsyncClient, user_did: str, request_id: str) -> None:
+    """Delete a single feed snapshot.
+
+    Used to remove load-test snapshots right after they are written: the write
+    exercises the real transactional path (part of what the load test measures),
+    but the document must not linger in the user-facing transparency feed.
+    """
+    await (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(FEED_SNAPSHOTS_COLLECTION)
+        .document(request_id)
+        .delete()
+    )
 
 
 async def get_recent_feed_snapshots(
