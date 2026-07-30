@@ -61,8 +61,9 @@ def _window(records: list[dict], pad_min: float) -> tuple[datetime, datetime]:
 
 
 def _client_summary(records: list[dict]) -> None:
-    console.print("\n[bold]Client-side latency by phase × cohort[/bold]")
+    console.print("\n[bold]Client-side latency by feed × phase × cohort[/bold]")
     table = Table(box=None)
+    table.add_column("feed")
     table.add_column("phase")
     table.add_column("cohort")
     table.add_column("count", justify="right")
@@ -71,15 +72,16 @@ def _client_summary(records: list[dict]) -> None:
     table.add_column("p95", justify="right")
     table.add_column("p99", justify="right")
 
-    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    groups: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for r in records:
-        groups[(r.get("phase", "?"), r.get("cohort", "?"))].append(r)
+        groups[(r.get("feed", "?"), r.get("phase", "?"), r.get("cohort", "?"))].append(r)
 
-    for phase, cohort in sorted(groups):
-        rows = groups[(phase, cohort)]
+    for feed, phase, cohort in sorted(groups):
+        rows = groups[(feed, phase, cohort)]
         errors = sum(1 for r in rows if r.get("status") != 200 or r.get("error"))
         lat = percentiles([r["latency_ms"] for r in rows])
         table.add_row(
+            feed,
             phase,
             cohort,
             str(len(rows)),

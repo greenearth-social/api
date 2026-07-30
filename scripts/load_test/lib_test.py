@@ -6,9 +6,12 @@ import pytest
 
 from load_test.lib import (
     COHORTS,
+    assign_feeds,
     build_interactions,
+    feed_bucket_counts,
     feed_uri_from_describe,
     interactions_request_body,
+    parse_feed_spec,
     percentiles,
     sample_page_depth,
     session_start_offsets,
@@ -59,6 +62,88 @@ class TestSamplePageDepth:
         # p == 1 would make log(1 - p) = log(0); must not crash.
         rng = random.Random(3)
         assert all(sample_page_depth(rng, 1) == 1 for _ in range(50))
+
+
+class TestParseFeedSpec:
+    def test_single_bare_feed_is_full_weight(self):
+        assert parse_feed_spec("your-feed") == [("your-feed", 100.0)]
+
+    def test_weighted_pairs(self):
+        assert parse_feed_spec("your-feed:90,random:10") == [
+            ("your-feed", 90.0),
+            ("random", 10.0),
+        ]
+
+    def test_whitespace_and_bare_tokens_get_equal_weight(self):
+        assert parse_feed_spec(" a , b ") == [("a", 100.0), ("b", 100.0)]
+
+    def test_rkey_with_hyphens_and_weight(self):
+        assert parse_feed_spec("best-of-friends:25") == [("best-of-friends", 25.0)]
+
+    def test_rejects_empty(self):
+        with pytest.raises(ValueError):
+            parse_feed_spec("  ,  ")
+
+    def test_rejects_nonpositive_weight(self):
+        with pytest.raises(ValueError):
+            parse_feed_spec("your-feed:0")
+
+    def test_rejects_non_numeric_weight(self):
+        with pytest.raises(ValueError):
+            parse_feed_spec("your-feed:lots")
+
+    def test_rejects_duplicate_feed(self):
+        with pytest.raises(ValueError):
+            parse_feed_spec("your-feed:50,your-feed:50")
+
+
+class TestFeedBucketCounts:
+    def test_sums_to_total_and_proportional(self):
+        counts = feed_bucket_counts(100, [90, 10])
+        assert sum(counts) == 100
+        assert counts == [90, 10]
+
+    def test_normalizes_relative_weights(self):
+        # Weights need not sum to 100; [3, 1] over 100 -> 75/25.
+        assert feed_bucket_counts(100, [3, 1]) == [75, 25]
+
+    def test_remainder_distributed_in_order(self):
+        # 10 * [1,1,1]/3 = 3.33 each -> floors 3,3,3 = 9, +1 to first.
+        counts = feed_bucket_counts(10, [1, 1, 1])
+        assert sum(counts) == 10
+        assert counts == [4, 3, 3]
+
+    def test_zero_total(self):
+        assert feed_bucket_counts(0, [90, 10]) == [0, 0]
+
+    def test_rejects_nonpositive_weight(self):
+        with pytest.raises(ValueError):
+            feed_bucket_counts(10, [1, 0])
+
+
+class TestAssignFeeds:
+    def _users(self, n):
+        return [{"did": f"did:plc:{i}", "cohort": "active"} for i in range(n)]
+
+    def test_assigns_exact_bucket_sizes(self):
+        users = self._users(20)
+        assign_feeds(users, [("your-feed", 90), ("random", 10)], random.Random(0))
+        counts = {}
+        for u in users:
+            counts[u["feed"]] = counts.get(u["feed"], 0) + 1
+        assert counts == {"your-feed": 18, "random": 2}
+
+    def test_every_user_gets_a_feed(self):
+        users = self._users(7)
+        assign_feeds(users, [("a", 1), ("b", 1), ("c", 1)], random.Random(3))
+        assert all("feed" in u for u in users)
+
+    def test_deterministic_under_seed(self):
+        a = self._users(15)
+        b = self._users(15)
+        assign_feeds(a, [("x", 70), ("y", 30)], random.Random(9))
+        assign_feeds(b, [("x", 70), ("y", 30)], random.Random(9))
+        assert [u["feed"] for u in a] == [u["feed"] for u in b]
 
 
 class TestSessionStartOffsets:

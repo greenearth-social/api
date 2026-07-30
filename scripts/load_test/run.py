@@ -46,9 +46,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 from load_test.lib import (
     CLOUD_RUN_REGION,
     CLOUD_RUN_SERVICES,
+    assign_feeds,
     build_interactions,
     feed_uri_from_describe,
     interactions_request_body,
+    parse_feed_spec,
     percentiles,
     sample_page_depth,
     session_start_offsets,
@@ -159,6 +161,7 @@ async def run_session(
     """One simulated user session: initial fetch, some paging, maybe interactions."""
     did = user["did"]
     cohort = user.get("cohort", "unknown")
+    feed_rkey = user.get("feed", "?")
     headers = {**headers_for, "X-Load-Test-DID": did}
     skeleton_url = f"{api_url}/xrpc/app.bsky.feed.getFeedSkeleton"
     interactions_url = f"{api_url}/xrpc/app.bsky.feed.sendInteractions"
@@ -181,6 +184,7 @@ async def run_session(
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "did": did,
                 "cohort": cohort,
+                "feed": feed_rkey,
                 "session_id": session_id,
                 "phase": "initial" if page_index == 0 else "page",
                 "page_index": page_index,
@@ -214,6 +218,7 @@ async def run_session(
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "did": did,
                     "cohort": cohort,
+                    "feed": feed_rkey,
                     "session_id": session_id,
                     "phase": "interactions",
                     "page_index": None,
@@ -247,7 +252,15 @@ async def run(args: argparse.Namespace) -> None:
     _MEAN_PAGES = args.mean_pages
 
     users = _load_users(args.users)
+    try:
+        feed_weights = parse_feed_spec(args.feed)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --feed spec: {exc}") from exc
+
     rng = random.Random(args.seed)
+    # Pin each user to one feed (weighted buckets) before scheduling, so a user's
+    # sessions all hit the same feed the way a real user mostly sticks to one.
+    assign_feeds(users, feed_weights, rng)
     offsets = session_start_offsets(args.rate, args.duration, rng)
 
     if args.rate > RATE_CONFIRM_THRESHOLD and not args.force:
@@ -260,6 +273,7 @@ async def run(args: argparse.Namespace) -> None:
         f"[bold]Plan:[/bold] {len(offsets)} sessions over {args.duration} min "
         f"(~{args.rate}/min), concurrency {args.concurrency}, {len(users)} users"
     )
+    _print_feed_plan(users, feed_weights)
 
     if args.dry_run:
         table = Table(title="First 10 scheduled sessions", title_justify="left")
@@ -280,12 +294,23 @@ async def run(args: argparse.Namespace) -> None:
     semaphore = asyncio.Semaphore(args.concurrency)
     limits = httpx.Limits(max_connections=args.concurrency * 2)
     async with httpx.AsyncClient(timeout=args.timeout, limits=limits, verify=True) as client:
-        # Resolve the feed AT URI by rkey from describeFeedGenerator.
+        # Resolve each requested feed's AT URI by rkey from describeFeedGenerator.
         describe = await client.get(f"{api_url}/xrpc/app.bsky.feed.describeFeedGenerator")
-        feed_uri = feed_uri_from_describe(describe.json(), args.feed)
-        if feed_uri is None:
-            raise SystemExit(f"Feed rkey '{args.feed}' not found in describeFeedGenerator")
-        console.print(f"[dim]Feed: {feed_uri}[/dim]")
+        described = describe.json()
+        feed_uris: dict[str, str] = {}
+        missing: list[str] = []
+        for rkey, _ in feed_weights:
+            uri = feed_uri_from_describe(described, rkey)
+            if uri is None:
+                missing.append(rkey)
+            else:
+                feed_uris[rkey] = uri
+        if missing:
+            raise SystemExit(
+                f"Feed rkey(s) not found in describeFeedGenerator: {', '.join(missing)}"
+            )
+        for rkey, uri in feed_uris.items():
+            console.print(f"[dim]Feed {rkey}: {uri}[/dim]")
 
         start_wall = time.monotonic()
 
@@ -300,7 +325,7 @@ async def run(args: argparse.Namespace) -> None:
                     user,
                     client=client,
                     api_url=api_url,
-                    feed_uri=feed_uri,
+                    feed_uri=feed_uris[user["feed"]],
                     headers_for=headers_for,
                     limit=args.limit,
                     rng=random.Random(rng.random()),
@@ -315,6 +340,20 @@ async def run(args: argparse.Namespace) -> None:
     writer.close()
     _print_summary(writer.records)
     console.print(f"[green]Wrote {args.out} ({len(writer.records)} records)[/green]")
+
+
+def _print_feed_plan(users: list[dict], feed_weights: list[tuple[str, float]]) -> None:
+    assigned: dict[str, int] = {}
+    for u in users:
+        assigned[u.get("feed", "?")] = assigned.get(u.get("feed", "?"), 0) + 1
+    total_w = sum(w for _, w in feed_weights)
+    table = Table(title="Feed assignment", title_justify="left")
+    table.add_column("feed")
+    table.add_column("share", justify="right")
+    table.add_column("users", justify="right")
+    for rkey, weight in feed_weights:
+        table.add_row(rkey, f"{weight / total_w:.0%}", str(assigned.get(rkey, 0)))
+    console.print(table)
 
 
 def _print_summary(records: list[dict]) -> None:
@@ -353,7 +392,12 @@ def main() -> None:
         default="stage",
     )
     parser.add_argument("--api-url", help="Override API base URL (else resolved via gcloud)")
-    parser.add_argument("--feed", default="your-feed", help="Feed rkey (default your-feed)")
+    parser.add_argument(
+        "--feed",
+        default="your-feed",
+        help="Feed rkey, or several with weights: 'your-feed:90,random:10'. Each "
+        "user is pinned to one feed, bucketed across users by weight (default your-feed).",
+    )
     parser.add_argument("--rate", type=float, default=60, help="Sessions per minute (default 60)")
     parser.add_argument("--duration", type=float, default=10, help="Minutes (default 10)")
     parser.add_argument("--concurrency", type=int, default=40, help="Max in-flight sessions")

@@ -88,6 +88,7 @@ pool is too small the script under-fills and warns.
 pipenv run python scripts/load_test/run.py \
     --users load_test_users.json \
     --environment stage \
+    --feed your-feed:60,random:25,best-of-friends:15 \
     --rate 60 --duration 10 \
     --out results.jsonl
 ```
@@ -98,11 +99,19 @@ pipenv run python scripts/load_test/run.py \
   geometric), pauses `--think-time-ms` between pages, and — with probability
   `--interaction-share` — reports seen/like/click interactions for the items it
   saw, echoing each item's `feedContext` token verbatim.
-- `--api-url` overrides URL resolution; `--secret` overrides secret resolution;
-  `--feed` picks the feed rkey (default `your-feed`).
-- `--dry-run` prints the schedule and sends nothing.
+- `--feed` picks which feed(s) to exercise. A single rkey (`your-feed`) sends
+  everyone to one feed; a weighted list buckets users across several —
+  `--feed your-feed:60,random:25,best-of-friends:15`. Each **user** is pinned to
+  one feed for the whole run (real users mostly stick to a single feed), and the
+  weights set the fraction of users assigned to each. Weights are relative (need
+  not sum to 100); bare rkeys get equal weight. Only publicly-served feeds work
+  — the rkeys must appear in `describeFeedGenerator`. The plan output shows the
+  resulting per-feed user counts.
+- `--api-url` overrides URL resolution; `--secret` overrides secret resolution.
+- `--dry-run` prints the schedule and feed assignment, and sends nothing.
 
-Prints a client-side latency summary and writes one JSONL record per HTTP call.
+Prints a client-side latency summary and writes one JSONL record per HTTP call
+(each stamped with the feed it hit).
 
 > **WARNING:** against prod this competes with real user traffic. Run only in a
 > low-traffic window, and start small.
@@ -114,9 +123,10 @@ pipenv run python scripts/load_test/analyze.py \
     --results results.jsonl --environment stage
 ```
 
-Reports client-side latency by phase × cohort, then server-side
+Reports client-side latency by feed × phase × cohort, then server-side
 `feed.render.duration_ms` percentiles (p50/p95/p99) grouped by `traffic` class
-(real vs load_test) and Cloud Run log/error counts over the run window.
+(real vs load_test) and Cloud Run log/error counts over the run window. (The
+server-side split is by traffic class only, not by feed.)
 
 `analyze.py` **reads nothing from Firestore** — all the context it needs is
 stamped on each JSONL record — so you can run cleanup *before* analysis if you

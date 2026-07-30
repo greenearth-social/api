@@ -55,6 +55,84 @@ def split_counts(total: int, pct_existing: int, pct_active: int, pct_low: int) -
     return counts
 
 
+def parse_feed_spec(spec: str) -> list[tuple[str, float]]:
+    """Parse a ``--feed`` spec into ``(rkey, weight)`` pairs.
+
+    ``"your-feed:90,random:10"`` → ``[("your-feed", 90.0), ("random", 10.0)]``.
+    A bare rkey gets weight 100, so ``"your-feed"`` → ``[("your-feed", 100.0)]``
+    and ``"a,b"`` → equal weights. Weights are relative (need not sum to 100) and
+    are normalized when users are bucketed. Raises ``ValueError`` on malformed
+    input or a repeated feed.
+    """
+    pairs: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for part in (p.strip() for p in spec.split(",")):
+        if not part:
+            continue
+        if ":" in part:
+            rkey, _, weight_s = part.rpartition(":")
+            rkey = rkey.strip()
+            try:
+                weight = float(weight_s)
+            except ValueError as exc:
+                raise ValueError(f"feed weight in '{part}' is not a number") from exc
+        else:
+            rkey, weight = part, 100.0
+        if not rkey:
+            raise ValueError(f"empty feed rkey in '{part}'")
+        if weight <= 0:
+            raise ValueError(f"feed weight must be positive in '{part}'")
+        if rkey in seen:
+            raise ValueError(f"feed '{rkey}' listed more than once")
+        seen.add(rkey)
+        pairs.append((rkey, weight))
+    if not pairs:
+        raise ValueError("empty --feed spec")
+    return pairs
+
+
+def feed_bucket_counts(total: int, weights: list[float]) -> list[int]:
+    """Split ``total`` users across feeds proportional to ``weights``.
+
+    Floor allocation with the leftover handed out in declared order (mirrors
+    ``split_counts``), so the returned counts always sum exactly to ``total``.
+    """
+    if total < 0:
+        raise ValueError("total must be non-negative")
+    if not weights or any(w <= 0 for w in weights):
+        raise ValueError("weights must be non-empty and positive")
+    s = sum(weights)
+    counts = [int(total * w / s) for w in weights]  # int() floors for positives
+    remainder = total - sum(counts)
+    i = 0
+    while remainder > 0:
+        counts[i % len(counts)] += 1
+        remainder -= 1
+        i += 1
+    return counts
+
+
+def assign_feeds(
+    users: list[dict], feed_weights: list[tuple[str, float]], rng: random.Random
+) -> None:
+    """Bucket users across feeds by weight, setting ``user["feed"]`` on each.
+
+    Real users mostly stick to one feed, so each user is pinned to a single feed
+    for the whole run. Users are shuffled first (deterministic given ``rng``) so
+    each feed draws a representative mix of cohorts rather than a contiguous
+    slice of the manifest.
+    """
+    n = len(users)
+    counts = feed_bucket_counts(n, [w for _, w in feed_weights])
+    order = list(range(n))
+    rng.shuffle(order)
+    pos = 0
+    for (rkey, _), count in zip(feed_weights, counts, strict=True):
+        for _ in range(count):
+            users[order[pos]]["feed"] = rkey
+            pos += 1
+
+
 def sample_page_depth(rng: random.Random, mean_pages: float) -> int:
     """Number of pages a session fetches, including the initial page (>= 1).
 
