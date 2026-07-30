@@ -68,7 +68,7 @@ def _make_db(*, user_stream, reread=None, flagged_stream=None):
 @pytest.mark.asyncio
 async def test_dry_run_deletes_nothing():
     db = _make_db(user_stream=[_user_snap("did:plc:a"), _user_snap("did:plc:b")])
-    deleted, skipped = await cleanup._delete_test_users(db, execute=False, restrict=None)
+    deleted, skipped = await cleanup._delete_test_users(db, execute=False)
     assert deleted == 2
     assert skipped == 0
     db.recursive_delete.assert_not_called()
@@ -78,7 +78,7 @@ async def test_dry_run_deletes_nothing():
 async def test_execute_deletes_flagged_user():
     reread = {"a": _user_snap("did:plc:a", flagged=True)}
     db = _make_db(user_stream=[_user_snap("did:plc:a")], reread=reread)
-    deleted, skipped = await cleanup._delete_test_users(db, execute=True, restrict=None)
+    deleted, skipped = await cleanup._delete_test_users(db, execute=True)
     assert deleted == 1
     assert skipped == 0
     db.recursive_delete.assert_awaited_once()
@@ -89,21 +89,10 @@ async def test_execute_skips_user_that_became_real():
     # The re-read shows the flag cleared between query and delete.
     reread = {"a": _user_snap("did:plc:a", flagged=False)}
     db = _make_db(user_stream=[_user_snap("did:plc:a")], reread=reread)
-    deleted, skipped = await cleanup._delete_test_users(db, execute=True, restrict=None)
+    deleted, skipped = await cleanup._delete_test_users(db, execute=True)
     assert deleted == 0
     assert skipped == 1
     db.recursive_delete.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_restrict_limits_to_named_dids():
-    db = _make_db(
-        user_stream=[_user_snap("did:plc:a"), _user_snap("did:plc:b")],
-        reread={"a": _user_snap("did:plc:a", flagged=True)},
-    )
-    deleted, skipped = await cleanup._delete_test_users(db, execute=True, restrict={"did:plc:a"})
-    assert deleted == 1
-    db.recursive_delete.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -125,26 +114,6 @@ async def test_delete_flagged_dry_run_does_not_delete():
     count = await cleanup._delete_flagged(db, "feed_cache", execute=False)
     assert count == 1
     doc1.reference.delete.assert_not_called()
-
-
-def _flagged_doc(user_did: str):
-    doc = MagicMock()
-    doc.to_dict.return_value = {"user_did": user_did, "load_test": True}
-    doc.reference.delete = AsyncMock()
-    return doc
-
-
-@pytest.mark.asyncio
-async def test_delete_flagged_restrict_filters_by_user_field():
-    keep = _flagged_doc("did:plc:a")
-    drop = _flagged_doc("did:plc:z")
-    db = _make_db(user_stream=[], flagged_stream=[keep, drop])
-    count = await cleanup._delete_flagged(
-        db, "interactions", execute=True, restrict={"did:plc:a"}, user_field="user_did"
-    )
-    assert count == 1
-    keep.reference.delete.assert_awaited_once()
-    drop.reference.delete.assert_not_called()
 
 
 # --- dev fail-closed ---------------------------------------------------------
@@ -172,8 +141,15 @@ def _bucket_doc(doc_id: str):
     return doc
 
 
-def _make_bucket_db(buckets_by_collection: dict[str, list]):
-    """Mock users/{did}/{collection}/ subcollection streams."""
+def _make_bucket_db(
+    buckets_by_collection: dict[str, list], *, user_exists: bool = True, user_flag: bool = False
+):
+    """Mock users/{did} doc get() + its {collection}/ subcollection streams.
+
+    ``user_exists``/``user_flag`` drive the doc.get() the bucket cleaner uses to
+    decide whether a manifest DID is a real user (clean its suffixed buckets) or
+    a test-created/deleted one (skip — recursive_delete owns it).
+    """
     db = MagicMock()
 
     def _collection(name):
@@ -182,6 +158,10 @@ def _make_bucket_db(buckets_by_collection: dict[str, list]):
 
             def _document(_doc_id):
                 user_doc = MagicMock()
+                snap = MagicMock()
+                snap.exists = user_exists
+                snap.to_dict.return_value = {"created_by_load_test": user_flag}
+                user_doc.get = AsyncMock(return_value=snap)
 
                 def _subcollection(coll_name):
                     sub = MagicMock()
@@ -220,3 +200,43 @@ async def test_delete_suffixed_buckets_deletes_only_suffixed():
     assert count == 1
     lt.reference.delete.assert_awaited_once()
     real.reference.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_suffixed_buckets_skips_flagged_user():
+    # A test-created user in the manifest is left to recursive_delete, so the
+    # bucket cleaner must not touch (or count) its suffixed buckets.
+    from app.lib.firestore import LOAD_TEST_BUCKET_SUFFIX, SEEN_POSTS_COLLECTION
+
+    lt = _bucket_doc("2026-06-02" + LOAD_TEST_BUCKET_SUFFIX)
+    db = _make_bucket_db({SEEN_POSTS_COLLECTION: [lt]}, user_flag=True)
+
+    count = await cleanup._delete_suffixed_buckets(db, {"did:plc:a"}, execute=True)
+
+    assert count == 0
+    lt.reference.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_suffixed_buckets_skips_absent_user():
+    # Already recursive-deleted (or never created): nothing to do.
+    from app.lib.firestore import LOAD_TEST_BUCKET_SUFFIX, SEEN_POSTS_COLLECTION
+
+    lt = _bucket_doc("2026-06-02" + LOAD_TEST_BUCKET_SUFFIX)
+    db = _make_bucket_db({SEEN_POSTS_COLLECTION: [lt]}, user_exists=False)
+
+    count = await cleanup._delete_suffixed_buckets(db, {"did:plc:a"}, execute=True)
+
+    assert count == 0
+    lt.reference.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_refuses_without_users_or_force():
+    import argparse
+
+    args = argparse.Namespace(
+        users=None, force=False, execute=False, skip_cache=False, environment="dev"
+    )
+    with pytest.raises(SystemExit):
+        await cleanup.run(args)

@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """Delete data created by load-test traffic (issue api#189).
 
-Removes users that were created *only* by a load test (so the cold-start path
-can be re-run for the same DID), plus load-test interactions, feed-cache
-entries, and — for real users touched by a run — their load-test seen/discarded
-activity buckets. A user who has since made a real request has had their
-``created_by_load_test`` flag cleared by the API (they "became ours") and is
-left untouched — this script re-checks the flag immediately before deleting to
-avoid a race.
+The goal is always the same: remove *everything* a load test created. Most of
+it is tagged and deleted globally by tag — users created only by a load test
+(``created_by_load_test``, whole subtree, so the cold-start path can be re-run
+for the same DID), plus load-test interactions and feed-cache entries
+(``load_test``). A user who has since made a real request had that flag cleared
+by the API (they "became ours"); this script re-checks it immediately before
+deleting to avoid a race, and leaves such users alone.
+
+The one thing tags can't find is a load-test seen/discarded **activity bucket**
+that accumulated under a *real* user (its suffixed doc ID lives in the same
+subcollection as the user's real buckets). To reach those, pass ``--users``
+with the run's manifest from select_users.py — it's used only as a **hint** for
+which real users to check; everything else is still cleaned globally. Without
+``--users`` the cleanup can't be complete, so it refuses unless ``--force`` is
+given (which cleans everything else and leaves those buckets to native TTL).
 
 Runs as a dry-run by default; pass ``--execute`` to actually delete.
 ``--environment dev`` requires a Firestore emulator (``GE_FIRESTORE_EMULATOR_HOST``)
@@ -15,8 +23,8 @@ and refuses to run without one, so deletes can never hit real Firestore.
 
 Run from the api/ directory:
 
-    pipenv run python scripts/load_test/cleanup.py --environment stage          # dry run
-    pipenv run python scripts/load_test/cleanup.py --environment stage --execute
+    pipenv run python scripts/load_test/cleanup.py --environment stage --users run.json
+    pipenv run python scripts/load_test/cleanup.py --environment stage --users run.json --execute
 
 Firestore connection comes from the same env vars as the API server; the
 ``--environment`` flag sets them for stage/prod (see scripts/feed_debug.py).
@@ -82,8 +90,8 @@ def _restrict_dids(path: str | None) -> set[str] | None:
     return {u["did"] for u in data.get("users", [])}
 
 
-async def _delete_test_users(db, execute: bool, restrict: set[str] | None) -> tuple[int, int]:
-    """Delete users flagged created_by_load_test. Returns (deleted, skipped)."""
+async def _delete_test_users(db, execute: bool) -> tuple[int, int]:
+    """Delete all users flagged created_by_load_test. Returns (deleted, skipped)."""
     query = db.collection(USERS_COLLECTION).where(
         filter=FieldFilter("created_by_load_test", "==", True)
     )
@@ -96,8 +104,6 @@ async def _delete_test_users(db, execute: bool, restrict: set[str] | None) -> tu
     async for doc in query.stream():
         data = doc.to_dict() or {}
         did = data.get("user_did", doc.id)
-        if restrict is not None and did not in restrict:
-            continue
         if not execute:
             table.add_row(did, data.get("username") or "—", "[yellow]would delete[/yellow]")
             deleted += 1
@@ -120,28 +126,11 @@ async def _delete_test_users(db, execute: bool, restrict: set[str] | None) -> tu
     return deleted, skipped
 
 
-async def _delete_flagged(
-    db,
-    collection: str,
-    execute: bool,
-    *,
-    restrict: set[str] | None = None,
-    user_field: str | None = None,
-) -> int:
-    """Delete documents in ``collection`` with load_test == True.
-
-    When ``restrict`` is given, only documents whose ``user_field`` value is in
-    the set are deleted (used to honor ``--users`` for interactions, which carry
-    ``user_did``). Collections with no user linkage pass ``user_field=None`` and
-    should not be called with a restriction.
-    """
+async def _delete_flagged(db, collection: str, execute: bool) -> int:
+    """Delete all documents in ``collection`` with load_test == True."""
     query = db.collection(collection).where(filter=FieldFilter("load_test", "==", True))
     count = 0
     async for doc in query.stream():
-        if restrict is not None and user_field is not None:
-            data = doc.to_dict() or {}
-            if data.get(user_field) not in restrict:
-                continue
         count += 1
         if execute:
             await doc.reference.delete()
@@ -149,21 +138,23 @@ async def _delete_flagged(
 
 
 async def _delete_suffixed_buckets(db, dids: set[str], execute: bool) -> int:
-    """Delete load-test seen/discarded buckets for the given (real) users.
+    """Delete load-test seen/discarded buckets belonging to *real* users.
 
-    Test-created users are removed whole by ``recursive_delete``; this handles
-    the remaining case — real users whose docs we keep but who accumulated
-    load-test activity buckets (doc IDs ending in the load-test suffix).
+    ``dids`` is the run manifest — a hint of who to check. Test-created users
+    are removed whole by ``_delete_test_users``/``recursive_delete``, so we skip
+    any manifest DID whose user doc is missing (already deleted) or still flagged
+    (would be). That leaves exactly the real users, whose suffixed activity
+    buckets tags can't reach — and keeps the dry-run count honest, since it never
+    counts buckets that ``recursive_delete`` already owns.
     """
     count = 0
     for did in dids:
+        user_ref = db.collection(USERS_COLLECTION).document(user_doc_id(did))
+        snap = await user_ref.get()
+        if not snap.exists or (snap.to_dict() or {}).get("created_by_load_test"):
+            continue
         for collection in (SEEN_POSTS_COLLECTION, DISCARDED_POSTS_COLLECTION):
-            coll = (
-                db.collection(USERS_COLLECTION)
-                .document(user_doc_id(did))
-                .collection(collection)
-            )
-            async for doc in coll.stream():
+            async for doc in user_ref.collection(collection).stream():
                 if doc.id.endswith(LOAD_TEST_BUCKET_SUFFIX):
                     count += 1
                     if execute:
@@ -172,7 +163,18 @@ async def _delete_suffixed_buckets(db, dids: set[str], execute: bool) -> int:
 
 
 async def run(args: argparse.Namespace) -> None:
-    restrict = _restrict_dids(args.users)
+    manifest_dids = _restrict_dids(args.users)
+
+    # Without a manifest we can't find real users' load-test activity buckets,
+    # so a run would be incomplete. Refuse unless the operator opts into that.
+    if manifest_dids is None and not args.force:
+        raise SystemExit(
+            "Refusing to run without --users: real users' load-test seen/discarded "
+            "activity buckets can only be found from a run manifest, so cleanup "
+            "would be incomplete. Pass --users <manifest.json>, or --force to clean "
+            "everything else and leave those buckets to native TTL (14d/3d)."
+        )
+
     db = init_firestore_client()
 
     if not args.execute:
@@ -180,34 +182,25 @@ async def run(args: argparse.Namespace) -> None:
             "[yellow]DRY RUN — nothing will be deleted. Pass --execute to delete.[/yellow]"
         )
 
-    deleted, skipped = await _delete_test_users(db, args.execute, restrict)
+    # Everything below is deleted globally by tag — the manifest never narrows it.
+    deleted, skipped = await _delete_test_users(db, args.execute)
+    interactions = await _delete_flagged(db, INTERACTIONS_COLLECTION, args.execute)
 
-    interactions = await _delete_flagged(
-        db, INTERACTIONS_COLLECTION, args.execute, restrict=restrict, user_field="user_did"
-    )
-
-    # feed_cache docs are keyed by request_id with no user field, so --users
-    # cannot scope them; skip cache deletion (rather than delete globally) when
-    # a restriction is in effect.
     cache = 0
     cache_note = ""
     if args.skip_cache:
         cache_note = " (feed_cache skipped: --skip-cache)"
-    elif restrict is not None:
-        cache_note = " (feed_cache skipped: not scopable by --users)"
     else:
         cache = await _delete_flagged(db, FEED_CACHE_COLLECTION, args.execute)
 
-    # Real users keep their doc, but their load-test activity buckets must be
-    # removed explicitly. Only possible with a --users manifest of who to clean;
-    # otherwise native TTL (14d/3d) is the backstop.
+    # Suffixed activity buckets on real users need the manifest hint to be found.
     buckets = 0
-    if restrict is not None:
-        buckets = await _delete_suffixed_buckets(db, restrict, args.execute)
+    if manifest_dids is not None:
+        buckets = await _delete_suffixed_buckets(db, manifest_dids, args.execute)
     else:
         console.print(
-            "[dim]No --users file: real users' load-test seen/discarded buckets "
-            "are left to native TTL (14d/3d).[/dim]"
+            "[yellow]--force without --users: real users' load-test seen/discarded "
+            "buckets are left to native TTL (14d/3d).[/yellow]"
         )
 
     verb = "Deleted" if args.execute else "Would delete"
@@ -231,9 +224,15 @@ def main() -> None:
     parser.add_argument("--execute", action="store_true", help="Actually delete (default: dry run)")
     parser.add_argument(
         "--users",
-        help="Restrict deletion to DIDs in this selection JSON. Scopes user docs, "
-        "interactions, and load-test activity buckets; feed_cache (no user linkage) "
-        "is skipped when set.",
+        help="Run manifest (from select_users.py). A hint for which real users' "
+        "load-test seen/discarded activity buckets to remove; everything else is "
+        "cleaned globally by tag regardless. Required unless --force.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Proceed without --users, leaving real users' load-test activity "
+        "buckets to native TTL (cleanup is otherwise incomplete).",
     )
     parser.add_argument("--skip-cache", action="store_true", help="Leave feed_cache entries alone")
     args = parser.parse_args()
