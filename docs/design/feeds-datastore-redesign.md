@@ -15,7 +15,7 @@ Feed serving cost on Elasticsearch is dominated by page-cache residency — the 
 |---|---|---|
 | **1** | Two-tower kNN off ES → lean Memorystore vector index | Eliminates the dominant ES query; two_tower p95 off the timeout ceiling |
 | **2** | Memorystore synergies: user-ID + author-ID embedding stores; home for popularity pools (api#330) | Unblocks the embedding roadmap at near-zero marginal infrastructure |
-| **3** *(conditional)* | Pub/Sub streaming from ingex | Only if sub-minute freshness or per-like updates become requirements |
+| **3** *(conditional)* | Pub/Sub streaming from ingex | When sub-minute freshness or per-like updates become requirements |
 
 Every phase ships independently behind PostHog flags and degrades back to today's ES paths on failure. ingex is unchanged until Phase 3.
 
