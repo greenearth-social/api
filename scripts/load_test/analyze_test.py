@@ -26,19 +26,29 @@ def test_aggregates_percentile_grouped_by_traffic():
         monitoring_v3, "p", "m", "stage", _interval(), 99, alignment_seconds=600,
     )
     agg = req.aggregation
-    assert agg.per_series_aligner == monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_99
-    assert agg.cross_series_reducer == monitoring_v3.Aggregation.Reducer.REDUCE_MEAN
+    # ALIGN_DELTA is the only aligner valid on a CUMULATIVE DISTRIBUTION; the
+    # percentile is taken by the cross-series reducer, not the aligner.
+    assert agg.per_series_aligner == monitoring_v3.Aggregation.Aligner.ALIGN_DELTA
+    assert agg.cross_series_reducer == monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_99
     assert list(agg.group_by_fields) == ["metric.label.traffic"]
     assert agg.alignment_period.seconds == 600
 
 
-def test_each_percentile_maps_to_its_aligner():
+def test_each_percentile_maps_to_its_reducer():
+    reducers = {
+        p: build_percentile_request(
+            monitoring_v3, "p", "m", "stage", _interval(), p, alignment_seconds=60
+        ).aggregation.cross_series_reducer
+        for p in (50, 95, 99)
+    }
+    assert reducers[50] == monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_50
+    assert reducers[95] == monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_95
+    assert reducers[99] == monitoring_v3.Aggregation.Reducer.REDUCE_PERCENTILE_99
+    # Every percentile is aligned the same way — with ALIGN_DELTA.
     aligners = {
         p: build_percentile_request(
             monitoring_v3, "p", "m", "stage", _interval(), p, alignment_seconds=60
         ).aggregation.per_series_aligner
         for p in (50, 95, 99)
     }
-    assert aligners[50] == monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_50
-    assert aligners[95] == monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_95
-    assert aligners[99] == monitoring_v3.Aggregation.Aligner.ALIGN_PERCENTILE_99
+    assert set(aligners.values()) == {monitoring_v3.Aggregation.Aligner.ALIGN_DELTA}

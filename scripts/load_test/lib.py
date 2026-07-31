@@ -10,8 +10,21 @@ for the runnable entry points.
 from __future__ import annotations
 
 import math
+import os
 import random
 from dataclasses import dataclass
+
+
+def gcloud_env() -> dict[str, str]:
+    """Environment for ``gcloud`` subprocesses that keeps gRPC fork noise quiet.
+
+    ``gcloud`` is a gRPC client that forks worker processes, and gRPC's C-core
+    event engine logs a benign INFO line ("FD from fork parent still in poll
+    list") for every inherited fd on each fork — nothing actionable, just noise
+    that drowns the report. ``GRPC_VERBOSITY=ERROR`` drops those INFO lines while
+    keeping real errors visible.
+    """
+    return {**os.environ, "GRPC_VERBOSITY": "ERROR"}
 
 # GCP project + Firestore database per environment. Both environments live in
 # the same project and are separated by database (mirrors feed_debug.py and
