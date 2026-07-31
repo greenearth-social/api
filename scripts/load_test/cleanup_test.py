@@ -44,8 +44,21 @@ def _make_db(*, user_stream, reread=None, flagged_stream=None):
     query = MagicMock()
     query.stream.side_effect = lambda: _AsyncIter(list(user_stream))
 
+    # load_test==True query. _delete_flagged pages it (limit().stream()) and
+    # deletes each page via a batch, so model deletion: `remaining` shrinks as
+    # batch.commit() applies the pending deletes, and the paged stream drains.
+    remaining = list(flagged_stream or [])
+    pending: list = []
+
     flagged_query = MagicMock()
-    flagged_query.stream.side_effect = lambda: _AsyncIter(list(flagged_stream or []))
+    flagged_query.stream.side_effect = lambda: _AsyncIter(list(remaining))
+
+    def _limit(n):
+        limited = MagicMock()
+        limited.stream.side_effect = lambda: _AsyncIter(remaining[:n])
+        return limited
+
+    flagged_query.limit.side_effect = _limit
 
     def _where(*, filter):  # noqa: A002 - mirrors the Firestore kwarg name
         field = getattr(filter, "field_path", "")
@@ -62,6 +75,17 @@ def _make_db(*, user_stream, reread=None, flagged_stream=None):
     collection.document.side_effect = _document
     db.collection.return_value = collection
     db.recursive_delete = AsyncMock()
+
+    batch = MagicMock()
+    batch.delete.side_effect = pending.append
+
+    def _commit():
+        dropped = {id(r) for r in pending}
+        remaining[:] = [d for d in remaining if id(d.reference) not in dropped]
+        pending.clear()
+
+    batch.commit = AsyncMock(side_effect=_commit)
+    db.batch.return_value = batch
     return db
 
 
@@ -96,24 +120,83 @@ async def test_execute_skips_user_that_became_real():
 
 
 @pytest.mark.asyncio
-async def test_delete_flagged_counts_and_deletes():
+async def test_delete_flagged_counts_and_batch_deletes():
     doc1, doc2 = MagicMock(), MagicMock()
-    doc1.reference.delete = AsyncMock()
-    doc2.reference.delete = AsyncMock()
     db = _make_db(user_stream=[], flagged_stream=[doc1, doc2])
     count = await cleanup._delete_flagged(db, "interactions", execute=True)
     assert count == 2
-    doc1.reference.delete.assert_awaited_once()
+    # Deleted via a batched commit, not per-doc, and both refs enqueued.
+    batch = db.batch.return_value
+    assert batch.delete.call_count == 2
+    batch.delete.assert_any_call(doc1.reference)
+    batch.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_flagged_paginates_until_empty():
+    # More docs than a single batch: must loop, deleting every one, and terminate.
+    docs = [MagicMock() for _ in range(cleanup.DELETE_BATCH + 7)]
+    db = _make_db(user_stream=[], flagged_stream=docs)
+    count = await cleanup._delete_flagged(db, "interactions", execute=True)
+    assert count == cleanup.DELETE_BATCH + 7
+    assert db.batch.return_value.delete.call_count == cleanup.DELETE_BATCH + 7
 
 
 @pytest.mark.asyncio
 async def test_delete_flagged_dry_run_does_not_delete():
     doc1 = MagicMock()
-    doc1.reference.delete = AsyncMock()
     db = _make_db(user_stream=[], flagged_stream=[doc1])
     count = await cleanup._delete_flagged(db, "feed_cache", execute=False)
     assert count == 1
-    doc1.reference.delete.assert_not_called()
+    db.batch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_splits_on_transaction_too_big():
+    # A backend that rejects any commit of more than 2 writes as "too big" — the
+    # heavy-feed_cache case. _batch_delete must split down until each commit fits
+    # and still delete every ref.
+    from google.api_core.exceptions import InvalidArgument
+
+    committed: list = []
+    max_ok = 2
+
+    def _make_batch():
+        pending: list = []
+        b = MagicMock()
+        b.delete.side_effect = pending.append
+
+        async def _commit():
+            if len(pending) > max_ok:
+                raise InvalidArgument("Transaction too big. Decrease transaction size.")
+            committed.extend(pending)
+
+        b.commit = AsyncMock(side_effect=_commit)
+        return b
+
+    db = MagicMock()
+    db.batch.side_effect = _make_batch
+
+    refs = [MagicMock() for _ in range(5)]
+    advanced: list = []
+    await cleanup._batch_delete(db, refs, advanced.append)
+
+    assert {id(r) for r in committed} == {id(r) for r in refs}
+    assert sum(advanced) == 5
+
+
+@pytest.mark.asyncio
+async def test_batch_delete_reraises_single_doc_failure():
+    # If even a single-doc commit is rejected, it's a real error, not a size issue.
+    from google.api_core.exceptions import InvalidArgument
+
+    db = MagicMock()
+    batch = MagicMock()
+    batch.commit = AsyncMock(side_effect=InvalidArgument("nope"))
+    db.batch.return_value = batch
+
+    with pytest.raises(InvalidArgument):
+        await cleanup._batch_delete(db, [MagicMock()], lambda n: None)
 
 
 # --- dev fail-closed ---------------------------------------------------------
