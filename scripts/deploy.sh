@@ -292,38 +292,54 @@ deploy_api_service() {
     # identifiable when picking a rollback target (see issue #228).
     deploy_cmd="$deploy_cmd --labels=git-sha=$GIT_SHA"
 
+    # Fold GE_FEED_GENERATOR_DID into this single deploy whenever we can resolve
+    # it up front (prod is a constant; stage/dev is derived from the service URL,
+    # which is stable once the service exists). This avoids emitting a second,
+    # otherwise-identical revision from a post-deploy `services update` — and
+    # keeps the git-sha label on the revision that actually serves traffic. Only
+    # a brand-new service (first-ever deploy) can't be resolved yet; that case
+    # falls back to a follow-up update below. Note the emulator host vars need no
+    # explicit removal here: --set-env-vars replaces the whole env set, so any
+    # GE_FIRESTORE_EMULATOR_HOST/FIRESTORE_EMULATOR_HOST are dropped by omission.
+    local generator_did=""
+    local did_in_deploy=false
+    if generator_did=$(resolve_generator_did); then
+        deploy_cmd="$deploy_cmd --set-env-vars=GE_FEED_GENERATOR_DID=$generator_did"
+        did_in_deploy=true
+    fi
+
     # Allow unauthenticated access (adjust based on your needs)
     deploy_cmd="$deploy_cmd --allow-unauthenticated"
 
     log_build "Executing: $deploy_cmd"
-    eval "$deploy_cmd"
+    if ! eval "$deploy_cmd"; then
+        log_error "Failed to deploy greenearth-api-$ENVIRONMENT"
+        exit 1
+    fi
 
-    if [ $? -eq 0 ]; then
-        log_info "✓ greenearth-api-$ENVIRONMENT deployed successfully"
+    log_info "✓ greenearth-api-$ENVIRONMENT deployed successfully"
 
-        # Get the service URL
-        local service_url=$(gcloud run services describe greenearth-api-$ENVIRONMENT --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)")
-        log_info "Service URL: $service_url"
+    local service_url
+    service_url=$(gcloud run services describe "greenearth-api-$ENVIRONMENT" --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)")
+    log_info "Service URL: $service_url"
 
-        # Ensure runtime DID is explicitly set so /.well-known/did.json is env-correct
-        local generator_did
-        if [ "$ENVIRONMENT" = "prod" ]; then
-            generator_did="did:web:api.greenearth.social"
-        else
-            local service_host
-            service_host=$(echo "$service_url" | sed 's|https://||')
-            generator_did="did:web:$service_host"
-        fi
-
+    if [ "$did_in_deploy" = true ]; then
+        log_info "Set GE_FEED_GENERATOR_DID=$generator_did"
+    else
+        # First-ever deploy: the service URL wasn't known until the service
+        # existed, so set the DID now. This creates one extra revision, but only
+        # once in a service's lifetime — every later deploy folds the DID in
+        # above. Carry the git-sha label onto this revision too.
+        local service_host
+        service_host=$(echo "$service_url" | sed 's|https://||')
+        generator_did="did:web:$service_host"
         gcloud run services update "greenearth-api-$ENVIRONMENT" \
             --region="$REGION" \
             --project="$PROJECT_ID" \
+            --labels="git-sha=$GIT_SHA" \
             --update-env-vars="GE_FEED_GENERATOR_DID=$generator_did" \
             --remove-env-vars="GE_FIRESTORE_EMULATOR_HOST,FIRESTORE_EMULATOR_HOST" > /dev/null
-        log_info "Set GE_FEED_GENERATOR_DID=$generator_did"
-    else
-        log_error "Failed to deploy greenearth-api-$ENVIRONMENT"
-        exit 1
+        log_info "Set GE_FEED_GENERATOR_DID=$generator_did (follow-up revision)"
     fi
 }
 
