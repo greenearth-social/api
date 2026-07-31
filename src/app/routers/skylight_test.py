@@ -18,7 +18,7 @@ def es_response():
                         "content": "hello world",
                         "contains_video": True,
                     },
-                    "fields": {MINILM_L12_EMBEDDING_FIELD: [0.1, 0.2]},
+                    "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
                 }
             ]
         }
@@ -28,7 +28,10 @@ def es_response():
 @pytest.fixture(autouse=True)
 def fake_app_es(es_response):
     class FakeEs:
-            async def search(self, *, index=None, query=None, size=None, _source=None, fields=None, **kwargs):
+            async def search(
+                self, *, index=None, query=None, size=None,
+                _source=None, docvalue_fields=None, **kwargs,
+            ):
                 # If this is a lookup by at_uri terms, return a doc. Allow
                 # simulating a 'missing' at_uri that has no embeddings.
                 if isinstance(query, dict) and "terms" in query:

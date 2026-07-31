@@ -37,13 +37,24 @@ def post_has_embedding_source(src: dict) -> bool:
 
 
 def embedding_from_fields(hit: dict) -> list[float] | None:
-    """Extract the MiniLM L12 vector from a hit's ``fields`` retrieval result.
+    """Extract the MiniLM L12 vector from a hit's ``docvalue_fields`` result.
 
-    Unlike ``docvalue_fields`` (which wraps each value in an outer list),
-    the ``fields`` API returns a ``dense_vector`` value as a flat list of
-    floats directly — verified against prod (ES 9.0.0).
+    We request the vector via ``docvalue_fields`` rather than ``fields``:
+    on ES 9.0 (prod), ``fields`` retrieval of a ``dense_vector`` measured
+    ~20% slower end-to-end and had visibly higher ES-side p50/p95, which
+    matches ``dense_vector`` not getting a source-free value fetcher for
+    ``fields`` until ES 9.2 — i.e. ``fields`` falls back to decompressing
+    ``_source`` on this cluster, defeating the point of excluding
+    embeddings from ``_source`` in the first place. ``docvalue_fields``
+    always reads from doc values, never ``_source``, by definition —
+    version-independent. Both populate the same ``hit["fields"]`` response
+    key; ``docvalue_fields`` wraps the value in an outer list, so a single
+    dense_vector value comes back as ``[[...]]``.
     """
-    vec = (hit.get("fields") or {}).get(MINILM_L12_EMBEDDING_FIELD)
+    values = (hit.get("fields") or {}).get(MINILM_L12_EMBEDDING_FIELD)
+    if not values:
+        return None
+    vec = values[0]
     return vec if vec else None
 
 
@@ -212,7 +223,7 @@ async def fetch_post_embeddings(
                     "at_uri",
                     *POST_EMBEDDING_SOURCE_FIELDS,
                 ],
-                fields=[MINILM_L12_EMBEDDING_FIELD],
+                docvalue_fields=[MINILM_L12_EMBEDDING_FIELD],
             )
 
             data = unwrap_es_response(resp)
@@ -275,7 +286,7 @@ async def fetch_post_embeddings_and_metadata(
                     "like_count",
                     *POST_EMBEDDING_SOURCE_FIELDS,
                 ],
-                fields=[MINILM_L12_EMBEDDING_FIELD],
+                docvalue_fields=[MINILM_L12_EMBEDDING_FIELD],
             )
 
             data = unwrap_es_response(resp)

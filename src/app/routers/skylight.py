@@ -133,7 +133,7 @@ async def skylight_search(
             query=body.get("query"),
             size=size,
             _source=SKYLIGHT_SOURCE_FIELDS,
-            fields=[MINILM_L12_EMBEDDING_FIELD],
+            docvalue_fields=[MINILM_L12_EMBEDDING_FIELD],
         )
     except Exception as exc:
         try:
@@ -185,7 +185,7 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
                 query=lookup_query,
                 size=len(payload.at_uris),
                 _source=SKYLIGHT_SOURCE_FIELDS,
-                fields=[MINILM_L12_EMBEDDING_FIELD],
+                docvalue_fields=[MINILM_L12_EMBEDDING_FIELD],
             )
         except Exception as exc:
             logger.exception("Failed to lookup at_uris for similar search")
@@ -248,7 +248,7 @@ async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
                 query=knn_q,
                 size=payload.size,
                 _source=SKYLIGHT_SOURCE_FIELDS,
-                fields=[MINILM_L12_EMBEDDING_FIELD],
+                docvalue_fields=[MINILM_L12_EMBEDDING_FIELD],
             )
     except Exception as exc:
         logger.exception("Elasticsearch similar search failed")

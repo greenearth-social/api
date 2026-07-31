@@ -89,14 +89,14 @@ class TestPostSimilarityGenerator:
                                             "at_uri": "at://post/2",
                                             "content": "liked post two",
                                         },
-                                        "fields": {MINILM_L12_EMBEDDING_FIELD: [0.0, 1.0]},
+                                        "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.0, 1.0]]},
                                     },
                                     {
                                         "_source": {
                                             "at_uri": "at://post/1",
                                             "content": "liked post one",
                                         },
-                                        "fields": {MINILM_L12_EMBEDDING_FIELD: [1.0, 0.0]},
+                                        "fields": {MINILM_L12_EMBEDDING_FIELD: [[1.0, 0.0]]},
                                     },
                                 ]
                             }
