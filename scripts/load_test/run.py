@@ -39,6 +39,14 @@ from datetime import datetime, timezone
 
 import httpx
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # scripts/
@@ -313,29 +321,46 @@ async def run(args: argparse.Namespace) -> None:
             console.print(f"[dim]Feed {rkey}: {uri}[/dim]")
 
         start_wall = time.monotonic()
+        progress = Progress(
+            TextColumn("[bold]running"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TextColumn("sessions"),
+            TimeElapsedColumn(),
+            TextColumn("[dim]eta[/dim]"),
+            TimeRemainingColumn(),
+            console=console,
+            # Off explicitly with --no-progress, and auto-off when stdout isn't a
+            # terminal (piped to a file / CI) so we don't spew control codes.
+            disable=True if args.no_progress else None,
+        )
 
-        async def _launch(session_id: int, delay: float) -> None:
-            now = time.monotonic() - start_wall
-            if delay > now:
-                await asyncio.sleep(delay - now)
-            async with semaphore:
-                user = weighted_cohort_choice(rng, users)
-                await run_session(
-                    session_id,
-                    user,
-                    client=client,
-                    api_url=api_url,
-                    feed_uri=feed_uris[user["feed"]],
-                    headers_for=headers_for,
-                    limit=args.limit,
-                    rng=random.Random(rng.random()),
-                    interaction_share=args.interaction_share,
-                    think_time_ms=args.think_time_ms,
-                    writer=writer,
-                )
+        with progress:
+            task_id = progress.add_task("run", total=len(offsets))
 
-        tasks = [asyncio.create_task(_launch(i, off)) for i, off in enumerate(offsets)]
-        await asyncio.gather(*tasks)
+            async def _launch(session_id: int, delay: float) -> None:
+                now = time.monotonic() - start_wall
+                if delay > now:
+                    await asyncio.sleep(delay - now)
+                async with semaphore:
+                    user = weighted_cohort_choice(rng, users)
+                    await run_session(
+                        session_id,
+                        user,
+                        client=client,
+                        api_url=api_url,
+                        feed_uri=feed_uris[user["feed"]],
+                        headers_for=headers_for,
+                        limit=args.limit,
+                        rng=random.Random(rng.random()),
+                        interaction_share=args.interaction_share,
+                        think_time_ms=args.think_time_ms,
+                        writer=writer,
+                    )
+                progress.advance(task_id)
+
+            tasks = [asyncio.create_task(_launch(i, off)) for i, off in enumerate(offsets)]
+            await asyncio.gather(*tasks)
 
     writer.close()
     _print_summary(writer.records)
@@ -411,6 +436,7 @@ def main() -> None:
     parser.add_argument("--secret", help="Load-test secret (else env / Secret Manager)")
     parser.add_argument("--out", default="results.jsonl")
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--no-progress", action="store_true", help="Hide the progress bar")
     parser.add_argument("--dry-run", action="store_true", help="Print the plan, send nothing")
     parser.add_argument("--force", action="store_true", help="Bypass the high-rate guardrail")
     args = parser.parse_args()
