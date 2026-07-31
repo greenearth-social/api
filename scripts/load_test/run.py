@@ -7,10 +7,13 @@ load-test bypass headers (``X-Load-Test-Secret`` / ``X-Load-Test-DID``) so the
 server skips AT Protocol auth, tags all resulting data as test traffic, and
 skips analytics — see load_test_did in src/app/routers/xrpc.py.
 
-This script only *generates* load and records raw per-request results to a JSONL
-file. Analyze the results afterwards with scripts/load_test/analyze.py, which
-reads that file (and Cloud Monitoring / logs) and never touches Firestore — so
-you can run scripts/load_test/cleanup.py before analysis if you like.
+This script *generates* load, records raw per-request results to a JSONL file,
+and — unless ``--skip-cleanup`` is given — deletes the data it created by
+invoking scripts/load_test/cleanup.py --execute when the run finishes (with
+``--skip-cleanup`` it prints that command for you to run later). Analyze the
+results afterwards with scripts/load_test/analyze.py, which reads only the JSONL
+file (and Cloud Monitoring / logs) and never touches Firestore — so cleanup
+running first never affects analysis.
 
 Run from the api/ directory:
 
@@ -57,6 +60,7 @@ from load_test.lib import (
     assign_feeds,
     build_interactions,
     feed_uri_from_describe,
+    gcloud_env,
     interactions_request_body,
     parse_feed_spec,
     percentiles,
@@ -89,6 +93,7 @@ def _resolve_api_url(args: argparse.Namespace) -> str:
             "value(status.url)",
         ],
         text=True,
+        env=gcloud_env(),
     ).strip()
     if not out:
         raise SystemExit(f"Could not resolve Cloud Run URL for {service}")
@@ -106,6 +111,7 @@ def _resolve_secret(args: argparse.Namespace) -> str:
         return subprocess.check_output(
             ["gcloud", "secrets", "versions", "access", "latest", "--secret", secret_name],
             text=True,
+            env=gcloud_env(),
         ).strip()
     except subprocess.CalledProcessError as exc:  # pragma: no cover - env dependent
         raise SystemExit(f"Could not read {secret_name} from Secret Manager: {exc}") from exc
@@ -366,6 +372,50 @@ async def run(args: argparse.Namespace) -> None:
     _print_summary(writer.records)
     console.print(f"[green]Wrote {args.out} ({len(writer.records)} records)[/green]")
 
+    _run_cleanup(args)
+
+
+def _cleanup_command(args: argparse.Namespace) -> list[str]:
+    """The cleanup invocation matching this run — deletes everything it created."""
+    cleanup_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cleanup.py")
+    return [
+        sys.executable,
+        cleanup_py,
+        "--environment",
+        args.environment,
+        "--users",
+        args.users,
+        "--execute",
+    ]
+
+
+def _cleanup_display(args: argparse.Namespace) -> str:
+    """Copy-pasteable form of the cleanup command (relative, no venv python path)."""
+    return (
+        "pipenv run python scripts/load_test/cleanup.py "
+        f"--environment {args.environment} --users {args.users} --execute"
+    )
+
+
+def _run_cleanup(args: argparse.Namespace) -> None:
+    """Delete this run's data unless --skip-cleanup; if skipped, show how to later."""
+    if args.skip_cleanup:
+        console.print(
+            "\n[yellow]--skip-cleanup: test data left in Firestore. "
+            "Remove it later with:[/yellow]\n"
+            f"  [bold]{_cleanup_display(args)}[/bold]"
+        )
+        return
+    console.print(
+        "\n[bold]Cleaning up test data[/bold] [dim](pass --skip-cleanup to keep it)[/dim]"
+    )
+    result = subprocess.run(_cleanup_command(args))
+    if result.returncode != 0:
+        console.print(
+            f"[red]Cleanup failed (exit {result.returncode}). Re-run manually:[/red]\n"
+            f"  [bold]{_cleanup_display(args)}[/bold]"
+        )
+
 
 def _print_feed_plan(users: list[dict], feed_weights: list[tuple[str, float]]) -> None:
     assigned: dict[str, int] = {}
@@ -437,6 +487,12 @@ def main() -> None:
     parser.add_argument("--out", default="results.jsonl")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--no-progress", action="store_true", help="Hide the progress bar")
+    parser.add_argument(
+        "--skip-cleanup",
+        action="store_true",
+        help="Don't delete the run's data afterwards (cleanup runs by default); "
+        "prints the cleanup command to run later instead.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print the plan, send nothing")
     parser.add_argument("--force", action="store_true", help="Bypass the high-rate guardrail")
     args = parser.parse_args()

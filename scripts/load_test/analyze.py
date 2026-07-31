@@ -33,7 +33,7 @@ from rich.table import Table
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # scripts/
 
-from load_test.lib import CLOUD_RUN_SERVICES, GCP_PROJECT, percentiles
+from load_test.lib import CLOUD_RUN_SERVICES, GCP_PROJECT, gcloud_env, percentiles
 
 console = Console()
 
@@ -106,13 +106,19 @@ def _client_summary(records: list[dict]) -> None:
 # It separates stage from prod, which share the project and the metric type.
 ENV_RESOURCE_LABEL = "namespace"
 
-# The percentiles to pull, mapped to Cloud Monitoring per-series aligners. The
-# distribution metric is reduced server-side, so we never reconstruct it
-# client-side (no cumulative double-counting, no mean-of-means).
-_PERCENTILE_ALIGNERS = {
-    50: "ALIGN_PERCENTILE_50",
-    95: "ALIGN_PERCENTILE_95",
-    99: "ALIGN_PERCENTILE_99",
+# The percentiles to pull, mapped to Cloud Monitoring cross-series reducers.
+# feed.render.duration_ms is exported as a CUMULATIVE DISTRIBUTION, and the
+# ALIGN_PERCENTILE_* *aligners* reject that metric kind. Instead we align with
+# ALIGN_DELTA (valid on cumulative → a per-period delta distribution) and take
+# the percentile with a REDUCE_PERCENTILE_* *reducer*, which accepts
+# distribution-typed series. It's all server-side, so we never reconstruct the
+# distribution client-side (no cumulative double-counting, no mean-of-means);
+# and reducing merges the per-instance distributions before taking the
+# percentile, rather than averaging per-instance percentiles.
+_PERCENTILE_REDUCERS = {
+    50: "REDUCE_PERCENTILE_50",
+    95: "REDUCE_PERCENTILE_95",
+    99: "REDUCE_PERCENTILE_99",
 }
 
 
@@ -127,16 +133,17 @@ def build_percentile_request(
 ):
     """Build a ListTimeSeries request for one percentile, grouped by traffic class.
 
-    Server-side aggregation aligns each series to the requested percentile over
-    the whole window, then reduces across series (e.g. per-instance) within each
-    ``traffic`` label. Filtered to one environment so stage and prod — which
+    Each series is aligned with ALIGN_DELTA over the whole window (converting the
+    cumulative distribution to a single delta distribution per series), then
+    reduced across series (e.g. per-instance) within each ``traffic`` label to the
+    requested percentile. Filtered to one environment so stage and prod — which
     write the same metric type to the same project — are never mixed.
     """
-    aligner = getattr(monitoring_v3.Aggregation.Aligner, _PERCENTILE_ALIGNERS[percentile])
+    reducer = getattr(monitoring_v3.Aggregation.Reducer, _PERCENTILE_REDUCERS[percentile])
     aggregation = monitoring_v3.Aggregation(
         alignment_period={"seconds": alignment_seconds},
-        per_series_aligner=aligner,
-        cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_MEAN,
+        per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_DELTA,
+        cross_series_reducer=reducer,
         group_by_fields=["metric.label.traffic"],
     )
     return monitoring_v3.ListTimeSeriesRequest(
@@ -175,7 +182,7 @@ def _server_metrics(project: str, env: str, start: datetime, end: datetime) -> N
     # traffic -> {percentile -> value}
     by_traffic: dict[str, dict[int, float]] = defaultdict(dict)
     try:
-        for percentile in _PERCENTILE_ALIGNERS:
+        for percentile in _PERCENTILE_REDUCERS:
             request = build_percentile_request(
                 monitoring_v3, project, metric, env, interval, percentile, alignment_seconds
             )
@@ -238,6 +245,7 @@ def _server_logs(service: str, project: str, start: datetime, end: datetime) -> 
                     "1000",
                 ],
                 text=True,
+                env=gcloud_env(),
             )
             count = len([ln for ln in out.splitlines() if ln.strip()])
             console.print(f"  {label}: [bold]{count}[/bold]")

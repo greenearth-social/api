@@ -10,9 +10,9 @@ Four scripts, run in order:
 | Step | Script | What it does |
 |---|---|---|
 | 1 | `select_users.py` | Pick a diverse cohort of real user DIDs → JSON manifest |
-| 2 | `run.py` | Generate load (getFeedSkeleton + paging + sendInteractions), write per-request JSONL |
+| 2 | `run.py` | Generate load (getFeedSkeleton + paging + sendInteractions), write per-request JSONL, then clean up (unless `--skip-cleanup`) |
 | 3 | `analyze.py` | Report client-side latency + server-side percentiles from the JSONL |
-| 4 | `cleanup.py` | Delete the data the run created, restoring the pre-run baseline |
+| 4 | `cleanup.py` | Delete the data the run created, restoring the pre-run baseline (run automatically by step 2; also standalone) |
 
 ## How test traffic is isolated
 
@@ -109,6 +109,11 @@ pipenv run python scripts/load_test/run.py \
   resulting per-feed user counts.
 - `--api-url` overrides URL resolution; `--secret` overrides secret resolution.
 - `--dry-run` prints the schedule and feed assignment, and sends nothing.
+- **Cleanup runs automatically** when the run finishes: `run.py` invokes
+  `cleanup.py --environment <env> --users <manifest> --execute` for you. Pass
+  `--skip-cleanup` to leave the data in place (it then prints the exact cleanup
+  command to run later — e.g. when you want to inspect the data first). Analysis
+  reads only the JSONL, so cleaning up first never affects it.
 
 Prints a client-side latency summary and writes one JSONL record per HTTP call
 (each stamped with the feed it hit).
@@ -135,8 +140,10 @@ has no Cloud Monitoring). Accepts multiple `--results` files.
 
 ### 4. Cleanup
 
-The goal is always to remove **everything** the run created. Dry run by default;
-`--execute` actually deletes.
+Step 2 already runs this for you unless you passed `--skip-cleanup`. Run it
+standalone when you skipped it, want a dry-run preview first, or are mopping up
+after several runs. The goal is always to remove **everything** the run created.
+Dry run by default; `--execute` actually deletes.
 
 ```bash
 # Preview
@@ -186,12 +193,15 @@ The bypass is off in dev by default. To smoke-test the whole flow locally:
    ```
    (The ES API key comes from the container's `GE_ELASTICSEARCH_API_KEY`.)
 
-3. **Run** — point at the api's in-container port and pass the dev secret:
+3. **Run** — point at the api's in-container port and pass the dev secret. Use
+   `--skip-cleanup` here: `run.py` only knows `stage`/`prod` environments, so its
+   automatic cleanup would target real **stage** Firestore, not the dev emulator.
+   Clean up dev explicitly in step 4 instead.
    ```bash
    devctl exec api pipenv run python scripts/load_test/run.py \
        --users scripts/load_test/users.json \
        --api-url http://127.0.0.1:8000 --secret ge-dev-load-test \
-       --rate 20 --duration 1 --interaction-share 0.8 \
+       --rate 20 --duration 1 --interaction-share 0.8 --skip-cleanup \
        --out scripts/load_test/results.jsonl
    ```
 
@@ -207,4 +217,3 @@ The bypass is off in dev by default. To smoke-test the whole flow locally:
 
 Inspect emulator state before/after in the Firestore emulator UI
 (http://localhost:4000/firestore) to confirm cleanup restored the baseline.
-```
