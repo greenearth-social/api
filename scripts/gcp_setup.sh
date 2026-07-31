@@ -179,6 +179,14 @@ get_probe_secret() {
     fi
 }
 
+get_load_test_secret() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "load-test-secret-prod"
+    else
+        echo "load-test-secret-stage"
+    fi
+}
+
 get_perspective_api_key_secret() {
     if [ "$ENVIRONMENT" = "prod" ]; then
         echo "perspective-api-key-prod"
@@ -356,6 +364,32 @@ ensure_probe_secret() {
         --role="roles/secretmanager.secretAccessor" \
         --project="$PROJECT_ID" \
         --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $probe_secret"
+}
+
+ensure_load_test_secret() {
+    # Secret that authorizes simulated load-test traffic (see load_test_did in
+    # routers/xrpc.py). Unlike the dev-session bypass, this is deliberately
+    # provisioned in deployed environments — load testing runs against stage/prod.
+    local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
+    local load_test_secret
+    load_test_secret="$(get_load_test_secret)"
+
+    log_info "Ensuring load-test secret exists: $load_test_secret"
+
+    if ! gcloud secrets describe "$load_test_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+        local value
+        value=$(openssl rand -hex 32)
+        echo -n "$value" | gcloud secrets create "$load_test_secret" --data-file=- --project="$PROJECT_ID"
+        log_info "Load-test secret created: $load_test_secret"
+    else
+        log_info "Load-test secret already exists: $load_test_secret (preserving value)"
+    fi
+
+    gcloud secrets add-iam-policy-binding "$load_test_secret" \
+        --member="serviceAccount:$sa_email" \
+        --role="roles/secretmanager.secretAccessor" \
+        --project="$PROJECT_ID" \
+        --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $load_test_secret"
 }
 
 create_service_account() {
@@ -763,6 +797,7 @@ main() {
     ensure_inference_api_key_secret_access
     ensure_feed_context_secret
     ensure_probe_secret
+    ensure_load_test_secret
 
     # Fetch ES API key from K8s unless disabled or already provided
     if [ "$FETCH_ES_KEY" = true ] && [ -z "$GE_ELASTICSEARCH_API_KEY" ]; then

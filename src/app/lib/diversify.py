@@ -61,9 +61,11 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[tuple[CandidatePost, flo
     decayed_same_author_counts = [0] * n
 
     rec = current_recorder()
-    # (at_uri, relevance, score, author_penalty, content_penalty) per pick, for
-    # the algorithm-agnostic diversification debug record.
-    diag: list[tuple[str, float, float, float, float]] | None = [] if rec is not None else None
+    # (at_uri, relevance, score, author_penalty, content_penalty, similarity_score)
+    # per pick, for the algorithm-agnostic diversification debug record.
+    diag: list[tuple[str, float, float, float, float, float]] | None = (
+        [] if rec is not None else None
+    )
 
     def _calculate_author_penalty(i: int) -> float:
         return BETA * AUTHOR_WEIGHT * decayed_same_author_counts[i]
@@ -84,11 +86,22 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[tuple[CandidatePost, flo
             pick_score = (1 - BETA) * norm_scores[best]
             author_penalty = 0.0
             content_penalty = 0.0
+            # Nothing selected yet, so there is nothing to be similar to.
+            similarity_score = 0.0
         else:
             best = max(remaining, key=_calculate_penalized_score)
             pick_score = _calculate_penalized_score(best)
             author_penalty = _calculate_author_penalty(best)
             content_penalty = _calculate_content_penalty(best)
+            # The combined similarity the penalties were derived from
+            # (i.e. total_penalty / BETA), recorded raw. Higher means more
+            # similar to what is already selected — less diverse. Deliberately
+            # not clamped to 0..1: repeated authors can push it above 1, and
+            # keeping that visible is what distinguishes a really homogenous
+            # slate from a merely repetitive one.
+            similarity_score = decayed_same_author_counts[best] * AUTHOR_WEIGHT + (
+                1 - AUTHOR_WEIGHT
+            ) * decayed_max_content_sims[best]
 
         if diag is not None:
             diag.append(
@@ -98,6 +111,7 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[tuple[CandidatePost, flo
                     pick_score,
                     author_penalty,
                     content_penalty,
+                    similarity_score,
                 )
             )
 

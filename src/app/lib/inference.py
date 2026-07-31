@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import time
+from typing import Literal, assert_never
 
 from .elasticsearch import (
     fetch_recent_liked_post_uris_and_times,
@@ -27,6 +28,7 @@ _POST_TOWER_UUID_STALE_GRACE_SEC = 3600
 _post_tower_uuid_cache: dict[tuple[str, str], tuple[str, float]] = {}
 _post_tower_uuid_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
+HistoryMode = Literal["actual", "empty"]
 
 class InferenceResponseFormatError(RuntimeError):
     """Raised when inference-service returns a successful but malformed response."""
@@ -207,35 +209,54 @@ async def compute_user_embedding(
     inference_base_url: str,
     inference_api_key: str,
     source: str,
-) -> list[float]:
+    history_mode: HistoryMode,
+    allow_empty_history: bool = True,
+) -> list[float] | None:
     async with timed(logger, "two_tower_user_side", user_did=user_did):
-        user_history_vectors: list[list[float]] = []
-        history_author_dids: list[str] = []
-        user_history_liked_uris, _ = await fetch_recent_liked_post_uris_and_times(es, user_did)
-
         rec = current_recorder()
 
-        if not user_history_liked_uris:
-            logger.info("No likes found for user %s", user_did)
-            if rec is not None:
-                rec.record_user_features(source, [], 0)
-        else:
-            user_history_embedding_pairs: list[tuple[str, list[float], str, int]] = await fetch_post_embeddings_and_metadata(
-                es, user_history_liked_uris,
-            )
-            if rec is not None:
-                rec.record_user_features(
-                    source, user_history_liked_uris, len(user_history_embedding_pairs)
-                )
-            if not user_history_embedding_pairs:
-                logger.info(
-                    "No embeddings found for %d liked posts of user %s",
-                    len(user_history_liked_uris),
-                    user_did,
-                )
-            else:
-                user_history_vectors = [embedding for _, embedding, _, _ in user_history_embedding_pairs]
-                history_author_dids = [author_did for _, _, author_did, _ in user_history_embedding_pairs]
+        # override allow_empty_history when we are running just for cold start debug feed
+        if history_mode == "empty":
+            allow_empty_history = True
+
+        match history_mode:
+            case "actual":
+                user_history_vectors: list[list[float]] = []
+                history_author_dids: list[str] = []
+                user_history_liked_uris, _ = await fetch_recent_liked_post_uris_and_times(es, user_did)
+
+                if not user_history_liked_uris:
+                    logger.info("No likes found for user %s", user_did)
+                    if rec is not None:
+                        rec.record_user_features(source, [], 0)
+                    if not allow_empty_history:
+                        return None
+                else:
+                    user_history_embedding_pairs: list[tuple[str, list[float], str, int]] = await fetch_post_embeddings_and_metadata(
+                        es, user_history_liked_uris,
+                    )
+                    if rec is not None:
+                        rec.record_user_features(
+                            source, user_history_liked_uris, len(user_history_embedding_pairs)
+                        )
+                    if not user_history_embedding_pairs:
+                        logger.info(
+                            "No embeddings found for %d liked posts of user %s",
+                            len(user_history_liked_uris),
+                            user_did,
+                        )
+                        if not allow_empty_history:
+                            return None
+                    else:
+                        user_history_vectors = [embedding for _, embedding, _, _ in user_history_embedding_pairs]
+                        history_author_dids = [author_did for _, _, author_did, _ in user_history_embedding_pairs]
+            case "empty":
+                user_history_vectors = []
+                history_author_dids = []
+                if rec is not None:
+                    rec.record_user_features(source, [], 0)
+            case _:
+                assert_never(history_mode)
 
         output_user_embedding_list = await predict_user_tower_single(
             user_history_vectors,

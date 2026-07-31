@@ -52,6 +52,7 @@ def test_list_models(app):
             "two_tower",
             "perspective",
             "heavy_ranker",
+            "heavy_ranker_empty_history",
         ]
     }
 

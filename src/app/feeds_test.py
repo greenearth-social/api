@@ -66,6 +66,30 @@ class TestFeedsRegistry:
             assert cfg.min_rank_score == pytest.approx(0.425)
             assert cfg.min_mmr_score is not None
 
+    def test_cold_start_feed_uses_empty_history_models(self):
+        cfg = FEEDS["cold-start"]
+        assert cfg.public is False
+        assert [
+            (spec.name, spec.weight)
+            for spec in cfg.gen_request_template.generators
+        ] == [
+            ("followed_users", 0.40),
+            ("two_tower_empty_history", 0.30),
+            ("popularity", 0.30),
+        ]
+        assert cfg.rank_request_template is not None
+        assert [
+            (spec.name, spec.weight)
+            for spec in cfg.rank_request_template.models
+        ] == [
+            ("heavy_ranker_empty_history", 1.0),
+            ("perspective", 1.0),
+        ]
+        assert cfg.diversify is True
+        assert cfg.max_render_share == pytest.approx(0.5)
+        assert cfg.min_rank_score == pytest.approx(0.425)
+        assert cfg.min_mmr_score == pytest.approx(-0.05)
+
     def test_unranked_feeds_have_no_slate_cutoffs(self):
         for feed_name, cfg in FEEDS.items():
             if cfg.rank_request_template is not None:

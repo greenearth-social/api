@@ -109,16 +109,21 @@ class MetricCollector:
 
         When recorded on a request path, the metric is automatically tagged
         with an ``endpoint`` label naming the originating API endpoint (e.g.
-        ``get_feed_skeleton`` vs ``candidates_generate``). This is read from a
-        ContextVar set by the endpoint middleware, so every callsite gets it
-        for free. An explicitly passed ``endpoint`` attribute wins.
+        ``get_feed_skeleton`` vs ``candidates_generate``) and a ``traffic``
+        label naming the traffic class (``real`` | ``probe`` | ``load_test``).
+        Both are read from ContextVars set on the request path, so every
+        callsite gets them for free — including background tasks, which inherit
+        the context at spawn time. Explicitly passed attributes win.
         """
-        from .request_context import get_endpoint
+        from .request_context import get_endpoint, get_traffic
 
         labels: dict[str, str] = dict(attributes)
         endpoint = get_endpoint()
         if endpoint is not None:
             labels.setdefault("endpoint", endpoint)
+        traffic = get_traffic()
+        if traffic is not None:
+            labels.setdefault("traffic", traffic)
         attrs = labels or None
         if name.endswith("_count"):
             self._get_counter(name).add(int(value), attrs)
