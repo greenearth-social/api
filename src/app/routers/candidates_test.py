@@ -1,6 +1,7 @@
 """Tests for the candidates router."""
 
 import os
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException, status
@@ -14,6 +15,34 @@ from ..security import verify_api_key
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def stub_inference():
+    """Stub two_tower's inference calls.
+
+    These are router tests — they cover dispatch, weighting, dedup and infill,
+    not the towers. ``two_tower`` is the generator that reaches the fake's kNN
+    branch (and so returns a single, distinct candidate), which is what the
+    routing cases below need; stubbing inference keeps them off the network.
+    """
+    with (
+        patch(
+            "app.lib.candidates.two_tower.get_inference_settings",
+            return_value=("https://inference", "api-key"),
+        ),
+        patch(
+            "app.lib.candidates.two_tower.get_cached_post_tower_uuid",
+            new_callable=AsyncMock,
+            return_value="post-tower-uuid",
+        ),
+        patch(
+            "app.lib.candidates.two_tower.compute_user_embedding",
+            new_callable=AsyncMock,
+            return_value=[0.1, 0.2],
+        ),
+    ):
+        yield
+
 
 @pytest.fixture(autouse=True)
 def fake_app_es():
@@ -77,7 +106,7 @@ def fake_app_es():
                             ]
                         }
                     }
-                # kNN search result (post_similarity)
+                # kNN search result (two_tower)
                 return {
                     "hits": {
                         "hits": [
@@ -121,7 +150,7 @@ def test_list_generators():
     resp = client.get("/candidates/generators")
     assert resp.status_code == 200
     data = resp.json()
-    assert "post_similarity" in data["generators"]
+    assert "two_tower" in data["generators"]
     assert "popularity" in data["generators"]
     assert "random_posts" in data["generators"]
     assert "followed_users" in data["generators"]
@@ -132,18 +161,18 @@ def test_generate_single_generator():
     resp = client.post(
         "/candidates/generate",
         json={
-            "generators": [{"name": "post_similarity"}],
+            "generators": [{"name": "two_tower"}],
             "user_did": "did:plc:user1",
             "num_candidates": 5,
         },
     )
     assert resp.status_code == 200
     data = resp.json()
-    # post_similarity returns 1 result from the fake; no infill by default
+    # two_tower returns 1 result from the fake; no infill by default
     assert len(data["candidates"]) == 1
     assert data["candidates"][0]["at_uri"] == "at://result/1"
     assert data["candidates"][0]["score"] == 0.88
-    assert data["candidates"][0]["generator_name"] == "post_similarity"
+    assert data["candidates"][0]["generator_name"] == "two_tower"
 
 
 def test_generate_popularity():
@@ -187,7 +216,7 @@ def test_generate_multiple_generators():
         "/candidates/generate",
         json={
             "generators": [
-                {"name": "post_similarity", "weight": 3},
+                {"name": "two_tower", "weight": 3},
                 {"name": "popularity", "weight": 1},
             ],
             "user_did": "did:plc:user1",
@@ -198,7 +227,7 @@ def test_generate_multiple_generators():
     data = resp.json()
     at_uris = [c["at_uri"] for c in data["candidates"]]
     gen_names = {c["generator_name"] for c in data["candidates"]}
-    assert "post_similarity" in gen_names
+    assert "two_tower" in gen_names
     assert "popularity" in gen_names
     # No duplicate at_uris
     assert len(at_uris) == len(set(at_uris))
@@ -211,7 +240,7 @@ def test_generate_dedup_keeps_first():
         "/candidates/generate",
         json={
             "generators": [
-                {"name": "post_similarity", "weight": 1},
+                {"name": "two_tower", "weight": 1},
                 {"name": "popularity", "weight": 1},
             ],
             "user_did": "did:plc:user1",
@@ -227,12 +256,12 @@ def test_generate_dedup_keeps_first():
 def test_infill_tops_up_when_primary_returns_few():
     """Infill generator fills remaining slots when primaries fall short."""
     client = TestClient(app, headers=HEADERS)
-    # post_similarity fake returns only 1 result; requesting 5 with infill
+    # two_tower fake returns only 1 result; requesting 5 with infill
     # should trigger the infill generator to fill the gap.
     resp = client.post(
         "/candidates/generate",
         json={
-            "generators": [{"name": "post_similarity"}],
+            "generators": [{"name": "two_tower"}],
             "user_did": "did:plc:user1",
             "num_candidates": 5,
             "infill": "popularity",
@@ -241,7 +270,7 @@ def test_infill_tops_up_when_primary_returns_few():
     assert resp.status_code == 200
     data = resp.json()
     gen_names = {c["generator_name"] for c in data["candidates"]}
-    assert "post_similarity" in gen_names
+    assert "two_tower" in gen_names
     assert "popularity" in gen_names
     # Should have de-duplicated mix, capped at num_candidates
     assert len(data["candidates"]) <= 5
@@ -257,7 +286,7 @@ def test_infill_not_called_when_enough_results():
             "generators": [{"name": "popularity"}],
             "user_did": "did:plc:user1",
             "num_candidates": 2,
-            "infill": "post_similarity",
+            "infill": "two_tower",
         },
     )
     assert resp.status_code == 200
@@ -270,11 +299,11 @@ def test_infill_not_called_when_enough_results():
 def test_no_infill_returns_fewer_candidates():
     """Without infill, fewer candidates than requested is fine."""
     client = TestClient(app, headers=HEADERS)
-    # post_similarity returns 1 result, requesting 10, no infill
+    # two_tower returns 1 result, requesting 10, no infill
     resp = client.post(
         "/candidates/generate",
         json={
-            "generators": [{"name": "post_similarity"}],
+            "generators": [{"name": "two_tower"}],
             "user_did": "did:plc:user1",
             "num_candidates": 10,
         },
@@ -282,7 +311,7 @@ def test_no_infill_returns_fewer_candidates():
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["candidates"]) == 1
-    assert data["candidates"][0]["generator_name"] == "post_similarity"
+    assert data["candidates"][0]["generator_name"] == "two_tower"
 
 
 def test_infill_custom_generator():
@@ -294,13 +323,13 @@ def test_infill_custom_generator():
             "generators": [{"name": "popularity"}],
             "user_did": "did:plc:user1",
             "num_candidates": 5,
-            "infill": "post_similarity",
+            "infill": "two_tower",
         },
     )
     assert resp.status_code == 200
     data = resp.json()
     gen_names = {c["generator_name"] for c in data["candidates"]}
-    assert "post_similarity" in gen_names
+    assert "two_tower" in gen_names
 
 
 def test_generate_unknown_generator_returns_404():
@@ -317,11 +346,11 @@ def test_generate_unknown_generator_returns_404():
 
 def test_generate_unknown_infill_returns_404():
     client = TestClient(app, headers=HEADERS)
-    # post_similarity returns only 1 result so infill will be attempted
+    # two_tower returns only 1 result so infill will be attempted
     resp = client.post(
         "/candidates/generate",
         json={
-            "generators": [{"name": "post_similarity"}],
+            "generators": [{"name": "two_tower"}],
             "user_did": "did:plc:user1",
             "num_candidates": 10,
             "infill": "nonexistent",
@@ -340,7 +369,7 @@ def test_generate_requires_auth():
         resp = client.post(
             "/candidates/generate",
             json={
-                "generators": [{"name": "post_similarity"}],
+                "generators": [{"name": "two_tower"}],
                 "user_did": "did:plc:user1",
             },
         )
@@ -396,7 +425,7 @@ def test_generate_default_num_candidates():
     resp = client.post(
         "/candidates/generate",
         json={
-            "generators": [{"name": "post_similarity"}],
+            "generators": [{"name": "two_tower"}],
             "user_did": "did:plc:user1",
         },
     )

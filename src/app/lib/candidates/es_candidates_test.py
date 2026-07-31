@@ -111,9 +111,9 @@ class TestKnnSearchPosts:
         })
         candidates = await knn_search_posts(
             es, [0.1, 0.2], num_candidates=5, search_field=MINILM_L12_EMBEDDING_FIELD,
-            generator_name="post_similarity"
+            generator_name="two_tower"
         )
-        assert candidates[0].generator_name == "post_similarity"
+        assert candidates[0].generator_name == "two_tower"
 
     @pytest.mark.asyncio
     async def test_default_freshness_filter_is_inside_knn(self):

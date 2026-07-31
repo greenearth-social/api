@@ -3,7 +3,6 @@ import pytest
 from app.feeds import FEEDS, SOCIAL_RADIUS_PRESETS
 
 CANDIDATE_ONLY_FEEDS = {
-    "post-similarity": "post_similarity",
     "followed-users": "followed_users",
     "network-likes": "network_likes",
     "popularity": "popularity",

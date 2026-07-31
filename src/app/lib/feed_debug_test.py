@@ -26,7 +26,7 @@ from ..models import (
 
 def _request() -> CandidateGenerateRequest:
     return CandidateGenerateRequest(
-        generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
+        generators=[GeneratorSpec(name="popularity", weight=1.0)],
         user_did="did:plc:user",
         num_candidates=10,
         video_only=False,
@@ -43,7 +43,7 @@ def _candidate(
         content=content,
         minilm_l12_embedding=embedding,
         score=1.0,
-        generator_name="post_similarity",
+        generator_name="popularity",
         author_did=author,
     )
 
@@ -68,7 +68,7 @@ class TestBuildDocument:
         rec.set_generate_request(_request())
         rec.record_generator_output(
             CandidateResult(
-                generator_name="post_similarity",
+                generator_name="popularity",
                 candidates=[_candidate("at://p/1"), _candidate("at://p/2")],
             )
         )
@@ -105,7 +105,7 @@ class TestBuildDocument:
         assert doc.ranker_model == "two_tower"
         assert doc.diversify is True
         assert len(doc.generator_outputs) == 1
-        assert doc.generator_outputs[0].generator_name == "post_similarity"
+        assert doc.generator_outputs[0].generator_name == "popularity"
         assert len(doc.final_candidates) == 2
         assert doc.ranking is not None and len(doc.ranking.rankings) == 2
         assert doc.order_after_rank == ["at://p/1", "at://p/2"]
@@ -179,7 +179,7 @@ class TestBuildDocument:
         rec.set_generate_request(_request())
         rec.record_generator_output(
             CandidateResult(
-                generator_name="post_similarity",
+                generator_name="popularity",
                 candidates=[_candidate("at://p/1", author="did:plc:a")],
             )
         )

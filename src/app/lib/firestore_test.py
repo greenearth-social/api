@@ -722,7 +722,7 @@ def _feed_debug_doc() -> FeedDebugDocument:
         username=USERNAME,
         feed_name=FEED_NAME,
         generate_request=CandidateGenerateRequest(
-            generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
+            generators=[GeneratorSpec(name="popularity", weight=1.0)],
             user_did=USER_DID,
             num_candidates=10,
             video_only=False,

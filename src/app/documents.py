@@ -206,8 +206,8 @@ class FeedDebugUserFeatures(BaseModel):
     """Inputs used to assemble a user-side representation during a feed load.
 
     Captured per pipeline stage that builds user features (e.g. the
-    ``post_similarity`` search vector and the two-tower user embedding) so we
-    can see which liked posts drove the result.
+    two-tower user embedding) so we can see which liked posts drove the
+    result.
     """
 
     source: str = Field(

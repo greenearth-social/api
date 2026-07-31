@@ -32,29 +32,6 @@ def fake_app_es(es_response):
                 self, *, index=None, query=None, size=None,
                 _source=None, docvalue_fields=None, **kwargs,
             ):
-                # If this is a lookup by at_uri terms, return a doc. Allow
-                # simulating a 'missing' at_uri that has no embeddings.
-                if isinstance(query, dict) and "terms" in query:
-                    at_list = query.get("terms", {}).get("at_uri")
-                    # If the test asks for an at_uri named "missing", return
-                    # a document without embeddings to trigger a 404 path.
-                    if isinstance(at_list, (list, tuple)) and "missing" in at_list:
-                        hit = {
-                            "_source": {
-                                **es_response["hits"]["hits"][0]["_source"],
-                                "at_uri": "at://missing",
-                            },
-                            "fields": {},
-                        }
-                        return {"hits": {"hits": [hit]}}
-                    hit = {
-                        "_source": {**es_response["hits"]["hits"][0]["_source"], "at_uri": "at://1"},
-                        "fields": es_response["hits"]["hits"][0]["fields"],
-                    }
-                    return {"hits": {"hits": [hit]}}
-                # If it's a knn search (similar), return same hit list
-                if isinstance(query, dict) and "knn" in query:
-                    return es_response
                 return es_response
 
     # ensure a predictable API key for tests and restore previous value
@@ -100,77 +77,3 @@ def test_search_returns_embedding():
             }
         ]
     }
-
-
-def test_similar_with_at_uris():
-    client = TestClient(app, headers={"X-API-Key": "testkey"})
-    resp = client.post("/skylight/similar", json={"at_uris": ["at://1"], "size": 1})
-    assert resp.status_code == 200
-
-    expected = encode_float32_b64([0.1, 0.2])
-    assert resp.json() == {
-        "results": [
-            {
-                "at_uri": "at://1",
-                "content": "hello world",
-                "minilm_l12_embedding": expected,
-                "score": 1.5,
-                "generator_name": None,
-                "author_did": None,
-                "author_username": None,
-                "contains_images": None,
-                "contains_video": None,
-                "image_count": None,
-                "video_count": None,
-                "external_uri": None,
-                "like_count": None,
-            }
-        ]
-    }
-
-
-def test_similar_with_embeddings():
-    client = TestClient(app, headers={"X-API-Key": "testkey"})
-    b64 = encode_float32_b64([0.1, 0.2])
-    resp = client.post("/skylight/similar", json={"embeddings": [b64], "size": 1})
-    assert resp.status_code == 200
-    expected = b64
-    assert resp.json() == {
-        "results": [
-            {
-                "at_uri": "at://1",
-                "content": "hello world",
-                "minilm_l12_embedding": expected,
-                "score": 1.5,
-                "generator_name": None,
-                "author_did": None,
-                "author_username": None,
-                "contains_images": None,
-                "contains_video": None,
-                "image_count": None,
-                "video_count": None,
-                "external_uri": None,
-                "like_count": None,
-            }
-        ]
-    }
-
-
-def test_similar_no_embeddings_for_at_uris_returns_404():
-    client = TestClient(app, headers={"X-API-Key": "testkey"})
-    resp = client.post("/skylight/similar", json={"at_uris": ["missing"], "size": 1})
-    assert resp.status_code == 404
-
-
-def test_similar_invalid_base64_returns_400():
-    client = TestClient(app, headers={"X-API-Key": "testkey"})
-    resp = client.post("/skylight/similar", json={"embeddings": ["not-base64"], "size": 1})
-    assert resp.status_code == 400
-
-
-def test_similar_embedding_dimension_mismatch_returns_400():
-    client = TestClient(app, headers={"X-API-Key": "testkey"})
-    b1 = encode_float32_b64([0.1, 0.2])
-    b2 = encode_float32_b64([0.1])
-    resp = client.post("/skylight/similar", json={"embeddings": [b1, b2], "size": 1})
-    assert resp.status_code == 400
