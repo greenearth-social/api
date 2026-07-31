@@ -37,9 +37,12 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import contextmanager
 
+from google.api_core.exceptions import InvalidArgument
 from google.cloud.firestore_v1.base_query import FieldFilter
 from rich.console import Console
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # scripts/
@@ -90,51 +93,143 @@ def _restrict_dids(path: str | None) -> set[str] | None:
     return {u["did"] for u in data.get("users", [])}
 
 
+# Firestore WriteBatch caps at 500 operations; also the page size we stream so no
+# single read stream stays open long enough to hit a gRPC deadline.
+DELETE_BATCH = 500
+
+
+async def _count_query(query) -> int | None:
+    """Total matching docs via a count() aggregation, or None if unavailable.
+
+    Only used to give the progress bar a denominator; a failure (e.g. an emulator
+    without aggregation support) just yields an indeterminate bar.
+    """
+    try:
+        result = await query.count().get()
+        return int(result[0][0].value)
+    except Exception:
+        return None
+
+
+@contextmanager
+def _delete_progress(label: str, total: int | None):
+    """A rich progress bar for a delete phase, yielding an ``advance(n)`` callback.
+
+    Auto-hidden when stdout isn't a TTY (piped output / CI).
+    """
+    progress = Progress(
+        TextColumn(f"[bold]deleting {label}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        disable=None,
+    )
+    with progress:
+        task = progress.add_task(label, total=total)
+        yield lambda n: progress.advance(task, n)
+
+
 async def _delete_test_users(db, execute: bool) -> tuple[int, int]:
     """Delete all users flagged created_by_load_test. Returns (deleted, skipped)."""
     query = db.collection(USERS_COLLECTION).where(
         filter=FieldFilter("created_by_load_test", "==", True)
     )
+    # Drain the query into memory first so the read stream isn't held open across
+    # the (slow) per-user recursive deletes below — the same deadline trap that
+    # streaming-while-deleting hits on the interactions collection.
+    flagged: list[tuple[str, str | None]] = []
+    async for doc in query.stream():
+        data = doc.to_dict() or {}
+        flagged.append((data.get("user_did", doc.id), data.get("username")))
+
     deleted = skipped = 0
     table = Table(title="Load-test-created users", title_justify="left")
     table.add_column("did")
     table.add_column("username")
     table.add_column("action")
 
-    async for doc in query.stream():
-        data = doc.to_dict() or {}
-        did = data.get("user_did", doc.id)
-        if not execute:
-            table.add_row(did, data.get("username") or "—", "[yellow]would delete[/yellow]")
+    if not execute:
+        for did, username in flagged:
+            table.add_row(did, username or "—", "[yellow]would delete[/yellow]")
             deleted += 1
-            continue
+        console.print(table)
+        return deleted, skipped
 
-        # Re-read immediately before deleting: a real request may have cleared
-        # the flag between the query and now (the user became ours).
-        ref = db.collection(USERS_COLLECTION).document(user_doc_id(did))
-        fresh = await ref.get()
-        fresh_data = fresh.to_dict() or {}
-        if not fresh_data.get("created_by_load_test"):
-            table.add_row(did, data.get("username") or "—", "[dim]skipped (now real)[/dim]")
-            skipped += 1
-            continue
-        await db.recursive_delete(ref)
-        table.add_row(did, data.get("username") or "—", "[red]deleted[/red]")
-        deleted += 1
+    with _delete_progress("users", len(flagged)) as advance:
+        for did, username in flagged:
+            # Re-read immediately before deleting: a real request may have cleared
+            # the flag between the query and now (the user became ours).
+            ref = db.collection(USERS_COLLECTION).document(user_doc_id(did))
+            fresh = await ref.get()
+            if not (fresh.to_dict() or {}).get("created_by_load_test"):
+                table.add_row(did, username or "—", "[dim]skipped (now real)[/dim]")
+                skipped += 1
+            else:
+                await db.recursive_delete(ref)
+                table.add_row(did, username or "—", "[red]deleted[/red]")
+                deleted += 1
+            advance(1)
 
     console.print(table)
     return deleted, skipped
 
 
-async def _delete_flagged(db, collection: str, execute: bool) -> int:
-    """Delete all documents in ``collection`` with load_test == True."""
-    query = db.collection(collection).where(filter=FieldFilter("load_test", "==", True))
-    count = 0
-    async for doc in query.stream():
-        count += 1
-        if execute:
-            await doc.reference.delete()
-    return count
+async def _delete_flagged(db, collection: str, execute: bool, *, label: str | None = None) -> int:
+    """Delete all documents in ``collection`` with load_test == True.
+
+    Reads and deletes are kept separate and bounded. Each pass streams at most
+    ``DELETE_BATCH`` matching docs (a short-lived stream) and removes them in one
+    batched commit; deleted docs stop matching the filter, so the next pass
+    returns the following batch — no cursor needed, and nothing held open long
+    enough to trip a gRPC deadline (the failure mode of streaming the whole query
+    while deleting one document at a time).
+    """
+    base = db.collection(collection).where(filter=FieldFilter("load_test", "==", True))
+
+    if not execute:
+        # Dry run: a plain read stream is fast (no interleaved writes) — just count.
+        count = 0
+        async for _ in base.stream():
+            count += 1
+        return count
+
+    total = await _count_query(base)
+    deleted = 0
+    with _delete_progress(label or collection, total) as advance:
+        while True:
+            refs = [doc.reference async for doc in base.limit(DELETE_BATCH).stream()]
+            if not refs:
+                break
+            await _batch_delete(db, refs, advance)
+            deleted += len(refs)
+    return deleted
+
+
+async def _batch_delete(db, refs: list, advance) -> None:
+    """Delete ``refs`` in one batched commit, halving on 'transaction too big'.
+
+    A commit is capped both at 500 writes *and* at a maximum number of index-entry
+    mutations. Deleting heavily-indexed documents (feed_cache caches whole rendered
+    feeds) can exceed the latter well under 500 docs, raising INVALID_ARGUMENT. We
+    can't know a safe per-collection size up front, so recover by splitting the
+    batch and retrying — down to a single doc, whose failure is a real error.
+    """
+    if not refs:
+        return
+    batch = db.batch()
+    for ref in refs:
+        batch.delete(ref)
+    try:
+        await batch.commit()
+    except InvalidArgument:
+        if len(refs) == 1:
+            raise
+        mid = len(refs) // 2
+        await _batch_delete(db, refs[:mid], advance)
+        await _batch_delete(db, refs[mid:], advance)
+        return
+    advance(len(refs))
 
 
 async def _delete_suffixed_buckets(db, dids: set[str], execute: bool) -> int:
