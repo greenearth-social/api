@@ -20,6 +20,11 @@ GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 # Inference configuration
 GE_INFERENCE_BASE_URL=""
 
+# Short git sha of the deployed code, resolved by require_clean_worktree().
+# Stamped onto the Cloud Run revision (env var + label) and onto debug feed
+# records so we can identify exactly what code is live (see issue #228).
+GIT_SHA=""
+
 # PostHog configuration. Each environment is a separate PostHog project (separate
 # API key, provisioned via scripts/gcp_setup.sh), but all projects live on the same
 # PostHog Cloud host, so the host is a constant here rather than a per-env secret.
@@ -66,6 +71,30 @@ resolve_inference_base_url() {
     inference_domain="$(default_inference_domain)"
     GE_INFERENCE_BASE_URL="https://$inference_domain"
     log_info "Using mapped inference URL: $GE_INFERENCE_BASE_URL"
+}
+
+require_clean_worktree() {
+    log_info "Verifying git working tree is clean..."
+
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        log_error "Not inside a git repository — cannot verify the deployed code."
+        log_error "Run deploy.sh from a checkout of the api repo."
+        exit 1
+    fi
+
+    # Refuse to deploy with uncommitted changes so the stamped git sha always
+    # matches the code that ships. Deploying an unpushed branch is fine — only a
+    # dirty tree is rejected (see issue #228).
+    if [ -n "$(git status --porcelain)" ]; then
+        log_error "Working tree has uncommitted changes. Commit or stash them before deploying"
+        log_error "so the deployed git sha reflects the running code."
+        git status --short
+        exit 1
+    fi
+
+    GIT_SHA="$(git rev-parse --short=7 HEAD)"
+    export GE_GIT_SHA="$GIT_SHA"  # picked up by publish_feed.py during feed sync
+    log_info "Deploying git sha: $GIT_SHA ($(git rev-parse --abbrev-ref HEAD))"
 }
 
 validate_config() {
@@ -220,6 +249,9 @@ deploy_api_service() {
     # Set environment variables. The app derives its default log level from
     # ENVIRONMENT (stage/prod -> WARNING, else INFO). Override with GE_LOG_LEVEL.
     deploy_cmd="$deploy_cmd --set-env-vars=ENVIRONMENT=$ENVIRONMENT"
+    # Stamp the deployed git sha so the app can report it (e.g. /health) and so
+    # revisions are identifiable for rollbacks (see issue #228).
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_GIT_SHA=$GIT_SHA"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$GE_ELASTICSEARCH_URL"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
@@ -255,6 +287,10 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --memory=512Mi"
     deploy_cmd="$deploy_cmd --timeout=$API_REQUEST_TIMEOUT"
     deploy_cmd="$deploy_cmd --concurrency=80"
+
+    # Tag the service/revision with the git sha so past deployments are
+    # identifiable when picking a rollback target (see issue #228).
+    deploy_cmd="$deploy_cmd --labels=git-sha=$GIT_SHA"
 
     # Allow unauthenticated access (adjust based on your needs)
     deploy_cmd="$deploy_cmd --allow-unauthenticated"
@@ -384,6 +420,7 @@ main() {
     log_info "Region: $REGION"
     log_info "Environment: $ENVIRONMENT"
 
+    require_clean_worktree
     validate_config
     verify_vpc_connector
 
