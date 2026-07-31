@@ -3,11 +3,12 @@
 import pytest
 
 from .elasticsearch import (
+    fetch_post_embeddings,
     fetch_post_embeddings_and_metadata,
     fetch_recent_liked_post_uris,
     fetch_recent_liked_post_uris_and_times,
 )
-from .embeddings import MINILM_L12_EMBEDDING_FIELD, MINILM_L12_EMBEDDING_KEY
+from .embeddings import MINILM_L12_EMBEDDING_FIELD
 
 
 class FakeEs:
@@ -20,7 +21,16 @@ class FakeEs:
         self.calls: list[dict] = []
 
     async def search(
-        self, *, index=None, query=None, knn=None, size=None, sort=None, _source=None, **kwargs
+        self,
+        *,
+        index=None,
+        query=None,
+        knn=None,
+        size=None,
+        sort=None,
+        _source=None,
+        docvalue_fields=None,
+        **kwargs,
     ):
         self.calls.append({
             "index": index,
@@ -29,6 +39,7 @@ class FakeEs:
             "size": size,
             "sort": sort,
             "_source": _source,
+            "docvalue_fields": docvalue_fields,
         })
         return self._responses.get(index, self._default)
 
@@ -170,18 +181,12 @@ class TestFetchPostEmbeddingsAndMetadata:
                 "hits": {
                     "hits": [
                         {
-                            "_source": {
-                                "at_uri": "at://2",
-                                "content": "two",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
-                            }
+                            "_source": {"at_uri": "at://2", "content": "two"},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
                         },
                         {
-                            "_source": {
-                                "at_uri": "at://1",
-                                "content": "one",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
-                            }
+                            "_source": {"at_uri": "at://1", "content": "one"},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
                         },
                     ]
                 }
@@ -194,11 +199,11 @@ class TestFetchPostEmbeddingsAndMetadata:
         ]
         assert es.calls[0]["_source"] == [
             "at_uri",
-            MINILM_L12_EMBEDDING_FIELD,
             "author_did",
             "like_count",
             "content",
         ]
+        assert es.calls[0]["docvalue_fields"] == [MINILM_L12_EMBEDDING_FIELD]
 
     @pytest.mark.asyncio
     async def test_returns_empty_for_empty_input_with_metadata_shape(self):
@@ -214,17 +219,12 @@ class TestFetchPostEmbeddingsAndMetadata:
                 "hits": {
                     "hits": [
                         {
-                            "_source": {
-                                "at_uri": "at://1",
-                                "content": "one",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
-                            }
+                            "_source": {"at_uri": "at://1", "content": "one"},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
                         },
                         {
-                            "_source": {
-                                "at_uri": "at://2",
-                                "embeddings": {},
-                            }
+                            "_source": {"at_uri": "at://2"},
+                            "fields": {},
                         },
                         {"_source": {"at_uri": "at://3"}},
                     ]
@@ -241,11 +241,8 @@ class TestFetchPostEmbeddingsAndMetadata:
                 "hits": {
                     "hits": [
                         {
-                            "_source": {
-                                "at_uri": "at://1",
-                                "content": "one",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
-                            }
+                            "_source": {"at_uri": "at://1", "content": "one"},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
                         },
                         {
                             "_source": {
@@ -253,8 +250,8 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "content": "   ",
                                 "media": [{"alt_text": ""}],
                                 "video_transcript": None,
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
-                            }
+                            },
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
                         },
                     ]
                 }
@@ -278,8 +275,8 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "author_did": "did:plc:two",
                                 "like_count": 22,
                                 "content": "two",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
-                            }
+                            },
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
                         },
                         {
                             "_source": {
@@ -287,8 +284,8 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "author_did": "did:plc:one",
                                 "like_count": 11,
                                 "content": "one",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
-                            }
+                            },
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
                         },
                     ]
                 }
@@ -301,11 +298,11 @@ class TestFetchPostEmbeddingsAndMetadata:
         ]
         assert es.calls[0]["_source"] == [
             "at_uri",
-            MINILM_L12_EMBEDDING_FIELD,
             "author_did",
             "like_count",
             "content",
         ]
+        assert es.calls[0]["docvalue_fields"] == [MINILM_L12_EMBEDDING_FIELD]
 
     @pytest.mark.asyncio
     async def test_keeps_posts_with_missing_author_dids_and_like_counts(self):
@@ -314,11 +311,8 @@ class TestFetchPostEmbeddingsAndMetadata:
                 "hits": {
                     "hits": [
                         {
-                            "_source": {
-                                "at_uri": "at://1",
-                                "content": "one",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
-                            }
+                            "_source": {"at_uri": "at://1", "content": "one"},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
                         },
                         {
                             "_source": {
@@ -326,15 +320,15 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "author_did": 123,
                                 "like_count": "2",
                                 "content": "two",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
-                            }
+                            },
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
                         },
                         {
                             "_source": {
                                 "at_uri": "at://3",
                                 "author_did": "did:plc:three",
-                                "embeddings": {},
-                            }
+                            },
+                            "fields": {},
                         },
                     ]
                 }
@@ -357,8 +351,8 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "at_uri": "at://1",
                                 "author_did": "did:plc:one",
                                 "content": "some content",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.1, 0.2]},
-                            }
+                            },
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
                         },
                         {
                             "_source": {
@@ -367,8 +361,8 @@ class TestFetchPostEmbeddingsAndMetadata:
                                 "content": "",
                                 "media": [{"alt_text": "   "}],
                                 "video_transcript": "",
-                                "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.3, 0.4]},
-                            }
+                            },
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
                         },
                     ]
                 }
@@ -376,3 +370,86 @@ class TestFetchPostEmbeddingsAndMetadata:
         })
         vecs = await fetch_post_embeddings_and_metadata(es, ["at://1", "at://2"])
         assert vecs == [("at://1", [0.1, 0.2], "did:plc:one", 0)]
+
+
+class TestFetchPostEmbeddings:
+    @pytest.mark.asyncio
+    async def test_returns_embeddings_in_requested_uri_order(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {"at_uri": "at://2", "content": "two"},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                        },
+                        {
+                            "_source": {"at_uri": "at://1", "content": "one"},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                        },
+                    ]
+                }
+            }
+        })
+        vecs = await fetch_post_embeddings(es, ["at://1", "at://2"])
+        assert vecs == [
+            ("at://1", [0.1, 0.2]),
+            ("at://2", [0.3, 0.4]),
+        ]
+        assert es.calls[0]["_source"] == ["at_uri", "content"]
+        assert es.calls[0]["docvalue_fields"] == [MINILM_L12_EMBEDDING_FIELD]
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_for_empty_input(self):
+        es = FakeEs()
+        vecs = await fetch_post_embeddings(es, [])
+        assert vecs == []
+        assert len(es.calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_skips_posts_without_embeddings(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {"at_uri": "at://1", "content": "one"},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                        },
+                        {
+                            "_source": {"at_uri": "at://2"},
+                            "fields": {},
+                        },
+                        {"_source": {"at_uri": "at://3"}},
+                    ]
+                }
+            }
+        })
+        vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
+        assert vecs == [("at://1", [0.1, 0.2])]
+
+    @pytest.mark.asyncio
+    async def test_skips_embeddings_without_source_text(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {"at_uri": "at://1", "content": "one"},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://2",
+                                "content": "   ",
+                                "media": [{"alt_text": ""}],
+                                "video_transcript": None,
+                            },
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                        },
+                    ]
+                }
+            }
+        })
+        vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
+        assert vecs == [("at://1", [0.1, 0.2])]
