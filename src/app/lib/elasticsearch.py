@@ -84,8 +84,8 @@ async def fetch_recent_liked_post_uris(
     ``subject_uri`` field from each hit.
 
     When a request cache is active the result is memoized so repeat
-    calls within the same request (e.g. post_similarity and the two-tower
-    ranker) share a single ES round-trip.
+    calls within the same request (e.g. the two-tower generator and the
+    two-tower ranker) share a single ES round-trip.
     """
     if isinstance(user_dids, str):
         user_dids = [user_dids]
@@ -145,8 +145,8 @@ async def fetch_recent_liked_post_uris_and_times(
     Excludes posts without ``created_at`` time.
 
     When a request cache is active the result is memorized so repeat
-    calls within the same request (e.g. post_similarity and the two-tower
-    ranker) share a single ES round-trip.
+    calls within the same request (e.g. the two-tower generator and the
+    two-tower ranker) share a single ES round-trip.
     """
     if isinstance(user_dids, str):
         user_dids = [user_dids]

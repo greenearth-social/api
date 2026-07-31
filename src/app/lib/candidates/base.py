@@ -41,7 +41,7 @@ class CandidateGenerator(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """Unique name identifying this generator (e.g. ``post_similarity``)."""
+        """Unique name identifying this generator (e.g. ``two_tower``)."""
         ...
 
     @abstractmethod
