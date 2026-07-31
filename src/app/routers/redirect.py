@@ -3,6 +3,8 @@ from urllib.parse import ParseResult, parse_qs, urlencode, urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
+from ..lib.posthog_client import get_posthog_client, track_redirect
+
 router = APIRouter(tags=["redirect"])
 
 _UTM_KEYS = ("utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term")
@@ -38,4 +40,5 @@ async def redirect(
     new_query = urlencode({k: v[0] for k, v in existing.items()})
 
     destination = urlunparse(parsed._replace(query=new_query))
+    track_redirect(get_posthog_client(), to, extra)
     return RedirectResponse(url=destination, status_code=302)
