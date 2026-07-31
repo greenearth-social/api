@@ -54,7 +54,6 @@ BEST_OF_FRIENDS_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{BEST_OF
 FEED_URI_FROM_APPVIEW = f"at://{PUBLISHER_DID}/app.bsky.feed.generator/{FEED_RKEY}"
 TEST_USERNAME = "testuser.bsky.app"
 CANDIDATE_ONLY_FEEDS = (
-    ("post-similarity", "post_similarity"),
     ("followed-users", "followed_users"),
     ("network-likes", "network_likes"),
     ("popularity", "popularity"),

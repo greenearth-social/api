@@ -208,23 +208,6 @@ FEEDS: dict[str, FeedConfig] = {
     ),
 
     ### (Private) Pure Candidate Generator Feeds, mostly for testing and debugging ###
-    "post-similarity": FeedConfig(
-        display_name="Post Similarity",
-        description="Development feed — post-similarity candidates only.",
-        internal_rkey="gh-ps",
-        internal_display_name="gh PS",
-        avatar="assets/icons/post-similarity.png",
-        diversify=False,
-        exclude_seen_posts=False,
-        gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=[
-                GeneratorSpec(name="post_similarity", weight=1.0),
-            ],
-            num_candidates=30,
-            video_only=False,
-            exclude_uris=[],
-        ),
-    ),
     "followed-users": FeedConfig(
         display_name="Followed Users",
         description="Development feed — followed-users candidates only.",

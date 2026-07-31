@@ -22,16 +22,12 @@ from .generate import (
     run_generate,
 )
 from .popularity import PopularityCandidateGenerator
-from .post_similarity import PostSimilarityCandidateGenerator
 from .random_posts import RandomPostsCandidateGenerator
 from .followed_users import FollowedUsersCandidateGenerator
 from .network_likes import NetworkLikesCandidateGenerator
 from .two_tower import TwoTowerCandidateGenerator
 
 # Register built-in generators
-_post_similarity = PostSimilarityCandidateGenerator()
-register_generator(_post_similarity)
-
 _popularity = PopularityCandidateGenerator()
 register_generator(_popularity)
 
@@ -69,7 +65,6 @@ __all__ = [
     "register_generator",
     "run_generate",
     "PopularityCandidateGenerator",
-    "PostSimilarityCandidateGenerator",
     "RandomPostsCandidateGenerator",
     "FollowedUsersCandidateGenerator",
     "NetworkLikesCandidateGenerator",
