@@ -10,6 +10,7 @@ import time
 import aiohttp
 
 from ..models import CandidatePost
+from .client_metrics import aiohttp_trace_config
 from .http_client import get_http_client
 from .pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from .telemetry import timed
@@ -164,7 +165,10 @@ class PerspectiveClient:
                 enable_cleanup_closed=True,
                 keepalive_timeout=45,
             )
-            self._session = aiohttp.ClientSession(connector=connector)
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                trace_configs=[aiohttp_trace_config("perspective")],
+            )
         return self._session
 
     async def close(self) -> None:

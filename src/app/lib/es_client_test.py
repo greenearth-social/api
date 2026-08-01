@@ -329,3 +329,26 @@ async def test_search_records_error_count_on_other_exception(monkeypatch):
         await wrapped.search(index="posts", op="likes")
 
     assert ("es.query.error_count", 1, {"op": "likes", "error": "other"}) in collector.records
+
+
+@pytest.mark.asyncio
+async def test_search_records_in_flight_count(monkeypatch):
+    release = asyncio.Event()
+
+    class _BlockingES:
+        async def search(self, **kwargs):
+            await release.wait()
+            return {"took": 1, "hits": {"hits": []}}
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_BlockingES())
+    t1 = asyncio.create_task(wrapped.search(index="posts", op="knn"))
+    t2 = asyncio.create_task(wrapped.search(index="posts", op="likes"))
+    await asyncio.sleep(0.01)
+    release.set()
+    await asyncio.gather(t1, t2)
+
+    in_flight = sorted(v for n, v, _ in collector.records if n == "es.client.in_flight")
+    assert in_flight == [1, 2]

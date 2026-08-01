@@ -291,7 +291,8 @@ class TestPerspectiveClientScore:
                     enable_cleanup_closed=True,
                     keepalive_timeout=45,
                 )
-                mock_session_cls.assert_called_once_with(connector=mock_connector.return_value)
+                assert mock_session_cls.call_args.kwargs["connector"] == mock_connector.return_value
+                assert len(mock_session_cls.call_args.kwargs["trace_configs"]) == 1
 
         asyncio.run(_build())
 
@@ -481,6 +482,26 @@ class _RecordingCollector:
 
     def record(self, name, value, **attrs):
         self.records.append((name, value, attrs))
+
+
+def test_get_session_attaches_trace_config(monkeypatch):
+    import asyncio
+
+    captured = {}
+
+    class _FakeSession:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(perspective_module.aiohttp, "ClientSession", _FakeSession)
+    client = perspective_module.PerspectiveClient.__new__(perspective_module.PerspectiveClient)
+    client._session = None
+
+    async def _build():
+        client._get_session()
+
+    asyncio.run(_build())
+    assert len(captured["trace_configs"]) == 1
 
 
 class TestScoreCandidatesFailureCounters:

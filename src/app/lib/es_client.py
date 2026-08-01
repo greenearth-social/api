@@ -10,6 +10,9 @@ Records metrics:
 - ``es.query.took_ms``: server-side time from ES response (histogram, labeled by ``op``; omitted if missing)
 - ``es.query.error_count``: counted on any exception, labeled by ``op`` and
   ``error`` (``"timeout"`` | ``"connection"`` | ``"other"``)
+- ``es.client.in_flight``: concurrent in-flight ``.search()`` calls sampled
+  per call (histogram, labeled by ``op``) — the queue-position signal for
+  this wrapper (see issue #344)
 
 Other attributes (e.g. ``close``, ``indices``) are exposed transparently
 via ``__getattr__`` so the wrapper is a drop-in for the underlying
@@ -75,6 +78,7 @@ class SlowQueryLoggingES:
 
     def __init__(self, wrapped) -> None:
         self._wrapped = wrapped
+        self._in_flight = 0
 
     def __getattr__(self, name: str):
         # Delegated for every attribute other than the ones explicitly
@@ -86,6 +90,10 @@ class SlowQueryLoggingES:
         start = time.monotonic()
         timed_out = False
         took_ms: float | None = None
+        self._in_flight += 1
+        collector = get_metric_collector()
+        if collector is not None:
+            collector.record("es.client.in_flight", self._in_flight, op=op)
         try:
             resp = await self._wrapped.search(*args, **kwargs)
             took_ms = _extract_took(resp)
@@ -104,6 +112,7 @@ class SlowQueryLoggingES:
             _record_query_error(op, "other")
             raise
         finally:
+            self._in_flight -= 1
             if not timed_out:
                 elapsed_ms = (time.monotonic() - start) * 1000
                 _record_query_metrics(op, elapsed_ms, took_ms)
