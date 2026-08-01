@@ -121,10 +121,21 @@ latency, error rate, or degradation.
 
 ### 4.1 Attribution instrumentation (goal 2 — small PRs, deploy first)
 
-The principle: **every dependency call gets a client-side duration and a
-server-side duration; the gap is queuing/scheduling on our side.** ingex
-already does this for writes (`duration_ms` vs `took_ms`); the api adopts it
-for reads.
+Two principles:
+
+1. **Every dependency call gets a client-side duration and a server-side
+   duration; the gap is queuing/scheduling on our side.** ingex already
+   does this for writes (`duration_ms` vs `took_ms`); the api adopts it
+   for reads.
+2. **Every concurrency-limited client exposes its queue position
+   directly.** #344's pool starvation is one instance of a general class —
+   any pooled client (ES aiohttp pool, Perspective session, shared httpx
+   client) or capped parallel workflow can silently queue work while its
+   backend idles. Where the transport has hooks (aiohttp), record pool
+   **wait time**; where it doesn't (httpx, the ES wrapper), record
+   **in-flight count** — a p95 in-flight pinned at the configured cap is
+   saturation even before latency shows it. Caps get threshold lines on
+   the dashboard, so "at the cap" is visible at a glance.
 
 - **`es.query.duration_ms` + `es.query.took_ms`** — recorded in the
   `es_client.py` search wrapper (the single choke point; it already measures
@@ -143,10 +154,35 @@ for reads.
 - **inference-service metrics** — port api's `lib/metrics.py`;
   `inference.predict.duration_ms` by model. Pairs with the api's
   client-side `rank.model.duration_ms` for the same gap analysis.
+- **Client queue-position metrics** (`lib/client_metrics.py`) — the
+  generalization of principle 2:
+  - `client.pool.wait_ms` (label `client`) via an aiohttp `TraceConfig`
+    (`on_connection_queued_start/end`) on the Perspective session — the
+    exact signal that would have named #250's head-of-line blocking, and a
+    tripwire if a connector cap ever returns.
+  - `client.connect.duration_ms` (label `client`) via
+    `on_connection_create_start/end` — connection-churn storms (TLS
+    renegotiation, fd races) show as create-rate/latency spikes.
+  - `client.in_flight` (label `host`) via httpx event hooks on the shared
+    `http_client` — request hook increments and records the count,
+    response hook decrements. Sustained p95 at the configured
+    `max_connections` cap ⇒ pool saturation for that host
+    (inference, Bluesky).
+  - `es.client.in_flight` (label `op`) in the ES search wrapper — same
+    idea; threshold line at `GE_ES_CONNECTIONS_PER_NODE` (100). #344
+    cause 1 would have pinned this at 10 while `took` stayed at ~10ms.
 - **External-call outcomes** — `perspective.score.failure_count` with
   `status_code` (429 = rate limit vs timeouts), same for Bluesky
-  `get_follows`. Distinguishes "they throttled us" from "we couldn't
-  schedule the response."
+  `get_follows` (`bsky.follows.failure_count`) and the inference client
+  (`rank.model.failure_count`). Distinguishes "they throttled us" from "we
+  couldn't schedule the response." The `status_code` label distinguishes a
+  **`connection`** class (fd/transport-level errors: `ClientOSError`,
+  `ConnectError`) from HTTP statuses and timeouts, and the ES wrapper gets
+  a matching `es.query.error_count` (`error` label: `timeout` |
+  `connection` | `other`): #344's uvloop fd race poisoned connections
+  across Perspective, inference, *and* ES simultaneously — the diagnostic
+  signature is connection-class failures spiking on several dependencies
+  at once, and these counters make that one chart.
 
 ### 4.2 The bottleneck dashboard (goal 1 — dashboard as code)
 
@@ -164,7 +200,12 @@ was really for. Layout mirrors the playbook so a human reads top-to-bottom:
    p95 by model paired with `inference.predict` p95 (gap chart);
    `perspective` p95 + outcome codes.
 3. **api saturation row** — `eventloop.lag_ms` p95 per instance; Cloud Run
-   instance count, CPU/mem utilization, concurrency.
+   instance count, CPU/mem utilization, concurrency; **dependency-failure
+   chart**: all client-side failure counters (`es.query.error_count`,
+   `perspective.score.failure_count`, `bsky.follows.failure_count`,
+   `rank.model.failure_count`) by status class on one time axis — a
+   simultaneous multi-dependency connection-error spike is the #344
+   fd-race signature.
 4. **ES row** — `es.query.took_ms` vs `duration_ms` by `op` (gap chart);
    search thread-pool queue/rejected; mean search latency.
 5. **Page-cache row** — Appendix A queries: major faults/s, device read
@@ -197,6 +238,9 @@ Read regressions off the dashboard as a decision table. Patterns, with the
 | `rank.model.duration_ms` ↑ with `inference.predict.duration_ms` ↑ | **inference-service capacity** | — |
 | `rank.model.duration_ms` ↑ with `inference.predict.duration_ms` flat | **api-side queuing to inference** | — |
 | `perspective` duration ↑ with 429s | **external rate limit** | — |
+| `es.query.duration − took` gap ↑ on every `op`, `took` flat, `eventloop.lag_ms` flat, CPU well below 100%; `es.client.in_flight` pinned at the pool cap | **ES client connection-pool starvation** (client-side queuing per dependency, not loop-wide) | #344 cause 1: pool of 10 exhausted by kNN, trivial terms lookups queued to p50 ≈ 918ms while ES `took` ≈ 10ms, CPU ≈ 64%. Pool now 100 (`GE_ES_CONNECTIONS_PER_NODE`) |
+| Any dependency's client-side duration ↑ with its server-side signal flat; that client's `pool.wait_ms` ↑ or `in_flight` pinned at its cap | **client-side queuing for that dependency** — the general #344-class pattern (Perspective session, shared httpx pool, any capped parallel workflow) | #250: Perspective head-of-line blocking under `asyncio.gather` bursts (pre-dates these metrics) |
+| Connection-class failures (`status_code=connection` / `error=connection`) spike on ≥2 dependencies at once; backend `took` / server latencies flat | **process-wide client/transport pathology** (event-loop or fd bookkeeping, e.g. uvloop fd race) | #344 cause 2: `Bad file descriptor` storms hit Perspective, inference, and ES together during both 150qpm windows; fixed by `--loop asyncio` |
 | `freshness_sec` ↑ during serving load test | **serving load starving ingest (shared ES)** | — |
 
 The playbook lives next to the dashboard config and in the load-test README.
