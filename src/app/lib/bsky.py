@@ -120,8 +120,13 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
                     ValueError,
                     FollowedUsersLookupError,
                 ) as exc:
-                    _count_failure("bsky.follows.failure_count", exc)
                     if followed_dids:
+                        # Terminal outcome for this lookup (partial success) —
+                        # count it here since it never reaches the outer
+                        # handlers below. A bare re-raise, in contrast, is
+                        # counted once by whichever outer handler catches it,
+                        # so we must not double-count here.
+                        _count_failure("bsky.follows.failure_count", exc)
                         logger.warning(
                             "Returning %s partial followed users for %s after "
                             "follow lookup page failed: %s",
