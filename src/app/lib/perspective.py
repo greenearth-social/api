@@ -21,6 +21,27 @@ _SCORE_TIMEOUT_SECONDS = 1.0
 _SCORE_ATTEMPTS = 2
 
 
+def get_metric_collector():
+    """Indirection point so tests can monkeypatch at module level."""
+    from .metrics import get_metric_collector as _get
+    return _get()
+
+
+def _status_code_label(exc: BaseException) -> str:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, (aiohttp.ClientOSError, aiohttp.ClientConnectorError)):
+        return "connection"
+    status = getattr(exc, "status", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    return str(status) if status else "other"
+
+
+def _count_failure(metric: str, exc: BaseException) -> None:
+    collector = get_metric_collector()
+    if collector is not None:
+        collector.record(metric, 1, status_code=_status_code_label(exc))
+
+
 def _perspective_url() -> str:
     """Perspective API endpoint URL, overridable via GE_PERSPECTIVE_HOST for local profiling."""
     host = os.environ.get("GE_PERSPECTIVE_HOST", _PERSPECTIVE_HOST_DEFAULT)
@@ -279,6 +300,9 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
             return None
         if not await _rate_limit_acquire():
             logger.warning("Perspective API minute quota exhausted; using missing score for post %s", c.at_uri)
+            collector = get_metric_collector()
+            if collector is not None:
+                collector.record("perspective.score.failure_count", 1, status_code="quota")
             return None
         try:
             return await client.score(c.content)
@@ -290,6 +314,7 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
             )
             return None  # expected — not a degradation
         except aiohttp.ClientResponseError as exc:
+            _count_failure("perspective.score.failure_count", exc)
             if exc.status == 429:
                 logger.warning(
                     "Perspective API rate limited for post %s; using missing score", c.at_uri
@@ -305,6 +330,7 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
                 ))
             return None
         except Exception as exc:
+            _count_failure("perspective.score.failure_count", exc)
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)
             ctx = current_pipeline_context()
             if ctx is not None:

@@ -475,6 +475,108 @@ class TestClosePerspectiveClient:
 # ---------------------------------------------------------------------------
 
 
+class _RecordingCollector:
+    def __init__(self):
+        self.records = []
+
+    def record(self, name, value, **attrs):
+        self.records.append((name, value, attrs))
+
+
+class TestScoreCandidatesFailureCounters:
+    """perspective.score.failure_count is recorded with a status_code label
+    for every external-reason scoring failure, but not for expected content
+    behavior (unsupported language)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_perspective_client(self, monkeypatch):
+        monkeypatch.setattr(perspective_module, "_client", None)
+
+    @pytest.mark.asyncio
+    async def test_counts_429_failures(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=429)
+        )
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        result = await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert result == {"at://a": None}
+        assert ("perspective.score.failure_count", 1, {"status_code": "429"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_timeout_failures(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(side_effect=TimeoutError())
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert ("perspective.score.failure_count", 1, {"status_code": "timeout"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_connection_errors(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(side_effect=aiohttp.ClientOSError(9, "Bad file descriptor"))
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert ("perspective.score.failure_count", 1, {"status_code": "connection"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_other_500_failures(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=500)
+        )
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert ("perspective.score.failure_count", 1, {"status_code": "500"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_quota_exhaustion(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        fake = _fake_client([0.9])
+        perspective_module._rate_bucket_minute = int(__import__("time").time()) // 60
+        perspective_module._rate_count = perspective_module._QUOTA_RPM
+        monkeypatch.setattr(perspective_module, "_client", fake)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert ("perspective.score.failure_count", 1, {"status_code": "quota"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_does_not_count_language_not_supported(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(side_effect=PerspectiveLanguageNotSupportedError("ja"))
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert not [r for r in collector.records if r[0] == "perspective.score.failure_count"]
+
+
 class TestScoreCandidatesDegradation:
     """Unexpected Perspective errors record DegradationEvent; expected errors don't."""
 

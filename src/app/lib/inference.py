@@ -10,6 +10,8 @@ import os
 import time
 from typing import Literal, assert_never
 
+import httpx
+
 from .elasticsearch import (
     fetch_recent_liked_post_uris_and_times,
     fetch_post_embeddings_and_metadata,
@@ -20,6 +22,27 @@ from .request_context import get_request_id
 from .http_client import get_http_client
 
 logger = logging.getLogger(__name__)
+
+
+def get_metric_collector():
+    """Indirection point so tests can monkeypatch at module level."""
+    from .metrics import get_metric_collector as _get
+    return _get()
+
+
+def _status_code_label(exc: BaseException) -> str:
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    if isinstance(exc, (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError)):
+        return "connection"
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return str(status) if status else "other"
+
+
+def _count_failure(metric: str, exc: BaseException) -> None:
+    collector = get_metric_collector()
+    if collector is not None:
+        collector.record(metric, 1, status_code=_status_code_label(exc))
 
 # Keep the post-tower UUID fresh, but allow transient /ready failures to use
 # the last known UUID briefly instead of disabling two-tower candidates.
@@ -148,13 +171,20 @@ async def predict_user_tower_single(
 
     client = get_http_client()
     async with timed(logger, "user_tower_http", n_history=len(history_embeddings)):
-        resp = await client.post(url, json=payload, headers=headers)
+        try:
+            resp = await client.post(url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            _count_failure("rank.model.failure_count", exc)
+            raise
     if resp.is_error:
         logger.error(
             "user-tower predict failed status=%s body=%s",
             resp.status_code,
             resp.text,
         )
+        collector = get_metric_collector()
+        if collector is not None:
+            collector.record("rank.model.failure_count", 1, status_code=str(resp.status_code))
         raise_inference_response_error("user-tower", resp.status_code, resp.text)
     payload = _decode_inference_json("user-tower", resp)
     return _extract_inference_outputs("user-tower", payload)
@@ -191,13 +221,20 @@ async def predict_heavy_ranker_single_user(
         n_history=len(history_embeddings),
         n_candidates=len(candidate_post_embeddings)
     ):
-        resp = await client.post(url, json=payload, headers=headers)
+        try:
+            resp = await client.post(url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            _count_failure("rank.model.failure_count", exc)
+            raise
     if resp.is_error:
         logger.error(
             "ranker predict failed status=%s body=%s",
             resp.status_code,
             resp.text,
         )
+        collector = get_metric_collector()
+        if collector is not None:
+            collector.record("rank.model.failure_count", 1, status_code=str(resp.status_code))
         raise_inference_response_error("ranker", resp.status_code, resp.text)
     payload = _decode_inference_json("ranker", resp)
     return _extract_inference_outputs("ranker", payload)
