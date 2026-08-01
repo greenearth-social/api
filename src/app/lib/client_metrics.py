@@ -22,6 +22,23 @@ def get_metric_collector():
 
 
 def aiohttp_trace_config(client: str) -> aiohttp.TraceConfig:
+    """Build an aiohttp ``TraceConfig`` that records pool-queue signals.
+
+    ``client.pool.wait_ms`` only emits when the session's ``TCPConnector``
+    has a connection-pool limit: aiohttp only enters its
+    ``_wait_for_available_connection`` path (which fires
+    ``on_connection_queued_start``/``_end``) when a request has to wait for
+    a slot. With an unbounded connector (``limit=0``/``limit_per_host=0`` —
+    e.g. Perspective's, deliberately unbounded since issue #250 to avoid
+    head-of-line blocking) there is never a slot to wait for, so this
+    metric structurally can never fire. It stays attached anyway as a
+    tripwire: if a connection-pool limit is ever reintroduced on such a
+    client, `client.pool.wait_ms` will start reporting queueing immediately
+    without further code changes. For clients with no such hook (or an
+    unbounded connector), track in-flight request counts instead (see
+    `InFlightTransport` for httpx, or track a manual counter around the
+    call site for aiohttp — as `PerspectiveClient.score` does).
+    """
     tc = aiohttp.TraceConfig()
 
     async def _queued_start(session, ctx, params):

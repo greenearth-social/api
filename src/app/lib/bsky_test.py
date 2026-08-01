@@ -116,6 +116,26 @@ class TestGetFollowedUserDidsFailureCounters:
         assert failures == [("bsky.follows.failure_count", 1, {"status_code": "503"})]
 
     @pytest.mark.asyncio
+    async def test_counts_malformed_first_page_with_no_partials(
+        self, fake_http_client, monkeypatch
+    ):
+        """A malformed first-page response (not a list of follows) raises
+        FollowedUsersLookupError through the inner handler's bare re-raise,
+        then through the outer `except FollowedUsersLookupError: raise`
+        clause -- it must still be counted exactly once, matching the
+        malformed-response-with-partials case."""
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
+
+        fake_http_client.response = FakeResponse({"follows": {"did": "not-a-list"}})
+
+        with pytest.raises(FollowedUsersLookupError, match="Unexpected follows response"):
+            await get_followed_user_dids("did:plc:x", limit=10)
+
+        failures = [r for r in collector.records if r[0] == "bsky.follows.failure_count"]
+        assert failures == [("bsky.follows.failure_count", 1, {"status_code": "other"})]
+
+    @pytest.mark.asyncio
     async def test_counts_once_for_partial_result_fallback(
         self, fake_http_client, monkeypatch, caplog
     ):

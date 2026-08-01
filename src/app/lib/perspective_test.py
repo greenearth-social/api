@@ -148,6 +148,22 @@ class _FakeResponseCM:
         return False
 
 
+class _BlockingResponseCM:
+    """Async context manager whose __aenter__ blocks on an asyncio.Event,
+    to overlap concurrent score() calls in flight-tracking tests."""
+
+    def __init__(self, event: "asyncio.Event", response):
+        self._event = event
+        self._response = response
+
+    async def __aenter__(self):
+        await self._event.wait()
+        return self._response
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
 class _TimeoutCM:
     """Async context manager that raises TimeoutError on entry, simulating a
     request that blew past aiohttp.ClientTimeout."""
@@ -322,6 +338,49 @@ class TestPerspectiveClientScore:
             client = PerspectiveClient()
 
         asyncio.run(client.close())  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_score_records_in_flight_and_resets_after_completion(self, monkeypatch):
+        """client.in_flight is the saturation signal for Perspective's
+        unbounded connector: two concurrent score() calls against a blocked
+        session record samples [1, 2]; a later, non-overlapping call
+        records 1 again -- the counter doesn't leak across calls."""
+        import asyncio
+
+        from .perspective import PerspectiveClient
+
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        release = asyncio.Event()
+        response = _fake_response(status=200, json_body=_SUCCESS_BODY)
+        session = MagicMock()
+        session.post = MagicMock(return_value=_BlockingResponseCM(release, response))
+
+        with patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}):
+            client = PerspectiveClient()
+
+        with patch.object(PerspectiveClient, "_get_session", return_value=session):
+            t1 = asyncio.create_task(client.score("hi"))
+            t2 = asyncio.create_task(client.score("there"))
+            await asyncio.sleep(0.01)  # let both reach the blocked response
+            release.set()
+            await asyncio.gather(t1, t2)
+
+            concurrent_samples = [
+                (v, a) for n, v, a in collector.records if n == "client.in_flight"
+            ]
+            assert sorted(v for v, _ in concurrent_samples) == [1, 2]
+            assert all(a == {"host": "commentanalyzer.googleapis.com"} for _, a in concurrent_samples)
+
+            # A later, non-overlapping call starts from a reset counter.
+            release2 = asyncio.Event()
+            release2.set()
+            session.post = MagicMock(return_value=_BlockingResponseCM(release2, response))
+            await client.score("again")
+
+        later_samples = [v for n, v, _ in collector.records if n == "client.in_flight"]
+        assert later_samples[-1] == 1
 
 
 class TestScoreCandidates:
