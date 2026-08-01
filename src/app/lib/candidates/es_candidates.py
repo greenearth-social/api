@@ -77,6 +77,7 @@ async def knn_search_posts(
     ):
         resp = await es.search(
             index=POSTS_KNN_INDEX,
+            op="knn",
             knn=knn_clause,
             size=num_candidates,
             _source=CANDIDATE_SOURCE_FIELDS,
