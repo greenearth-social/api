@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """Analyze a load-test run (issue api#189).
 
-Reports client-side latency/error stats from the generator's JSONL output and
-server-side signals from Cloud Monitoring and Cloud Run logs, comparing
-load-test traffic against real traffic over the run window.
+Reports client-side latency/error stats from the generator's JSONL output,
+then prints a deep-link to the Cloud Monitoring dashboard (with the run
+window pre-set) for server-side signals — Cloud Monitoring metrics and
+Cloud Run logs, comparing load-test traffic against real traffic over the
+run window. See ``monitoring/README.md`` for the dashboard playbook.
 
 This script deliberately reads **nothing from Firestore** — all cohort/DID
 context it needs is stamped on every record in the results file — so it can be
 run after scripts/load_test/cleanup.py has already removed the test data.
 
-Run from the api/ directory (server-side sections need
-``gcloud auth application-default login``):
+Run from the api/ directory:
 
     pipenv run python scripts/load_test/analyze.py --results results.jsonl \
         --environment stage
-
-``--no-server`` skips the Cloud Monitoring / logs sections (client-side only).
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -33,11 +31,9 @@ from rich.table import Table
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # scripts/
 
-from load_test.lib import CLOUD_RUN_SERVICES, GCP_PROJECT, percentiles
+from load_test.lib import GCP_PROJECT, dashboard_url, percentiles
 
 console = Console()
-
-METRIC_PREFIX = "custom.googleapis.com/greenearth-api"
 
 
 def _read_records(paths: list[str]) -> list[dict]:
@@ -101,150 +97,6 @@ def _client_summary(records: list[dict]) -> None:
     )
 
 
-# OTel resource attribute service.namespace (set to the environment in
-# metrics.py) surfaces as this monitored-resource label in Cloud Monitoring.
-# It separates stage from prod, which share the project and the metric type.
-ENV_RESOURCE_LABEL = "namespace"
-
-# The percentiles to pull, mapped to Cloud Monitoring per-series aligners. The
-# distribution metric is reduced server-side, so we never reconstruct it
-# client-side (no cumulative double-counting, no mean-of-means).
-_PERCENTILE_ALIGNERS = {
-    50: "ALIGN_PERCENTILE_50",
-    95: "ALIGN_PERCENTILE_95",
-    99: "ALIGN_PERCENTILE_99",
-}
-
-
-def build_percentile_request(
-    monitoring_v3,
-    project: str,
-    metric_type: str,
-    env: str,
-    interval,
-    percentile: int,
-    alignment_seconds: int,
-):
-    """Build a ListTimeSeries request for one percentile, grouped by traffic class.
-
-    Server-side aggregation aligns each series to the requested percentile over
-    the whole window, then reduces across series (e.g. per-instance) within each
-    ``traffic`` label. Filtered to one environment so stage and prod — which
-    write the same metric type to the same project — are never mixed.
-    """
-    aligner = getattr(monitoring_v3.Aggregation.Aligner, _PERCENTILE_ALIGNERS[percentile])
-    aggregation = monitoring_v3.Aggregation(
-        alignment_period={"seconds": alignment_seconds},
-        per_series_aligner=aligner,
-        cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_MEAN,
-        group_by_fields=["metric.label.traffic"],
-    )
-    return monitoring_v3.ListTimeSeriesRequest(
-        name=f"projects/{project}",
-        filter=f'metric.type = "{metric_type}" AND resource.labels.{ENV_RESOURCE_LABEL} = "{env}"',
-        interval=interval,
-        aggregation=aggregation,
-        view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
-    )
-
-
-def _server_metrics(project: str, env: str, start: datetime, end: datetime) -> None:
-    try:
-        from google.cloud import monitoring_v3
-    except ImportError:
-        console.print("[yellow]google-cloud-monitoring not installed; skipping metrics.[/yellow]")
-        return
-
-    client = monitoring_v3.MetricServiceClient()
-    interval = monitoring_v3.TimeInterval(
-        {
-            "start_time": {"seconds": int(start.timestamp())},
-            "end_time": {"seconds": int(end.timestamp())},
-        }
-    )
-    # One alignment bucket spanning the whole window: each series collapses to a
-    # single aligned percentile point.
-    alignment_seconds = max(60, int((end - start).total_seconds()))
-    metric = f"{METRIC_PREFIX}/feed.render.duration_ms"
-
-    console.print(
-        f"\n[bold]Server-side feed.render.duration_ms by traffic class[/bold] "
-        f"[dim]({env})[/dim]"
-    )
-
-    # traffic -> {percentile -> value}
-    by_traffic: dict[str, dict[int, float]] = defaultdict(dict)
-    try:
-        for percentile in _PERCENTILE_ALIGNERS:
-            request = build_percentile_request(
-                monitoring_v3, project, metric, env, interval, percentile, alignment_seconds
-            )
-            for series in client.list_time_series(request=request):
-                traffic = series.metric.labels.get("traffic", "(unlabeled)")
-                if series.points:
-                    # Mean across aligned points (usually one) for this series.
-                    vals = [p.value.double_value for p in series.points]
-                    by_traffic[traffic][percentile] = sum(vals) / len(vals)
-    except Exception as exc:  # pragma: no cover - network dependent
-        console.print(f"[yellow]Cloud Monitoring query failed: {exc}[/yellow]")
-        return
-
-    if not by_traffic:
-        console.print(
-            "[yellow]No feed.render.duration_ms series in the window "
-            f"(check the '{ENV_RESOURCE_LABEL}' resource label matches '{env}').[/yellow]"
-        )
-        return
-
-    table = Table(box=None)
-    table.add_column("traffic")
-    table.add_column("p50", justify="right")
-    table.add_column("p95", justify="right")
-    table.add_column("p99", justify="right")
-    for traffic in sorted(by_traffic):
-        vals = by_traffic[traffic]
-        table.add_row(
-            traffic,
-            f"{vals.get(50, 0):.0f}",
-            f"{vals.get(95, 0):.0f}",
-            f"{vals.get(99, 0):.0f}",
-        )
-    console.print(table)
-
-
-def _server_logs(service: str, project: str, start: datetime, end: datetime) -> None:
-    console.print("\n[bold]Cloud Run log counts in the window[/bold]")
-    base_filter = (
-        f'resource.type="cloud_run_revision" '
-        f'resource.labels.service_name="{service}" '
-        f'timestamp>="{start.isoformat()}" timestamp<="{end.isoformat()}"'
-    )
-    for label, extra in (
-        ("errors (severity>=ERROR)", "severity>=ERROR"),
-        ("slow_es_query", 'textPayload=~"slow_es_query"'),
-    ):
-        try:
-            out = subprocess.check_output(
-                [
-                    "gcloud",
-                    "logging",
-                    "read",
-                    f"{base_filter} {extra}",
-                    "--project",
-                    project,
-                    "--format",
-                    "value(timestamp)",
-                    "--limit",
-                    "1000",
-                ],
-                text=True,
-            )
-            count = len([ln for ln in out.splitlines() if ln.strip()])
-            console.print(f"  {label}: [bold]{count}[/bold]")
-        except subprocess.CalledProcessError as exc:  # pragma: no cover
-            console.print(f"  {label}: [yellow]query failed ({exc})[/yellow]")
-
-
 def run(args: argparse.Namespace) -> None:
     records = _read_records(args.results)
     start, end = _window(records, args.pad_min)
@@ -259,10 +111,14 @@ def run(args: argparse.Namespace) -> None:
 
     _client_summary(records)
 
-    if args.no_server:
-        return
-    _server_metrics(args.project, args.environment, start, end)
-    _server_logs(CLOUD_RUN_SERVICES[args.environment], args.project, start, end)
+    url = dashboard_url(args.environment, start, end)
+    if url:
+        console.print(f"\n[bold]Dashboard (run window pre-set):[/bold] {url}")
+    else:
+        console.print(
+            "\n[yellow]No dashboard ID recorded for this environment — "
+            "run monitoring/deploy.sh first.[/yellow]"
+        )
 
 
 def main() -> None:
@@ -279,7 +135,6 @@ def main() -> None:
     parser.add_argument("--start", help="ISO override for window start")
     parser.add_argument("--end", help="ISO override for window end")
     parser.add_argument("--pad-min", type=float, default=2.0, help="Padding around results window")
-    parser.add_argument("--no-server", action="store_true", help="Client-side only")
     args = parser.parse_args()
     run(args)
 
