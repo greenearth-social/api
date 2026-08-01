@@ -5,6 +5,10 @@ the wrapper logs a single WARNING line carrying the full request body
 so the query can be replayed verbatim — paste the ``body=`` JSON into
 curl or Kibana to reproduce.
 
+Records metrics:
+- ``es.query.duration_ms``: client-side elapsed time (histogram, labeled by ``op``)
+- ``es.query.took_ms``: server-side time from ES response (histogram, labeled by ``op``; omitted if missing)
+
 Other attributes (e.g. ``close``, ``indices``) are exposed transparently
 via ``__getattr__`` so the wrapper is a drop-in for the underlying
 ``AsyncElasticsearch`` client.
@@ -22,6 +26,30 @@ from elastic_transport import ConnectionTimeout
 from .request_context import get_request_id
 
 logger = logging.getLogger(__name__)
+
+
+def get_metric_collector():
+    """Indirection point so tests can monkeypatch at module level."""
+    from .metrics import get_metric_collector as _get
+    return _get()
+
+
+def _extract_took(resp) -> float | None:
+    body = getattr(resp, "body", resp)
+    if isinstance(body, dict):
+        took = body.get("took")
+        if isinstance(took, (int, float)):
+            return float(took)
+    return None
+
+
+def _record_query_metrics(op: str, elapsed_ms: float, took_ms: float | None) -> None:
+    collector = get_metric_collector()
+    if collector is None:
+        return
+    collector.record("es.query.duration_ms", elapsed_ms, op=op)
+    if took_ms is not None:
+        collector.record("es.query.took_ms", took_ms, op=op)
 
 
 def _slow_threshold_ms() -> float:
@@ -44,19 +72,24 @@ class SlowQueryLoggingES:
         # context-manager protocols, etc.
         return getattr(self._wrapped, name)
 
-    async def search(self, *args, **kwargs):
+    async def search(self, *args, op: str = "unlabeled", **kwargs):
         start = time.monotonic()
         timed_out = False
+        took_ms: float | None = None
         try:
-            return await self._wrapped.search(*args, **kwargs)
+            resp = await self._wrapped.search(*args, **kwargs)
+            took_ms = _extract_took(resp)
+            return resp
         except ConnectionTimeout:
             timed_out = True
             elapsed_ms = (time.monotonic() - start) * 1000
             _log_timeout_search(elapsed_ms, args, kwargs)
+            _record_query_metrics(op, elapsed_ms, None)
             raise
         finally:
             if not timed_out:
                 elapsed_ms = (time.monotonic() - start) * 1000
+                _record_query_metrics(op, elapsed_ms, took_ms)
                 if elapsed_ms >= _slow_threshold_ms():
                     _log_slow_search(elapsed_ms, args, kwargs)
 

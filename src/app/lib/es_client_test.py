@@ -200,3 +200,80 @@ def test_threshold_is_re_read_per_call(caplog, monkeypatch):
     with caplog.at_level(logging.WARNING, logger=es_client_module.logger.name):
         asyncio.run(es.search(index="posts", query={"match_all": {}}))
     assert any("slow_es_query" in r.message for r in caplog.records)
+
+
+class _RecordingCollector:
+    def __init__(self):
+        self.records = []
+
+    def record(self, name, value, **attrs):
+        self.records.append((name, value, attrs))
+
+
+@pytest.mark.asyncio
+async def test_search_records_duration_and_took_metrics(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            return {"took": 42, "hits": {"hits": []}}
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    await wrapped.search(index="likes", op="likes")
+
+    names = {name: attrs for name, _, attrs in collector.records}
+    assert names["es.query.duration_ms"] == {"op": "likes"}
+    assert names["es.query.took_ms"] == {"op": "likes"}
+    took = [v for n, v, _ in collector.records if n == "es.query.took_ms"]
+    assert took == [42]
+
+
+@pytest.mark.asyncio
+async def test_search_does_not_forward_op_to_client(monkeypatch):
+    seen_kwargs = {}
+
+    class _FakeES:
+        async def search(self, **kwargs):
+            seen_kwargs.update(kwargs)
+            return {"took": 1}
+
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: None)
+    wrapped = SlowQueryLoggingES(_FakeES())
+    await wrapped.search(index="posts", op="hydrate")
+    assert "op" not in seen_kwargs
+
+
+@pytest.mark.asyncio
+async def test_search_defaults_op_to_unlabeled_and_tolerates_missing_took(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            return {"hits": {"hits": []}}  # no "took" key
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    await wrapped.search(index="posts")
+
+    by_name = {n: attrs for n, _, attrs in collector.records}
+    assert by_name["es.query.duration_ms"] == {"op": "unlabeled"}
+    assert "es.query.took_ms" not in by_name
+
+
+@pytest.mark.asyncio
+async def test_search_records_duration_on_timeout(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            raise ConnectionTimeout("boom")
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    with pytest.raises(ConnectionTimeout):
+        await wrapped.search(index="posts", op="knn")
+
+    names = [n for n, _, _ in collector.records]
+    assert "es.query.duration_ms" in names
+    assert "es.query.took_ms" not in names
