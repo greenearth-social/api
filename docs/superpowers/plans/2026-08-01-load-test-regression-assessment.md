@@ -31,6 +31,9 @@
 | `src/app/main.py` (modify) | Start/stop the event-loop monitor in lifespan |
 | `src/app/lib/perspective.py` (modify) | `perspective.score.failure_count` with `status_code` label |
 | `src/app/lib/bsky.py` (modify) | `bsky.follows.failure_count` with `status_code` label |
+| `src/app/lib/inference.py` (modify) | `rank.model.failure_count` with `status_code` label |
+| `src/app/lib/client_metrics.py` (create) | aiohttp pool-wait/connect trace config + httpx in-flight transport (general #344-class detector) |
+| `src/app/lib/http_client.py` (modify) | Explicit pool limits + in-flight transport |
 | `inference-service/metrics.py` (create, other repo) | Trimmed port of api `MetricCollector` (prefix `greenearth-inference`) |
 | `inference-service/app.py` (modify, other repo) | Collector in lifespan; `inference.predict.duration_ms` by `model_name` |
 | `monitoring/dashboards/bottleneck.json.tmpl` (create) | Dashboard template (env-parameterized) with threshold lines |
@@ -477,13 +480,17 @@ git commit -m "add eventloop.lag_ms background monitor wired into app lifespan"
 **Files:**
 - Modify: `src/app/lib/perspective.py` (`score_candidates._score_one` exception paths + quota path)
 - Modify: `src/app/lib/bsky.py` (`get_followed_user_dids` failure paths)
-- Test: `src/app/lib/perspective_test.py`, `src/app/lib/bsky_test.py`
+- Modify: `src/app/lib/inference.py` (the httpx `client.post` calls for user-tower/ranker predictions and their non-2xx handling)
+- Modify: `src/app/lib/es_client.py` (`SlowQueryLoggingES.search` exception paths — extends Task 1's work)
+- Test: `src/app/lib/perspective_test.py`, `src/app/lib/bsky_test.py`, `src/app/lib/inference_test.py`, `src/app/lib/es_client_test.py`
 
 **Interfaces:**
-- Consumes: `get_metric_collector` (lazy import inside each module, same monkeypatch-friendly indirection as Tasks 1/3).
-- Produces: counters `perspective.score.failure_count` and `bsky.follows.failure_count`, label `status_code` — values: HTTP status as string (`"429"`, `"503"`), `"timeout"`, or `"other"`. Success paths record nothing (success duration already exists for Perspective; follows volume is visible via candidates metrics).
+- Consumes: `get_metric_collector` (lazy import inside each module, same monkeypatch-friendly indirection as Tasks 1/3; es_client already has it from Task 1).
+- Produces: counters `perspective.score.failure_count`, `bsky.follows.failure_count`, `rank.model.failure_count`, label `status_code` — values: HTTP status as string (`"429"`, `"503"`), `"timeout"`, `"connection"`, or `"other"`; and `es.query.error_count`, labels `op` + `error` (`"timeout"` | `"connection"` | `"other"`). Success paths record nothing (success duration already exists for Perspective; follows volume is visible via candidates metrics).
 
 Semantics: count every scoring attempt that yields no score for an *external* reason — including 429s and quota exhaustion, which are deliberately **not** degradation events today but are exactly what the dashboard's "external rate limit" playbook row needs. `PerspectiveLanguageNotSupportedError` is expected content behavior: not counted.
+
+**Why the `connection` class and `es.query.error_count` (issue #344, PR #346):** the uvloop fd race poisoned connections across Perspective, inference, *and* ES simultaneously (`ClientOSError: Bad file descriptor` storms). The diagnostic signature is connection-class failures spiking on several dependencies at once while backend latencies stay flat. `connection` maps: aiohttp `ClientOSError`/`ClientConnectorError`, httpx `ConnectError`/`NetworkError`/`RemoteProtocolError`, elastic_transport `ConnectionError` (its non-timeout transport error). Timeouts stay their own class.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -581,6 +588,8 @@ def get_metric_collector():
 def _status_code_label(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "timeout"
+    if isinstance(exc, (aiohttp.ClientOSError, aiohttp.ClientConnectorError)):
+        return "connection"
     status = getattr(exc, "status", None) or getattr(getattr(exc, "response", None), "status_code", None)
     return str(status) if status else "other"
 
@@ -589,6 +598,24 @@ def _count_failure(metric: str, exc: BaseException) -> None:
     collector = get_metric_collector()
     if collector is not None:
         collector.record(metric, 1, status_code=_status_code_label(exc))
+```
+
+Ordering matters: check `TimeoutError` before the connection classes (aiohttp's `ServerTimeoutError` is both), and check connection classes before reading `.status` (`ClientConnectorError` has no status). Add a test per class:
+
+```python
+@pytest.mark.asyncio
+async def test_score_candidates_counts_connection_errors(monkeypatch):
+    collector = _RecordingCollector()
+    monkeypatch.setattr(perspective, "get_metric_collector", lambda: collector)
+
+    async def _raise_oserror(self, content):
+        raise aiohttp.ClientOSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr(perspective.PerspectiveClient, "score", _raise_oserror)
+    monkeypatch.setattr(perspective, "_client", perspective.PerspectiveClient.__new__(perspective.PerspectiveClient))
+
+    await perspective.score_candidates([_candidate(at_uri="at://a", content="hi")])
+    assert ("perspective.score.failure_count", 1, {"status_code": "connection"}) in collector.records
 ```
 
 `perspective.py` — in `_score_one`:
@@ -609,6 +636,25 @@ def _status_code_label(exc: BaseException) -> str:
 
 `bsky.py` — count once per failed *lookup* (not per retry): in `get_followed_user_dids`, in each of the three failure paths that either `raise` or return partial results (the inner `except (...) as exc` block, the `except TimeoutError as exc` block, and the outer `except (httpx.HTTPError, ValueError) as exc` block), call `_count_failure("bsky.follows.failure_count", exc)`.
 
+`inference.py` — httpx client. Wrap the two prediction call paths (`predict_user_tower_single` and `predict_heavy_ranker_single_user`, the `client.post` + non-2xx handling): on httpx exceptions or when `raise_inference_response_error` fires, `_count_failure("rank.model.failure_count", exc)` — for the non-2xx path there is no exception carrying the status yet, so record directly: `collector.record("rank.model.failure_count", 1, status_code=str(resp.status_code))` before raising. Use the httpx variant of `_status_code_label` (as in `bsky.py`), extended: `httpx.ConnectError`, `httpx.NetworkError`, `httpx.RemoteProtocolError` → `"connection"`. Tests mirror the bsky ones (mock the http client per `inference_test.py`'s existing pattern; one test per class: HTTP 500 → `"500"`, `httpx.ConnectError` → `"connection"`, `httpx.ReadTimeout` → `"timeout"`).
+
+`es_client.py` — extend Task 1's wrapper: in `search`, add an `except Exception as exc` layer (after the existing `ConnectionTimeout` handler) that records `es.query.error_count` with `op` and `error` labels then re-raises; the `ConnectionTimeout` path records `error="timeout"`; classify `elastic_transport.ConnectionError` as `"connection"`, anything else `"other"`:
+
+```python
+except ConnectionTimeout:
+    ...existing timeout logging/duration handling...
+    _record_query_error(op, "timeout")
+    raise
+except EsConnectionError:
+    _record_query_error(op, "connection")
+    raise
+except Exception:
+    _record_query_error(op, "other")
+    raise
+```
+
+Implementation detail: only the `ConnectionTimeout` branch sets `timed_out = True`; the other exception branches fall through to the existing `finally`, which records `es.query.duration_ms` normally (an errored query still consumed client-side time; `took` is simply absent). `from elastic_transport import ConnectionError as EsConnectionError` — do **not** shadow the builtin. `_record_query_error(op, kind)` records `collector.record("es.query.error_count", 1, op=op, error=kind)`. Tests: fake raising `elastic_transport.ConnectionError` → `error="connection"`; fake raising `ValueError` → `error="other"`; existing timeout test extended to assert `error="timeout"`.
+
 - [ ] **Step 4: Run the full suite**
 
 Run: `pipenv run pytest -q`
@@ -619,6 +665,333 @@ Expected: PASS.
 ```bash
 git add src/app/lib/perspective.py src/app/lib/perspective_test.py src/app/lib/bsky.py src/app/lib/bsky_test.py
 git commit -m "count perspective and bsky follows failures with status_code label"
+```
+
+---
+
+### Task 4b: Client queue-position metrics — the general #344-class detector (PR C)
+
+**Context (user requirement 2026-08-01):** #344's pool starvation is one instance of a general class — any pooled client or concurrency-limited parallel workflow can queue client-side while its backend idles. Principle: pool **wait time** where the transport has hooks (aiohttp), **in-flight count vs cap** where it doesn't (httpx, the ES wrapper). See design doc §4.1 principle 2.
+
+**Files:**
+- Create: `src/app/lib/client_metrics.py`
+- Create: `src/app/lib/client_metrics_test.py`
+- Modify: `src/app/lib/perspective.py` (`_get_session` — attach trace config)
+- Modify: `src/app/lib/http_client.py` (in-flight transport + explicit limits)
+- Modify: `src/app/lib/es_client.py` (in-flight sample per search)
+- Test: additions to `src/app/lib/es_client_test.py`, `src/app/lib/perspective_test.py`
+
+**Interfaces:**
+- Consumes: `get_metric_collector` indirection (same pattern as Tasks 1/3/4).
+- Produces: `client_metrics.aiohttp_trace_config(client: str) -> aiohttp.TraceConfig` and `client_metrics.InFlightTransport(inner: httpx.AsyncBaseTransport)`. Metrics: `client.pool.wait_ms` + `client.connect.duration_ms` (histograms, label `client`), `client.in_flight` (histogram, label `host`), `es.client.in_flight` (histogram, label `op`).
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `src/app/lib/client_metrics_test.py`:
+
+```python
+import asyncio
+from types import SimpleNamespace
+
+import httpx
+import pytest
+
+from app.lib import client_metrics
+
+
+class _RecordingCollector:
+    def __init__(self):
+        self.records = []
+
+    def record(self, name, value, **attrs):
+        self.records.append((name, value, attrs))
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_trace_records_pool_wait(monkeypatch):
+    collector = _RecordingCollector()
+    monkeypatch.setattr(client_metrics, "get_metric_collector", lambda: collector)
+
+    tc = client_metrics.aiohttp_trace_config("perspective")
+    ctx = SimpleNamespace()
+    await tc.on_connection_queued_start[0](None, ctx, None)
+    await tc.on_connection_queued_end[0](None, ctx, None)
+
+    [(name, value, attrs)] = collector.records
+    assert name == "client.pool.wait_ms"
+    assert value >= 0
+    assert attrs == {"client": "perspective"}
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_trace_records_connect_duration(monkeypatch):
+    collector = _RecordingCollector()
+    monkeypatch.setattr(client_metrics, "get_metric_collector", lambda: collector)
+
+    tc = client_metrics.aiohttp_trace_config("perspective")
+    ctx = SimpleNamespace()
+    await tc.on_connection_create_start[0](None, ctx, None)
+    await tc.on_connection_create_end[0](None, ctx, None)
+
+    [(name, _, attrs)] = collector.records
+    assert name == "client.connect.duration_ms"
+    assert attrs == {"client": "perspective"}
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_trace_end_without_start_records_nothing(monkeypatch):
+    collector = _RecordingCollector()
+    monkeypatch.setattr(client_metrics, "get_metric_collector", lambda: collector)
+    tc = client_metrics.aiohttp_trace_config("perspective")
+    await tc.on_connection_queued_end[0](None, SimpleNamespace(), None)
+    assert collector.records == []
+
+
+class _BlockingTransport(httpx.AsyncBaseTransport):
+    """Inner transport that parks until released, to overlap requests."""
+
+    def __init__(self):
+        self.release = asyncio.Event()
+
+    async def handle_async_request(self, request):
+        await self.release.wait()
+        return httpx.Response(200, request=request)
+
+
+@pytest.mark.asyncio
+async def test_in_flight_transport_counts_concurrent_requests(monkeypatch):
+    collector = _RecordingCollector()
+    monkeypatch.setattr(client_metrics, "get_metric_collector", lambda: collector)
+
+    inner = _BlockingTransport()
+    transport = client_metrics.InFlightTransport(inner)
+    client = httpx.AsyncClient(transport=transport)
+
+    async def _get():
+        return await client.get("http://inference.test/x")
+
+    t1 = asyncio.create_task(_get())
+    t2 = asyncio.create_task(_get())
+    await asyncio.sleep(0.01)  # let both reach the transport
+    inner.release.set()
+    await asyncio.gather(t1, t2)
+    await client.aclose()
+
+    values = [v for n, v, a in collector.records
+              if n == "client.in_flight" and a == {"host": "inference.test"}]
+    assert sorted(values) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_in_flight_transport_decrements_on_error(monkeypatch):
+    collector = _RecordingCollector()
+    monkeypatch.setattr(client_metrics, "get_metric_collector", lambda: collector)
+
+    class _FailingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            raise httpx.ConnectError("boom", request=request)
+
+    transport = client_metrics.InFlightTransport(_FailingTransport())
+    client = httpx.AsyncClient(transport=transport)
+    with pytest.raises(httpx.ConnectError):
+        await client.get("http://inference.test/x")
+
+    # After the failure the counter must be back at zero: a fresh request
+    # records in-flight 1, not 2.
+    inner = _BlockingTransport()
+    transport2 = client_metrics.InFlightTransport(inner)
+    # same tracker instance matters — reuse transport, swap inner:
+    transport._inner = inner
+    inner.release.set()
+    await client.get("http://inference.test/x")
+    await client.aclose()
+
+    values = [v for n, v, a in collector.records if n == "client.in_flight"]
+    assert values == [1, 1]
+```
+
+Add to `src/app/lib/es_client_test.py`:
+
+```python
+@pytest.mark.asyncio
+async def test_search_records_in_flight_count(monkeypatch):
+    release = asyncio.Event()
+
+    class _BlockingES:
+        async def search(self, **kwargs):
+            await release.wait()
+            return {"took": 1, "hits": {"hits": []}}
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client, "get_metric_collector", lambda: collector)
+
+    wrapped = es_client.SlowQueryLoggingES(_BlockingES())
+    t1 = asyncio.create_task(wrapped.search(index="posts", op="knn"))
+    t2 = asyncio.create_task(wrapped.search(index="posts", op="likes"))
+    await asyncio.sleep(0.01)
+    release.set()
+    await asyncio.gather(t1, t2)
+
+    in_flight = sorted(v for n, v, _ in collector.records if n == "es.client.in_flight")
+    assert in_flight == [1, 2]
+```
+
+Add to `src/app/lib/perspective_test.py`:
+
+```python
+def test_get_session_attaches_trace_config(monkeypatch):
+    captured = {}
+
+    class _FakeSession:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(perspective.aiohttp, "ClientSession", _FakeSession)
+    client = perspective.PerspectiveClient.__new__(perspective.PerspectiveClient)
+    client._session = None
+    client._get_session()
+    assert len(captured["trace_configs"]) == 1
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `pipenv run pytest src/app/lib/client_metrics_test.py src/app/lib/es_client_test.py src/app/lib/perspective_test.py -q`
+Expected: FAIL — module missing / no trace_configs / no in-flight records.
+
+- [ ] **Step 3: Implement `src/app/lib/client_metrics.py`**
+
+```python
+"""Queue-position metrics for concurrency-limited clients.
+
+Any pooled client can reproduce #344's pattern: work queues client-side
+while the backend idles. Where the transport exposes queue events
+(aiohttp), record pool wait time; where it doesn't (httpx), record the
+in-flight count — a p95 pinned at the configured cap is saturation even
+before latency shows it.
+"""
+
+from __future__ import annotations
+
+import time
+
+import aiohttp
+import httpx
+
+
+def get_metric_collector():
+    """Indirection point so tests can monkeypatch at module level."""
+    from .metrics import get_metric_collector as _get
+    return _get()
+
+
+def aiohttp_trace_config(client: str) -> aiohttp.TraceConfig:
+    tc = aiohttp.TraceConfig()
+
+    async def _queued_start(session, ctx, params):
+        ctx.queued_start = time.monotonic()
+
+    async def _queued_end(session, ctx, params):
+        start = getattr(ctx, "queued_start", None)
+        if start is None:
+            return
+        collector = get_metric_collector()
+        if collector is not None:
+            collector.record(
+                "client.pool.wait_ms", (time.monotonic() - start) * 1000, client=client
+            )
+
+    async def _create_start(session, ctx, params):
+        ctx.create_start = time.monotonic()
+
+    async def _create_end(session, ctx, params):
+        start = getattr(ctx, "create_start", None)
+        if start is None:
+            return
+        collector = get_metric_collector()
+        if collector is not None:
+            collector.record(
+                "client.connect.duration_ms", (time.monotonic() - start) * 1000, client=client
+            )
+
+    tc.on_connection_queued_start.append(_queued_start)
+    tc.on_connection_queued_end.append(_queued_end)
+    tc.on_connection_create_start.append(_create_start)
+    tc.on_connection_create_end.append(_create_end)
+    return tc
+
+
+class InFlightTransport(httpx.AsyncBaseTransport):
+    """Wraps a transport, sampling concurrent requests per host.
+
+    The sample is taken before the inner transport (i.e. before pool
+    acquisition), so queued requests count — sustained samples at the
+    pool cap mean requests are waiting, not working.
+    """
+
+    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+        self._inner = inner
+        self._counts: dict[str, int] = {}
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        host = request.url.host or "unknown"
+        self._counts[host] = self._counts.get(host, 0) + 1
+        collector = get_metric_collector()
+        if collector is not None:
+            collector.record("client.in_flight", self._counts[host], host=host)
+        try:
+            return await self._inner.handle_async_request(request)
+        finally:
+            self._counts[host] = self._counts.get(host, 1) - 1
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+```
+
+- [ ] **Step 4: Wire in**
+
+`http_client.py` — explicit limits (cap becomes chartable) + the transport:
+
+```python
+import os
+from .client_metrics import InFlightTransport
+
+def init_http_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        max_connections = int(os.environ.get("GE_HTTP_MAX_CONNECTIONS", "100"))
+        limits = httpx.Limits(max_connections=max_connections, max_keepalive_connections=20)
+        _client = httpx.AsyncClient(
+            timeout=30.0,
+            transport=InFlightTransport(httpx.AsyncHTTPTransport(limits=limits)),
+        )
+    return _client
+```
+
+(Limits must go on the inner transport — client-level `limits=` is ignored when a custom transport is passed. Update the module docstring.)
+
+`perspective.py` `_get_session`:
+
+```python
+from .client_metrics import aiohttp_trace_config
+...
+self._session = aiohttp.ClientSession(
+    connector=connector,
+    trace_configs=[aiohttp_trace_config("perspective")],
+)
+```
+
+`es_client.py` — in `SlowQueryLoggingES.__init__`, add `self._in_flight = 0`; in `search`, before the try: increment, record `es.client.in_flight` (value = post-increment count, label `op=op`) via the existing collector indirection; decrement in the `finally`. Single event loop — no locking needed.
+
+- [ ] **Step 5: Run the full suite**
+
+Run: `pipenv run pytest -q`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/app/lib/client_metrics.py src/app/lib/client_metrics_test.py src/app/lib/http_client.py src/app/lib/perspective.py src/app/lib/perspective_test.py src/app/lib/es_client.py src/app/lib/es_client_test.py
+git commit -m "add client queue-position metrics: pool wait, connect duration, in-flight per host"
 ```
 
 ---
@@ -772,6 +1145,9 @@ Dashboard layout (design doc §4.2 — six rows, `mosaicLayout` with section hea
 | 2 | `perspective.score` p95 + `failure_count` by `status_code` | histogram p95 + stacked counter rate | — |
 | 3 api saturation | `eventloop.lag_ms` p95 per instance | percentile, no reducer across instances | **100 ms** |
 | 3 | Cloud Run instances / CPU / memory | `run.googleapis.com/container/instance_count`, `cpu/utilizations`, `memory/utilizations` | — |
+| 3 | Dependency failures by class (one chart) | stacked counter rates: `es.query.error_count` (by `error`), `perspective.score.failure_count`, `bsky.follows.failure_count`, `rank.model.failure_count` (by `status_code`) | **1/min** |
+| 3 | Client queue position: `client.pool.wait_ms` p95 by `client` + `client.connect.duration_ms` p95 | histogram percentiles | **10 ms** pool wait |
+| 3 | Client in-flight vs caps: `client.in_flight` p95 by `host`, `es.client.in_flight` p95 | histogram percentiles | **100** (= `GE_HTTP_MAX_CONNECTIONS` / `GE_ES_CONNECTIONS_PER_NODE` caps) |
 | 4 ES | `es.query.took_ms` vs `duration_ms` p95 by `op` (gap) | two percentile series per op | — |
 | 4 | Search thread-pool queue + rejected | PromQL `elasticsearch_thread_pool_queue_count{type="search"}`, `_rejected_count` rate | **rejected > 0** |
 | 4 | ES mean search latency | Appendix A query 4 | **10 ms** |
@@ -790,6 +1166,7 @@ Implementation notes:
 - PromQL charts use `"prometheusQuery"` in the widget's `timeSeriesQuery`; copy the Appendix A queries verbatim, replacing the hardcoded `greenearth-prod` namespace/cluster with `${NAMESPACE}`/`${CLUSTER}` tokens. **Note:** ES + GKE metrics exist only for the prod cluster (stage api still reads prod ES) — for `ENV=stage`, rows 4–6 still point at the prod cluster; only the `greenearth-api` namespace filter differs. `deploy.sh` therefore substitutes `NAMESPACE=stage|prod` for api metrics and always `greenearth-prod` for cluster-scoped queries.
 - Compare-to-past: not expressible in dashboard JSON for all chart types; where supported use `timeshiftDuration: "86400s"` on the key UX charts (`feed.render` p95). Otherwise the README documents the console's "compare to past" toggle.
 - Build the JSON against the **2026-07-31 02:00–04:00 UTC window** (issue's timeline table): after `deploy.sh stage --dry-run` passes, deploy to stage project scope and open the dashboard at that window; acceptance = the six rows reproduce Appendix B's diagnosis (burst 1 saturation visible in rows 1+3, clean burst 2, ES churn in rows 4–5).
+- **#344 acceptance (user requirement 2026-08-01):** the charts must be able to name both of #344's root causes without ad-hoc queries — (1) connection-pool starvation shows as `es.query.duration_ms − took_ms` gap ↑ on every `op` with flat `took`, flat `eventloop.lag_ms`, CPU < ~70% (row 4 gap chart + row 3), and `es.client.in_flight` pinned at its cap; (2) the uvloop-style fd race shows as a simultaneous multi-dependency `connection`-class spike on the row-3 dependency-failure chart while backend latencies stay flat. And generally (user clarification): **any** dependency or capped parallel workflow queuing client-side must be nameable from its own row-3 queue-position chart (`pool.wait_ms` ↑ or `in_flight` at cap) paired with a flat backend signal — #344 is the worked example, not the scope. All three signatures appear as rows in the README playbook.
 
 - [ ] **Step 1: Write `bottleneck.json.tmpl`** — full JSON, all 16 charts from the table, `${ENV}`/`${NAMESPACE}`/`${CLUSTER}` tokens, threshold lines per the table.
 - [ ] **Step 2: Write `deploy.sh`** (bash, `set -euo pipefail`, args `stage|prod` + `--dry-run`, render → validate JSON → create-or-update, print dashboard URL + ID on success; write the returned dashboard resource ID into `monitoring/dashboards/ids.env` as `DASHBOARD_ID_STAGE=...`/`DASHBOARD_ID_PROD=...` — Task 7 reads this file).
@@ -948,7 +1325,7 @@ Expected: all four descriptors exist and `es.query.*` carries the `op` label wit
 |---|---|---|---|
 | A | api | 8.1, 1, 2 | `issue.343` (this worktree) |
 | B | api | 3 | stacked on A or same branch, user's call |
-| C | api | 4 | 〃 |
+| C | api | 4, 4b | 〃 |
 | D | inference-service | 5 | new branch in that repo |
 | E | api | 6 | after A–D deployed (dashboard references the new metrics) |
 | F | api | 7 | after E (needs dashboard ID) |
