@@ -1,0 +1,1060 @@
+{
+  "displayName": "Load Test & Bottleneck Attribution (${ENV})",
+  "dashboardFilters": [],
+  "mosaicLayout": {
+    "columns": 12,
+    "tiles": [
+      {
+        "xPos": 0,
+        "yPos": 0,
+        "width": 12,
+        "height": 4,
+        "widget": {
+          "title": "1 — Load & UX",
+          "sectionHeader": {
+            "subtitle": "Is anyone hurting? The probe series is the real-user canary; load_test is the synthetic driver.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 4,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Renders/min by traffic",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "success ${metric.labels.traffic}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.success_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"traffic\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "failure ${metric.labels.traffic}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"traffic\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "renders / min", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 4,
+        "yPos": 4,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "feed.render p50 / p95 by traffic (vs 24h ago)",
+          "xyChart": {
+            "timeshiftDuration": "86400s",
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 ${metric.labels.traffic}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["metric.label.\"traffic\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 ${metric.labels.traffic}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_50",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["metric.label.\"traffic\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [
+              {"value": 2500, "label": "baseline p95 2500 ms", "targetAxis": "Y1"}
+            ],
+            "yAxis": {"label": "ms", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 8,
+        "yPos": 4,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Failures + degraded + 5xx per min",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "feed.render failure ${metric.labels.status_code}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"status_code\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "feed.render degraded",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.degraded_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"feed_name\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "Cloud Run 5xx",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"run.googleapis.com/request_count\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\" metric.label.\"response_code_class\"=\"5xx\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"response_code_class\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [
+              {"value": 1, "label": "baseline 1 / min", "targetAxis": "Y1"}
+            ],
+            "yAxis": {"label": "events / min", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+
+      {
+        "xPos": 0,
+        "yPos": 12,
+        "width": 12,
+        "height": 4,
+        "widget": {
+          "title": "2 — Serving stages",
+          "sectionHeader": {
+            "subtitle": "Which stage of the render owns the latency? Paired client/server series separate backend slowness from api-side queuing.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 16,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "candidates.generate p95 by generator_name",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.generator_name}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/candidates.generate.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["metric.label.\"generator_name\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "ms", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 4,
+        "yPos": 16,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "rank.model p95 vs inference.predict p95 (gap = api-side queuing)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "api rank.model ${metric.labels.model_name}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/rank.model.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["metric.label.\"model_name\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "inference.predict ${metric.labels.model_name}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-inference/inference.predict.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["metric.label.\"model_name\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "ms", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 8,
+        "yPos": 16,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "perspective.score p95 + failures/min by status_code",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 duration",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/perspective.score.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "STACKED_BAR",
+                "targetAxis": "Y2",
+                "legendTemplate": "failures ${metric.labels.status_code}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/perspective.score.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"status_code\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "ms", "scale": "LINEAR"},
+            "y2Axis": {"label": "failures / min", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+
+      {
+        "xPos": 0,
+        "yPos": 24,
+        "width": 12,
+        "height": 4,
+        "widget": {
+          "title": "3 — api saturation & client-side queuing",
+          "sectionHeader": {
+            "subtitle": "Loop-wide saturation (lag, CPU, instances) vs per-dependency client-side queuing (pool wait, in-flight at cap). #344 causes 1 and 2 are read off the last three charts.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 28,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "eventloop.lag_ms p95 per instance",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "${resource.labels.task_id}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/eventloop.lag_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": ["resource.label.\"task_id\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [
+              {"value": 100, "label": "saturation 100 ms", "targetAxis": "Y1"}
+            ],
+            "yAxis": {"label": "ms", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 4,
+        "yPos": 28,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Cloud Run instances / CPU / memory",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "instances",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"run.googleapis.com/container/instance_count\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"state\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y2",
+                "legendTemplate": "CPU utilization p95",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"run.googleapis.com/container/cpu/utilizations\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y2",
+                "legendTemplate": "memory utilization p95",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"run.googleapis.com/container/memory/utilizations\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "instances", "scale": "LINEAR"},
+            "y2Axis": {"label": "utilization (0-1)", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 8,
+        "yPos": 28,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Dependency failures/min by class (#344 cause 2 signature)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "es.query ${metric.labels.error}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.error_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"error\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "perspective ${metric.labels.status_code}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/perspective.score.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"status_code\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "bsky.follows ${metric.labels.status_code}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/bsky.follows.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"status_code\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "STACKED_AREA",
+                "targetAxis": "Y1",
+                "legendTemplate": "rank.model ${metric.labels.status_code}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/rank.model.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": ["metric.label.\"status_code\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [
+              {"value": 1, "label": "baseline 1 / min", "targetAxis": "Y1"}
+            ],
+            "yAxis": {"label": "failures / min", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 36,
+        "width": 6,
+        "height": 8,
+        "widget": {
+          "title": "Client queue position: pool wait p95 by client + connect p95",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "pool.wait_ms ${metric.labels.client}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.pool.wait_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["metric.label.\"client\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "connect.duration_ms ${metric.labels.client}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.connect.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["metric.label.\"client\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [
+              {"value": 10, "label": "pool wait 10 ms", "targetAxis": "Y1"}
+            ],
+            "yAxis": {"label": "ms", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 6,
+        "yPos": 36,
+        "width": 6,
+        "height": 8,
+        "widget": {
+          "title": "Client in-flight vs pool caps (#344 cause 1 signature)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "client.in_flight ${metric.labels.host}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": ["metric.label.\"host\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "es.client.in_flight ${metric.labels.op}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": ["metric.label.\"op\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [
+              {"value": 100, "label": "pool cap 100", "targetAxis": "Y1"}
+            ],
+            "yAxis": {"label": "concurrent requests", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+
+      {
+        "xPos": 0,
+        "yPos": 44,
+        "width": 12,
+        "height": 4,
+        "widget": {
+          "title": "4 — Elasticsearch",
+          "sectionHeader": {
+            "subtitle": "Cluster-scoped: always the prod ES cluster (stage api reads prod ES). duration − took is the client-side queuing gap.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 48,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "es.query duration_ms vs took_ms p95 by op (gap chart)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "duration ${metric.labels.op}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["metric.label.\"op\""]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "took ${metric.labels.op}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": ["metric.label.\"op\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "ms", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 4,
+        "yPos": 48,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "ES search thread pool: queue + rejected/s",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "queue ${metric.labels.name}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (name)(elasticsearch_thread_pool_queue_count{cluster=\"${CLUSTER}\", type=\"search\"})"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y2",
+                "legendTemplate": "rejected/s ${metric.labels.name}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (name)(rate(elasticsearch_thread_pool_rejected_count{cluster=\"${CLUSTER}\", type=\"search\"}[5m]))"
+                }
+              }
+            ],
+            "thresholds": [
+              {"value": 0, "label": "any rejection is a finding", "targetAxis": "Y2"}
+            ],
+            "yAxis": {"label": "queued tasks", "scale": "LINEAR"},
+            "y2Axis": {"label": "rejected / s", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 8,
+        "yPos": 48,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "ES mean search latency (ms), data nodes",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "mean search latency",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "1000 * sum(rate(elasticsearch_indices_search_query_time_seconds{cluster=\"${CLUSTER}\", es_data_node=\"true\"}[30m]))\n     / sum(rate(elasticsearch_indices_search_query_total{cluster=\"${CLUSTER}\", es_data_node=\"true\"}[30m]))"
+                }
+              }
+            ],
+            "thresholds": [
+              {"value": 10, "label": "clean baseline 10 ms", "targetAxis": "Y1"}
+            ],
+            "yAxis": {"label": "ms", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+
+      {
+        "xPos": 0,
+        "yPos": 56,
+        "width": 12,
+        "height": 4,
+        "widget": {
+          "title": "5 — ES page-cache residency",
+          "sectionHeader": {
+            "subtitle": "Appendix A proxies (validated 2026-07-30, Spearman 0.94). Miss rate and user impact are separate rows on purpose — the playbook joins them.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 60,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Major faults/s per ES data pod (cache-miss rate)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.pod_name}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (pod_name)(rate(kubernetes_io:container_memory_page_fault_count{\n  monitored_resource=\"k8s_container\", namespace_name=\"${K8S_NAMESPACE}\",\n  fault_type=\"major\"}[30m]))"
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "major faults / s", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 4,
+        "yPos": 60,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Device read MB/s per ES node (cold reads)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.name}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (name)(rate(elasticsearch_filesystem_io_stats_device_read_size_kilobytes_sum{\n  cluster=\"${CLUSTER}\"}[30m])) / 1024"
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "MB / s", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 8,
+        "yPos": 60,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Evictable (page cache) bytes per ES data pod",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.pod_name}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (pod_name)(kubernetes_io:container_memory_used_bytes{\n  monitored_resource=\"k8s_container\", namespace_name=\"${K8S_NAMESPACE}\",\n  memory_type=\"evictable\"})"
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "bytes (1 GB = 1e9)", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+
+      {
+        "xPos": 0,
+        "yPos": 68,
+        "width": 12,
+        "height": 4,
+        "widget": {
+          "title": "6 — Blast radius (ingest + cluster health)",
+          "sectionHeader": {
+            "subtitle": "Serving load and ingest share one ES cluster. Freshness is the canary that a serving load test is starving ingest.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 72,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "ingex freshness_sec p95 by source",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "${resource.labels.job}",
+                "timeSeriesQuery": {
+                  "unitOverride": "s",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/freshness_sec\" resource.type=\"generic_task\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": ["resource.label.\"job\"", "resource.label.\"namespace\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [
+              {"value": 300, "label": "freshness alert threshold 300 s", "targetAxis": "Y1"}
+            ],
+            "yAxis": {"label": "seconds behind", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 4,
+        "yPos": 72,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "ingex es.bulk_index_* took_ms p95",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "posts",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_posts.took_ms\" resource.type=\"generic_task\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "likes",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_likes.took_ms\" resource.type=\"generic_task\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "inferences",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_inferences.took_ms\" resource.type=\"generic_task\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "tombstones",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_tombstones.took_ms\" resource.type=\"generic_task\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "like_tombstones",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_like_tombstones.took_ms\" resource.type=\"generic_task\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "ms", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      },
+      {
+        "xPos": 8,
+        "yPos": 72,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "JVM GC/s + breakers tripped/s + PD IO latency",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "gc/s ${metric.labels.name}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (name)(rate(elasticsearch_jvm_gc_collection_seconds_count{cluster=\"${CLUSTER}\"}[5m]))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "breakers tripped/s ${metric.labels.breaker}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "sum by (breaker)(rate(elasticsearch_breakers_tripped{cluster=\"${CLUSTER}\"}[5m]))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y2",
+                "legendTemplate": "PD IO latency ${resource.labels.instance_id}",
+                "timeSeriesQuery": {
+                  "unitOverride": "us",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"compute.googleapis.com/instance/disk/average_io_latency\" resource.type=\"gce_instance\" metric.label.\"direction\"=\"read\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": ["resource.label.\"instance_id\""]
+                    }
+                  }
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {"label": "events / s", "scale": "LINEAR"},
+            "y2Axis": {"label": "IO latency (us)", "scale": "LINEAR"},
+            "chartOptions": {"mode": "COLOR"}
+          }
+        }
+      }
+    ]
+  }
+}
