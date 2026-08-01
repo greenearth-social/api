@@ -8,6 +8,8 @@ curl or Kibana to reproduce.
 Records metrics:
 - ``es.query.duration_ms``: client-side elapsed time (histogram, labeled by ``op``)
 - ``es.query.took_ms``: server-side time from ES response (histogram, labeled by ``op``; omitted if missing)
+- ``es.query.error_count``: counted on any exception, labeled by ``op`` and
+  ``error`` (``"timeout"`` | ``"connection"`` | ``"other"``)
 
 Other attributes (e.g. ``close``, ``indices``) are exposed transparently
 via ``__getattr__`` so the wrapper is a drop-in for the underlying
@@ -22,6 +24,7 @@ import os
 import time
 
 from elastic_transport import ConnectionTimeout
+from elastic_transport import ConnectionError as EsConnectionError
 
 from .request_context import get_request_id
 
@@ -50,6 +53,13 @@ def _record_query_metrics(op: str, elapsed_ms: float, took_ms: float | None) -> 
     collector.record("es.query.duration_ms", elapsed_ms, op=op)
     if took_ms is not None:
         collector.record("es.query.took_ms", took_ms, op=op)
+
+
+def _record_query_error(op: str, error: str) -> None:
+    collector = get_metric_collector()
+    if collector is None:
+        return
+    collector.record("es.query.error_count", 1, op=op, error=error)
 
 
 def _slow_threshold_ms() -> float:
@@ -85,6 +95,13 @@ class SlowQueryLoggingES:
             elapsed_ms = (time.monotonic() - start) * 1000
             _log_timeout_search(elapsed_ms, args, kwargs)
             _record_query_metrics(op, elapsed_ms, None)
+            _record_query_error(op, "timeout")
+            raise
+        except EsConnectionError:
+            _record_query_error(op, "connection")
+            raise
+        except Exception:
+            _record_query_error(op, "other")
             raise
         finally:
             if not timed_out:

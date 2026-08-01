@@ -5,6 +5,7 @@ import json
 import logging
 
 import pytest
+from elastic_transport import ConnectionError as EsConnectionError
 from elastic_transport import ConnectionTimeout
 
 from . import es_client as es_client_module
@@ -277,3 +278,54 @@ async def test_search_records_duration_on_timeout(monkeypatch):
     names = [n for n, _, _ in collector.records]
     assert "es.query.duration_ms" in names
     assert "es.query.took_ms" not in names
+
+
+@pytest.mark.asyncio
+async def test_search_records_error_count_on_timeout(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            raise ConnectionTimeout("boom")
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    with pytest.raises(ConnectionTimeout):
+        await wrapped.search(index="posts", op="knn")
+
+    assert ("es.query.error_count", 1, {"op": "knn", "error": "timeout"}) in collector.records
+
+
+@pytest.mark.asyncio
+async def test_search_records_error_count_on_connection_error(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            raise EsConnectionError("connection refused")
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    with pytest.raises(EsConnectionError):
+        await wrapped.search(index="posts", op="knn")
+
+    assert ("es.query.error_count", 1, {"op": "knn", "error": "connection"}) in collector.records
+    # An errored query still consumed client-side time.
+    names = [n for n, _, _ in collector.records]
+    assert "es.query.duration_ms" in names
+
+
+@pytest.mark.asyncio
+async def test_search_records_error_count_on_other_exception(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            raise ValueError("boom")
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    with pytest.raises(ValueError):
+        await wrapped.search(index="posts", op="likes")
+
+    assert ("es.query.error_count", 1, {"op": "likes", "error": "other"}) in collector.records
