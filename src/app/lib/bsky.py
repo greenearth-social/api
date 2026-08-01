@@ -19,6 +19,8 @@ def get_metric_collector():
 def _status_code_label(exc: BaseException) -> str:
     if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
         return "timeout"
+    if isinstance(exc, (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError)):
+        return "connection"
     status = getattr(getattr(exc, "response", None), "status_code", None)
     return str(status) if status else "other"
 
