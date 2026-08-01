@@ -92,6 +92,25 @@ class TestGetFollowedUserDidsFailureCounters:
         assert ("bsky.follows.failure_count", 1, {"status_code": "timeout"}) in collector.records
 
     @pytest.mark.asyncio
+    async def test_counts_connection_failures(self, fake_http_client, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
+
+        request = httpx.Request("GET", "https://example.test")
+        fake_http_client.response = FakeResponse(
+            status_exc=httpx.ConnectError("connection refused", request=request)
+        )
+
+        with pytest.raises(FollowedUsersLookupError):
+            await get_followed_user_dids("did:plc:x", limit=10)
+
+        assert (
+            "bsky.follows.failure_count",
+            1,
+            {"status_code": "connection"},
+        ) in collector.records
+
+    @pytest.mark.asyncio
     async def test_counts_exactly_once_when_first_page_fails_with_no_partials(
         self, fake_http_client, monkeypatch
     ):

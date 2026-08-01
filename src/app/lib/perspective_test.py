@@ -615,6 +615,23 @@ class TestScoreCandidatesFailureCounters:
         assert ("perspective.score.failure_count", 1, {"status_code": "connection"}) in collector.records
 
     @pytest.mark.asyncio
+    async def test_counts_server_disconnected_as_connection(self, monkeypatch):
+        """aiohttp.ServerDisconnectedError is a ClientConnectionError but not
+        a ClientOSError/ClientConnectorError -- it must still classify as
+        "connection" now that the branch is broadened to the common
+        ancestor."""
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(side_effect=aiohttp.ServerDisconnectedError())
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert ("perspective.score.failure_count", 1, {"status_code": "connection"}) in collector.records
+
+    @pytest.mark.asyncio
     async def test_counts_other_500_failures(self, monkeypatch):
         collector = _RecordingCollector()
         monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)

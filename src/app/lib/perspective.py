@@ -32,7 +32,7 @@ def get_metric_collector():
 def _status_code_label(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "timeout"
-    if isinstance(exc, (aiohttp.ClientOSError, aiohttp.ClientConnectorError)):
+    if isinstance(exc, aiohttp.ClientConnectionError):
         return "connection"
     status = getattr(exc, "status", None) or getattr(getattr(exc, "response", None), "status_code", None)
     return str(status) if status else "other"
