@@ -42,6 +42,7 @@ from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
 from .lib.firebase_auth import init_firebase_auth
 from .lib.es_client import SlowQueryLoggingES
+from .lib.eventloop_monitor import start_eventloop_monitor, stop_eventloop_monitor
 from .lib.feed_cache import FirestoreFeedCache
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
@@ -112,6 +113,7 @@ async def lifespan(app: FastAPI):
         export_interval_sec=int(os.environ.get("GE_METRICS_EXPORT_INTERVAL_SEC", "60")),
     )
     set_metric_collector(metrics)
+    eventloop_task = start_eventloop_monitor()
 
     posthog_api_key = os.environ.get("GE_POSTHOG_API_KEY")
     posthog_host = os.environ.get("GE_POSTHOG_HOST", "https://us.i.posthog.com")
@@ -151,6 +153,10 @@ async def lifespan(app: FastAPI):
             pass
         try:
             await close_perspective_client()
+        except Exception:
+            pass
+        try:
+            await stop_eventloop_monitor(eventloop_task)
         except Exception:
             pass
         try:
