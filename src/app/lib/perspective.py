@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import time
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -47,6 +48,13 @@ def _perspective_url() -> str:
     """Perspective API endpoint URL, overridable via GE_PERSPECTIVE_HOST for local profiling."""
     host = os.environ.get("GE_PERSPECTIVE_HOST", _PERSPECTIVE_HOST_DEFAULT)
     return f"{host}/v1alpha1/comments:analyze"
+
+
+def _perspective_host_label() -> str:
+    """Host label for the `client.in_flight` metric, matching the httpx
+    transport's host-label semantics (InFlightTransport uses
+    `request.url.host`)."""
+    return urlsplit(_perspective_url()).hostname or "unknown"
 
 
 class PerspectiveLanguageNotSupportedError(Exception):
@@ -146,6 +154,7 @@ class PerspectiveClient:
             raise RuntimeError("GE_PERSPECTIVE_API_KEY environment variable is not set")
         self._api_key = key
         self._session: aiohttp.ClientSession | None = None
+        self._in_flight = 0
 
     def _get_session(self) -> aiohttp.ClientSession:
         """Lazily build the dedicated aiohttp session.
@@ -221,29 +230,46 @@ class PerspectiveClient:
         session = self._get_session()
         timeout = aiohttp.ClientTimeout(total=_SCORE_TIMEOUT_SECONDS)
 
-        for attempt in range(_SCORE_ATTEMPTS):
-            try:
-                async with timed(logger, "perspective.score.duration_ms", record_metric=True):
-                    async with session.post(
-                        _perspective_url(),
-                        params={"key": self._api_key},
-                        json=payload,
-                        timeout=timeout,
-                    ) as response:
-                        if response.status != 200:
-                            await self._handle_error_response(response, content)
-                        data = await response.json()
-                return self._extract_score(data)
-            except TimeoutError:
-                if attempt == _SCORE_ATTEMPTS - 1:
-                    raise
-                logger.warning(
-                    "Perspective API timeout (%ss) scoring content %.80r; retrying",
-                    _SCORE_TIMEOUT_SECONDS,
-                    content,
+        # `client.in_flight` is the saturation signal for this session: the
+        # connector is unbounded (limit=0/limit_per_host=0, see
+        # _get_session), so `client.pool.wait_ms` can structurally never
+        # fire here -- there's no pool cap to queue behind. This counter
+        # tracks concurrent score() calls instead. Increment/record happen
+        # inside the try so the `finally` decrement always runs, even if
+        # `collector.record` itself raises.
+        self._in_flight += 1
+        try:
+            collector = get_metric_collector()
+            if collector is not None:
+                collector.record(
+                    "client.in_flight", self._in_flight, host=_perspective_host_label()
                 )
 
-        raise AssertionError("unreachable: loop above always returns or raises")
+            for attempt in range(_SCORE_ATTEMPTS):
+                try:
+                    async with timed(logger, "perspective.score.duration_ms", record_metric=True):
+                        async with session.post(
+                            _perspective_url(),
+                            params={"key": self._api_key},
+                            json=payload,
+                            timeout=timeout,
+                        ) as response:
+                            if response.status != 200:
+                                await self._handle_error_response(response, content)
+                            data = await response.json()
+                    return self._extract_score(data)
+                except TimeoutError:
+                    if attempt == _SCORE_ATTEMPTS - 1:
+                        raise
+                    logger.warning(
+                        "Perspective API timeout (%ss) scoring content %.80r; retrying",
+                        _SCORE_TIMEOUT_SECONDS,
+                        content,
+                    )
+
+            raise AssertionError("unreachable: loop above always returns or raises")
+        finally:
+            self._in_flight -= 1
 
 
 # Client-side rate limiter tracking usage within the current calendar-minute

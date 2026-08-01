@@ -161,7 +161,8 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
         raise FollowedUsersLookupError(
             f"Failed to fetch followed users for {user_did}"
         ) from exc
-    except FollowedUsersLookupError:
+    except FollowedUsersLookupError as exc:
+        _count_failure("bsky.follows.failure_count", exc)
         raise
     except (httpx.HTTPError, ValueError) as exc:
         _count_failure("bsky.follows.failure_count", exc)
