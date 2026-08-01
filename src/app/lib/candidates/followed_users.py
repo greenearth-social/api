@@ -78,6 +78,7 @@ async def followed_users_search(
     ):
         resp = await es.search(
             index="posts_recent",
+            op="author_scan",
             query=query,
             size=num_candidates,
             sort=[{"created_at": "desc"}],

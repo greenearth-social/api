@@ -105,6 +105,7 @@ async def fetch_recent_liked_post_uris(
 
             resp = await es.search(
                 index="likes",
+                op="likes",
                 query=query,
                 size=limit,
                 sort=[{"created_at": "desc"}],
@@ -169,6 +170,7 @@ async def fetch_recent_liked_post_uris_and_times(
 
             resp = await es.search(
                 index="likes",
+                op="likes",
                 query=query,
                 size=limit,
                 sort=[{"created_at": "desc"}],
@@ -217,6 +219,7 @@ async def fetch_post_embeddings(
 
             resp = await es.search(
                 index=index,
+                op="hydrate",
                 query=query,
                 size=len(at_uris),
                 _source=[
@@ -278,6 +281,7 @@ async def fetch_post_embeddings_and_metadata(
 
             resp = await es.search(
                 index=index,
+                op="hydrate",
                 query=query,
                 size=len(at_uris),
                 _source=[

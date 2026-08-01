@@ -105,6 +105,7 @@ async def skylight_search(
     try:
         resp = await es.search(
             index="posts",
+            op="search",
             query=body.get("query"),
             size=size,
             _source=SKYLIGHT_SOURCE_FIELDS,
