@@ -7,9 +7,9 @@ read top-to-bottom against the attribution playbook below.
 - Template: [`dashboards/bottleneck.json.tmpl`](dashboards/bottleneck.json.tmpl)
 - Deploy: [`deploy.sh`](deploy.sh)
 - Deployed dashboard ids (written by `deploy.sh`): `dashboards/ids.env`
-- Design doc: [`../docs/design/load-test-regression-assessment.md`](../docs/design/load-test-regression-assessment.md)
-  (§4.2 layout, §4.3 playbook, Appendix A validated PromQL, Appendix B the 07-31
-  worked example)
+- Design context: [issue #343](https://github.com/greenearth-social/api/issues/343)
+  (attribution plan, metric inventory, and the 07-31 load-test timeline used as
+  the worked example below)
 
 ## Deploying
 
