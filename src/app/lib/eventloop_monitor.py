@@ -4,7 +4,7 @@ A background task sleeps for a fixed interval and records how far past the
 deadline it actually woke up. Under a healthy loop the overshoot is ~0-2 ms;
 when coroutines or sync work monopolize the loop, every pending callback —
 including responses already received from ES/inference/Perspective — waits
-this long to run. See docs/design/load-test-regression-assessment.md §4.1.
+this long to run. See issue #343 for the attribution design.
 """
 
 from __future__ import annotations
