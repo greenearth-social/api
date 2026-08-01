@@ -18,7 +18,9 @@ from publish_feed import (
     _put_record,
     _resolve_environment,
     _resolve_feed_publish_params,
+    _git_short_sha,
     _upload_blob,
+    _with_git_sha,
     delete_all_feeds,
     delete_feed,
     list_feeds,
@@ -843,11 +845,60 @@ class TestSearchability:
 
 
 class TestDisplayNameLength:
+    # git_sha=None covers the unstamped path; "e9f07f5" is a representative
+    # 7-char short sha (the widest form deploy.sh produces via --short=7), so a
+    # feed that fits with it stamped fits for any deployment.
     @pytest.mark.parametrize("rkey,feed_cfg", list(FEEDS.items()))
     @pytest.mark.parametrize("env", ["prod", "stage", "dev"])
-    def test_display_name_within_24_chars(self, rkey, feed_cfg, env):
-        _, name, _ = _resolve_feed_publish_params(rkey, feed_cfg, env)
-        assert len(name) <= 24, f"{rkey} @ {env}: '{name}' is {len(name)} chars"
+    @pytest.mark.parametrize("git_sha", [None, "e9f07f5"])
+    def test_display_name_within_24_chars(self, rkey, feed_cfg, env, git_sha):
+        _, name, _ = _resolve_feed_publish_params(rkey, feed_cfg, env, git_sha)
+        assert len(name) <= 24, f"{rkey} @ {env} (sha={git_sha}): '{name}' is {len(name)} chars"
+
+
+# ---------------------------------------------------------------------------
+# git sha stamping
+# ---------------------------------------------------------------------------
+
+
+class TestGitShaStamping:
+    def test_internal_name_and_description_carry_sha(self):
+        feed = FEEDS["unranked-your-feed"]
+        _, name, desc = _resolve_feed_publish_params(
+            "unranked-your-feed", feed, "stage", "e9f07f5"
+        )
+        assert name.endswith(" e9f07f5")
+        assert desc == "Built by Caterpie · e9f07f5"
+
+    def test_prod_public_name_is_not_stamped(self):
+        feed = FEEDS["best-of-friends"]
+        _, name, desc = _resolve_feed_publish_params(
+            "best-of-friends", feed, "prod", "e9f07f5"
+        )
+        assert name == feed.display_name
+        assert "e9f07f5" not in name
+        assert "e9f07f5" not in desc
+
+    def test_missing_sha_leaves_names_unstamped(self):
+        feed = FEEDS["unranked-your-feed"]
+        _, name, desc = _resolve_feed_publish_params(
+            "unranked-your-feed", feed, "stage", None
+        )
+        assert name == "GE e2 S"
+        assert desc == "Built by Caterpie"
+
+    def test_with_git_sha_appends_within_budget(self):
+        assert _with_git_sha("GE e2 S", "e9f07f5") == "GE e2 S e9f07f5"
+        assert _with_git_sha("GE e2 S", None) == "GE e2 S"
+
+    def test_with_git_sha_rejects_over_budget_name(self):
+        with pytest.raises(ValueError, match="exceeding"):
+            _with_git_sha("This name is already long", "e9f07f5")
+
+    def test_git_short_sha_prefers_env(self, monkeypatch):
+        monkeypatch.setenv("GE_GIT_SHA", "deadbeefcafe")
+        # Truncated to 7 chars even if the env value is longer.
+        assert _git_short_sha() == "deadbee"
 
 
 # ---------------------------------------------------------------------------
