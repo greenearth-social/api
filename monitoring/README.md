@@ -119,6 +119,24 @@ gcloud alpha monitoring policies list --project greenearth-471522 --format json 
 and, if the policy's `thresholdValue` differs, update the `300` in the row-6
 `freshness_sec` chart's `thresholds` block and the table above.
 
+### Post-deploy verification checklist
+
+Deploying the template renders JSON that hasn't all been eyeballed against a
+live dashboard yet. After `deploy.sh stage` / `deploy.sh prod`, confirm:
+
+- The row-6 freshness threshold matches the prod alert policy (see the
+  freshness policy check above).
+- The zero-value threshold line on the row-4 rejected-count chart survives the
+  proto3 round trip (a `0` threshold can serialize as an absent field).
+- The four convention-derived series names (ES exporter thread-pool/GC/circuit
+  breaker metrics, GCE disk IO latency) resolve to real time series rather than
+  empty charts.
+- The row-3 `instance_count` state-label legend distinguishes instance states
+  rather than rendering one indistinguishable series.
+- The `analyze.py` deep-link's `;startTime=…;endTime=…` matrix-param format
+  actually pre-sets the console's time range when opened, rather than landing
+  on the default window.
+
 ## Chart inventory
 
 Six rows, 20 charts, one section header per row.
@@ -145,6 +163,22 @@ Six rows, 20 charts, one section header per row.
 | 6 Blast radius | `ingex/freshness_sec` p95 by source | percentile, grouped by `resource.label.job` (`jetstream_ingest` / `megastream_ingest`) |
 | 6 | `ingex/es.bulk_index_*.took_ms` p95 | one percentile series per bulk op (posts, likes, inferences, tombstones, like_tombstones) |
 | 6 | JVM GC/s + breakers tripped/s + PD IO latency | PromQL exporter series on Y1, `compute.googleapis.com` disk IO latency on Y2 |
+
+Row 2's `rank.model` p95 vs `inference.predict` p95 gap chart pairs series across
+repos by `model_name`: api's `rank.model.duration_ms` values `two_tower` /
+`heavy_ranker` correspond to inference-service's `inference.predict.duration_ms`
+values `user-tower` / `ranker` respectively — the two services don't share a
+naming convention for the same model, so match the pairs by that mapping, not by
+literal label equality, when reading the gap chart.
+
+### Deliberate omissions
+
+Two charts from the design doc's §4.2 layout are intentionally left out of v1:
+Cloud Run request concurrency (row 3) and PD IO queue depth (row 6). Neither
+had a clear finding to hang off of during the 07-31 case study, so they were
+cut to keep the dashboard to the charts that earned their place. Add them back
+if a future regression raises an instance-level saturation question (row 3) or
+a disk-queue-depth question (row 6) that the existing charts can't answer.
 
 ## Window comparison
 
