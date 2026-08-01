@@ -92,6 +92,30 @@ class TestGetFollowedUserDidsFailureCounters:
         assert ("bsky.follows.failure_count", 1, {"status_code": "timeout"}) in collector.records
 
     @pytest.mark.asyncio
+    async def test_counts_exactly_once_when_first_page_fails_with_no_partials(
+        self, fake_http_client, monkeypatch
+    ):
+        """A lookup that fails on its first page (no partial data accumulated
+        yet) re-raises out of the inner per-page handler and is counted once
+        by the outer handler that catches it -- not twice."""
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
+
+        request = httpx.Request("GET", "https://example.test")
+        response = httpx.Response(503, request=request)
+        fake_http_client.response = FakeResponse(
+            status_exc=httpx.HTTPStatusError(
+                "service unavailable", request=request, response=response
+            )
+        )
+
+        with pytest.raises(FollowedUsersLookupError):
+            await get_followed_user_dids("did:plc:x", limit=10)
+
+        failures = [r for r in collector.records if r[0] == "bsky.follows.failure_count"]
+        assert failures == [("bsky.follows.failure_count", 1, {"status_code": "503"})]
+
+    @pytest.mark.asyncio
     async def test_counts_once_for_partial_result_fallback(
         self, fake_http_client, monkeypatch, caplog
     ):
