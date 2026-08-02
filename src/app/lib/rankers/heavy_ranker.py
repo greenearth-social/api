@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+from typing import assert_never
 
 from ...models import RankedCandidate, CandidatePost, RankPredictResult
 from .base import Ranker, RankerResult
@@ -15,20 +16,24 @@ from ..telemetry import timed
 from ..inference import (
     get_inference_settings,
     predict_heavy_ranker_single_user,
+    HistoryMode
 )
 from ..feed_debug import current_recorder
 from .utils import get_rank_predict_results_from_candidates_and_scores
 
 logger = logging.getLogger(__name__)
-HEAVY_RANKER_MODEL_NAME = "heavy_ranker"
 
 
 class HeavyRanker(Ranker):
     """Rank candidate posts relative to a user using an ML model."""
 
+    def __init__(self, name: str, history_mode: HistoryMode):
+        self._name = name
+        self.history_mode: HistoryMode = history_mode
+
     @property
     def name(self) -> str:
-        return HEAVY_RANKER_MODEL_NAME
+        return self._name
 
     @property
     def score_bounds(self) -> tuple[float, float]:
@@ -45,45 +50,53 @@ class HeavyRanker(Ranker):
         )
 
         async def _get_user_features() -> tuple[list[list[float]], list[str], list[str], list[int]]:
-            async with timed(logger, "ranker_get_user_features", user_did=user_did):
-                user_history_vectors: list[list[float]] = []
-                history_author_dids: list[str] = []
-                filtered_history_liked_at_times: list[str] = []
-                history_like_counts: list[int] = []
-                user_history_liked_uris, history_liked_at_times = await fetch_recent_liked_post_uris_and_times(es, user_did)
+            rec = current_recorder()
 
-                rec = current_recorder()
+            match self.history_mode:
+                case "actual":
+                    async with timed(logger, "ranker_get_user_features", user_did=user_did):
+                        user_history_vectors: list[list[float]] = []
+                        history_author_dids: list[str] = []
+                        filtered_history_liked_at_times: list[str] = []
+                        history_like_counts: list[int] = []
+                        user_history_liked_uris, history_liked_at_times = await fetch_recent_liked_post_uris_and_times(es, user_did)
 
-                if not user_history_liked_uris:
-                    logger.info("No likes found for user %s", user_did)
+                        if not user_history_liked_uris:
+                            logger.info("No likes found for user %s", user_did)
+                            if rec is not None:
+                                rec.record_user_features(self._name, [], 0)
+                        else:
+                            user_history_hydrated_posts: list[tuple[str, list[float], str, int]] = await fetch_post_embeddings_and_metadata(
+                                es, user_history_liked_uris,
+                            )
+                            if rec is not None:
+                                rec.record_user_features(
+                                    self._name, user_history_liked_uris, len(user_history_hydrated_posts)
+                                )
+                            if not user_history_hydrated_posts:
+                                logger.info(
+                                    "No embeddings found for %d liked posts of user %s",
+                                    len(user_history_liked_uris),
+                                    user_did,
+                                )
+                            else:
+                                user_history_vectors = [embedding for _, embedding, _, _ in user_history_hydrated_posts]
+                                history_author_dids = [author_did for _, _, author_did, _ in user_history_hydrated_posts]
+                                history_like_counts = [like_count for _, _, _, like_count in user_history_hydrated_posts]
+                                filtered_history_uris = [uri for uri, _, _, _ in user_history_hydrated_posts]
+                                filtered_history_liked_at_times = [
+                                    liked_at_time
+                                    for uri, liked_at_time in zip(user_history_liked_uris, history_liked_at_times)
+                                    if uri in filtered_history_uris
+                                ]
+
+                        return user_history_vectors, history_author_dids, filtered_history_liked_at_times, history_like_counts
+                case "empty":
                     if rec is not None:
-                        rec.record_user_features(HEAVY_RANKER_MODEL_NAME, [], 0)
-                else:
-                    user_history_hydrated_posts: list[tuple[str, list[float], str, int]] = await fetch_post_embeddings_and_metadata(
-                        es, user_history_liked_uris,
-                    )
-                    if rec is not None:
-                        rec.record_user_features(
-                            HEAVY_RANKER_MODEL_NAME, user_history_liked_uris, len(user_history_hydrated_posts)
-                        )
-                    if not user_history_hydrated_posts:
-                        logger.info(
-                            "No embeddings found for %d liked posts of user %s",
-                            len(user_history_liked_uris),
-                            user_did,
-                        )
-                    else:
-                        user_history_vectors = [embedding for _, embedding, _, _ in user_history_hydrated_posts]
-                        history_author_dids = [author_did for _, _, author_did, _ in user_history_hydrated_posts]
-                        history_like_counts = [like_count for _, _, _, like_count in user_history_hydrated_posts]
-                        filtered_history_uris = [uri for uri, _, _, _ in user_history_hydrated_posts]
-                        filtered_history_liked_at_times = [
-                            liked_at_time
-                            for uri, liked_at_time in zip(user_history_liked_uris, history_liked_at_times)
-                            if uri in filtered_history_uris
-                        ]
-
-                return user_history_vectors, history_author_dids, filtered_history_liked_at_times, history_like_counts
+                        rec.record_user_features(self._name, [], 0)
+                    return [], [], [], []
+                case _:
+                    assert_never(self.history_mode)
         # end _get_user_features()
 
 

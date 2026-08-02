@@ -20,6 +20,11 @@ GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 # Inference configuration
 GE_INFERENCE_BASE_URL=""
 
+# Short git sha of the deployed code, resolved by require_clean_worktree().
+# Stamped onto the Cloud Run revision (env var + label) and onto debug feed
+# records so we can identify exactly what code is live (see issue #228).
+GIT_SHA=""
+
 # PostHog configuration. Each environment is a separate PostHog project (separate
 # API key, provisioned via scripts/gcp_setup.sh), but all projects live on the same
 # PostHog Cloud host, so the host is a constant here rather than a per-env secret.
@@ -66,6 +71,30 @@ resolve_inference_base_url() {
     inference_domain="$(default_inference_domain)"
     GE_INFERENCE_BASE_URL="https://$inference_domain"
     log_info "Using mapped inference URL: $GE_INFERENCE_BASE_URL"
+}
+
+require_clean_worktree() {
+    log_info "Verifying git working tree is clean..."
+
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        log_error "Not inside a git repository — cannot verify the deployed code."
+        log_error "Run deploy.sh from a checkout of the api repo."
+        exit 1
+    fi
+
+    # Refuse to deploy with uncommitted changes so the stamped git sha always
+    # matches the code that ships. Deploying an unpushed branch is fine — only a
+    # dirty tree is rejected (see issue #228).
+    if [ -n "$(git status --porcelain)" ]; then
+        log_error "Working tree has uncommitted changes. Commit or stash them before deploying"
+        log_error "so the deployed git sha reflects the running code."
+        git status --short
+        exit 1
+    fi
+
+    GIT_SHA="$(git rev-parse --short=7 HEAD)"
+    export GE_GIT_SHA="$GIT_SHA"  # picked up by publish_feed.py during feed sync
+    log_info "Deploying git sha: $GIT_SHA ($(git rev-parse --abbrev-ref HEAD))"
 }
 
 validate_config() {
@@ -192,6 +221,7 @@ deploy_api_service() {
     local firestore_api_key_secret="firestore-api-key-stage"
     local feed_context_secret="feed-context-secret-stage"
     local probe_secret="probe-secret-stage"
+    local load_test_secret="load-test-secret-stage"
     local perspective_api_key_secret="perspective-api-key-stage"
     local posthog_api_key_secret="posthog-api-key-stage"
     local firestore_database="greenearth-stage"
@@ -201,6 +231,7 @@ deploy_api_service() {
         firestore_api_key_secret="firestore-api-key-prod"
         feed_context_secret="feed-context-secret-prod"
         probe_secret="probe-secret-prod"
+        load_test_secret="load-test-secret-prod"
         perspective_api_key_secret="perspective-api-key-prod"
         posthog_api_key_secret="posthog-api-key-prod"
         firestore_database="greenearth-prod"
@@ -221,6 +252,9 @@ deploy_api_service() {
     # Set environment variables. The app derives its default log level from
     # ENVIRONMENT (stage/prod -> WARNING, else INFO). Override with GE_LOG_LEVEL.
     deploy_cmd="$deploy_cmd --set-env-vars=ENVIRONMENT=$ENVIRONMENT"
+    # Stamp the deployed git sha so the app can report it (e.g. /health) and so
+    # revisions are identifiable for rollbacks (see issue #228).
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_GIT_SHA=$GIT_SHA"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$GE_ELASTICSEARCH_URL"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
@@ -236,13 +270,6 @@ deploy_api_service() {
     # the client's own timeout with nothing recorded on our side (see #270).
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FEED_REQUEST_TIMEOUT_SEC=9"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_POSTHOG_HOST=$GE_POSTHOG_HOST"
-    # NOTE: keep this false until the Perspective API timeout and ES generator
-    # connection errors under investigation in #270/#271 are resolved --
-    # enabling fail-fast while those are unaddressed would turn silent,
-    # swallowed failures into user-visible "feed unavailable" errors on every
-    # occurrence.
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_FAIL_FAST=false"
-
     if [ -n "$GE_INFERENCE_BASE_URL" ]; then
         deploy_cmd="$deploy_cmd --set-env-vars=GE_INFERENCE_BASE_URL=$GE_INFERENCE_BASE_URL"
     fi
@@ -253,6 +280,7 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-secrets=GE_FIRESTORE_API_KEY=$firestore_api_key_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_FEED_CONTEXT_SECRET=$feed_context_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_PROBE_SECRET=$probe_secret:latest"
+    deploy_cmd="$deploy_cmd --set-secrets=GE_LOAD_TEST_SECRET=$load_test_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_PERSPECTIVE_API_KEY=$perspective_api_key_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_POSTHOG_API_KEY=$posthog_api_key_secret:latest"
 
@@ -264,38 +292,58 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --timeout=$API_REQUEST_TIMEOUT"
     deploy_cmd="$deploy_cmd --concurrency=80"
 
+    # Tag the service/revision with the git sha so past deployments are
+    # identifiable when picking a rollback target (see issue #228).
+    deploy_cmd="$deploy_cmd --labels=git-sha=$GIT_SHA"
+
+    # Fold GE_FEED_GENERATOR_DID into this single deploy whenever we can resolve
+    # it up front (prod is a constant; stage/dev is derived from the service URL,
+    # which is stable once the service exists). This avoids emitting a second,
+    # otherwise-identical revision from a post-deploy `services update` — and
+    # keeps the git-sha label on the revision that actually serves traffic. Only
+    # a brand-new service (first-ever deploy) can't be resolved yet; that case
+    # falls back to a follow-up update below. Note the emulator host vars need no
+    # explicit removal here: --set-env-vars replaces the whole env set, so any
+    # GE_FIRESTORE_EMULATOR_HOST/FIRESTORE_EMULATOR_HOST are dropped by omission.
+    local generator_did=""
+    local did_in_deploy=false
+    if generator_did=$(resolve_generator_did); then
+        deploy_cmd="$deploy_cmd --set-env-vars=GE_FEED_GENERATOR_DID=$generator_did"
+        did_in_deploy=true
+    fi
+
     # Allow unauthenticated access (adjust based on your needs)
     deploy_cmd="$deploy_cmd --allow-unauthenticated"
 
     log_build "Executing: $deploy_cmd"
-    eval "$deploy_cmd"
+    if ! eval "$deploy_cmd"; then
+        log_error "Failed to deploy greenearth-api-$ENVIRONMENT"
+        exit 1
+    fi
 
-    if [ $? -eq 0 ]; then
-        log_info "✓ greenearth-api-$ENVIRONMENT deployed successfully"
+    log_info "✓ greenearth-api-$ENVIRONMENT deployed successfully"
 
-        # Get the service URL
-        local service_url=$(gcloud run services describe greenearth-api-$ENVIRONMENT --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)")
-        log_info "Service URL: $service_url"
+    local service_url
+    service_url=$(gcloud run services describe "greenearth-api-$ENVIRONMENT" --region="$REGION" --project="$PROJECT_ID" --format="value(status.url)")
+    log_info "Service URL: $service_url"
 
-        # Ensure runtime DID is explicitly set so /.well-known/did.json is env-correct
-        local generator_did
-        if [ "$ENVIRONMENT" = "prod" ]; then
-            generator_did="did:web:api.greenearth.social"
-        else
-            local service_host
-            service_host=$(echo "$service_url" | sed 's|https://||')
-            generator_did="did:web:$service_host"
-        fi
-
+    if [ "$did_in_deploy" = true ]; then
+        log_info "Set GE_FEED_GENERATOR_DID=$generator_did"
+    else
+        # First-ever deploy: the service URL wasn't known until the service
+        # existed, so set the DID now. This creates one extra revision, but only
+        # once in a service's lifetime — every later deploy folds the DID in
+        # above. Carry the git-sha label onto this revision too.
+        local service_host
+        service_host=$(echo "$service_url" | sed 's|https://||')
+        generator_did="did:web:$service_host"
         gcloud run services update "greenearth-api-$ENVIRONMENT" \
             --region="$REGION" \
             --project="$PROJECT_ID" \
+            --labels="git-sha=$GIT_SHA" \
             --update-env-vars="GE_FEED_GENERATOR_DID=$generator_did" \
             --remove-env-vars="GE_FIRESTORE_EMULATOR_HOST,FIRESTORE_EMULATOR_HOST" > /dev/null
-        log_info "Set GE_FEED_GENERATOR_DID=$generator_did"
-    else
-        log_error "Failed to deploy greenearth-api-$ENVIRONMENT"
-        exit 1
+        log_info "Set GE_FEED_GENERATOR_DID=$generator_did (follow-up revision)"
     fi
 }
 
@@ -392,6 +440,7 @@ main() {
     log_info "Region: $REGION"
     log_info "Environment: $ENVIRONMENT"
 
+    require_clean_worktree
     validate_config
     verify_vpc_connector
 

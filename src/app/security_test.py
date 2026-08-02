@@ -55,4 +55,4 @@ class TestHealthEndpointNoAuth:
 
     def test_health_returns_ok_status(self, client_invalid):
         response = client_invalid.get("/health")
-        assert response.json() == {"status": "ok"}
+        assert response.json()["status"] == "ok"

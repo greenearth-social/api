@@ -8,14 +8,18 @@ import logging
 
 from ...models import MaxAgeHours
 from .base import CandidateGenerator, CandidateResult
-from ..inference import get_inference_settings, compute_user_embedding, get_cached_post_tower_uuid
+from ..inference import (
+    get_inference_settings,
+    compute_user_embedding,
+    get_cached_post_tower_uuid,
+    HistoryMode,
+)
 from .es_candidates import knn_search_posts
 from ..embeddings import GE_POST_EMBEDDING_FIELD
 
 logger = logging.getLogger(__name__)
 
 
-TWO_TOWER_GENERATOR_NAME = "two_tower"
 MIN_LIKE_COUNT = 20
 # Hard cap on the freshness window for two-tower, independent of the user's
 # freshness preference. The selective MIN_LIKE_COUNT filter makes Lucene
@@ -36,9 +40,13 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         user_did → recent likes → post embeddings → user tower → kNN search
     """
 
+    def __init__(self, name: str, history_mode: HistoryMode):
+        self._name = name
+        self.history_mode: HistoryMode = history_mode
+
     @property
     def name(self) -> str:
-        return "two_tower"
+        return self._name
 
     async def generate(
         self,
@@ -68,13 +76,25 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             )
 
         # run the user tower to get the user embedding
+        allow_empty_history = False
+        if self.history_mode == "empty":
+            allow_empty_history = True
         user_embedding = await compute_user_embedding(
             user_did,
             es,
             inference_base_url,
             inference_api_key,
-            TWO_TOWER_GENERATOR_NAME,
+            self.name,
+            self.history_mode,
+            allow_empty_history,
         )
+        if user_embedding is None:
+            return CandidateResult(
+                generator_name=self.name,
+                candidates=[],
+                status="not_run",
+                reason="no_user_like_history",
+            )
 
         # Freshness filters returned candidates, not the interaction history
         # used above to compute the user embedding. Cap the requested window at

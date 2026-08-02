@@ -26,7 +26,7 @@ from ..models import (
 
 def _request() -> CandidateGenerateRequest:
     return CandidateGenerateRequest(
-        generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
+        generators=[GeneratorSpec(name="popularity", weight=1.0)],
         user_did="did:plc:user",
         num_candidates=10,
         video_only=False,
@@ -43,7 +43,7 @@ def _candidate(
         content=content,
         minilm_l12_embedding=embedding,
         score=1.0,
-        generator_name="post_similarity",
+        generator_name="popularity",
         author_did=author,
     )
 
@@ -68,7 +68,7 @@ class TestBuildDocument:
         rec.set_generate_request(_request())
         rec.record_generator_output(
             CandidateResult(
-                generator_name="post_similarity",
+                generator_name="popularity",
                 candidates=[_candidate("at://p/1"), _candidate("at://p/2")],
             )
         )
@@ -105,7 +105,7 @@ class TestBuildDocument:
         assert doc.ranker_model == "two_tower"
         assert doc.diversify is True
         assert len(doc.generator_outputs) == 1
-        assert doc.generator_outputs[0].generator_name == "post_similarity"
+        assert doc.generator_outputs[0].generator_name == "popularity"
         assert len(doc.final_candidates) == 2
         assert doc.ranking is not None and len(doc.ranking.rankings) == 2
         assert doc.order_after_rank == ["at://p/1", "at://p/2"]
@@ -163,19 +163,23 @@ class TestBuildDocument:
     def test_includes_diversification(self):
         rec = self._recorder()
         rec.record_diversification(
-            [("at://p/2", 0.9, 0.4, 0.3, 0.1), ("at://p/1", 1.0, 1.0, 0.0, 0.0)]
+            [
+                ("at://p/2", 0.9, 0.4, 0.3, 0.1, 0.6),
+                ("at://p/1", 1.0, 1.0, 0.0, 0.0, 1.0),
+            ]
         )
         doc = self._build(rec)
         assert [e.at_uri for e in doc.diversification] == ["at://p/2", "at://p/1"]
         assert doc.diversification[0].author_penalty == 0.3
         assert doc.diversification[0].content_penalty == 0.1
+        assert doc.diversification[0].similarity_score == 0.6
 
     def test_author_dids_union(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
         rec.set_generate_request(_request())
         rec.record_generator_output(
             CandidateResult(
-                generator_name="post_similarity",
+                generator_name="popularity",
                 candidates=[_candidate("at://p/1", author="did:plc:a")],
             )
         )
@@ -257,17 +261,19 @@ class TestDiversificationCapture:
 
         assert [e[0] for e in rec.diversification] == ["at://a", "at://b"]
         # First pick: selected on weighted relevance alone, no penalty.
-        _, rel, score, author_pen, content_pen = rec.diversification[0]
+        _, rel, score, author_pen, content_pen, similarity_score = rec.diversification[0]
         assert rel == pytest.approx(1.0)
         assert score == pytest.approx((1 - BETA) * 1.0)
         assert author_pen == pytest.approx(0.0)
         assert content_pen == pytest.approx(0.0)
+        assert similarity_score == pytest.approx(0.0)
         # Second pick: author_penalty = BETA * AUTHOR_WEIGHT * 1.
-        _, rel, score, author_pen, content_pen = rec.diversification[1]
+        _, rel, score, author_pen, content_pen, similarity_score = rec.diversification[1]
         assert rel == pytest.approx(0.5)
         assert author_pen == pytest.approx(BETA * AUTHOR_WEIGHT * 1)
         assert content_pen == pytest.approx(0.0)
         assert score == pytest.approx((1 - BETA) * 0.5 - author_pen - content_pen)
+        assert similarity_score == pytest.approx((author_pen + content_pen) / BETA)
 
     def test_content_penalty_recorded(self):
         # Different authors, identical embeddings -> penalty is purely content.
@@ -282,10 +288,11 @@ class TestDiversificationCapture:
         with feed_debug_scope(rec):
             mmr_rerank([a, b])
 
-        _, _, _, author_pen, content_pen = rec.diversification[1]
+        _, _, _, author_pen, content_pen, similarity_score = rec.diversification[1]
         # content_penalty = BETA * (1 - AUTHOR_WEIGHT) * cosine(=1).
         assert author_pen == pytest.approx(0.0)
         assert content_pen == pytest.approx(BETA * (1 - AUTHOR_WEIGHT) * 1.0)
+        assert similarity_score == pytest.approx(content_pen / BETA)
 
     def test_no_recording_without_recorder(self):
         a = CandidatePost(
@@ -422,7 +429,7 @@ class TestBuildPipelineMetadata:
         )
         rec.diversify = True
         rec.diversification = [
-            ("at://a", 1.0, 0.80, 0.15, 0.05),
+            ("at://a", 1.0, 0.80, 0.15, 0.05, 0.7),
         ]
         rec.final_order = ["at://a"]
         rec.order_after_rank = ["at://a"]
@@ -437,6 +444,7 @@ class TestBuildPipelineMetadata:
         assert div.score == 0.80
         assert div.author_penalty == 0.15
         assert div.content_penalty == 0.05
+        assert div.similarity_score == 0.7
 
     def test_diversification_none_when_not_diversified(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)

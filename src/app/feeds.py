@@ -49,7 +49,9 @@ SOCIAL_RADIUS_PRESETS: dict[int, list[GeneratorSpec]] = {
     ],
 }
 
-# NOTE: display_name is limited to 24 chars, including the prefix ("GreenEarth, GE Dev, or GE Stg")
+# NOTE: published display names are limited to 24 graphemes. Internal ("debug")
+# feeds are published as "GE <internal_display_name> <git_sha>" (see issue #228),
+# so keep internal_display_name to 13 chars or fewer. feeds_test.py enforces this.
 FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(
         display_name="Unranked YF",
@@ -208,23 +210,6 @@ FEEDS: dict[str, FeedConfig] = {
     ),
 
     ### (Private) Pure Candidate Generator Feeds, mostly for testing and debugging ###
-    "post-similarity": FeedConfig(
-        display_name="Post Similarity",
-        description="Development feed — post-similarity candidates only.",
-        internal_rkey="gh-ps",
-        internal_display_name="gh PS",
-        avatar="assets/icons/post-similarity.png",
-        diversify=False,
-        exclude_seen_posts=False,
-        gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=[
-                GeneratorSpec(name="post_similarity", weight=1.0),
-            ],
-            num_candidates=30,
-            video_only=False,
-            exclude_uris=[],
-        ),
-    ),
     "followed-users": FeedConfig(
         display_name="Followed Users",
         description="Development feed — followed-users candidates only.",
@@ -291,6 +276,34 @@ FEEDS: dict[str, FeedConfig] = {
             num_candidates=30,
             video_only=False,
             exclude_uris=[],
+        ),
+    ),
+    "cold-start": FeedConfig(
+        display_name="Cold Start",
+        description="Main Green Earth feed for a user with no like history.",
+        public=False,
+        internal_rkey="mf-cs",
+        internal_display_name="mf CS",
+        avatar="assets/icons/green-earth.png",
+        max_render_share=0.5,
+        min_rank_score=0.425,
+        min_mmr_score=-0.05,
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[
+                GeneratorSpec(name="followed_users", weight=0.40),
+                GeneratorSpec(name="two_tower_empty_history", weight=0.30),
+                GeneratorSpec(name="popularity", weight=0.30),
+            ],
+            infill=None,
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
+        ),
+        rank_request_template=RankPredictRequest.model_construct(
+            models=[
+                RankModelSpec(name="heavy_ranker_empty_history", weight=1.0),
+                RankModelSpec(name="perspective", weight=1.0),
+            ],
         ),
     ),
 }

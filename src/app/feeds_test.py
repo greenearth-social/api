@@ -3,12 +3,21 @@ import pytest
 from app.feeds import FEEDS, SOCIAL_RADIUS_PRESETS
 
 CANDIDATE_ONLY_FEEDS = {
-    "post-similarity": "post_similarity",
     "followed-users": "followed_users",
     "network-likes": "network_likes",
     "popularity": "popularity",
     "two-tower": "two_tower",
 }
+
+# AT Protocol app.bsky.feed.generator caps displayName at 24 graphemes. Published
+# names are composed from this metadata: prod publishes public feeds under the raw
+# display_name, while internal ("debug") feeds are published as
+# "GE <internal_display_name> <git_sha>" in dev/stage (see publish_feed.py and
+# issue #228). Budgeting for the widest composition here means an over-long name in
+# feeds.py fails next to its definition, not only in the publish script's tests.
+MAX_DISPLAY_NAME_GRAPHEMES = 24
+DEV_STAGE_PREFIX = "GE "  # widest env prefix applied to internal feeds
+GIT_SHA_SUFFIX_LEN = len(" ") + 7  # " " + 7-char short git sha
 
 
 class TestFeedsRegistry:
@@ -66,6 +75,30 @@ class TestFeedsRegistry:
             assert cfg.min_rank_score == pytest.approx(0.425)
             assert cfg.min_mmr_score is not None
 
+    def test_cold_start_feed_uses_empty_history_models(self):
+        cfg = FEEDS["cold-start"]
+        assert cfg.public is False
+        assert [
+            (spec.name, spec.weight)
+            for spec in cfg.gen_request_template.generators
+        ] == [
+            ("followed_users", 0.40),
+            ("two_tower_empty_history", 0.30),
+            ("popularity", 0.30),
+        ]
+        assert cfg.rank_request_template is not None
+        assert [
+            (spec.name, spec.weight)
+            for spec in cfg.rank_request_template.models
+        ] == [
+            ("heavy_ranker_empty_history", 1.0),
+            ("perspective", 1.0),
+        ]
+        assert cfg.diversify is True
+        assert cfg.max_render_share == pytest.approx(0.5)
+        assert cfg.min_rank_score == pytest.approx(0.425)
+        assert cfg.min_mmr_score == pytest.approx(-0.05)
+
     def test_unranked_feeds_have_no_slate_cutoffs(self):
         for feed_name, cfg in FEEDS.items():
             if cfg.rank_request_template is not None:
@@ -92,3 +125,33 @@ class TestFeedsRegistry:
         assert cfg.max_render_share == pytest.approx(0.5)
         assert cfg.min_rank_score == pytest.approx(0.425)
         assert cfg.min_mmr_score == pytest.approx(-0.05)
+
+
+class TestFeedNameLengths:
+    """Surface over-long feed names at definition time.
+
+    ``publish_feed.py`` also asserts the composed published name fits (via
+    ``_resolve_feed_publish_params``); these checks are the same budget applied
+    directly to the raw metadata in ``feeds.py`` so the failure points at the
+    offending field.
+    """
+
+    @pytest.mark.parametrize("feed_name,cfg", list(FEEDS.items()))
+    def test_internal_display_name_fits_with_prefix_and_sha(self, feed_name, cfg):
+        # Worst case: dev/stage publishes internal feeds as "GE <name> <sha>".
+        composed = (
+            len(DEV_STAGE_PREFIX) + len(cfg.internal_display_name) + GIT_SHA_SUFFIX_LEN
+        )
+        assert composed <= MAX_DISPLAY_NAME_GRAPHEMES, (
+            f"{feed_name}: internal_display_name {cfg.internal_display_name!r} is too long — "
+            f"'GE {cfg.internal_display_name} <sha>' would be {composed} chars "
+            f"(limit {MAX_DISPLAY_NAME_GRAPHEMES})"
+        )
+
+    @pytest.mark.parametrize("feed_name,cfg", list(FEEDS.items()))
+    def test_public_display_name_fits(self, feed_name, cfg):
+        # Prod publishes public feeds under the raw display_name (no prefix/sha).
+        assert len(cfg.display_name) <= MAX_DISPLAY_NAME_GRAPHEMES, (
+            f"{feed_name}: display_name {cfg.display_name!r} exceeds "
+            f"{MAX_DISPLAY_NAME_GRAPHEMES} graphemes"
+        )

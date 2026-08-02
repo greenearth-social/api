@@ -41,6 +41,7 @@ from ..documents import (
 from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
+from ..lib.config import fail_fast, set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
 from ..lib.elasticsearch import fetch_post_embeddings
 from ..lib.embeddings import encode_float32_b64
@@ -50,6 +51,7 @@ from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_sco
 from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
+    delete_feed_snapshot,
     get_recent_discarded_uris,
     get_recent_seen_uris,
     get_user,
@@ -69,10 +71,16 @@ from ..lib.pipeline_context import (
     current_pipeline_context,
     pipeline_context_scope,
 )
-from ..lib.posthog_client import get_posthog_client, track_interaction, track_session
+from ..lib.posthog_client import (
+    evaluate_fail_fast_flag,
+    get_posthog_client,
+    track_interaction,
+    track_session,
+)
 from ..lib.release import api_release_sha
 from ..lib.rankers import run_predict
 from ..lib.request_cache import request_cache_scope
+from ..lib.request_context import set_traffic
 from ..lib.telemetry import timed
 from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
 
@@ -103,17 +111,24 @@ class _InitialRequestEntry:
 
 
 _initial_request_lock = Lock()
-_initial_requests: dict[tuple[str, str, int], _InitialRequestEntry] = {}
+_initial_requests: dict[tuple[str, str, int, bool], _InitialRequestEntry] = {}
 
 
 def _claim_initial_request(
     user_did: str,
     feed_name: str,
     limit: int,
+    is_load_test: bool,
 ) -> tuple[bool, Future[FeedSkeletonResponse]]:
-    """Elect one generator for identical initial requests within a short window."""
+    """Elect one generator for identical initial requests within a short window.
+
+    ``is_load_test`` is part of the key so real and load-test requests for the
+    same (user, feed, limit) never share a response: the shared response carries
+    the leader's signed feedContext (with its ``lt`` claim), and a follower of
+    the other traffic class would otherwise inherit the wrong provenance.
+    """
     now = time.monotonic()
-    key = (user_did, feed_name, limit)
+    key = (user_did, feed_name, limit, is_load_test)
     with _initial_request_lock:
         expired = [
             existing_key
@@ -136,12 +151,13 @@ def _complete_initial_request(
     user_did: str,
     feed_name: str,
     limit: int,
+    is_load_test: bool,
     future: Future[FeedSkeletonResponse],
     *,
     response: FeedSkeletonResponse | None = None,
     error: BaseException | None = None,
 ) -> None:
-    key = (user_did, feed_name, limit)
+    key = (user_did, feed_name, limit, is_load_test)
     if error is not None:
         with _initial_request_lock:
             entry = _initial_requests.get(key)
@@ -222,6 +238,44 @@ def dev_session_did(request: Request) -> str | None:
         raise HTTPException(
             status_code=400,
             detail="X-Dev-Session-DID must be a did:plc DID",
+        )
+    return did
+
+
+def load_test_did(request: Request) -> str | None:
+    """DID for a simulated load-test session, or ``None`` when not one.
+
+    Load testing drives ``getFeedSkeleton`` for a chosen set of real Bluesky
+    DIDs to measure how the serving path behaves under load — including the
+    cold-start path for users we've never seen. There is no AT Protocol JWT for
+    those requests, so like the probe and dev-session bypasses this stands in an
+    identity based on a shared secret.
+
+    Unlike ``dev_session_did`` — which is refused in deployed environments —
+    this is *meant* to run in stage/prod: that is where the load matters. To
+    keep it safe, every record it produces is tagged as test data
+    (``created_by_load_test`` on new user docs, ``lt`` on feedContext tokens,
+    ``load_test`` on interactions and cache entries, and a ``load_test`` metric
+    label), analytics (PostHog) are skipped for it, and the tagged data can be
+    deleted afterwards. Otherwise it is treated as a real session downstream so
+    the full write path is exercised.
+
+    Enabled only by ``GE_LOAD_TEST_SECRET``. Requests supply the secret in
+    ``X-Load-Test-Secret`` and the user in ``X-Load-Test-DID``.
+    """
+    secret = os.environ.get("GE_LOAD_TEST_SECRET")
+    if not secret:
+        return None
+    if not hmac.compare_digest(request.headers.get("X-Load-Test-Secret", ""), secret):
+        return None
+
+    did = request.headers.get("X-Load-Test-DID", "").strip()
+    if not did.startswith("did:plc:"):
+        # The secret matched, so this is an operator getting it wrong rather
+        # than stray traffic — say so instead of falling through to a 401.
+        raise HTTPException(
+            status_code=400,
+            detail="X-Load-Test-DID must be a did:plc DID",
         )
     return did
 
@@ -439,7 +493,7 @@ async def _run_ranking_pipeline(
 
     Runs inside a per-request cache scope so that identical ES queries
     issued by different stages (e.g. ``fetch_recent_liked_post_uris`` in
-    both ``post_similarity`` and the two-tower ranker) collapse to a
+    both the two-tower generator and the two-tower ranker) collapse to a
     single round-trip.
     """
     rec = current_recorder()
@@ -776,16 +830,71 @@ def _get_feed_cache(request: Request) -> FeedCache:
     return cache
 
 
+def _similarity_scores_from_items_meta(items_meta: list[PipelineItemMeta]) -> dict[str, float]:
+    """Build an ``{at_uri: similarity_score}`` lookup from pipeline metadata.
+
+    Items without diversification info (diversify disabled, or not yet
+    joined) are simply absent from the result.
+    """
+    return {
+        meta.at_uri: meta.diversification.similarity_score
+        for meta in items_meta
+        if meta.diversification is not None
+    }
+
+
+def _record_similarity_metric(
+    page_uris: list[str],
+    scores_by_uri: dict[str, float],
+    feed_name: str,
+    batch: int,
+    exclude_uri: str | None = None,
+) -> None:
+    """Emit the mean similarity score for one served page.
+
+    Lower is better: the score is each item's combined author+content
+    similarity to the items selected before it, so a rising mean means the
+    feed is getting more homogenous.
+
+    Silently emits nothing when no URI in the page has a known score (e.g.
+    diversify is disabled for this feed). ``exclude_uri`` (the pinned post,
+    when present) is always excluded from the mean even if it happens to
+    carry a score, since it wasn't organically selected by MMR.
+    """
+    scores = [
+        scores_by_uri[uri]
+        for uri in page_uris
+        if uri in scores_by_uri and uri != exclude_uri
+    ]
+    if not scores:
+        return
+    mc = get_metric_collector()
+    if mc is None:
+        return
+    mc.record(
+        "feed.mean_similarity_score",
+        sum(scores) / len(scores),
+        feed_name=feed_name,
+        batch=str(batch),
+    )
+
+
 # ---------------------------------------------------------------------------
 # feedContext helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_feed_context(user_did: str, feed_name: str, request_id: str) -> str:
+def _make_feed_context(
+    user_did: str, feed_name: str, request_id: str, *, load_test: bool = False
+) -> str:
     """Build the signed feedContext token shared by every item in a response.
 
     ``request_id`` doubles as the feed-cache key, so the served item order can be
     recovered from the cache during its TTL window.
+
+    ``load_test`` stamps the ``lt`` claim so that interactions later reported
+    against this feed (via the public sendInteractions endpoint, which carries
+    no other provenance) are recognised as test data.
     """
     return encode_feed_context(
         FeedContextPayload(
@@ -793,6 +902,7 @@ def _make_feed_context(user_did: str, feed_name: str, request_id: str) -> str:
             feed=feed_name,
             rid=request_id,
             iat=int(time.time()),
+            lt=load_test,
         )
     )
 
@@ -846,20 +956,34 @@ async def _generation_exclusions(db, user_did: str, feed_cfg: FeedConfig) -> lis
     return list(dict.fromkeys(seen_uris + discarded_uris))
 
 
-async def _record_discarded(db, user_did: str, post_uris: list[str]) -> None:
-    """Persist low-rank-score post URIs in the background; failures are logged."""
+async def _record_discarded(
+    db, user_did: str, post_uris: list[str], *, load_test: bool = False
+) -> None:
+    """Persist low-rank-score post URIs in the background; failures are logged.
+
+    Load-test traffic writes to the user's separate load-test bucket so the
+    exclusion path is exercised without polluting their real discarded set.
+    """
     try:
-        await record_discarded_posts(db, user_did, post_uris)
+        await record_discarded_posts(db, user_did, post_uris, load_test=load_test)
     except Exception:
         logger.exception("Failed to record discarded posts for user '%s'", user_did)
 
 
-async def _record_session(request: Request, user_did: str, feed_name: str, db) -> None:
+async def _record_session(
+    request: Request, user_did: str, feed_name: str, db, *, is_load_test: bool = False
+) -> None:
     """Resolve the caller's handle and upsert user + feed-activity docs.
 
     Runs as a background task so the user-facing latency of getFeedSkeleton
     isn't paying for firebase roundtrips.
     Failures are logged but do not surface to the caller.
+
+    For load-test traffic (``is_load_test=True``) the user upsert is tagged as
+    synthetic (and left untouched if the user already exists — see
+    ``upsert_user``), and both feed-activity recording and PostHog tracking are
+    skipped: activity data feeds user selection for future tests, and test
+    traffic must never inflate real analytics.
     """
     # Handle resolution goes over the network to the PLC directory, so it fails
     # for reasons that have nothing to do with this user existing — a directory
@@ -879,9 +1003,12 @@ async def _record_session(request: Request, user_did: str, feed_name: str, db) -
     now = datetime.now(timezone.utc)
 
     try:
-        await upsert_user(db, user_did, username)
+        await upsert_user(db, user_did, username, is_load_test=is_load_test)
     except Exception:
         logger.exception("Failed to upsert user '%s' in Firestore", user_did)
+
+    if is_load_test:
+        return
 
     try:
         await upsert_feed_activity(db, user_did, feed_name)
@@ -924,11 +1051,20 @@ async def _write_feed_snapshot_background(
     user_did: str,
     request_id: str,
     snapshot,
+    *,
+    load_test: bool = False,
 ) -> None:
     """Create or extend the lightweight feed snapshot in a background task.
 
     Separated from ``_run_pipeline_capturing`` so the Firestore write stays
     off the feed-serving hot path. Failures are logged, never surfaced.
+
+    Load-test traffic (``load_test=True``) still performs the write — that
+    transactional path is part of what the load test exercises — but the
+    snapshot is deleted immediately afterward. Snapshots are read only by the
+    user-facing transparency feed, so a synthetic one must not linger there;
+    delete-after keeps it out of the UI without a provenance field the
+    transparency reader would have to filter on.
     """
     if not snapshot.items:
         return
@@ -946,6 +1082,8 @@ async def _write_feed_snapshot_background(
                 collector.record(
                     "feed.snapshot.truncated_count", 1, feed_name=snapshot.feed_name
                 )
+        if load_test:
+            await delete_feed_snapshot(db, user_did, request_id)
     except Exception:
         logger.exception(
             "Failed to write feed snapshot for user '%s', request '%s'",
@@ -998,8 +1136,10 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
     always stored regardless.
     """
     # Seen URIs collected per user so we can record them with a single write
-    # per user after the per-interaction loop.
-    seen_by_user: dict[str, list[str]] = {}
+    # per user after the per-interaction loop. Keyed by (did, load_test) so a
+    # load-test session's seen posts land in that user's separate load-test
+    # bucket instead of polluting their real exclusion data.
+    seen_by_user: dict[tuple[str, bool], list[str]] = {}
 
     for ix in interactions:
         payload = decode_feed_context(ix.feed_context or "")
@@ -1018,7 +1158,7 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
             and feed_cfg is not None
             and feed_cfg.exclude_seen_posts
         ):
-            seen_by_user.setdefault(payload.did, []).append(ix.item)
+            seen_by_user.setdefault((payload.did, payload.lt), []).append(ix.item)
 
         doc = InteractionDocument(
             user_did=payload.did,
@@ -1027,13 +1167,16 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
             feed_name=payload.feed,
             request_id=payload.rid,
             feed_generated_at=datetime.fromtimestamp(payload.iat, tz=timezone.utc),
+            load_test=payload.lt,
         )
         try:
             await record_interaction(db, doc)
         except Exception:
             logger.exception("Failed to record interaction for user '%s'", payload.did)
 
-        if event:
+        # Load-test interactions are never sent to PostHog — test traffic must
+        # not inflate real analytics.
+        if event and not payload.lt:
             try:
                 track_interaction(
                     get_posthog_client(),
@@ -1048,9 +1191,9 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
                     "Failed to track PostHog interaction '%s' for user '%s'", event, payload.did
                 )
 
-    for did, uris in seen_by_user.items():
+    for (did, load_test), uris in seen_by_user.items():
         try:
-            await record_seen_posts(db, did, uris)
+            await record_seen_posts(db, did, uris, load_test=load_test)
         except Exception:
             logger.exception("Failed to record seen posts for user '%s'", did)
 
@@ -1206,15 +1349,27 @@ async def get_feed_skeleton(
     is_probe = bool(_probe_secret) and hmac.compare_digest(
         request.headers.get("X-Probe-Secret", ""), _probe_secret
     )
+    # A load-test session is a stand-in for a signed-in user (writes happen, so
+    # the cold-start path is exercised for real), but tagged as test data. It
+    # takes precedence over the probe bypass.
+    _lt_did = load_test_did(request)
     # A development session is a stand-in for a signed-in user, so it takes
-    # precedence over the probe bypass and clears is_probe: the request must be
-    # treated as real traffic downstream, including writing feed snapshots.
+    # precedence over every other bypass: the request must be treated as real
+    # traffic downstream, including writing feed snapshots.
     _dev_session_did = dev_session_did(request)
     if _dev_session_did is not None:
+        is_probe = False
+        _lt_did = None
+    is_load_test = _lt_did is not None
+    if is_load_test:
         is_probe = False
 
     if _dev_session_did is not None:
         user_did = _dev_session_did
+    elif is_load_test:
+        assert _lt_did is not None
+        user_did = _lt_did
+        logger.warning("Load-test feed request for %s on feed %s", user_did, feed_name)
     elif is_probe:
         user_did = os.environ.get("GE_PROBE_USER_DID", "did:plc:s4tl2ajfsnstzuxtegl7r33g")
     else:
@@ -1231,6 +1386,11 @@ async def get_feed_skeleton(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+    # Tag every metric on this request path (incl. background tasks, which
+    # inherit this context at spawn time) with its traffic class so test and
+    # probe traffic can be filtered out of dashboards.
+    set_traffic("load_test" if is_load_test else "probe" if is_probe else "real")
+
     # Record authenticated users in Firestore for backend analytics. Runs in
     # the background since this isn't essential for serving.
     db = getattr(request.app.state, "firestore", None)
@@ -1238,7 +1398,11 @@ async def get_feed_skeleton(
         logger.error("Firestore client not initialized")
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
-    _spawn_background(_record_session(request, user_did, feed_name, db))
+    _spawn_background(
+        _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
+    )
+
+    set_fail_fast_for_request(evaluate_fail_fast_flag(get_posthog_client(), user_did))
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
@@ -1253,15 +1417,24 @@ async def get_feed_skeleton(
 
     # Social Radius only reallocates the fixed candidate batch among sources;
     # it never increases the total candidate count or per-request batch cap.
-    # Apply its preference override to your-feed generator weights.
+    # Apply its preference override to personalized-feed generator weights.
+    # Cold-start uses the same source mix as your-feed, but forces the
+    # empty-history two-tower variant.
     # The override is computed once and threaded through model_copy in both
     # generation paths so the shared module-level template is never mutated.
     generators_override: dict = {}
     applied_social_radius: int | None = None
-    if feed_name == "your-feed":
+    if feed_name in ("your-feed", "cold-start"):
         applied_social_radius = user_doc.social_radius if user_doc is not None else 3
         preset = SOCIAL_RADIUS_PRESETS.get(applied_social_radius)
         if preset is not None:
+            if feed_name == "cold-start":
+                preset = [
+                    spec.model_copy(update={"name": "two_tower_empty_history"})
+                    if spec.name == "two_tower"
+                    else spec
+                    for spec in preset
+                ]
             generators_override = {"generators": preset}
 
     freshness_index = (
@@ -1301,7 +1474,13 @@ async def get_feed_skeleton(
                         # next request will fall into the regeneration branch
                         # below, which fetches fresh candidates.
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
-                    feed_context = _make_feed_context(user_did, feed_name, parsed.id)
+                    scores_by_uri = _similarity_scores_from_items_meta(cache_doc.items_meta)
+                    _record_similarity_metric(
+                        page, scores_by_uri, feed_name, batch=parsed.offset // limit
+                    )
+                    feed_context = _make_feed_context(
+                        user_did, feed_name, parsed.id, load_test=is_load_test
+                    )
                     cached_snapshot = FeedSnapshotDocument(
                         request_id=parsed.id,
                         items=cached_uris,
@@ -1319,6 +1498,7 @@ async def get_feed_skeleton(
                             user_did,
                             parsed.id,
                             _snapshot_page(cached_snapshot, page),
+                            load_test=is_load_test,
                         )
                     return FeedSkeletonResponse(
                         feed=_skeleton_items(page, feed_context),
@@ -1354,7 +1534,9 @@ async def get_feed_skeleton(
                     applied_social_radius=applied_social_radius,
                 )
                 if low_score_uris:
-                    _spawn_background(_record_discarded(db, user_did, low_score_uris))
+                    _spawn_background(
+                        _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
+                    )
                 new_uris = generated_snapshot.items
                 if new_uris:
                     async with timed(logger, "feedcache_append", cache_id=parsed.id):
@@ -1370,13 +1552,22 @@ async def get_feed_skeleton(
                         # lands at end-of-cache and regenerates again (the
                         # ranking session restarts with fresh exclusions).
                         next_cursor = FeedCursor(id=parsed.id, offset=next_offset).encode()
-                        feed_context = _make_feed_context(user_did, feed_name, parsed.id)
+                        scores_by_uri = _similarity_scores_from_items_meta(
+                            generated_snapshot.items_meta
+                        )
+                        _record_similarity_metric(
+                            page, scores_by_uri, feed_name, batch=parsed.offset // limit
+                        )
+                        feed_context = _make_feed_context(
+                            user_did, feed_name, parsed.id, load_test=is_load_test
+                        )
                         if not is_probe:
                             await _write_feed_snapshot_background(
                                 db,
                                 user_did,
                                 parsed.id,
                                 _snapshot_page(generated_snapshot, page),
+                                load_test=is_load_test,
                             )
                         return FeedSkeletonResponse(
                             feed=_skeleton_items(page, feed_context),
@@ -1393,7 +1584,9 @@ async def get_feed_skeleton(
         # ------------------------------------------------------------------
         reuse_future: Future[FeedSkeletonResponse] | None = None
         if cursor is None and not is_probe:
-            is_leader, reuse_future = _claim_initial_request(user_did, feed_name, limit)
+            is_leader, reuse_future = _claim_initial_request(
+                user_did, feed_name, limit, is_load_test
+            )
             if not is_leader:
                 reused = await asyncio.wrap_future(reuse_future)
                 return reused.model_copy(deep=True)
@@ -1429,7 +1622,9 @@ async def get_feed_skeleton(
                 applied_social_radius=applied_social_radius,
             )
             if low_score_uris:
-                _spawn_background(_record_discarded(db, user_did, low_score_uris))
+                _spawn_background(
+                    _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
+                )
             all_uris = generated_snapshot.items
 
             # Pinned posts are a Bluesky presentation concern and are deliberately
@@ -1445,12 +1640,18 @@ async def get_feed_skeleton(
                 page = generated_page
                 consumed = len(generated_page)
 
+            scores_by_uri = _similarity_scores_from_items_meta(generated_snapshot.items_meta)
+            _record_similarity_metric(
+                page, scores_by_uri, feed_name, batch=0, exclude_uri=feed_cfg.pinned_post_uri
+            )
+
             if not is_probe:
                 await _write_feed_snapshot_background(
                     db,
                     user_did,
                     request_id,
                     _snapshot_page(generated_snapshot, generated_page),
+                    load_test=is_load_test,
                 )
 
             # Store every non-empty batch — even a (possibly cutoff-shortened)
@@ -1482,11 +1683,14 @@ async def get_feed_skeleton(
                             api_release_sha=generated_snapshot.api_release_sha,
                             expires_at=datetime.now(timezone.utc)
                             + timedelta(seconds=DEFAULT_TTL_SECONDS),
+                            load_test=is_load_test,
                         ),
                     )
                 next_cursor = FeedCursor(id=request_id, offset=consumed).encode()
 
-            feed_context = _make_feed_context(user_did, feed_name, request_id)
+            feed_context = _make_feed_context(
+                user_did, feed_name, request_id, load_test=is_load_test
+            )
             response = FeedSkeletonResponse(
                 feed=_skeleton_items(page, feed_context),
                 cursor=next_cursor,
@@ -1496,6 +1700,7 @@ async def get_feed_skeleton(
                     user_did,
                     feed_name,
                     limit,
+                    is_load_test,
                     reuse_future,
                     response=response.model_copy(deep=True),
                 )
@@ -1506,6 +1711,7 @@ async def get_feed_skeleton(
                     user_did,
                     feed_name,
                     limit,
+                    is_load_test,
                     reuse_future,
                     error=error,
                 )

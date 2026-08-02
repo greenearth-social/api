@@ -9,7 +9,7 @@ import logging
 from elastic_transport import ObjectApiResponse
 from fastapi import HTTPException
 
-from .embeddings import MINILM_L12_EMBEDDING_FIELD, MINILM_L12_EMBEDDING_KEY
+from .embeddings import MINILM_L12_EMBEDDING_FIELD
 from .request_cache import get_request_cache
 from .telemetry import timed
 
@@ -34,6 +34,28 @@ def post_has_embedding_source(src: dict) -> bool:
     if _has_nonblank_string(src.get("content")):
         return True
     return False
+
+
+def embedding_from_fields(hit: dict) -> list[float] | None:
+    """Extract the MiniLM L12 vector from a hit's ``docvalue_fields`` result.
+
+    We request the vector via ``docvalue_fields`` rather than ``fields``:
+    on ES 9.0 (prod), ``fields`` retrieval of a ``dense_vector`` measured
+    ~20% slower end-to-end and had visibly higher ES-side p50/p95, which
+    matches ``dense_vector`` not getting a source-free value fetcher for
+    ``fields`` until ES 9.2 — i.e. ``fields`` falls back to decompressing
+    ``_source`` on this cluster, defeating the point of excluding
+    embeddings from ``_source`` in the first place. ``docvalue_fields``
+    always reads from doc values, never ``_source``, by definition —
+    version-independent. Both populate the same ``hit["fields"]`` response
+    key; ``docvalue_fields`` wraps the value in an outer list, so a single
+    dense_vector value comes back as ``[[...]]``.
+    """
+    values = (hit.get("fields") or {}).get(MINILM_L12_EMBEDDING_FIELD)
+    if not values:
+        return None
+    vec = values[0]
+    return vec if vec else None
 
 
 def unwrap_es_response(resp) -> dict:
@@ -62,8 +84,8 @@ async def fetch_recent_liked_post_uris(
     ``subject_uri`` field from each hit.
 
     When a request cache is active the result is memoized so repeat
-    calls within the same request (e.g. post_similarity and the two-tower
-    ranker) share a single ES round-trip.
+    calls within the same request (e.g. the two-tower generator and the
+    two-tower ranker) share a single ES round-trip.
     """
     if isinstance(user_dids, str):
         user_dids = [user_dids]
@@ -123,8 +145,8 @@ async def fetch_recent_liked_post_uris_and_times(
     Excludes posts without ``created_at`` time.
 
     When a request cache is active the result is memorized so repeat
-    calls within the same request (e.g. post_similarity and the two-tower
-    ranker) share a single ES round-trip.
+    calls within the same request (e.g. the two-tower generator and the
+    two-tower ranker) share a single ES round-trip.
     """
     if isinstance(user_dids, str):
         user_dids = [user_dids]
@@ -199,9 +221,9 @@ async def fetch_post_embeddings(
                 size=len(at_uris),
                 _source=[
                     "at_uri",
-                    MINILM_L12_EMBEDDING_FIELD,
                     *POST_EMBEDDING_SOURCE_FIELDS,
                 ],
+                docvalue_fields=[MINILM_L12_EMBEDDING_FIELD],
             )
 
             data = unwrap_es_response(resp)
@@ -213,11 +235,9 @@ async def fetch_post_embeddings(
                     continue
                 if not post_has_embedding_source(src):
                     continue
-                emb = src.get("embeddings")
-                if isinstance(emb, dict):
-                    vec = emb.get(MINILM_L12_EMBEDDING_KEY)
-                    if vec:
-                        embeddings_by_uri[at_uri] = vec
+                vec = embedding_from_fields(hit)
+                if vec:
+                    embeddings_by_uri[at_uri] = vec
 
             ordered_embeddings: list[tuple[str, list[float]]] = []
             for at_uri in at_uris:
@@ -253,7 +273,7 @@ async def fetch_post_embeddings_and_metadata(
         return []
 
     async def _fetch() -> list[tuple[str, list[float], str, int]]:
-        async with timed(logger, "es_post_embeddings", n_uris=len(at_uris)):
+        async with timed(logger, "es_post_embeddings_and_metadata", n_uris=len(at_uris)):
             query = {"terms": {"at_uri": at_uris}}
 
             resp = await es.search(
@@ -262,11 +282,11 @@ async def fetch_post_embeddings_and_metadata(
                 size=len(at_uris),
                 _source=[
                     "at_uri",
-                    MINILM_L12_EMBEDDING_FIELD,
                     "author_did",
                     "like_count",
                     *POST_EMBEDDING_SOURCE_FIELDS,
                 ],
+                docvalue_fields=[MINILM_L12_EMBEDDING_FIELD],
             )
 
             data = unwrap_es_response(resp)
@@ -280,11 +300,9 @@ async def fetch_post_embeddings_and_metadata(
                     continue
                 if not post_has_embedding_source(src):
                     continue
-                emb = src.get("embeddings")
-                if isinstance(emb, dict):
-                    vec = emb.get(MINILM_L12_EMBEDDING_KEY)
-                    if vec:
-                        embeddings_by_uri[at_uri] = vec
+                vec = embedding_from_fields(hit)
+                if vec:
+                    embeddings_by_uri[at_uri] = vec
                 author_did = src.get("author_did")
                 if isinstance(author_did, str):
                     author_dids_by_uri[at_uri] = author_did

@@ -12,6 +12,7 @@ from ...models import CandidateGenerateRequest, CandidatePost, GeneratorSpec, Ma
 from ..candidates import generate as generate_module
 from ..candidates.base import CandidateGenerator, CandidateResult
 from ..candidates.generate import GeneratorError, run_generate
+from ..config import set_fail_fast_for_request
 from ..feed_debug import FeedDebugRecorder, feed_debug_scope
 from ..metrics import MetricCollector, set_metric_collector
 from ..pipeline_context import (
@@ -176,13 +177,13 @@ class TestGeneratorTimeout:
     @pytest.mark.asyncio
     async def test_timeout_swallow_returns_no_candidates_and_records_metric(self, monkeypatch):
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
-        _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
+        _stub_generators(monkeypatch, {"slow_generator": _HangingGenerator("slow_generator")})
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
         ctx = PipelineContext(feed_name="test-feed")
         with pipeline_context_scope(ctx):
-            result = await run_generate(_make_request("post_similarity"), es=None)
+            result = await run_generate(_make_request("slow_generator"), es=None)
 
         assert result.candidates == []
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -190,7 +191,7 @@ class TestGeneratorTimeout:
         name, value, attrs = failure_calls[0]
         assert value == 1
         assert attrs == {
-            "generator_name": "post_similarity",
+            "generator_name": "slow_generator",
             "outcome": "timeout",
             "is_infill": "false",
         }
@@ -198,12 +199,12 @@ class TestGeneratorTimeout:
     @pytest.mark.asyncio
     async def test_timeout_swallow_logs_warning_not_exception(self, monkeypatch, caplog):
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
-        _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
+        _stub_generators(monkeypatch, {"slow_generator": _HangingGenerator("slow_generator")})
 
         ctx = PipelineContext(feed_name="test-feed")
         with pipeline_context_scope(ctx):
             with caplog.at_level(logging.WARNING):
-                await run_generate(_make_request("post_similarity"), es=None)
+                await run_generate(_make_request("slow_generator"), es=None)
 
         timeout_warnings = [
             r for r in caplog.records
@@ -211,35 +212,37 @@ class TestGeneratorTimeout:
         ]
         error_logs = [
             r for r in caplog.records
-            if r.levelno >= logging.ERROR and "post_similarity" in r.message
+            if r.levelno >= logging.ERROR and "slow_generator" in r.message
         ]
         assert len(timeout_warnings) == 1
         assert len(error_logs) == 0
 
     @pytest.mark.asyncio
     async def test_timeout_no_swallow_raises_generator_error_promptly(self, monkeypatch):
+        set_fail_fast_for_request(True)
         # No PipelineContext installed → hard fail (GeneratorError)
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
-        _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
+        _stub_generators(monkeypatch, {"slow_generator": _HangingGenerator("slow_generator")})
 
         with pytest.raises(GeneratorError) as exc_info:
             await asyncio.wait_for(
-                run_generate(_make_request("post_similarity"), es=None),
+                run_generate(_make_request("slow_generator"), es=None),
                 timeout=1.0,
             )
 
-        assert exc_info.value.name == "post_similarity"
+        assert exc_info.value.name == "slow_generator"
 
     @pytest.mark.asyncio
     async def test_timeout_no_swallow_records_metric_before_raising(self, monkeypatch):
+        set_fail_fast_for_request(True)
         # No PipelineContext installed → hard fail (GeneratorError)
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
-        _stub_generators(monkeypatch, {"post_similarity": _HangingGenerator("post_similarity")})
+        _stub_generators(monkeypatch, {"slow_generator": _HangingGenerator("slow_generator")})
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
         with pytest.raises(GeneratorError):
-            await run_generate(_make_request("post_similarity"), es=None)
+            await run_generate(_make_request("slow_generator"), es=None)
 
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
         assert len(failure_calls) == 1
@@ -344,6 +347,7 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_timeout_no_swallow_raises_generator_error_with_is_infill(self, monkeypatch):
+        set_fail_fast_for_request(True)
         # No PipelineContext → hard fail
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {
@@ -362,6 +366,7 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_timeout_no_swallow_records_metric(self, monkeypatch):
+        set_fail_fast_for_request(True)
         # No PipelineContext → hard fail
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {

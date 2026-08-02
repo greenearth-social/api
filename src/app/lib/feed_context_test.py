@@ -4,6 +4,9 @@ import pytest
 
 from .feed_context import (
     FeedContextPayload,
+    _b64encode,
+    _secret,
+    _sign,
     decode_feed_context,
     encode_feed_context,
 )
@@ -35,6 +38,31 @@ class TestRoundTrip:
     def test_token_well_under_2000_chars(self):
         token = encode_feed_context(_payload())
         assert len(token) < 2000
+
+
+class TestLoadTestClaim:
+    def test_lt_defaults_to_false(self):
+        assert _payload().lt is False
+
+    def test_lt_round_trips(self):
+        token = encode_feed_context(_payload(lt=True))
+        decoded = decode_feed_context(token)
+        assert decoded is not None
+        assert decoded.lt is True
+
+    def test_lt_token_still_well_under_2000_chars(self):
+        assert len(encode_feed_context(_payload(lt=True))) < 2000
+
+    def test_legacy_token_without_lt_decodes_to_false(self):
+        """Tokens minted before ``lt`` existed still decode, defaulting to False."""
+        import json
+
+        legacy = {"did": "did:plc:abc123", "feed": "your-feed", "rid": "req-1", "iat": 1730000000}
+        payload_b64 = _b64encode(json.dumps(legacy).encode())
+        token = f"{payload_b64}.{_sign(payload_b64, _secret())}"
+        decoded = decode_feed_context(token)
+        assert decoded is not None
+        assert decoded.lt is False
 
 
 class TestVerificationFailures:

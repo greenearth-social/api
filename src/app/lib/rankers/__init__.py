@@ -32,8 +32,18 @@ register_ranker(_two_tower)
 _perspective = PerspectiveRanker()
 register_ranker(_perspective)
 
-_heavy_ranker = HeavyRanker()
+_heavy_ranker = HeavyRanker(
+    name="heavy_ranker",
+    history_mode="actual",
+)
 register_ranker(_heavy_ranker)
+
+_heavy_ranker_empty_history = HeavyRanker(
+    name="heavy_ranker_empty_history",
+    history_mode="empty",
+)
+register_ranker(_heavy_ranker_empty_history)
+
 
 __all__ = [
     "CandidateScoreRanker",

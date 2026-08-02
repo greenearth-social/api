@@ -15,10 +15,12 @@ from ..lib.firestore import (
     DISCARDED_POSTS_COLLECTION,
     FEED_DEBUG_COLLECTION,
     FEED_SNAPSHOTS_COLLECTION,
+    LOAD_TEST_BUCKET_SUFFIX,
     MAX_FEED_SNAPSHOT_ITEMS,
     INTERACTIONS_COLLECTION,
     SEEN_POSTS_COLLECTION,
     USERS_COLLECTION,
+    delete_feed_snapshot,
     get_feed_activity,
     get_feed_debug,
     get_newer_feed_snapshot_uris,
@@ -351,6 +353,75 @@ class TestUpsertUser:
         assert update_fields["username"] == USERNAME
         assert "updated_at" in update_fields
 
+    @pytest.mark.asyncio
+    async def test_load_test_new_user_is_tagged(self):
+        db, _, doc_ref = _mock_firestore_client()
+        doc_ref.get.return_value = _mock_doc_snapshot(False)
+
+        user = await upsert_user(db, USER_DID, USERNAME, is_load_test=True)
+
+        assert user.created_by_load_test is True
+        written = doc_ref.set.call_args[0][0]
+        assert written["created_by_load_test"] is True
+
+    @pytest.mark.asyncio
+    async def test_load_test_existing_user_is_left_untouched(self):
+        db, _, doc_ref = _mock_firestore_client()
+        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        doc_ref.get.return_value = _mock_doc_snapshot(True, {
+            "user_did": USER_DID,
+            "username": USERNAME,
+            "created_at": original_time,
+            "updated_at": original_time,
+            "last_seen_at": original_time,
+        })
+
+        user = await upsert_user(db, USER_DID, USERNAME, is_load_test=True)
+
+        # No write at all — a real user's activity must not be bumped by a test.
+        doc_ref.update.assert_not_called()
+        doc_ref.set.assert_not_called()
+        assert user.last_seen_at == original_time
+
+    @pytest.mark.asyncio
+    async def test_real_request_clears_load_test_flag(self):
+        db, _, doc_ref = _mock_firestore_client()
+        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        doc_ref.get.return_value = _mock_doc_snapshot(True, {
+            "user_did": USER_DID,
+            "username": USERNAME,
+            "created_at": original_time,
+            "updated_at": original_time,
+            "last_seen_at": original_time,
+            "created_by_load_test": True,
+        })
+
+        user = await upsert_user(db, USER_DID, USERNAME)
+
+        update_fields = doc_ref.update.call_args[0][0]
+        assert update_fields["created_by_load_test"] is False
+        # created_at reset to the first real visit.
+        assert update_fields["created_at"] > original_time
+        assert user.created_by_load_test is False
+
+    @pytest.mark.asyncio
+    async def test_real_request_on_unflagged_user_leaves_flag_alone(self):
+        db, _, doc_ref = _mock_firestore_client()
+        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        doc_ref.get.return_value = _mock_doc_snapshot(True, {
+            "user_did": USER_DID,
+            "username": USERNAME,
+            "created_at": original_time,
+            "updated_at": original_time,
+            "last_seen_at": original_time,
+        })
+
+        await upsert_user(db, USER_DID, USERNAME)
+
+        update_fields = doc_ref.update.call_args[0][0]
+        assert "created_by_load_test" not in update_fields
+        assert "created_at" not in update_fields
+
 
 # ---------------------------------------------------------------------------
 # get_feed_activity
@@ -514,6 +585,20 @@ class TestRecordSeenPosts:
 
         doc_ref.set.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_load_test_writes_suffixed_bucket_with_marker(self):
+        db, doc_ref = _mock_seen_posts_write_client()
+
+        await record_seen_posts(db, USER_DID, ["at://post/1"], load_test=True)
+
+        # Bucket id gets the load-test suffix; a separate doc from real seen posts.
+        bucket_id = datetime.now(timezone.utc).strftime("%Y-%m-%d") + LOAD_TEST_BUCKET_SUFFIX
+        db.collection.return_value.document.return_value.collection.return_value.document.assert_called_with(
+            bucket_id
+        )
+        payload = doc_ref.set.call_args[0][0]
+        assert payload["load_test"] is True
+
 
 # ---------------------------------------------------------------------------
 # get_recent_seen_uris
@@ -549,6 +634,20 @@ class TestGetRecentSeenUris:
         assert len(uris) == 1000
         assert uris[0] == "at://post/0"
         assert uris[-1] == "at://post/999"
+
+    @pytest.mark.asyncio
+    async def test_reads_load_test_suffixed_buckets_too(self):
+        """The exclusion read must pick up load-test buckets, so a load test
+        exercises the same exclusion behaviour as production."""
+        buckets = [
+            _mock_bucket("2026-06-02", ["at://real"]),
+            _mock_bucket("2026-06-02" + LOAD_TEST_BUCKET_SUFFIX, ["at://lt"]),
+        ]
+        db, _ = _mock_seen_posts_query_client(buckets)
+
+        uris = await get_recent_seen_uris(db, USER_DID)
+
+        assert set(uris) == {"at://real", "at://lt"}
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +730,7 @@ def _feed_debug_doc() -> FeedDebugDocument:
         username=USERNAME,
         feed_name=FEED_NAME,
         generate_request=CandidateGenerateRequest(
-            generators=[GeneratorSpec(name="post_similarity", weight=1.0)],
+            generators=[GeneratorSpec(name="popularity", weight=1.0)],
             user_did=USER_DID,
             num_candidates=10,
             video_only=False,
@@ -900,3 +999,20 @@ class TestMergeFeedSnapshots:
 
         assert await merge_feed_snapshot(db, USER_DID, "session-1", doc) is False
         db.transaction.assert_not_called()
+
+
+class TestDeleteFeedSnapshot:
+    @pytest.mark.asyncio
+    async def test_deletes_snapshot_by_path(self):
+        db, doc_ref = _mock_feed_activity_client()
+
+        await delete_feed_snapshot(db, USER_DID, "session-1")
+
+        db.collection.assert_called_with(USERS_COLLECTION)
+        db.collection.return_value.document.return_value.collection.assert_called_with(
+            FEED_SNAPSHOTS_COLLECTION
+        )
+        db.collection.return_value.document.return_value.collection.return_value.document.assert_called_with(
+            "session-1"
+        )
+        doc_ref.delete.assert_awaited_once()

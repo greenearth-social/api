@@ -3,7 +3,7 @@
 import pytest
 from fastapi import Request
 
-from .main import _is_deployed_environment, _resolve_endpoint, app
+from .main import _es_connections_per_node, _is_deployed_environment, _resolve_endpoint, app
 
 
 def _request_for(path: str, method: str = "GET") -> Request:
@@ -31,6 +31,21 @@ def test_resolve_endpoint_returns_route_name():
 
 def test_resolve_endpoint_none_for_unknown_path():
     assert _resolve_endpoint(_request_for("/no/such/route")) is None
+
+
+def test_es_connections_per_node_default(monkeypatch):
+    monkeypatch.delenv("GE_ES_CONNECTIONS_PER_NODE", raising=False)
+    assert _es_connections_per_node() == 100
+
+
+def test_es_connections_per_node_from_env(monkeypatch):
+    monkeypatch.setenv("GE_ES_CONNECTIONS_PER_NODE", "25")
+    assert _es_connections_per_node() == 25
+
+
+def test_es_connections_per_node_invalid_falls_back(monkeypatch):
+    monkeypatch.setenv("GE_ES_CONNECTIONS_PER_NODE", "lots")
+    assert _es_connections_per_node() == 100
 
 
 @pytest.mark.parametrize("env_value", ["prod", "production", "stage", "staging", "PROD", " stage "])

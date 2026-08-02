@@ -10,12 +10,15 @@ from ..models import CandidatePost
 
 from ..lib.embeddings import (
     MINILM_L12_EMBEDDING_FIELD,
-    MINILM_L12_EMBEDDING_KEY,
-    decode_float32_b64,
     encode_float32_b64,
 )
-from ..lib.elasticsearch import unwrap_es_response, POSTS_KNN_INDEX
-from ..lib.telemetry import timed
+from ..lib.elasticsearch import embedding_from_fields, unwrap_es_response
+
+# Fields pulled from `_source` for skylight results. Deliberately excludes
+# `embeddings` (~65% of a post doc's `_source` size) — the MiniLM L12 vector
+# is fetched separately via `docvalue_fields`, which reads it from doc values
+# instead of decompressing the full stored `_source` blob.
+SKYLIGHT_SOURCE_FIELDS = ["at_uri", "author_did", "content"]
 
 router = APIRouter(tags=["skylight"], dependencies=[Depends(verify_api_key)])
 
@@ -31,27 +34,6 @@ class SkylightSearchResponse(BaseModel):
     )
 
 
-class SkylightSimilarRequest(BaseModel):
-    """Seeds for a nearest-neighbor similarity search."""
-
-    at_uris: list[str] | None = Field(
-        None,
-        description=(
-            "AT URIs of seed posts. The service fetches their stored MiniLM "
-            "L12 embeddings from the index and averages them into a query vector."
-        ),
-    )
-    embeddings: list[str] | None = Field(
-        None,
-        description=(
-            "Base64-encoded float32 MiniLM L12 embeddings (384-d) to use as "
-            "similarity seeds. Averaged with any embeddings looked up via "
-            "`at_uris`. At least one of `at_uris` or `embeddings` is required."
-        ),
-    )
-    size: int = Field(10, ge=1, le=100, description="Number of nearest-neighbor results to return.")
-
-
 def posts_response_to_results(resp) -> list[CandidatePost]:
     """Convert an Elasticsearch response from the posts index to a list of CandidatePost objects.
 
@@ -63,13 +45,7 @@ def posts_response_to_results(resp) -> list[CandidatePost]:
 
     for hit in data.get("hits", {}).get("hits", []):
         src = hit.get("_source", {}) or {}
-        embeddings_obj = src.get("embeddings") or {}
-
-        l12 = (
-            embeddings_obj.get(MINILM_L12_EMBEDDING_KEY)
-            if isinstance(embeddings_obj, dict)
-            else None
-        )
+        l12 = embedding_from_fields(hit)
 
         encoded = None
         if l12 is not None:
@@ -105,8 +81,7 @@ async def skylight_search(
     """Search the `posts` index `content` field and return matching posts.
 
     Results are currently scoped to posts that contain video.
-    Stored MiniLM L12 vectors are returned on each result when present,
-    which can be passed directly to `/skylight/similar` as `embeddings`.
+    Stored MiniLM L12 vectors are returned on each result when present.
     """
     # Only return posts that contain video. Use a boolean query with a
     # `must` for the original query_string and a `filter` for the
@@ -128,7 +103,13 @@ async def skylight_search(
     # fake/spy object that implements an async `search(...)` method.
     es = request.app.state.es
     try:
-        resp = await es.search(index="posts", query=body.get("query"), size=size)
+        resp = await es.search(
+            index="posts",
+            query=body.get("query"),
+            size=size,
+            _source=SKYLIGHT_SOURCE_FIELDS,
+            docvalue_fields=[MINILM_L12_EMBEDDING_FIELD],
+        )
     except Exception as exc:
         try:
             body_str = json.dumps(body, ensure_ascii=False)
@@ -139,106 +120,6 @@ async def skylight_search(
             "Elasticsearch search failed",
             extra={"index": "posts", "request_body": body_str},
         )
-        raise HTTPException(status_code=502, detail="Elasticsearch request failed") from exc
-
-    results = posts_response_to_results(resp)
-    return SkylightSearchResponse(results=results)
-
-
-
-@router.post(
-    "/skylight/similar",
-    response_model=SkylightSearchResponse,
-    responses={
-        400: {"description": "No embeddings supplied, invalid base64, or dimension mismatch"},
-        404: {"description": "None of the supplied `at_uris` had stored embeddings"},
-        502: {"description": "Upstream Elasticsearch request failed"},
-    },
-)
-async def skylight_similar(request: Request, payload: SkylightSimilarRequest):
-    """Return posts most similar to the average MiniLM L12 embedding of the seeds.
-
-    The service averages the embeddings from `at_uris` (fetched from the index)
-    and/or directly supplied `embeddings` into a single query vector, then runs
-    a k-nearest-neighbor search against the post index.
-
-    Results are currently scoped to posts that contain video.
-
-    At least one of `at_uris` or `embeddings` must be provided.  If `at_uris`
-    are given but none are found in the index with stored embeddings, the
-    endpoint returns 404.
-    """
-    vectors: list[list[float]] = []
-
-    # 1) fetch embeddings for provided at_uris
-    if payload.at_uris:
-        lookup_query = {"terms": {"at_uri": payload.at_uris}}
-        try:
-            hits_resp = await request.app.state.es.search(
-                index="posts", query=lookup_query, size=len(payload.at_uris)
-            )
-        except Exception as exc:
-            logger.exception("Failed to lookup at_uris for similar search")
-            raise HTTPException(status_code=502, detail="Elasticsearch request failed") from exc
-
-        hits_data = unwrap_es_response(hits_resp)
-
-        for hit in hits_data.get("hits", {}).get("hits", []):
-            src = hit.get("_source", {}) or {}
-            emb = src.get("embeddings", {}) if isinstance(src.get("embeddings"), dict) else None
-            if emb:
-                l12 = emb.get(MINILM_L12_EMBEDDING_KEY)
-                if l12:
-                    vectors.append(l12)
-
-        if payload.at_uris and not vectors and not payload.embeddings:
-            raise HTTPException(status_code=404, detail="No embeddings found for supplied at_uris")
-
-    # 2) decode provided base64 embeddings
-    if payload.embeddings:
-        for b64 in payload.embeddings:
-            try:
-                vec = decode_float32_b64(b64)
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid base64 embedding")
-            vectors.append(vec)
-
-    if not vectors:
-        raise HTTPException(status_code=400, detail="No embeddings supplied or found for at_uris")
-
-    # 3) compute average embedding
-    dim = len(vectors[0])
-    for v in vectors:
-        if len(v) != dim:
-            raise HTTPException(status_code=400, detail="Embedding dimension mismatch")
-
-    avg = [0.0] * dim
-    for v in vectors:
-        for i, val in enumerate(v):
-            avg[i] += val
-    n = len(vectors)
-    avg = [x / n for x in avg]
-
-    # 4) perform similarity search using native `knn` query for nearest neighbors
-    knn_q = {
-        "bool": {
-            "must": {
-                "knn": {
-                    "field": MINILM_L12_EMBEDDING_FIELD,
-                    "query_vector": avg,
-                    "k": payload.size,
-                    "num_candidates": max(100, payload.size * 10),
-                }
-            },
-            "filter": [{"term": {"contains_video": True}}],
-        }
-    }
-
-    try:
-        async with timed(logger, "skylight_similar_knn", index=POSTS_KNN_INDEX, size=payload.size):
-            resp = await request.app.state.es.search(index=POSTS_KNN_INDEX, query=knn_q, size=payload.size)
-    except Exception as exc:
-        logger.exception("Elasticsearch similar search failed")
         raise HTTPException(status_code=502, detail="Elasticsearch request failed") from exc
 
     results = posts_response_to_results(resp)

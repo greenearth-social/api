@@ -59,3 +59,5 @@ profiles/
 
 # macOS metadata files
 .DS_Store
+
+load_test_data
