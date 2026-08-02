@@ -232,6 +232,7 @@ class FeedDebugRecorder:
         generated_at: datetime,
         expires_at: datetime,
         applied_social_radius: int | None = None,
+        api_release_sha: str | None = None,
     ) -> "FeedSnapshotDocument":
         """Assemble a lightweight :class:`FeedSnapshotDocument` with only the
         per-URI pipeline metadata needed by the transparency API.
@@ -391,6 +392,7 @@ class FeedDebugRecorder:
             items=self.final_order,
             feed_name=self.feed_name,
             generated_at=generated_at,
+            api_release_sha=api_release_sha,
             expires_at=expires_at,
             ranker_model=self.ranker_model,
             diversify=self.diversify,

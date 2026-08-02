@@ -92,6 +92,7 @@ class FeedCacheDocument(BaseModel):
     applied_social_radius: int | None = None
     feed_name: str | None = None
     generated_at: datetime | None = None
+    api_release_sha: str | None = None
 
 
 class SeenPostsDocument(BaseModel):
@@ -400,6 +401,7 @@ class FeedSnapshotDocument(BaseModel):
     items: list[str] = Field(default_factory=list, description="AT URIs in final served order")
     feed_name: str
     generated_at: datetime
+    api_release_sha: str | None = None
     expires_at: datetime = Field(..., description="UTC expiration; drives native TTL")
     ranker_model: str | None = None
     diversify: bool = False
