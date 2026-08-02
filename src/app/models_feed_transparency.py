@@ -15,6 +15,7 @@ class FeedSummary(BaseModel):
     request_id: str
     generated_at: datetime
     feed_name: str
+    api_release_sha: str | None = None
     applied_social_radius: int | None = None
     generator_diagnostics: list["GeneratorDiagnosticView"] = Field(default_factory=list)
 
@@ -97,6 +98,7 @@ class FeedItemView(BaseModel):
 class FeedDetailResponse(BaseModel):
     request_id: str
     generated_at: datetime
+    api_release_sha: str | None = None
     items: list[FeedItemView]
     stored_item_count: int = 0
     displayed_item_count: int = 0

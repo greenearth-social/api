@@ -92,6 +92,7 @@ def test_list_feeds_returns_summaries(mock_query, client):
     mock_query.return_value = [
         _snapshot_doc(
             request_id="req-1",
+            api_release_sha="api-sha-1",
             generated_at=datetime.now(timezone.utc),
             items=["at://a"],
             items_meta=[PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)],
@@ -110,6 +111,7 @@ def test_list_feeds_returns_summaries(mock_query, client):
     assert len(data["feeds"]) == 2
     assert data["feeds"][0]["request_id"] == "req-1"
     assert data["feeds"][0]["feed_name"] == "your-feed"
+    assert data["feeds"][0]["api_release_sha"] == "api-sha-1"
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
@@ -310,7 +312,7 @@ def test_list_feeds_preserves_fully_overlapping_middle_snapshot(mock_query, clie
 @patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_returns_merged_data(mock_get_snapshot, mock_hydrate, client):
     uri = "at://did:plc:author/app.bsky.feed.post/post1"
-    doc = _snapshot_doc()
+    doc = _snapshot_doc(api_release_sha="api-sha-detail")
     mock_get_snapshot.return_value = doc
     mock_hydrate.return_value = {
         uri: {
@@ -337,6 +339,7 @@ def test_get_feed_detail_returns_merged_data(mock_get_snapshot, mock_hydrate, cl
     assert response.status_code == 200
     data = response.json()
     assert data["request_id"] == "req-abc"
+    assert data["api_release_sha"] == "api-sha-detail"
     assert len(data["items"]) == 1
 
     item = data["items"][0]
