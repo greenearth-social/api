@@ -210,9 +210,6 @@ generate_requirements() {
 deploy_api_service() {
     log_info "Deploying greenearth-api-$ENVIRONMENT service from source..."
 
-    local release_sha
-    release_sha="$(git rev-parse HEAD)"
-
     # Determine secret names based on environment
     # Stage uses no suffix for backwards compatibility, prod uses -prod suffix
     # API uses the readonly key since it only needs read access to Elasticsearch
@@ -259,7 +256,6 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_RELEASE_SHA=$release_sha"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_PROBE_USER_DID=did:plc:s4tl2ajfsnstzuxtegl7r33g"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=4"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_RANK_MODEL_TIMEOUT_SEC=2.5"
