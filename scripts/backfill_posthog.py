@@ -43,7 +43,7 @@ from app.lib.firestore import (
     init_firestore_client,
     user_doc_id,
 )
-from app.lib.posthog_client import init_posthog_client
+from app.lib.posthog_client import annotate_event_properties, init_posthog_client
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +148,9 @@ async def backfill_users(
                 ph.capture(
                     distinct_id=user_did,
                     event="feedLoaded",
-                    properties={"feed_name": feed_name, "$set": set_props},
+                    properties=annotate_event_properties(
+                        {"feed_name": feed_name, "$set": set_props}
+                    ),
                     timestamp=first_seen_at,
                 )
 
@@ -204,7 +206,7 @@ async def backfill_interactions(
             ph.capture(
                 distinct_id=user_did,
                 event=event,
-                properties=properties,
+                properties=annotate_event_properties(properties),
                 timestamp=created_at,
             )
 

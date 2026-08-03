@@ -546,6 +546,34 @@ Disable when done (full capture has storage/perf cost):
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --disable
 ```
 
+## Analytics (PostHog)
+
+This service and the frontend write to the **same PostHog project**, so every
+event this service emits is annotated to identify its producer. Annotations are
+applied centrally in `src/app/lib/posthog_client.py` — call sites never set them.
+
+| Property | Value here | Purpose |
+|---|---|---|
+| `surface` | `greenearth_api` | Which producer emitted the event. The frontend stamps `greenearth_web`. |
+| `schema_version` | `1` | Version of *this surface's* event schema; scoped to `surface`, versioned independently of the frontend. |
+
+Conventions:
+
+- **Filter on `surface`** in any insight that should cover one producer rather
+  than both. Event names are not namespaced, so a name collision between the two
+  surfaces is possible and only `surface` separates them.
+- `schema_version` is only meaningful alongside `surface` — the two surfaces'
+  version numbers are unrelated. Bump it when an existing event's properties
+  change shape in a way that would break a saved insight.
+- Annotations are applied *after* caller-supplied properties, so an event
+  property can never overwrite the partition key.
+- `scripts/backfill_posthog.py` stamps the same annotations, so historical
+  API-origin events are not a gap in the partition.
+
+`distinct_id` is the user's `did:plc:…` on both surfaces (the frontend's Firebase
+`uid` is that same DID), so a user is one PostHog person across both. Feature
+flags are evaluated on the DID for the same reason.
+
 ## Elasticsearch Query Profiling
 
 The API logs any ES query that exceeds `GE_SLOW_ES_THRESHOLD_MS` (default 500 ms) to Cloud Run as a
