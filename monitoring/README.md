@@ -72,6 +72,16 @@ computes the percentile across the (possibly grouped) series. Cloud Run's
 `DELTA DISTRIBUTION`, which the `ALIGN_PERCENTILE_95` per-series aligner
 accepts directly, so those two charts are left as-is.
 
+A percentile is also only as precise as the histogram's buckets — a value
+inside a bucket is interpolated across that bucket's full width. The api and
+inference services therefore set explicit boundaries per metric family
+(`src/app/lib/metrics.py`, `histogram_boundaries`) rather than taking the
+OTel defaults, which leave just four buckets above 1s. Every baseline
+threshold below is an exact bucket edge in the relevant set, so the estimate
+is precise at the value it is being compared against. Changing a threshold to
+a value that is *not* a boundary reintroduces interpolation error at exactly
+the point that matters; add the boundary alongside the threshold.
+
 ## Attribution playbook
 
 Read a regression off the dashboard as a decision table. The 2026-07-31 load-test
