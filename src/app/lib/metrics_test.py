@@ -1,5 +1,6 @@
 """Tests for MetricCollector."""
 
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -361,7 +362,9 @@ class TestHistogramBoundaries:
 
 
 class TestHistogramBoundariesApplied:
-    def _points(self, reader, name):
+    # data_points is a union of point types; the concrete one depends on the
+    # instrument, so return Any rather than narrowing at every call site.
+    def _points(self, reader, name) -> Any:
         for rm in reader.get_metrics_data().resource_metrics:
             for sm in rm.scope_metrics:
                 for metric in sm.metrics:
