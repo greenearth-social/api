@@ -19,11 +19,11 @@ set -euo pipefail
 
 PROJECT_ID="greenearth-471522"
 
-# Cluster-scoped queries (ES exporter, GKE page-cache proxies) always point at the
-# prod cluster: stage api reads the prod Elasticsearch, so there is no stage ES to
-# chart. Only the api custom-metric namespace differs between environments.
-CLUSTER="greenearth-prod-cluster"
-K8S_NAMESPACE="greenearth-prod"
+# Cluster-scoped queries (ES exporter, GKE page-cache proxies) target the
+# environment's own cluster: greenearth-stage-cluster / greenearth-stage exist
+# and report exporter + GKE metrics just like prod (verified 2026-08-02), and
+# the api's deploy.sh targets greenearth-${ENVIRONMENT}-cluster. Set below,
+# after the environment argument is parsed.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${SCRIPT_DIR}/dashboards/bottleneck.json.tmpl"
@@ -48,10 +48,13 @@ done
 [[ -f "$TEMPLATE" ]] || { echo "template not found: $TEMPLATE" >&2; exit 1; }
 
 NAMESPACE="$ENV_NAME"
+CLUSTER="greenearth-${ENV_NAME}-cluster"
+K8S_NAMESPACE="greenearth-${ENV_NAME}"
 DISPLAY_NAME="Load Test & Bottleneck Attribution (${ENV_NAME})"
 
-RENDERED="$(mktemp -t bottleneck-dashboard).json"
-trap 'rm -f "$RENDERED"' EXIT
+RENDER_DIR="$(mktemp -d -t bottleneck-dashboard)"
+trap 'rm -rf "$RENDER_DIR"' EXIT
+RENDERED="${RENDER_DIR}/dashboard.json"
 
 sed \
     -e "s|\${ENV}|${ENV_NAME}|g" \

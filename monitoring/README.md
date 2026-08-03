@@ -38,30 +38,30 @@ exact burst window without another API round trip.
 |---|---|---|---|
 | `${ENV}` | `stage` | `prod` | dashboard title, Cloud Run `service_name` (`greenearth-api-${ENV}`) |
 | `${NAMESPACE}` | `stage` | `prod` | api/inference custom metrics — `generic_task` resource label `namespace` |
-| `${CLUSTER}` | `greenearth-prod-cluster` | `greenearth-prod-cluster` | Elasticsearch Prometheus exporter queries |
-| `${K8S_NAMESPACE}` | `greenearth-prod` | `greenearth-prod` | GKE page-cache PromQL (Appendix A queries 1 and 3) |
+| `${CLUSTER}` | `greenearth-stage-cluster` | `greenearth-prod-cluster` | Elasticsearch Prometheus exporter queries |
+| `${K8S_NAMESPACE}` | `greenearth-stage` | `greenearth-prod` | GKE page-cache PromQL (major faults, evictable memory) |
 
 Only those four exact tokens are substituted, so Cloud Monitoring's own legend
 syntax (`${metric.labels.traffic}`, `${resource.labels.task_id}`) passes through
 untouched.
 
-### Cluster-scope caveat (important when reading the stage dashboard)
+### Cluster-scope note
 
-**Rows 4, 5 and 6 always show the prod Elasticsearch cluster, on both
-dashboards.** Stage api reads prod ES; there is no separate stage cluster, and
-the GKE/ES exporter metrics only exist for `greenearth-prod-cluster` /
-`greenearth-prod`. Only rows 1–3 (api custom metrics + Cloud Run built-ins)
-differ between the two dashboards. So on the stage dashboard, row 4/5/6 movement
-is *shared-cluster context*, not something stage caused — cross-check the prod
-dashboard's rows 1–3 before blaming a stage load test for ES numbers.
+**Rows 4 and 5 show the environment's own Elasticsearch cluster** — each
+environment has one (`greenearth-stage-cluster` / `greenearth-prod-cluster`),
+both reporting exporter and GKE metrics (verified 2026-08-02), and the api's
+`scripts/deploy.sh` wires each api environment to its matching cluster.
 
-Row 6 (`ingex/*`) is likewise a single ingest pipeline writing to that same
-cluster, so it appears identically on both dashboards.
+**Row 6 (`ingex/*`) is the exception: it is a single prod ingest pipeline**
+(freshness series carry `namespace=prod` only), so that row reads identically
+on both dashboards — on the stage dashboard it is prod-ingest context, not
+something a stage load test caused.
 
 ## Attribution playbook
 
-Read a regression off the dashboard as a decision table (design doc §4.3). The
-07-31 bursts are the worked example; Appendix B has the full case study.
+Read a regression off the dashboard as a decision table. The 2026-07-31 load-test
+bursts (timeline in [issue #343](https://github.com/greenearth-social/api/issues/343))
+are the worked example.
 
 | Pattern | Diagnosis | Where on the dashboard | 07-31 evidence |
 |---|---|---|---|
@@ -92,45 +92,23 @@ ES cluster shape, pool caps) or the next load-test campaign.
 
 | Row / chart | Threshold | Source measurement |
 |---|---|---|
-| 1 — `feed.render` p50/p95 by traffic | **2500 ms** | Steady-state probe p95 1.6–2.2 s in the clean burst 2 (Appendix B); burst 1 pinned at the 10 s ceiling. 2500 ms sits just above healthy, well below broken. |
+| 1 — `feed.render` p50/p95 by traffic | **2500 ms** | Steady-state probe p95 1.6–2.2 s in the clean 07-31 burst 2; burst 1 pinned at the 10 s ceiling. 2500 ms sits just above healthy, well below broken. |
 | 1 — Failures + degraded + 5xx per min | **1 / min** | Clean burst 2 ran ~0 failures, trace degraded, ≤0.5 5xx/min; burst 1 ran 2–3 failures + 15–18 degraded + 7–9 5xx per minute. |
 | 3 — `eventloop.lag_ms` p95 per instance | **100 ms** | Healthy asyncio loop lags <10 ms; a saturated instance lags into the seconds. 100 ms is an order of magnitude above healthy and an order below saturated. No 07-31 data (metric postdates the test). |
 | 3 — Dependency failures/min by class | **1 / min** | Dependency failures are ≈0 in steady state; any sustained non-zero class is a finding. Same basis as the row-1 failure line. |
 | 3 — `client.pool.wait_ms` p95 | **10 ms** | A non-contended connector hands out a connection in well under 1 ms; 10 ms of queuing means the pool is the bottleneck for that client. |
 | 3 — `client.in_flight` / `es.client.in_flight` p95 | **100** | The pool caps: `GE_HTTP_MAX_CONNECTIONS` (default 100, `lib/http_client.py`) for the shared httpx client, and `GE_ES_CONNECTIONS_PER_NODE` (default 100, introduced in PR #346) for the ES client. Either series flattening at its cap is the client-side starvation signal. |
 | 4 — ES search thread pool rejected/s | **0** (any rejection) | Rejections are never normal; the line exists so a non-zero series is visually unambiguous. |
-| 4 — ES mean search latency | **10 ms** | ~5 ms on a clean cluster, 17–38 ms during the 07-31 cold-read storm (Appendix A/B). 10 ms separates the two regimes. |
-| 6 — `ingex/freshness_sec` p95 | **300 s** | Intended to mirror the existing prod freshness alert policy. **Not yet verified** — see note below. |
-
-### Freshness policy check (outstanding)
-
-The intent is for this line to mirror the existing prod freshness **alert
-policy** rather than invent a second number. That lookup could not be completed
-on this branch (the `gcloud` credentials in the working environment needed an
-interactive re-login), so the design doc's fallback of **300 s** is committed.
-
-Before relying on it, run:
-
-```bash
-gcloud alpha monitoring policies list --project greenearth-471522 --format json \
-  | grep -B5 -A20 -i freshness
-```
-
-and, if the policy's `thresholdValue` differs, update the `300` in the row-6
-`freshness_sec` chart's `thresholds` block and the table above.
+| 4 — ES mean search latency | **10 ms** | ~5 ms on a clean cluster, 17–38 ms during the 07-31 nightly cold-read storm. 10 ms separates the two regimes. |
+| 6 — `ingex/freshness_sec` p95 | **600 s** | Matches the existing "Megastream/Jetstream P50 Lag SLA" alert policies (p50 > 600 s over 30 m, verified 2026-08-02). This chart plots p95, and p95 ≥ p50 always, so the p95 series crossing 600 s strictly leads the alert — an early-warning line consistent with the SLA rather than a second invented number. |
 
 ### Post-deploy verification checklist
 
 Deploying the template renders JSON that hasn't all been eyeballed against a
 live dashboard yet. After `deploy.sh stage` / `deploy.sh prod`, confirm:
 
-- The row-6 freshness threshold matches the prod alert policy (see the
-  freshness policy check above).
 - The zero-value threshold line on the row-4 rejected-count chart survives the
   proto3 round trip (a `0` threshold can serialize as an absent field).
-- The four convention-derived series names (ES exporter thread-pool/GC/circuit
-  breaker metrics, GCE disk IO latency) resolve to real time series rather than
-  empty charts.
 - The row-3 `instance_count` state-label legend distinguishes instance states
   rather than rendering one indistinguishable series.
 - The `analyze.py` deep-link's `;startTime=…;endTime=…` matrix-param format
@@ -156,10 +134,10 @@ Six rows, 20 charts, one section header per row.
 | 3 | Client in-flight vs caps | `client.in_flight` p95 by `host` + `es.client.in_flight` p95 by `op` |
 | 4 ES | `es.query.duration_ms` vs `took_ms` p95 by `op` | two percentile series per `op` |
 | 4 | Search thread-pool queue + rejected | PromQL `elasticsearch_thread_pool_queue_count` / `_rejected_count` |
-| 4 | ES mean search latency | PromQL, Appendix A query 4 |
-| 5 Page cache | Major faults/s per pod | PromQL, Appendix A query 1 |
-| 5 | Device read MB/s per node | PromQL, Appendix A query 2 |
-| 5 | Evictable bytes per pod | PromQL, Appendix A query 3 |
+| 4 | ES mean search latency | PromQL — mean search latency, data nodes |
+| 5 Page cache | Major faults/s per pod | PromQL — major page faults/s (cache-miss rate) |
+| 5 | Device read MB/s per node | PromQL — device read KB/s (cold-read throughput) |
+| 5 | Evictable bytes per pod | PromQL — evictable container memory (page-cache size) |
 | 6 Blast radius | `ingex/freshness_sec` p95 by source | percentile, grouped by `resource.label.job` (`jetstream_ingest` / `megastream_ingest`) |
 | 6 | `ingex/es.bulk_index_*.took_ms` p95 | one percentile series per bulk op (posts, likes, inferences, tombstones, like_tombstones) |
 | 6 | JVM GC/s + breakers tripped/s + PD IO latency | PromQL exporter series on Y1, `compute.googleapis.com` disk IO latency on Y2 |
@@ -173,7 +151,7 @@ literal label equality, when reading the gap chart.
 
 ### Deliberate omissions
 
-Two charts from the design doc's §4.2 layout are intentionally left out of v1:
+Two charts from the original design layout are intentionally left out of v1:
 Cloud Run request concurrency (row 3) and PD IO queue depth (row 6). Neither
 had a clear finding to hang off of during the 07-31 case study, so they were
 cut to keep the dashboard to the charts that earned their place. Add them back
