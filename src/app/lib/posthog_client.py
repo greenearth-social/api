@@ -92,6 +92,21 @@ def track_interaction(
     )
 
 
+def track_redirect(
+    client: Posthog | None,
+    to: str,
+    utm_params: dict[str, str],
+) -> None:
+    """Capture a redirectClicked event for UTM click counting."""
+    if client is None:
+        return
+    client.capture(
+        distinct_id="redirect_service",
+        event="redirectClicked",
+        properties={"to": to, **utm_params},
+    )
+
+
 def evaluate_fail_fast_flag(client: Posthog | None, user_did: str) -> bool:
     """Evaluate the fail-fast-feed PostHog feature flag for this user.
 
