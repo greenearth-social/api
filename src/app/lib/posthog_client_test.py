@@ -9,11 +9,13 @@ from app.lib.posthog_client import (
     EVENT_SCHEMA_VERSION,
     EVENT_SURFACE,
     annotate_event_properties,
+    evaluate_fail_fast_flag,
     get_posthog_client,
     init_posthog_client,
     set_posthog_client,
     track_interaction,
     track_session,
+    user_identity_properties,
 )
 
 NOW = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
@@ -64,6 +66,7 @@ def test_track_session_captures_feed_loaded():
         properties={
             "feed_name": "your-feed",
             "$set": {"username": "alice.bsky.app"},
+            "user_handle": "alice.bsky.app",
             **ANNOTATIONS,
         },
         timestamp=NOW,
@@ -108,6 +111,79 @@ def test_track_interaction_captures_event_with_uri():
         },
         timestamp=NOW,
     )
+
+
+# ---------------------------------------------------------------------------
+# Handle as the user-facing identifier
+# ---------------------------------------------------------------------------
+
+
+def test_identity_properties_set_the_handle_for_display_and_breakdown():
+    # $set drives the PostHog person display name; user_handle lets an insight
+    # break down by handle without joining to the person.
+    assert user_identity_properties("alice.bsky.app") == {
+        "$set": {"username": "alice.bsky.app"},
+        "user_handle": "alice.bsky.app",
+    }
+
+
+def test_identity_properties_are_empty_without_a_handle():
+    # Never write a null over a handle PostHog already knows.
+    assert user_identity_properties(None) == {}
+
+
+def test_track_interaction_carries_the_handle():
+    mock = MagicMock()
+    track_interaction(
+        mock,
+        USER_DID,
+        "interactionLike",
+        "your-feed",
+        "at://did/post/1",
+        NOW,
+        username="alice.bsky.app",
+    )
+    mock.capture.assert_called_once_with(
+        distinct_id=USER_DID,
+        event="interactionLike",
+        properties={
+            "feed_name": "your-feed",
+            "item_uri": "at://did/post/1",
+            "$set": {"username": "alice.bsky.app"},
+            "user_handle": "alice.bsky.app",
+            **ANNOTATIONS,
+        },
+        timestamp=NOW,
+    )
+
+
+def test_track_interaction_without_a_handle_still_captures_the_event():
+    mock = MagicMock()
+    track_interaction(mock, USER_DID, "interactionLike", "your-feed", None, NOW, username=None)
+    properties = mock.capture.call_args.kwargs["properties"]
+    assert "$set" not in properties
+    assert "user_handle" not in properties
+    assert properties["feed_name"] == "your-feed"
+
+
+def test_distinct_id_stays_the_did_even_when_the_handle_is_known():
+    # The handle is mutable; keying on it would fork a person on every rename
+    # and detach their history. The DID stays the key on every event.
+    mock = MagicMock()
+    track_session(mock, USER_DID, "alice.bsky.app", "your-feed", NOW)
+    track_interaction(
+        mock, USER_DID, "interactionLike", "your-feed", None, NOW, username="alice.bsky.app"
+    )
+    for call in mock.capture.call_args_list:
+        assert call.kwargs["distinct_id"] == USER_DID
+
+
+def test_feature_flags_are_still_evaluated_on_the_did():
+    # A rename must not re-roll a user's flag bucket.
+    mock = MagicMock()
+    mock.feature_enabled.return_value = True
+    evaluate_fail_fast_flag(mock, USER_DID)
+    mock.feature_enabled.assert_called_once_with("fail-fast-feed", USER_DID)
 
 
 def test_track_interaction_captures_event_without_uri():
@@ -174,9 +250,6 @@ def test_real_posthog_client_is_disabled_in_tests():
     can never cause a test run to send live analytics events."""
     client = init_posthog_client("phc_key", "https://us.i.posthog.com")
     assert client.disabled is True
-
-
-from app.lib.posthog_client import evaluate_fail_fast_flag
 
 
 def test_evaluate_fail_fast_flag_none_client_returns_false():

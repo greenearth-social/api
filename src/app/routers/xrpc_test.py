@@ -2169,6 +2169,117 @@ class TestSendInteractions:
         track.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_interaction_carries_the_handle_from_firestore(self):
+        """The handle already stored by upsert_user is attached to the event,
+        so interactions identify the user the same way feedLoaded does."""
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        like = "app.bsky.feed.defs#interactionLike"
+        ix = Interaction(item="at://post/1", event=like, feed_context=_make_token())
+        db = MagicMock()
+        user = MagicMock()
+        user.username = "alice.bsky.app"
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
+            patch("app.routers.xrpc.track_interaction") as track,
+        ):
+            await _record_interactions(db, [ix])
+
+        track.assert_called_once()
+        assert track.call_args.kwargs["username"] == "alice.bsky.app"
+
+    @pytest.mark.asyncio
+    async def test_interaction_handle_is_looked_up_once_per_user(self):
+        """A batch of interactions from one user costs a single Firestore read —
+        this runs per sendInteractions call, so it must not scale with batch size."""
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        like = "app.bsky.feed.defs#interactionLike"
+        interactions = [
+            Interaction(item=f"at://post/{i}", event=like, feed_context=_make_token())
+            for i in range(4)
+        ]
+        db = MagicMock()
+        user = MagicMock()
+        user.username = "alice.bsky.app"
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch(
+                "app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user
+            ) as get_u,
+            patch("app.routers.xrpc.track_interaction") as track,
+        ):
+            await _record_interactions(db, interactions)
+
+        assert get_u.await_count == 1
+        assert track.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_interaction_is_still_tracked_when_the_handle_lookup_fails(self):
+        """Identity enrichment is best-effort: losing the handle must not also
+        lose the behavioural event."""
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        like = "app.bsky.feed.defs#interactionLike"
+        ix = Interaction(item="at://post/1", event=like, feed_context=_make_token())
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch(
+                "app.routers.xrpc.get_user",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("firestore down"),
+            ),
+            patch("app.routers.xrpc.track_interaction") as track,
+        ):
+            await _record_interactions(db, [ix])
+
+        track.assert_called_once()
+        assert track.call_args.kwargs["username"] is None
+
+    @pytest.mark.asyncio
+    async def test_interaction_handle_is_none_for_an_unknown_user(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        like = "app.bsky.feed.defs#interactionLike"
+        ix = Interaction(item="at://post/1", event=like, feed_context=_make_token())
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+            patch("app.routers.xrpc.track_interaction") as track,
+        ):
+            await _record_interactions(db, [ix])
+
+        track.assert_called_once()
+        assert track.call_args.kwargs["username"] is None
+
+    @pytest.mark.asyncio
+    async def test_load_test_interaction_skips_the_handle_lookup(self):
+        """Load-test traffic never reaches PostHog, so it shouldn't pay for a
+        Firestore read it has no use for."""
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        like = "app.bsky.feed.defs#interactionLike"
+        ix = Interaction(item="at://post/1", event=like, feed_context=_make_token(lt=True))
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock) as get_u,
+            patch("app.routers.xrpc.track_interaction") as track,
+        ):
+            await _record_interactions(db, [ix])
+
+        get_u.assert_not_awaited()
+        track.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_load_test_seen_recorded_to_separate_bucket(self, monkeypatch):
         """Load-test 'seen' events are recorded, but into the user's load-test
         bucket (load_test=True), never mixed with their real seen posts.
