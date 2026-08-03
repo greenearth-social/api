@@ -778,7 +778,7 @@
         "widget": {
           "title": "5 — ES page-cache residency",
           "sectionHeader": {
-            "subtitle": "Appendix A proxies (validated 2026-07-30, Spearman 0.94). Miss rate and user impact are separate rows on purpose — the playbook joins them.",
+            "subtitle": "Page-cache residency proxies (validated 2026-07-30, Spearman 0.94). Miss rate and user impact are separate rows on purpose — the playbook joins them.",
             "dividerBelow": true
           }
         }
@@ -897,7 +897,7 @@
               }
             ],
             "thresholds": [
-              {"value": 300, "label": "freshness alert threshold 300 s", "targetAxis": "Y1"}
+              {"value": 600, "label": "freshness SLA 600 s (p50 alert threshold)", "targetAxis": "Y1"}
             ],
             "yAxis": {"label": "seconds behind", "scale": "LINEAR"},
             "chartOptions": {"mode": "COLOR"}
