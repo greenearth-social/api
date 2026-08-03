@@ -47,15 +47,30 @@ untouched.
 
 ### Cluster-scope note
 
-**Rows 4 and 5 show the environment's own Elasticsearch cluster** — each
-environment has one (`greenearth-stage-cluster` / `greenearth-prod-cluster`),
-both reporting exporter and GKE metrics (verified 2026-08-02), and the api's
+Every row is per-environment. **Rows 4 and 5 show the environment's own
+Elasticsearch cluster** — each environment has one
+(`greenearth-stage-cluster` / `greenearth-prod-cluster`), both reporting
+exporter and GKE metrics (verified 2026-08-02), and the api's
 `scripts/deploy.sh` wires each api environment to its matching cluster.
+**Row 6 (`ingex/*`) uses the environment's own ingest pipeline**: series
+exist for both `namespace=stage` and `namespace=prod`
+(`resource.label."namespace"`), and every row-6 chart filters on
+`${NAMESPACE}` so the stage dashboard shows stage ingest and the prod
+dashboard shows prod ingest.
 
-**Row 6 (`ingex/*`) is the exception: it is a single prod ingest pipeline**
-(freshness series carry `namespace=prod` only), so that row reads identically
-on both dashboards — on the stage dashboard it is prod-ingest context, not
-something a stage load test caused.
+### Percentile aggregation
+
+All `custom.googleapis.com/*` metrics (greenearth-api, greenearth-inference,
+ingex) are `metricKind=CUMULATIVE, valueType=DISTRIBUTION`. The Monitoring
+API rejects a `perSeriesAligner` of `ALIGN_PERCENTILE_*` on that combination
+("The aligner cannot be applied to metrics with kind CUMULATIVE and value
+type DISTRIBUTION"), so every percentile chart on those metrics uses
+`perSeriesAligner: ALIGN_DELTA` with `crossSeriesReducer:
+REDUCE_PERCENTILE_95` / `REDUCE_PERCENTILE_50` instead — the reducer
+computes the percentile across the (possibly grouped) series. Cloud Run's
+`cpu/utilizations` and `memory/utilizations` are the exception: they are
+`DELTA DISTRIBUTION`, which the `ALIGN_PERCENTILE_95` per-series aligner
+accepts directly, so those two charts are left as-is.
 
 ## Attribution playbook
 
@@ -138,7 +153,7 @@ Six rows, 20 charts, one section header per row.
 | 5 Page cache | Major faults/s per pod | PromQL — major page faults/s (cache-miss rate) |
 | 5 | Device read MB/s per node | PromQL — device read KB/s (cold-read throughput) |
 | 5 | Evictable bytes per pod | PromQL — evictable container memory (page-cache size) |
-| 6 Blast radius | `ingex/freshness_sec` p95 by source | percentile, grouped by `resource.label.job` (`jetstream_ingest` / `megastream_ingest`) |
+| 6 Blast radius | `ingex/freshness_sec` p95 by source | percentile, grouped by `resource.label.job` (`jetstream-ingest` / `megastream-ingest`) |
 | 6 | `ingex/es.bulk_index_*.took_ms` p95 | one percentile series per bulk op (posts, likes, inferences, tombstones, like_tombstones) |
 | 6 | JVM GC/s + breakers tripped/s + PD IO latency | PromQL exporter series on Y1, `compute.googleapis.com` disk IO latency on Y2 |
 
