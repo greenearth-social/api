@@ -87,8 +87,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["metric.label.\"traffic\""]
                     }
                   }
@@ -104,8 +104,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_50",
-                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
                       "groupByFields": ["metric.label.\"traffic\""]
                     }
                   }
@@ -222,8 +222,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/candidates.generate.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["metric.label.\"generator_name\""]
                     }
                   }
@@ -255,8 +255,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/rank.model.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["metric.label.\"model_name\""]
                     }
                   }
@@ -272,8 +272,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-inference/inference.predict.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["metric.label.\"model_name\""]
                     }
                   }
@@ -305,8 +305,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/perspective.score.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
                     }
                   }
@@ -370,8 +370,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/eventloop.lag_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MAX",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["resource.label.\"task_id\""]
                     }
                   }
@@ -559,8 +559,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.pool.wait_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["metric.label.\"client\""]
                     }
                   }
@@ -576,8 +576,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.connect.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["metric.label.\"client\""]
                     }
                   }
@@ -611,8 +611,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MAX",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["metric.label.\"host\""]
                     }
                   }
@@ -628,8 +628,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MAX",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["metric.label.\"op\""]
                     }
                   }
@@ -677,8 +677,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["metric.label.\"op\""]
                     }
                   }
@@ -694,8 +694,8 @@
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": ["metric.label.\"op\""]
                     }
                   }
@@ -885,12 +885,12 @@
                 "timeSeriesQuery": {
                   "unitOverride": "s",
                   "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/freshness_sec\" resource.type=\"generic_task\"",
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/freshness_sec\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MAX",
-                      "groupByFields": ["resource.label.\"job\"", "resource.label.\"namespace\""]
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
+                      "groupByFields": ["resource.label.\"job\""]
                     }
                   }
                 }
@@ -920,11 +920,11 @@
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_posts.took_ms\" resource.type=\"generic_task\"",
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_posts.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MAX",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
                     }
                   }
@@ -937,11 +937,11 @@
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_likes.took_ms\" resource.type=\"generic_task\"",
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_likes.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MAX",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
                     }
                   }
@@ -954,11 +954,11 @@
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_inferences.took_ms\" resource.type=\"generic_task\"",
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_inferences.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MAX",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
                     }
                   }
@@ -971,11 +971,11 @@
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_tombstones.took_ms\" resource.type=\"generic_task\"",
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_tombstones.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MAX",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
                     }
                   }
@@ -988,11 +988,11 @@
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_like_tombstones.took_ms\" resource.type=\"generic_task\"",
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_like_tombstones.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
                       "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MAX",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
                     }
                   }
