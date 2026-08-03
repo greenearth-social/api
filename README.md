@@ -261,13 +261,37 @@ ENVIRONMENT=prod \
 
 The deployment script will:
 
+- Refuse to run with a dirty working tree (see below)
 - Generate `requirements.txt` from `Pipfile`
 - Auto-detect the Elasticsearch internal load balancer IP
 - Build the container using Google Cloud buildpacks
 - Deploy to Cloud Run with proper environment variables and secrets
+- Stamp the deployed git sha onto the revision and the debug feed records
 
 API deployments do not change Firebase configuration. Deploy Firebase rules,
 indexes, TTL policies, Functions, and Hosting from the frontend repository.
+
+#### Deployments must be from a clean tree (git sha traceability)
+
+So we always know exactly what code is live, `deploy.sh` **refuses to deploy
+with uncommitted changes**. Deploying an unpushed branch is fine — only a dirty
+working tree is rejected. Commit or stash first, then deploy.
+
+Each deploy stamps its short git sha in three places:
+
+- **Cloud Run env var `GE_GIT_SHA`** — the running app reports it at
+  `GET /health` (`{"status":"ok","git_sha":"e9f07f5"}`). Use this to confirm
+  which revision is live.
+- **Cloud Run label `git-sha=<sha>`** — tags the service/revision so past
+  deployments are identifiable when picking a rollback target
+  (`gcloud run revisions list --format='value(metadata.name,metadata.labels.git-sha)'`).
+- **Debug feed display names + descriptions** — every internal ("debug") feed
+  record is published as e.g. `GE e2 S e9f07f5`, with `Built by Caterpie · e9f07f5`
+  in the description. The public prod GreenEarth feeds are left unstamped.
+
+**Reporting a bug against a feed?** Open the debug feed in Bluesky and copy the
+trailing sha from its name (e.g. `e9f07f5`) into the report — it pins the bug to
+the exact deployed code. You can also read the live sha off `GET /health`.
 
 Inference endpoint resolution order during deploy:
 

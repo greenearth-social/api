@@ -49,7 +49,9 @@ SOCIAL_RADIUS_PRESETS: dict[int, list[GeneratorSpec]] = {
     ],
 }
 
-# NOTE: display_name is limited to 24 chars, including the prefix ("GreenEarth, GE Dev, or GE Stg")
+# NOTE: published display names are limited to 24 graphemes. Internal ("debug")
+# feeds are published as "GE <internal_display_name> <git_sha>" (see issue #228),
+# so keep internal_display_name to 13 chars or fewer. feeds_test.py enforces this.
 FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(
         display_name="Unranked YF",

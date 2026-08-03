@@ -189,6 +189,7 @@ async def list_feeds(
                 request_id=doc.request_id,
                 generated_at=doc.generated_at,
                 feed_name=doc.feed_name,
+                api_release_sha=doc.api_release_sha,
                 applied_social_radius=doc.applied_social_radius,
                 generator_diagnostics=[
                     GeneratorDiagnosticView(**diagnostic.model_dump())
@@ -264,6 +265,7 @@ async def get_feed_detail(
     return FeedDetailResponse(
         request_id=request_id,
         generated_at=snapshot.generated_at,
+        api_release_sha=snapshot.api_release_sha,
         items=items,
         stored_item_count=len(snapshot.items),
         displayed_item_count=len(items),

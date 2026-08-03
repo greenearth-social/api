@@ -1,5 +1,6 @@
 """Tests for PRC scoring and Perspective API candidate scoring."""
 
+import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
