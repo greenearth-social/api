@@ -1148,6 +1148,26 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
     # bucket instead of polluting their real exclusion data.
     seen_by_user: dict[tuple[str, bool], list[str]] = {}
 
+    # Handles for the PostHog identity properties, memoized so a batch of
+    # interactions from one user costs one Firestore read rather than one per
+    # item. Read from the user doc that _record_session already wrote, rather
+    # than re-resolving against the PLC directory.
+    handles: dict[str, str | None] = {}
+
+    async def _handle_for(user_did: str) -> str | None:
+        if user_did not in handles:
+            try:
+                user = await get_user(db, user_did)
+                handles[user_did] = user.username if user else None
+            except Exception:
+                logger.warning(
+                    "Could not load handle for %s; tracking interaction without it",
+                    user_did,
+                    exc_info=True,
+                )
+                handles[user_did] = None
+        return handles[user_did]
+
     for ix in interactions:
         payload = decode_feed_context(ix.feed_context or "")
         if payload is None:
@@ -1192,6 +1212,7 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
                     payload.feed,
                     ix.item,
                     doc.created_at,
+                    username=await _handle_for(payload.did),
                 )
             except Exception:
                 logger.exception(

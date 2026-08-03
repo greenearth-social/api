@@ -61,6 +61,25 @@ def annotate_event_properties(properties: dict) -> dict:
     }
 
 
+def user_identity_properties(username: str | None) -> dict:
+    """Return the properties that carry the user's handle on an event.
+
+    ``distinct_id`` stays the DID — it is Bluesky's stable identifier and
+    survives a rename, so keying on the handle would fork a person every time
+    they change it. The handle is instead what a human reads: ``$set`` populates
+    the PostHog person display name (``$set``, not ``$set_once``, so a rename
+    propagates), and ``user_handle`` mirrors it onto the event so an insight can
+    break down by handle without joining to the person.
+
+    ``username`` may be ``None`` when the handle couldn't be resolved, in which
+    case nothing is returned — writing a null would erase a handle PostHog
+    already has over what is usually a transient directory failure.
+    """
+    if username is None:
+        return {}
+    return {"$set": {"username": username}, "user_handle": username}
+
+
 def set_posthog_client(client: Posthog | None) -> None:
     global _posthog_client
     _posthog_client = client
@@ -90,9 +109,10 @@ def track_session(
     """
     if client is None:
         return
-    properties: dict[str, object] = {"feed_name": feed_name}
-    if username is not None:
-        properties["$set"] = {"username": username}
+    properties: dict[str, object] = {
+        "feed_name": feed_name,
+        **user_identity_properties(username),
+    }
     client.capture(
         distinct_id=user_did,
         event="feedLoaded",
@@ -108,18 +128,24 @@ def track_interaction(
     feed_name: str,
     item_uri: str | None,
     timestamp: datetime,
+    username: str | None = None,
 ) -> None:
     """Capture a Bluesky interaction event.
 
     ``event`` should already be camelCase (e.g. ``interactionLike``) per the
     module-level event naming convention -- callers pass through the event
     name as-is, no case conversion happens here.
+
+    ``username`` is the caller's handle, carried so interaction events identify
+    the user the same way ``feedLoaded`` does. It is optional and best-effort:
+    an unresolved handle costs the identity properties, never the event.
     """
     if client is None:
         return
     properties: dict = {"feed_name": feed_name}
     if item_uri:
         properties["item_uri"] = item_uri
+    properties.update(user_identity_properties(username))
     client.capture(
         distinct_id=user_did,
         event=event,
