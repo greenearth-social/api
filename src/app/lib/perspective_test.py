@@ -357,10 +357,19 @@ class TestPerspectiveClientScore:
         session = MagicMock()
         session.post = MagicMock(return_value=_BlockingResponseCM(release, response))
 
-        with patch.dict("os.environ", {"GE_PERSPECTIVE_API_KEY": "test-key"}):
+        # Pin the host: the label is derived from GE_PERSPECTIVE_HOST, which is
+        # set to a stub in the local dev environment, so asserting the
+        # production hostname would make this test environment-dependent.
+        env = {
+            "GE_PERSPECTIVE_API_KEY": "test-key",
+            "GE_PERSPECTIVE_HOST": "https://perspective.test",
+        }
+        with patch.dict("os.environ", env):
             client = PerspectiveClient()
 
-        with patch.object(PerspectiveClient, "_get_session", return_value=session):
+        with patch.dict("os.environ", env), patch.object(
+            PerspectiveClient, "_get_session", return_value=session
+        ):
             t1 = asyncio.create_task(client.score("hi"))
             t2 = asyncio.create_task(client.score("there"))
             await asyncio.sleep(0.01)  # let both reach the blocked response
@@ -371,7 +380,7 @@ class TestPerspectiveClientScore:
                 (v, a) for n, v, a in collector.records if n == "client.in_flight"
             ]
             assert sorted(v for v, _ in concurrent_samples) == [1, 2]
-            assert all(a == {"host": "commentanalyzer.googleapis.com"} for _, a in concurrent_samples)
+            assert all(a == {"host": "perspective.test"} for _, a in concurrent_samples)
 
             # A later, non-overlapping call starts from a reset counter.
             release2 = asyncio.Event()
