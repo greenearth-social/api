@@ -796,26 +796,33 @@ async def get_redirect(db: AsyncClient, slug: str) -> RedirectDocument | None:
     return RedirectDocument.model_validate(data)
 
 
-async def create_redirect(db: AsyncClient, slug: str, url: str) -> RedirectDocument:
+async def create_redirect(
+    db: AsyncClient, slug: str, url: str, description: str | None = None
+) -> RedirectDocument:
     """Create a new redirect document. Raises ``ValueError`` if slug already exists."""
     ref = db.collection(REDIRECTS_COLLECTION).document(slug)
     existing = await ref.get()
     if existing.exists:
         raise ValueError(f"Slug '{slug}' already exists")
-    record = RedirectDocument(slug=slug, url=url)
+    record = RedirectDocument(slug=slug, url=url, description=description)
     await ref.set(record.model_dump())
     return record
 
 
-async def update_redirect(db: AsyncClient, slug: str, url: str) -> RedirectDocument | None:
-    """Update the URL for an existing slug. Returns ``None`` if the slug does not exist."""
+async def update_redirect(
+    db: AsyncClient, slug: str, url: str, description: str | None = None
+) -> RedirectDocument | None:
+    """Update the URL (and optionally description) for an existing slug. Returns ``None`` if not found."""
     ref = db.collection(REDIRECTS_COLLECTION).document(slug)
     existing = await ref.get()
     if not existing.exists:
         return None
-    await ref.update({"url": url})
+    updates: dict = {"url": url}
+    if description is not None:
+        updates["description"] = description
+    await ref.update(updates)
     data = existing.to_dict() or {}
-    data["url"] = url
+    data.update(updates)
     return RedirectDocument.model_validate(data)
 
 

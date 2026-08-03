@@ -100,15 +100,18 @@ async def redirect_to(
 class RedirectCreateRequest(BaseModel):
     slug: str
     url: str
+    description: str | None = None
 
 
 class RedirectUpdateRequest(BaseModel):
     url: str
+    description: str | None = None
 
 
 class RedirectResponse_(BaseModel):
     slug: str
     url: str
+    description: str | None = None
 
 
 @router.post("/admin/redirects", status_code=201)
@@ -125,10 +128,10 @@ async def admin_create_redirect(
     if parsed.scheme != "https" or not parsed.netloc:
         raise HTTPException(status_code=400, detail="url must be a valid https:// URL")
     try:
-        record = await create_redirect(db, body.slug, body.url)
+        record = await create_redirect(db, body.slug, body.url, body.description)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    return RedirectResponse_(slug=record.slug, url=record.url)
+    return RedirectResponse_(slug=record.slug, url=record.url, description=record.description)
 
 
 @router.put("/admin/redirects/{slug}", status_code=200)
@@ -145,10 +148,10 @@ async def admin_update_redirect(
     parsed = urlparse(body.url)
     if parsed.scheme != "https" or not parsed.netloc:
         raise HTTPException(status_code=400, detail="url must be a valid https:// URL")
-    record = await update_redirect(db, slug, body.url)
+    record = await update_redirect(db, slug, body.url, body.description)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Slug '{slug}' not found")
-    return RedirectResponse_(slug=record.slug, url=record.url)
+    return RedirectResponse_(slug=record.slug, url=record.url, description=record.description)
 
 
 @router.delete("/admin/redirects/{slug}", status_code=204)

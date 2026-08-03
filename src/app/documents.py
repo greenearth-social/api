@@ -444,6 +444,7 @@ class RedirectDocument(BaseModel):
 
     slug: str = Field(..., description="Short identifier (also the document ID)")
     url: str = Field(..., description="Destination https:// URL")
+    description: str | None = Field(default=None, description="Human-readable label for this redirect")
     created_at: datetime = Field(
         default_factory=_utcnow, description="When this mapping was created"
     )
