@@ -17,6 +17,10 @@ NOW = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
 EARLIER = datetime(2024, 6, 1, 0, 0, 0, tzinfo=UTC)
 USER_DID = "did:plc:abc123"
 
+# Backfilled events are API-origin, so they carry the same annotations as live
+# ones -- otherwise historical data would be a hole in the surface partition.
+ANNOTATIONS = {"surface": "greenearth_api", "schema_version": 1}
+
 
 def _make_user_doc(user_did=USER_DID, username="alice.bsky.app", created_at=NOW):
     doc = MagicMock()
@@ -95,6 +99,7 @@ async def test_backfill_users_emits_feed_loaded_per_feed():
                 "username": "alice.bsky.app",
                 "posthog_created_at": NOW.isoformat(),
             },
+            **ANNOTATIONS,
         },
         timestamp=EARLIER,
     )
@@ -145,7 +150,7 @@ async def test_backfill_interactions_emits_one_event_per_doc():
     ph.capture.assert_called_once_with(
         distinct_id=USER_DID,
         event="interactionLike",
-        properties={"feed_name": "your-feed", "item_uri": "at://did/post/1"},
+        properties={"feed_name": "your-feed", "item_uri": "at://did/post/1", **ANNOTATIONS},
         timestamp=NOW,
     )
 
