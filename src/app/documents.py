@@ -434,3 +434,16 @@ class FeedSnapshotDocument(BaseModel):
     generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
     applied_social_radius: int | None = None
     items_meta: list[PipelineItemMeta] = Field(default_factory=list)
+
+
+class RedirectDocument(BaseModel):
+    """A slug → URL mapping stored in the ``redirects`` collection.
+
+    The document ID in Firestore is the slug itself (e.g. ``bsky-profile``).
+    """
+
+    slug: str = Field(..., description="Short identifier (also the document ID)")
+    url: str = Field(..., description="Destination https:// URL")
+    created_at: datetime = Field(
+        default_factory=_utcnow, description="When this mapping was created"
+    )

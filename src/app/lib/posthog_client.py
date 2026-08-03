@@ -94,6 +94,7 @@ def track_interaction(
 
 def track_redirect(
     client: Posthog | None,
+    slug: str,
     to: str,
     utm_params: dict[str, str],
 ) -> None:
@@ -103,7 +104,7 @@ def track_redirect(
     client.capture(
         distinct_id="redirect_service",
         event="redirectClicked",
-        properties={"to": to, **utm_params},
+        properties={"slug": slug, "to": to, **utm_params},
     )
 
 
