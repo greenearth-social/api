@@ -2,11 +2,17 @@
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
 
 from app.lib import client_metrics
+
+
+# The trace callbacks ignore their session and params arguments; the cast
+# keeps the type checker happy without fabricating aiohttp internals.
+UNUSED = cast(Any, None)
 
 
 class _RecordingCollector:
@@ -24,8 +30,8 @@ async def test_aiohttp_trace_records_pool_wait(monkeypatch):
 
     tc = client_metrics.aiohttp_trace_config("perspective")
     ctx = SimpleNamespace()
-    await tc.on_connection_queued_start[0](None, ctx, None)
-    await tc.on_connection_queued_end[0](None, ctx, None)
+    await tc.on_connection_queued_start[0](UNUSED, ctx, UNUSED)
+    await tc.on_connection_queued_end[0](UNUSED, ctx, UNUSED)
 
     [(name, value, attrs)] = collector.records
     assert name == "client.pool.wait_ms"
@@ -40,8 +46,8 @@ async def test_aiohttp_trace_records_connect_duration(monkeypatch):
 
     tc = client_metrics.aiohttp_trace_config("perspective")
     ctx = SimpleNamespace()
-    await tc.on_connection_create_start[0](None, ctx, None)
-    await tc.on_connection_create_end[0](None, ctx, None)
+    await tc.on_connection_create_start[0](UNUSED, ctx, UNUSED)
+    await tc.on_connection_create_end[0](UNUSED, ctx, UNUSED)
 
     [(name, _, attrs)] = collector.records
     assert name == "client.connect.duration_ms"
@@ -53,7 +59,7 @@ async def test_aiohttp_trace_end_without_start_records_nothing(monkeypatch):
     collector = _RecordingCollector()
     monkeypatch.setattr(client_metrics, "get_metric_collector", lambda: collector)
     tc = client_metrics.aiohttp_trace_config("perspective")
-    await tc.on_connection_queued_end[0](None, SimpleNamespace(), None)
+    await tc.on_connection_queued_end[0](UNUSED, SimpleNamespace(), UNUSED)
     assert collector.records == []
 
 
