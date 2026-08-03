@@ -7,10 +7,13 @@ load-test bypass headers (``X-Load-Test-Secret`` / ``X-Load-Test-DID``) so the
 server skips AT Protocol auth, tags all resulting data as test traffic, and
 skips analytics — see load_test_did in src/app/routers/xrpc.py.
 
-This script only *generates* load and records raw per-request results to a JSONL
-file. Analyze the results afterwards with scripts/load_test/analyze.py, which
-reads that file (and Cloud Monitoring / logs) and never touches Firestore — so
-you can run scripts/load_test/cleanup.py before analysis if you like.
+This script *generates* load, records raw per-request results to a JSONL file,
+and — unless ``--skip-cleanup`` is given — deletes the data it created by
+invoking scripts/load_test/cleanup.py --execute when the run finishes (with
+``--skip-cleanup`` it prints that command for you to run later). Analyze the
+results afterwards with scripts/load_test/analyze.py, which reads only the JSONL
+file (and Cloud Monitoring / logs) and never touches Firestore — so cleanup
+running first never affects analysis.
 
 Run from the api/ directory:
 
@@ -39,6 +42,14 @@ from datetime import datetime, timezone
 
 import httpx
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # scripts/
@@ -49,6 +60,7 @@ from load_test.lib import (
     assign_feeds,
     build_interactions,
     feed_uri_from_describe,
+    gcloud_env,
     interactions_request_body,
     parse_feed_spec,
     percentiles,
@@ -81,6 +93,7 @@ def _resolve_api_url(args: argparse.Namespace) -> str:
             "value(status.url)",
         ],
         text=True,
+        env=gcloud_env(),
     ).strip()
     if not out:
         raise SystemExit(f"Could not resolve Cloud Run URL for {service}")
@@ -98,6 +111,7 @@ def _resolve_secret(args: argparse.Namespace) -> str:
         return subprocess.check_output(
             ["gcloud", "secrets", "versions", "access", "latest", "--secret", secret_name],
             text=True,
+            env=gcloud_env(),
         ).strip()
     except subprocess.CalledProcessError as exc:  # pragma: no cover - env dependent
         raise SystemExit(f"Could not read {secret_name} from Secret Manager: {exc}") from exc
@@ -313,33 +327,94 @@ async def run(args: argparse.Namespace) -> None:
             console.print(f"[dim]Feed {rkey}: {uri}[/dim]")
 
         start_wall = time.monotonic()
+        progress = Progress(
+            TextColumn("[bold]running"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TextColumn("sessions"),
+            TimeElapsedColumn(),
+            TextColumn("[dim]eta[/dim]"),
+            TimeRemainingColumn(),
+            console=console,
+            # Off explicitly with --no-progress, and auto-off when stdout isn't a
+            # terminal (piped to a file / CI) so we don't spew control codes.
+            disable=True if args.no_progress else None,
+        )
 
-        async def _launch(session_id: int, delay: float) -> None:
-            now = time.monotonic() - start_wall
-            if delay > now:
-                await asyncio.sleep(delay - now)
-            async with semaphore:
-                user = weighted_cohort_choice(rng, users)
-                await run_session(
-                    session_id,
-                    user,
-                    client=client,
-                    api_url=api_url,
-                    feed_uri=feed_uris[user["feed"]],
-                    headers_for=headers_for,
-                    limit=args.limit,
-                    rng=random.Random(rng.random()),
-                    interaction_share=args.interaction_share,
-                    think_time_ms=args.think_time_ms,
-                    writer=writer,
-                )
+        with progress:
+            task_id = progress.add_task("run", total=len(offsets))
 
-        tasks = [asyncio.create_task(_launch(i, off)) for i, off in enumerate(offsets)]
-        await asyncio.gather(*tasks)
+            async def _launch(session_id: int, delay: float) -> None:
+                now = time.monotonic() - start_wall
+                if delay > now:
+                    await asyncio.sleep(delay - now)
+                async with semaphore:
+                    user = weighted_cohort_choice(rng, users)
+                    await run_session(
+                        session_id,
+                        user,
+                        client=client,
+                        api_url=api_url,
+                        feed_uri=feed_uris[user["feed"]],
+                        headers_for=headers_for,
+                        limit=args.limit,
+                        rng=random.Random(rng.random()),
+                        interaction_share=args.interaction_share,
+                        think_time_ms=args.think_time_ms,
+                        writer=writer,
+                    )
+                progress.advance(task_id)
+
+            tasks = [asyncio.create_task(_launch(i, off)) for i, off in enumerate(offsets)]
+            await asyncio.gather(*tasks)
 
     writer.close()
     _print_summary(writer.records)
     console.print(f"[green]Wrote {args.out} ({len(writer.records)} records)[/green]")
+
+    _run_cleanup(args)
+
+
+def _cleanup_command(args: argparse.Namespace) -> list[str]:
+    """The cleanup invocation matching this run — deletes everything it created."""
+    cleanup_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cleanup.py")
+    return [
+        sys.executable,
+        cleanup_py,
+        "--environment",
+        args.environment,
+        "--users",
+        args.users,
+        "--execute",
+    ]
+
+
+def _cleanup_display(args: argparse.Namespace) -> str:
+    """Copy-pasteable form of the cleanup command (relative, no venv python path)."""
+    return (
+        "pipenv run python scripts/load_test/cleanup.py "
+        f"--environment {args.environment} --users {args.users} --execute"
+    )
+
+
+def _run_cleanup(args: argparse.Namespace) -> None:
+    """Delete this run's data unless --skip-cleanup; if skipped, show how to later."""
+    if args.skip_cleanup:
+        console.print(
+            "\n[yellow]--skip-cleanup: test data left in Firestore. "
+            "Remove it later with:[/yellow]\n"
+            f"  [bold]{_cleanup_display(args)}[/bold]"
+        )
+        return
+    console.print(
+        "\n[bold]Cleaning up test data[/bold] [dim](pass --skip-cleanup to keep it)[/dim]"
+    )
+    result = subprocess.run(_cleanup_command(args))
+    if result.returncode != 0:
+        console.print(
+            f"[red]Cleanup failed (exit {result.returncode}). Re-run manually:[/red]\n"
+            f"  [bold]{_cleanup_display(args)}[/bold]"
+        )
 
 
 def _print_feed_plan(users: list[dict], feed_weights: list[tuple[str, float]]) -> None:
@@ -411,6 +486,13 @@ def main() -> None:
     parser.add_argument("--secret", help="Load-test secret (else env / Secret Manager)")
     parser.add_argument("--out", default="results.jsonl")
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--no-progress", action="store_true", help="Hide the progress bar")
+    parser.add_argument(
+        "--skip-cleanup",
+        action="store_true",
+        help="Don't delete the run's data afterwards (cleanup runs by default); "
+        "prints the cleanup command to run later instead.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print the plan, send nothing")
     parser.add_argument("--force", action="store_true", help="Bypass the high-rate guardrail")
     args = parser.parse_args()

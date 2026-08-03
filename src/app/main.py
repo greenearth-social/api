@@ -37,7 +37,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-from .routers import candidates, diversify, feed_transparency, health, rank, skylight, xrpc
+from .routers import candidates, diversify, feed_transparency, health, rank, redirect, skylight, xrpc
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
 from .lib.firebase_auth import init_firebase_auth
@@ -60,6 +60,21 @@ from .lib.request_context import (
 from elasticsearch import AsyncElasticsearch
 from starlette.routing import BaseRoute, Match
 from starlette.types import Scope
+
+
+def _es_connections_per_node() -> int:
+    """Size of the ES client's per-node connection pool.
+
+    One feed render fans out to ~6-8 concurrent ES searches, so the
+    transport default of 10 connections serializes renders under load:
+    queries queue inside aiohttp while the event loop sits idle, showing
+    up as slow trivial queries and generator timeouts (api#344). aiohttp's
+    global connector limit is 100, so values above that have no effect.
+    """
+    try:
+        return int(os.environ.get("GE_ES_CONNECTIONS_PER_NODE", "100"))
+    except ValueError:
+        return 100
 
 
 def _reject_dev_session_secret_in_deployment() -> None:
@@ -105,6 +120,7 @@ async def lifespan(app: FastAPI):
         api_key=es_api_key,
         verify_certs=es_verify,
         request_timeout=20,
+        connections_per_node=_es_connections_per_node(),
     )
 
     metrics = MetricCollector(
@@ -352,6 +368,7 @@ app.include_router(feed_transparency.router)
 app.include_router(health.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)
+app.include_router(redirect.router)
 app.include_router(xrpc.router)
 
 

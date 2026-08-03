@@ -47,6 +47,7 @@ import argparse
 import getpass
 import os
 import pathlib
+import subprocess
 import sys
 from typing import Literal
 
@@ -58,6 +59,11 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "src
 from app.feeds import FEEDS  # type: ignore
 
 DEFAULT_PDS = "https://bsky.social"
+
+# AT Protocol app.bsky.feed.generator caps displayName at 24 graphemes. We append
+# the deployed git sha to internal ("debug") feed names, so guard the composed
+# name against this budget rather than only the base name.
+MAX_DISPLAY_NAME_GRAPHEMES = 24
 
 ENV_DISPLAY_PREFIX: dict[str, str] = {
     "dev": "GE Dev",
@@ -83,6 +89,48 @@ def _normalize_environment(environment: str | None) -> str | None:
     if not environment:
         return None
     return ENV_ALIASES.get(environment.strip().lower())
+
+
+def _git_short_sha() -> str | None:
+    """Return the short git sha to stamp onto debug feed records.
+
+    Prefers ``GE_GIT_SHA`` (set by ``deploy.sh`` from the clean tree it verified)
+    so the published sha always matches the deployed code. Falls back to the
+    local ``HEAD`` for manual/local publishes. Returns ``None`` when neither is
+    available (e.g. not a git checkout), in which case names are left unstamped.
+    """
+    env_sha = os.environ.get("GE_GIT_SHA")
+    if env_sha and env_sha.strip():
+        return env_sha.strip()[:7]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=pathlib.Path(__file__).parent.parent,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return result.stdout.strip() or None
+
+
+def _with_git_sha(display_name: str, git_sha: str | None) -> str:
+    """Append *git_sha* to *display_name*, guarding the 24-grapheme budget.
+
+    Raises ``ValueError`` if the composed name would exceed the AT Protocol
+    displayName limit — a loud failure at publish time is preferable to Bluesky
+    silently truncating the sha, which would make it unusable for identifying
+    deployed code.
+    """
+    name = f"{display_name} {git_sha}" if git_sha else display_name
+    if len(name) > MAX_DISPLAY_NAME_GRAPHEMES:
+        raise ValueError(
+            f"Feed display name {name!r} is {len(name)} chars, exceeding the "
+            f"{MAX_DISPLAY_NAME_GRAPHEMES}-grapheme AT Protocol limit. Shorten "
+            "the feed's internal_display_name."
+        )
+    return name
 
 
 def _resolve_environment(cli_environment: str | None) -> str | None:
@@ -411,8 +459,15 @@ def _resolve_feed_publish_params(
     rkey: str,
     feed_cfg,
     normalized_env: str | None,
+    git_sha: str | None = None,
 ) -> tuple[str, str, str]:
-    """Return (published_rkey, display_name, description) for a feed based on routing rules."""
+    """Return (published_rkey, display_name, description) for a feed based on routing rules.
+
+    Internal ("debug") feeds are stamped with *git_sha* in both the display name
+    and description so testers can tell exactly which deployed code produced a
+    feed. The public prod GreenEarth records are left unstamped — real users see
+    them and the sha would be noise there.
+    """
     is_greenearth = normalized_env == "prod" and feed_cfg.public
     if is_greenearth:
         return rkey, feed_cfg.display_name, f"{feed_cfg.description}\nBuilt by GreenEarth (https://www.greenearth.social)."
@@ -422,7 +477,9 @@ def _resolve_feed_publish_params(
         published_display_name = f"GE {base_display_name}"
     else:
         published_display_name = base_display_name
-    return published_rkey, published_display_name, "Built by Caterpie"
+    published_display_name = _with_git_sha(published_display_name, git_sha)
+    description = f"Built by Caterpie · {git_sha}" if git_sha else "Built by Caterpie"
+    return published_rkey, published_display_name, description
 
 
 def sync_feeds(
@@ -432,6 +489,7 @@ def sync_feeds(
     generator_did: str,
     environment: str | None = None,
     visibility: Literal["public", "internal"] | None = None,
+    git_sha: str | None = None,
     pds: str = DEFAULT_PDS,
 ) -> None:
     """Sync published feed records with the FEEDS config.
@@ -440,6 +498,9 @@ def sync_feeds(
     *visibility* when set) and deletes any existing records whose rkey is
     *not* in the desired set.  Because ``putRecord`` is an upsert, feeds that
     already exist are updated in place without a visible gap.
+
+    *git_sha*, when provided, is stamped onto internal (debug) feed records so
+    testers can identify the deployed code behind a feed.
     """
     feed_items = list(FEEDS.items())
     if visibility == "public":
@@ -466,7 +527,7 @@ def sync_feeds(
         desired_rkeys: set[str] = set()
         for rkey, feed_cfg in feed_items:
             published_rkey, display_name, description = _resolve_feed_publish_params(
-                rkey, feed_cfg, normalized_env
+                rkey, feed_cfg, normalized_env, git_sha
             )
             desired_rkeys.add(published_rkey)
             avatar_blob = _upload_blob(client, pds, access_jwt, feed_cfg.avatar)
@@ -596,6 +657,14 @@ def main() -> None:
         default=DEFAULT_PDS,
         help=f"PDS endpoint to authenticate against (default: {DEFAULT_PDS})",
     )
+    parser.add_argument(
+        "--git-sha",
+        default=None,
+        help=(
+            "Short git sha to stamp onto internal (debug) feed names/descriptions. "
+            "Falls back to GE_GIT_SHA, then to the local HEAD sha."
+        ),
+    )
     args = parser.parse_args()
 
     # Load .env file to pick up GE_FEED_GENERATOR_DID and other env vars
@@ -643,6 +712,7 @@ def main() -> None:
             generator_did=generator_did,
             environment=resolved_environment,
             visibility=visibility,
+            git_sha=args.git_sha or _git_short_sha(),
             pds=args.pds,
         )
         return

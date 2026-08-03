@@ -77,6 +77,7 @@ from ..lib.posthog_client import (
     track_interaction,
     track_session,
 )
+from ..lib.release import api_release_sha
 from ..lib.rankers import run_predict
 from ..lib.request_cache import request_cache_scope
 from ..lib.request_context import set_traffic
@@ -715,6 +716,7 @@ async def _run_pipeline_capturing(
         generated_at=generated_at,
         expires_at=expires_at,
         applied_social_radius=applied_social_radius,
+        api_release_sha=api_release_sha(),
     )
 
     # Full debug document only for debug-flagged users, in background.
@@ -1484,6 +1486,7 @@ async def get_feed_skeleton(
                         items=cached_uris,
                         feed_name=cache_doc.feed_name or feed_name,
                         generated_at=cache_doc.generated_at or datetime.now(timezone.utc),
+                        api_release_sha=cache_doc.api_release_sha,
                         expires_at=cache_doc.expires_at,
                         generator_diagnostics=cache_doc.generator_diagnostics,
                         applied_social_radius=cache_doc.applied_social_radius,
@@ -1677,6 +1680,7 @@ async def get_feed_skeleton(
                             applied_social_radius=applied_social_radius,
                             feed_name=feed_name,
                             generated_at=generated_snapshot.generated_at,
+                            api_release_sha=generated_snapshot.api_release_sha,
                             expires_at=datetime.now(timezone.utc)
                             + timedelta(seconds=DEFAULT_TTL_SECONDS),
                             load_test=is_load_test,

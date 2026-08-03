@@ -99,13 +99,21 @@ def _mock_doc_snapshot(exists: bool, data: dict | None = None) -> MagicMock:
     return snap
 
 
-def _feed_snapshot(request_id: str, generated_at: datetime, items: list[str], *, expires_at: datetime | None = None) -> FeedSnapshotDocument:
+def _feed_snapshot(
+    request_id: str,
+    generated_at: datetime,
+    items: list[str],
+    *,
+    expires_at: datetime | None = None,
+    api_release_sha: str | None = None,
+) -> FeedSnapshotDocument:
     return FeedSnapshotDocument(
         request_id=request_id,
         items=items,
         items_meta=[PipelineItemMeta(at_uri=uri, rank=i) for i, uri in enumerate(items, 1)],
         feed_name="your-feed",
         generated_at=generated_at,
+        api_release_sha=api_release_sha,
         expires_at=expires_at or generated_at + timedelta(minutes=15),
     )
 
@@ -934,6 +942,25 @@ class TestMergeFeedSnapshots:
 
         assert merged.items == ["at://a", "at://b", "at://c"]
         assert merged.generated_at == now
+
+    def test_preserves_originating_api_release(self):
+        now = datetime.now(timezone.utc)
+        initial = _feed_snapshot(
+            "session-1",
+            now,
+            ["at://a"],
+            api_release_sha="origin-sha",
+        )
+        regenerated = _feed_snapshot(
+            "session-1",
+            now + timedelta(minutes=1),
+            ["at://b"],
+            api_release_sha="later-sha",
+        )
+
+        merged, _ = _merge_feed_snapshots(initial, regenerated)
+
+        assert merged.api_release_sha == "origin-sha"
 
     def test_caps_session_at_item_limit(self):
         now = datetime.now(timezone.utc)
