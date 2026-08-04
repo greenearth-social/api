@@ -24,6 +24,7 @@ from ..documents import (
     FeedDebugDocument,
     FeedSnapshotDocument,
     InteractionDocument,
+    RedirectDocument,
     UserDocument,
 )
 
@@ -775,3 +776,61 @@ async def get_newer_feed_snapshot_uris(
             feed_name,
         )
         return set()
+
+
+# ---------------------------------------------------------------------------
+# Redirects
+# ---------------------------------------------------------------------------
+
+REDIRECTS_COLLECTION = "redirects"
+
+
+async def get_redirect(db: AsyncClient, slug: str) -> RedirectDocument | None:
+    """Fetch a redirect document by slug, or return ``None`` if not found."""
+    doc = await db.collection(REDIRECTS_COLLECTION).document(slug).get()
+    if not doc.exists:
+        return None
+    data = doc.to_dict()
+    if data is None:
+        return None
+    return RedirectDocument.model_validate(data)
+
+
+async def create_redirect(
+    db: AsyncClient, slug: str, url: str, description: str | None = None
+) -> RedirectDocument:
+    """Create a new redirect document. Raises ``ValueError`` if slug already exists."""
+    ref = db.collection(REDIRECTS_COLLECTION).document(slug)
+    existing = await ref.get()
+    if existing.exists:
+        raise ValueError(f"Slug '{slug}' already exists")
+    record = RedirectDocument(slug=slug, url=url, description=description)
+    await ref.set(record.model_dump())
+    return record
+
+
+async def update_redirect(
+    db: AsyncClient, slug: str, url: str, description: str | None = None
+) -> RedirectDocument | None:
+    """Update the URL (and optionally description) for an existing slug. Returns ``None`` if not found."""
+    ref = db.collection(REDIRECTS_COLLECTION).document(slug)
+    existing = await ref.get()
+    if not existing.exists:
+        return None
+    updates: dict = {"url": url}
+    if description is not None:
+        updates["description"] = description
+    await ref.update(updates)
+    data = existing.to_dict() or {}
+    data.update(updates)
+    return RedirectDocument.model_validate(data)
+
+
+async def delete_redirect(db: AsyncClient, slug: str) -> bool:
+    """Delete a redirect document. Returns ``True`` if deleted, ``False`` if not found."""
+    ref = db.collection(REDIRECTS_COLLECTION).document(slug)
+    existing = await ref.get()
+    if not existing.exists:
+        return False
+    await ref.delete()
+    return True
