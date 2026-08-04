@@ -1,5 +1,5 @@
 {
-  "displayName": "Load Test & Bottleneck Attribution (${ENV})",
+  "displayName": "API Performance & Bottleneck Attribution (${ENV})",
   "dashboardFilters": [],
   "mosaicLayout": {
     "columns": 12,
@@ -10,9 +10,9 @@
         "width": 12,
         "height": 1,
         "widget": {
-          "title": "1 — Load & UX",
+          "title": "1 — Load & user experience",
           "sectionHeader": {
-            "subtitle": "Is anyone hurting? The probe series is the real-user canary; load_test is the synthetic driver.",
+            "subtitle": "Whether users are getting a complete feed quickly right now. Traffic classes separate production users (real) from the synthetic uptime check (probe) and generated load (load_test). Probe and real rising together means users are affected; load_test alone rising means the system is absorbing the extra load.",
             "dividerBelow": true
           }
         }
@@ -23,13 +23,13 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "Renders/min by traffic",
+          "title": "Feed renders per minute by traffic class",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "success ${metric.labels.traffic}",
+                "legendTemplate": "success traffic=${metric.labels.traffic}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -38,7 +38,9 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"traffic\""]
+                      "groupByFields": [
+                        "metric.label.\"traffic\""
+                      ]
                     }
                   }
                 }
@@ -46,7 +48,7 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "failure ${metric.labels.traffic}",
+                "legendTemplate": "failure traffic=${metric.labels.traffic}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -55,15 +57,22 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"traffic\""]
+                      "groupByFields": [
+                        "metric.label.\"traffic\""
+                      ]
                     }
                   }
                 }
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "renders / min", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "renders / min",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -73,23 +82,25 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "feed.render p50 / p95 by traffic (vs 24h ago)",
+          "title": "Feed render latency by traffic class (dashed: 24h earlier)",
           "xyChart": {
             "timeshiftDuration": "86400s",
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "p95 ${metric.labels.traffic}",
+                "legendTemplate": "p95 traffic=${metric.labels.traffic}",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["metric.label.\"traffic\""]
+                      "groupByFields": [
+                        "metric.label.\"traffic\""
+                      ]
                     }
                   }
                 }
@@ -97,26 +108,56 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "p50 ${metric.labels.traffic}",
+                "legendTemplate": "p50 traffic=${metric.labels.traffic}",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": ["metric.label.\"traffic\""]
+                      "groupByFields": [
+                        "metric.label.\"traffic\""
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 traffic=${metric.labels.traffic}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"traffic\""
+                      ]
                     }
                   }
                 }
               }
             ],
             "thresholds": [
-              {"value": 2500, "label": "baseline p95 2500 ms", "targetAxis": "Y1"}
+              {
+                "value": 2500,
+                "label": "p95 target (2,500 ms)",
+                "targetAxis": "Y1"
+              }
             ],
-            "yAxis": {"label": "ms", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -126,13 +167,13 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "Failures + degraded + 5xx per min",
+          "title": "Failed, degraded and 5xx responses per minute",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "STACKED_AREA",
                 "targetAxis": "Y1",
-                "legendTemplate": "feed.render failure ${metric.labels.status_code}",
+                "legendTemplate": "failed status_code=${metric.labels.status_code}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -141,7 +182,9 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"status_code\""]
+                      "groupByFields": [
+                        "metric.label.\"status_code\""
+                      ]
                     }
                   }
                 }
@@ -149,7 +192,7 @@
               {
                 "plotType": "STACKED_AREA",
                 "targetAxis": "Y1",
-                "legendTemplate": "feed.render degraded",
+                "legendTemplate": "degraded feed=${metric.labels.feed_name}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -158,7 +201,9 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"feed_name\""]
+                      "groupByFields": [
+                        "metric.label.\"feed_name\""
+                      ]
                     }
                   }
                 }
@@ -166,7 +211,7 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "Cloud Run 5xx",
+                "legendTemplate": "Cloud Run 5xx responses",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -175,21 +220,29 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"response_code_class\""]
+                      "groupByFields": []
                     }
                   }
                 }
               }
             ],
             "thresholds": [
-              {"value": 1, "label": "baseline 1 / min", "targetAxis": "Y1"}
+              {
+                "value": 1,
+                "label": "expected ceiling (1/min)",
+                "targetAxis": "Y1"
+              }
             ],
-            "yAxis": {"label": "events / min", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "events / min",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
-
       {
         "xPos": 0,
         "yPos": 9,
@@ -198,7 +251,7 @@
         "widget": {
           "title": "2 — Serving stages",
           "sectionHeader": {
-            "subtitle": "Which stage of the render owns the latency? Paired client/server series separate backend slowness from api-side queuing.",
+            "subtitle": "Which stage of a feed render owns the latency. Each dependency is charted client-side (how long the api waited) against server-side (how long the dependency says it worked), so a gap between the pair is time spent queuing inside the api rather than a slow backend.",
             "dividerBelow": true
           }
         }
@@ -209,30 +262,56 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "candidates.generate p95 by generator_name",
+          "title": "Candidate generation latency by generator",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "${metric.labels.generator_name}",
+                "legendTemplate": "p95 generator=${metric.labels.generator_name}",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/candidates.generate.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["metric.label.\"generator_name\""]
+                      "groupByFields": [
+                        "metric.label.\"generator_name\""
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 generator=${metric.labels.generator_name}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/candidates.generate.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"generator_name\""
+                      ]
                     }
                   }
                 }
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "ms", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -242,22 +321,24 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "rank.model p95 vs inference.predict p95 (gap = api-side queuing)",
+          "title": "Ranking latency: api client-side vs inference server-side",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "api rank.model ${metric.labels.model_name}",
+                "legendTemplate": "api p95 model=${metric.labels.model_name}",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/rank.model.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["metric.label.\"model_name\""]
+                      "groupByFields": [
+                        "metric.label.\"model_name\""
+                      ]
                     }
                   }
                 }
@@ -265,24 +346,69 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "inference.predict ${metric.labels.model_name}",
+                "legendTemplate": "api p50 model=${metric.labels.model_name}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/rank.model.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"model_name\""
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "inference p95 model=${metric.labels.model_name}",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-inference/inference.predict.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["metric.label.\"model_name\""]
+                      "groupByFields": [
+                        "metric.label.\"model_name\""
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "inference p50 model=${metric.labels.model_name}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-inference/inference.predict.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"model_name\""
+                      ]
                     }
                   }
                 }
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "ms", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -292,7 +418,7 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "perspective.score p95 + failures/min by status_code",
+          "title": "Perspective scoring latency and failures per minute",
           "xyChart": {
             "dataSets": [
               {
@@ -304,7 +430,7 @@
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/perspective.score.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
@@ -313,9 +439,26 @@
                 }
               },
               {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 duration",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/perspective.score.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
                 "plotType": "STACKED_BAR",
                 "targetAxis": "Y2",
-                "legendTemplate": "failures ${metric.labels.status_code}",
+                "legendTemplate": "failures status_code=${metric.labels.status_code}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -324,29 +467,38 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"status_code\""]
+                      "groupByFields": [
+                        "metric.label.\"status_code\""
+                      ]
                     }
                   }
                 }
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "ms", "scale": "LINEAR"},
-            "y2Axis": {"label": "failures / min", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "y2Axis": {
+              "label": "failures / min",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
-
       {
         "xPos": 0,
         "yPos": 18,
         "width": 12,
         "height": 1,
         "widget": {
-          "title": "3 — api saturation & client-side queuing",
+          "title": "3 — API saturation & client-side queuing",
           "sectionHeader": {
-            "subtitle": "Loop-wide saturation (lag, CPU, instances) vs per-dependency client-side queuing (pool wait, in-flight at cap). #344 causes 1 and 2 are read off the last three charts.",
+            "subtitle": "Whether the api process itself is the bottleneck. Event-loop lag, CPU and instance count show saturation affecting every request; the in-flight charts show a single dependency's connection pool filling up. See the attribution playbook for how to tell them apart: https://github.com/greenearth-social/api/blob/main/monitoring/README.md",
             "dividerBelow": true
           }
         }
@@ -357,32 +509,62 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "eventloop.lag_ms p95 per instance",
+          "title": "Event-loop scheduling lag per instance",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "${resource.labels.task_id}",
+                "legendTemplate": "p95 instance=${resource.labels.task_id}",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/eventloop.lag_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["resource.label.\"task_id\""]
+                      "groupByFields": [
+                        "resource.label.\"task_id\""
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 instance=${resource.labels.task_id}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/eventloop.lag_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "resource.label.\"task_id\""
+                      ]
                     }
                   }
                 }
               }
             ],
             "thresholds": [
-              {"value": 100, "label": "saturation 100 ms", "targetAxis": "Y1"}
+              {
+                "value": 100,
+                "label": "saturation threshold (100 ms)",
+                "targetAxis": "Y1"
+              }
             ],
-            "yAxis": {"label": "ms", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -392,13 +574,13 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "Cloud Run instances / CPU / memory",
+          "title": "Cloud Run instances, CPU and memory utilization",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "instances ${metric.labels.state}",
+                "legendTemplate": "instances state=${metric.labels.state}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -407,7 +589,9 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_MEAN",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"state\""]
+                      "groupByFields": [
+                        "metric.label.\"state\""
+                      ]
                     }
                   }
                 }
@@ -415,13 +599,13 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y2",
-                "legendTemplate": "CPU utilization p95",
+                "legendTemplate": "CPU p95",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"run.googleapis.com/container/cpu/utilizations\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_PERCENTILE_95",
                       "crossSeriesReducer": "REDUCE_MEAN",
                       "groupByFields": []
@@ -432,14 +616,48 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y2",
-                "legendTemplate": "memory utilization p95",
+                "legendTemplate": "CPU p50",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"run.googleapis.com/container/cpu/utilizations\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_50",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y2",
+                "legendTemplate": "memory p95",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"run.googleapis.com/container/memory/utilizations\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y2",
+                "legendTemplate": "memory p50",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"run.googleapis.com/container/memory/utilizations\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_50",
                       "crossSeriesReducer": "REDUCE_MEAN",
                       "groupByFields": []
                     }
@@ -448,9 +666,17 @@
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "instances", "scale": "LINEAR"},
-            "y2Axis": {"label": "utilization (0-1)", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "instances",
+              "scale": "LINEAR"
+            },
+            "y2Axis": {
+              "label": "utilization (0-1)",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -460,13 +686,13 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "Dependency failures/min by class (#344 cause 2 signature)",
+          "title": "Dependency failures per minute by cause",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "STACKED_AREA",
                 "targetAxis": "Y1",
-                "legendTemplate": "es.query ${metric.labels.error}",
+                "legendTemplate": "elasticsearch error=${metric.labels.error}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -475,7 +701,9 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"error\""]
+                      "groupByFields": [
+                        "metric.label.\"error\""
+                      ]
                     }
                   }
                 }
@@ -483,7 +711,7 @@
               {
                 "plotType": "STACKED_AREA",
                 "targetAxis": "Y1",
-                "legendTemplate": "perspective ${metric.labels.status_code}",
+                "legendTemplate": "perspective status_code=${metric.labels.status_code}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -492,7 +720,9 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"status_code\""]
+                      "groupByFields": [
+                        "metric.label.\"status_code\""
+                      ]
                     }
                   }
                 }
@@ -500,7 +730,7 @@
               {
                 "plotType": "STACKED_AREA",
                 "targetAxis": "Y1",
-                "legendTemplate": "bsky.follows ${metric.labels.status_code}",
+                "legendTemplate": "bluesky follows status_code=${metric.labels.status_code}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -509,7 +739,9 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"status_code\""]
+                      "groupByFields": [
+                        "metric.label.\"status_code\""
+                      ]
                     }
                   }
                 }
@@ -517,7 +749,7 @@
               {
                 "plotType": "STACKED_AREA",
                 "targetAxis": "Y1",
-                "legendTemplate": "rank.model ${metric.labels.status_code}",
+                "legendTemplate": "inference status_code=${metric.labels.status_code}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -526,17 +758,28 @@
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": ["metric.label.\"status_code\""]
+                      "groupByFields": [
+                        "metric.label.\"status_code\""
+                      ]
                     }
                   }
                 }
               }
             ],
             "thresholds": [
-              {"value": 1, "label": "baseline 1 / min", "targetAxis": "Y1"}
+              {
+                "value": 1,
+                "label": "expected ceiling (1/min)",
+                "targetAxis": "Y1"
+              }
             ],
-            "yAxis": {"label": "failures / min", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "failures / min",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -546,22 +789,24 @@
         "width": 6,
         "height": 8,
         "widget": {
-          "title": "Client queue position: pool wait p95 by client + connect p95",
+          "title": "Outbound connection setup time by client",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "pool.wait_ms ${metric.labels.client}",
+                "legendTemplate": "connect p95 client=${metric.labels.client}",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.pool.wait_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.connect.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["metric.label.\"client\""]
+                      "groupByFields": [
+                        "metric.label.\"client\""
+                      ]
                     }
                   }
                 }
@@ -569,26 +814,31 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "connect.duration_ms ${metric.labels.client}",
+                "legendTemplate": "connect p50 client=${metric.labels.client}",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.connect.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["metric.label.\"client\""]
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"client\""
+                      ]
                     }
                   }
                 }
               }
             ],
-            "thresholds": [
-              {"value": 10, "label": "pool wait 10 ms", "targetAxis": "Y1"}
-            ],
-            "yAxis": {"label": "ms", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "thresholds": [],
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -598,22 +848,24 @@
         "width": 6,
         "height": 8,
         "widget": {
-          "title": "Client in-flight vs pool caps (#344 cause 1 signature)",
+          "title": "Concurrent outbound requests in flight vs pool cap",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "client.in_flight ${metric.labels.host}",
+                "legendTemplate": "in flight p95 host=${metric.labels.host}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["metric.label.\"host\""]
+                      "groupByFields": [
+                        "metric.label.\"host\""
+                      ]
                     }
                   }
                 }
@@ -621,30 +873,78 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "es.client.in_flight ${metric.labels.op}",
+                "legendTemplate": "in flight p50 host=${metric.labels.host}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"host\""
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "elasticsearch in flight p95 op=${metric.labels.op}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["metric.label.\"op\""]
+                      "groupByFields": [
+                        "metric.label.\"op\""
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "elasticsearch in flight p50 op=${metric.labels.op}",
+                "timeSeriesQuery": {
+                  "unitOverride": "1",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"op\""
+                      ]
                     }
                   }
                 }
               }
             ],
             "thresholds": [
-              {"value": 100, "label": "pool cap 100", "targetAxis": "Y1"}
+              {
+                "value": 100,
+                "label": "connection pool cap (100)",
+                "targetAxis": "Y1"
+              }
             ],
-            "yAxis": {"label": "concurrent requests", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "concurrent requests",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
-
       {
         "xPos": 0,
         "yPos": 35,
@@ -653,7 +953,7 @@
         "widget": {
           "title": "4 — Elasticsearch",
           "sectionHeader": {
-            "subtitle": "Cluster-scoped: always the prod ES cluster (stage api reads prod ES). duration − took is the client-side queuing gap.",
+            "subtitle": "How much of each query's time Elasticsearch actually spent working. The cluster reports took; the difference between that and the api's measured duration is time the query spent queued client-side. Thread-pool queueing and rejections mean the cluster is at its own concurrency ceiling.",
             "dividerBelow": true
           }
         }
@@ -664,22 +964,24 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "es.query duration_ms vs took_ms p95 by op (gap chart)",
+          "title": "Elasticsearch query latency: api client-side vs cluster-reported",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "duration ${metric.labels.op}",
+                "legendTemplate": "client duration p95 op=${metric.labels.op}",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["metric.label.\"op\""]
+                      "groupByFields": [
+                        "metric.label.\"op\""
+                      ]
                     }
                   }
                 }
@@ -687,24 +989,69 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "took ${metric.labels.op}",
+                "legendTemplate": "client duration p50 op=${metric.labels.op}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"op\""
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "cluster took p95 op=${metric.labels.op}",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["metric.label.\"op\""]
+                      "groupByFields": [
+                        "metric.label.\"op\""
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "cluster took p50 op=${metric.labels.op}",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"op\""
+                      ]
                     }
                   }
                 }
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "ms", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -714,13 +1061,13 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "ES search thread pool: queue + rejected/s",
+          "title": "Elasticsearch search thread pool: queued and rejected",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "queue ${metric.labels.name}",
+                "legendTemplate": "queued node=${metric.labels.name}",
                 "timeSeriesQuery": {
                   "prometheusQuery": "sum by (name)(elasticsearch_thread_pool_queue_count{cluster=\"${CLUSTER}\", type=\"search\"})"
                 }
@@ -728,18 +1075,30 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y2",
-                "legendTemplate": "rejected/s ${metric.labels.name}",
+                "legendTemplate": "rejected/s node=${metric.labels.name}",
                 "timeSeriesQuery": {
                   "prometheusQuery": "sum by (name)(rate(elasticsearch_thread_pool_rejected_count{cluster=\"${CLUSTER}\", type=\"search\"}[5m]))"
                 }
               }
             ],
             "thresholds": [
-              {"value": 0.001, "label": "any rejection is a finding", "targetAxis": "Y2"}
+              {
+                "value": 0.001,
+                "label": "expected: no rejections",
+                "targetAxis": "Y2"
+              }
             ],
-            "yAxis": {"label": "queued tasks", "scale": "LINEAR"},
-            "y2Axis": {"label": "rejected / s", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "queued tasks",
+              "scale": "LINEAR"
+            },
+            "y2Axis": {
+              "label": "rejected / s",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -749,7 +1108,7 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "ES mean search latency (ms), data nodes",
+          "title": "Elasticsearch mean search latency, data nodes",
           "xyChart": {
             "dataSets": [
               {
@@ -762,23 +1121,31 @@
               }
             ],
             "thresholds": [
-              {"value": 10, "label": "clean baseline 10 ms", "targetAxis": "Y1"}
+              {
+                "value": 10,
+                "label": "warm-cache baseline (10 ms)",
+                "targetAxis": "Y1"
+              }
             ],
-            "yAxis": {"label": "ms", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
-
       {
         "xPos": 0,
         "yPos": 44,
         "width": 12,
         "height": 1,
         "widget": {
-          "title": "5 — ES page-cache residency",
+          "title": "5 — Elasticsearch page-cache residency",
           "sectionHeader": {
-            "subtitle": "Page-cache residency proxies (validated 2026-07-30, Spearman 0.94). Miss rate and user impact are separate rows on purpose — the playbook joins them.",
+            "subtitle": "Whether Elasticsearch is serving reads from memory or from disk. Major page faults and device reads rise together once the working set has been evicted, which surfaces as slower queries in the previous section. Evictable memory is the cache budget those reads compete for.",
             "dividerBelow": true
           }
         }
@@ -789,21 +1156,26 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "Major faults/s per ES data pod (cache-miss rate)",
+          "title": "Major page faults per second per data node (cache misses)",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "${metric.labels.pod_name}",
+                "legendTemplate": "pod=${metric.labels.pod_name}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (pod_name)(rate(kubernetes_io:container_memory_page_fault_count{\n  monitored_resource=\"k8s_container\", namespace_name=\"${K8S_NAMESPACE}\",\n  fault_type=\"major\"}[30m]))"
+                  "prometheusQuery": "sum by (pod_name)(rate(kubernetes_io:container_memory_page_fault_count{\n  monitored_resource=\"k8s_container\", namespace_name=\"${K8S_NAMESPACE}\",\n  pod_name=~\"greenearth-es-data-.*\", fault_type=\"major\"}[30m]))"
                 }
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "major faults / s", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "major faults / s",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -813,21 +1185,26 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "Device read MB/s per ES node (cold reads)",
+          "title": "Disk read throughput per data node (cold reads)",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "${metric.labels.name}",
+                "legendTemplate": "node=${metric.labels.name}",
                 "timeSeriesQuery": {
                   "prometheusQuery": "sum by (name)(rate(elasticsearch_filesystem_io_stats_device_read_size_kilobytes_sum{\n  cluster=\"${CLUSTER}\"}[30m])) / 1024"
                 }
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "MB / s", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "MB / s",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -837,34 +1214,38 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "Evictable (page cache) bytes per ES data pod",
+          "title": "Page-cache memory per data node",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "${metric.labels.pod_name}",
+                "legendTemplate": "pod=${metric.labels.pod_name}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "sum by (pod_name)(kubernetes_io:container_memory_used_bytes{\n  monitored_resource=\"k8s_container\", namespace_name=\"${K8S_NAMESPACE}\",\n  memory_type=\"evictable\"})"
+                  "prometheusQuery": "sum by (pod_name)(kubernetes_io:container_memory_used_bytes{\n  monitored_resource=\"k8s_container\", namespace_name=\"${K8S_NAMESPACE}\",\n  pod_name=~\"greenearth-es-data-.*\", memory_type=\"evictable\"})"
                 }
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "bytes (1 GB = 1e9)", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "bytes (1 GB = 1e9)",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
-
       {
         "xPos": 0,
         "yPos": 53,
         "width": 12,
         "height": 1,
         "widget": {
-          "title": "6 — Blast radius (ingest + cluster health)",
+          "title": "6 — Blast radius: ingest & cluster health",
           "sectionHeader": {
-            "subtitle": "Serving load and ingest share one ES cluster. Freshness is the canary that a serving load test is starving ingest.",
+            "subtitle": "Whether serving pressure is spilling over into ingest, which shares the same Elasticsearch cluster. Rising freshness means new posts are taking longer to become searchable; GC, circuit breakers and disk latency show the cluster-level cost.",
             "dividerBelow": true
           }
         }
@@ -875,32 +1256,62 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "ingex freshness_sec p95 by source",
+          "title": "Ingest freshness by source",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "${resource.labels.job}",
+                "legendTemplate": "p95 source=${resource.labels.job}",
                 "timeSeriesQuery": {
                   "unitOverride": "s",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/ingex/freshness_sec\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": ["resource.label.\"job\""]
+                      "groupByFields": [
+                        "resource.label.\"job\""
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 source=${resource.labels.job}",
+                "timeSeriesQuery": {
+                  "unitOverride": "s",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/freshness_sec\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "resource.label.\"job\""
+                      ]
                     }
                   }
                 }
               }
             ],
             "thresholds": [
-              {"value": 600, "label": "freshness SLA 600 s (p50 alert threshold)", "targetAxis": "Y1"}
+              {
+                "value": 600,
+                "label": "freshness SLA (600 s)",
+                "targetAxis": "Y1"
+              }
             ],
-            "yAxis": {"label": "seconds behind", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "seconds behind",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -910,19 +1321,19 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "ingex es.bulk_index_* took_ms p95",
+          "title": "Ingest bulk-index latency by index",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "posts",
+                "legendTemplate": "p95 index=posts",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_posts.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
@@ -933,13 +1344,30 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "likes",
+                "legendTemplate": "p50 index=posts",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_posts.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 index=likes",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_likes.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
@@ -950,13 +1378,30 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "inferences",
+                "legendTemplate": "p50 index=likes",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_likes.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 index=inferences",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_inferences.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
@@ -967,13 +1412,30 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "tombstones",
+                "legendTemplate": "p50 index=inferences",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_inferences.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 index=tombstones",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_tombstones.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
                       "groupByFields": []
@@ -984,15 +1446,49 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "like_tombstones",
+                "legendTemplate": "p50 index=tombstones",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_tombstones.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 index=like_tombstones",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
                   "timeSeriesFilter": {
                     "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_like_tombstones.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
                     "aggregation": {
-                      "alignmentPeriod": "60s",
+                      "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
+                      "groupByFields": []
+                    }
+                  }
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 index=like_tombstones",
+                "timeSeriesQuery": {
+                  "unitOverride": "ms",
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_like_tombstones.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
+                    "aggregation": {
+                      "alignmentPeriod": "120s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
                       "groupByFields": []
                     }
                   }
@@ -1000,8 +1496,13 @@
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "ms", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       },
@@ -1011,13 +1512,13 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "JVM GC/s + breakers tripped/s + PD IO latency",
+          "title": "Cluster health: JVM GC, circuit breakers and disk latency",
           "xyChart": {
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "gc/s ${metric.labels.name}",
+                "legendTemplate": "GC/s node=${metric.labels.name}",
                 "timeSeriesQuery": {
                   "prometheusQuery": "sum by (name)(rate(elasticsearch_jvm_gc_collection_seconds_count{cluster=\"${CLUSTER}\"}[5m]))"
                 }
@@ -1025,7 +1526,7 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "breakers tripped/s ${metric.labels.breaker}",
+                "legendTemplate": "breaker trips/s breaker=${metric.labels.breaker}",
                 "timeSeriesQuery": {
                   "prometheusQuery": "sum by (breaker)(rate(elasticsearch_breakers_tripped{cluster=\"${CLUSTER}\"}[5m]))"
                 }
@@ -1033,25 +1534,33 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y2",
-                "legendTemplate": "PD IO latency ${resource.labels.instance_id}",
+                "legendTemplate": "max persistent-volume disk latency",
                 "timeSeriesQuery": {
                   "unitOverride": "us",
                   "timeSeriesFilter": {
-                    "filter": "metric.type=\"compute.googleapis.com/instance/disk/average_io_latency\" resource.type=\"gce_instance\" metric.label.\"direction\"=\"read\"",
+                    "filter": "metric.type=\"compute.googleapis.com/instance/disk/average_io_latency\" resource.type=\"gce_instance\" metric.label.\"device_name\"=starts_with(\"pvc-\")",
                     "aggregation": {
                       "alignmentPeriod": "60s",
                       "perSeriesAligner": "ALIGN_MEAN",
                       "crossSeriesReducer": "REDUCE_MAX",
-                      "groupByFields": ["resource.label.\"instance_id\""]
+                      "groupByFields": []
                     }
                   }
                 }
               }
             ],
             "thresholds": [],
-            "yAxis": {"label": "events / s", "scale": "LINEAR"},
-            "y2Axis": {"label": "IO latency (us)", "scale": "LINEAR"},
-            "chartOptions": {"mode": "COLOR"}
+            "yAxis": {
+              "label": "events / s",
+              "scale": "LINEAR"
+            },
+            "y2Axis": {
+              "label": "IO latency (us)",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
           }
         }
       }

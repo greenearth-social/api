@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Render and deploy the "Load Test & Bottleneck Attribution" dashboard.
+# Render and deploy the API performance dashboard.
 #
 #   ./monitoring/deploy.sh stage            # create or update the stage dashboard
 #   ./monitoring/deploy.sh prod --dry-run   # render + validate JSON only, no gcloud
@@ -13,17 +13,15 @@
 #
 # On a successful create/update the resulting dashboard resource id is written to
 # monitoring/dashboards/ids.env as DASHBOARD_ID_STAGE=... / DASHBOARD_ID_PROD=...
-# (consumed by the load-test deep-link tooling).
+# (consumed by the load-test deep-link in scripts/load_test/analyze.py).
 
 set -euo pipefail
 
 PROJECT_ID="greenearth-471522"
 
 # Cluster-scoped queries (ES exporter, GKE page-cache proxies) target the
-# environment's own cluster: greenearth-stage-cluster / greenearth-stage exist
-# and report exporter + GKE metrics just like prod (verified 2026-08-02), and
-# the api's deploy.sh targets greenearth-${ENVIRONMENT}-cluster. Set below,
-# after the environment argument is parsed.
+# environment's own cluster, matching how the api is wired to Elasticsearch.
+# Set below, once the environment argument is parsed.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${SCRIPT_DIR}/dashboards/bottleneck.json.tmpl"
@@ -50,7 +48,6 @@ done
 NAMESPACE="$ENV_NAME"
 CLUSTER="greenearth-${ENV_NAME}-cluster"
 K8S_NAMESPACE="greenearth-${ENV_NAME}"
-DISPLAY_NAME="Load Test & Bottleneck Attribution (${ENV_NAME})"
 
 RENDER_DIR="$(mktemp -d -t bottleneck-dashboard)"
 trap 'rm -rf "$RENDER_DIR"' EXIT
@@ -71,16 +68,33 @@ fi
 
 python3 -m json.tool "$RENDERED" >/dev/null
 
+# The display name is the dashboard's identity for lookup, so take it from the
+# rendered template rather than keeping a second copy here that can drift.
+DISPLAY_NAME="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["displayName"])' "$RENDERED")"
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "rendered OK (${ENV_NAME}): ${DISPLAY_NAME}"
     echo "  namespace=${NAMESPACE} cluster=${CLUSTER} k8s_namespace=${K8S_NAMESPACE}"
     exit 0
 fi
 
-EXISTING="$(gcloud monitoring dashboards list \
+MATCHES="$(gcloud monitoring dashboards list \
     --project "$PROJECT_ID" \
     --filter "displayName='${DISPLAY_NAME}'" \
-    --format 'value(name)' | head -n1)"
+    --format 'value(name)')"
+MATCH_COUNT="$(printf '%s' "$MATCHES" | grep -c . || true)"
+
+# Renaming the dashboard orphans the old one (the lookup is by display name),
+# and two dashboards sharing a name means every later deploy silently updates
+# whichever came back first. Refuse rather than guess.
+if [[ "$MATCH_COUNT" -gt 1 ]]; then
+    echo "ERROR: ${MATCH_COUNT} dashboards already share the name '${DISPLAY_NAME}':" >&2
+    printf '  %s\n' $MATCHES >&2
+    echo "Delete the stale one(s) with 'gcloud monitoring dashboards delete <name>'." >&2
+    exit 1
+fi
+
+EXISTING="$(printf '%s' "$MATCHES" | head -n1)"
 
 if [[ -n "$EXISTING" ]]; then
     echo "updating existing dashboard: ${EXISTING}"
