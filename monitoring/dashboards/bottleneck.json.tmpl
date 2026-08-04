@@ -8,7 +8,7 @@
         "xPos": 0,
         "yPos": 0,
         "width": 12,
-        "height": 4,
+        "height": 1,
         "widget": {
           "title": "1 — Load & UX",
           "sectionHeader": {
@@ -19,7 +19,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 4,
+        "yPos": 1,
         "width": 4,
         "height": 8,
         "widget": {
@@ -69,7 +69,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 4,
+        "yPos": 1,
         "width": 4,
         "height": 8,
         "widget": {
@@ -122,7 +122,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 4,
+        "yPos": 1,
         "width": 4,
         "height": 8,
         "widget": {
@@ -192,9 +192,9 @@
 
       {
         "xPos": 0,
-        "yPos": 12,
+        "yPos": 9,
         "width": 12,
-        "height": 4,
+        "height": 1,
         "widget": {
           "title": "2 — Serving stages",
           "sectionHeader": {
@@ -205,7 +205,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 16,
+        "yPos": 10,
         "width": 4,
         "height": 8,
         "widget": {
@@ -238,7 +238,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 16,
+        "yPos": 10,
         "width": 4,
         "height": 8,
         "widget": {
@@ -288,7 +288,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 16,
+        "yPos": 10,
         "width": 4,
         "height": 8,
         "widget": {
@@ -340,9 +340,9 @@
 
       {
         "xPos": 0,
-        "yPos": 24,
+        "yPos": 18,
         "width": 12,
-        "height": 4,
+        "height": 1,
         "widget": {
           "title": "3 — api saturation & client-side queuing",
           "sectionHeader": {
@@ -353,7 +353,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 28,
+        "yPos": 19,
         "width": 4,
         "height": 8,
         "widget": {
@@ -388,7 +388,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 28,
+        "yPos": 19,
         "width": 4,
         "height": 8,
         "widget": {
@@ -398,7 +398,7 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "instances",
+                "legendTemplate": "instances ${metric.labels.state}",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
                   "timeSeriesFilter": {
@@ -456,7 +456,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 28,
+        "yPos": 19,
         "width": 4,
         "height": 8,
         "widget": {
@@ -542,7 +542,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 36,
+        "yPos": 27,
         "width": 6,
         "height": 8,
         "widget": {
@@ -594,7 +594,7 @@
       },
       {
         "xPos": 6,
-        "yPos": 36,
+        "yPos": 27,
         "width": 6,
         "height": 8,
         "widget": {
@@ -647,9 +647,9 @@
 
       {
         "xPos": 0,
-        "yPos": 44,
+        "yPos": 35,
         "width": 12,
-        "height": 4,
+        "height": 1,
         "widget": {
           "title": "4 — Elasticsearch",
           "sectionHeader": {
@@ -660,7 +660,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 48,
+        "yPos": 36,
         "width": 4,
         "height": 8,
         "widget": {
@@ -710,7 +710,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 48,
+        "yPos": 36,
         "width": 4,
         "height": 8,
         "widget": {
@@ -735,7 +735,7 @@
               }
             ],
             "thresholds": [
-              {"value": 0, "label": "any rejection is a finding", "targetAxis": "Y2"}
+              {"value": 0.001, "label": "any rejection is a finding", "targetAxis": "Y2"}
             ],
             "yAxis": {"label": "queued tasks", "scale": "LINEAR"},
             "y2Axis": {"label": "rejected / s", "scale": "LINEAR"},
@@ -745,7 +745,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 48,
+        "yPos": 36,
         "width": 4,
         "height": 8,
         "widget": {
@@ -772,9 +772,9 @@
 
       {
         "xPos": 0,
-        "yPos": 56,
+        "yPos": 44,
         "width": 12,
-        "height": 4,
+        "height": 1,
         "widget": {
           "title": "5 — ES page-cache residency",
           "sectionHeader": {
@@ -785,7 +785,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 60,
+        "yPos": 45,
         "width": 4,
         "height": 8,
         "widget": {
@@ -809,7 +809,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 60,
+        "yPos": 45,
         "width": 4,
         "height": 8,
         "widget": {
@@ -833,7 +833,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 60,
+        "yPos": 45,
         "width": 4,
         "height": 8,
         "widget": {
@@ -858,9 +858,9 @@
 
       {
         "xPos": 0,
-        "yPos": 68,
+        "yPos": 53,
         "width": 12,
-        "height": 4,
+        "height": 1,
         "widget": {
           "title": "6 — Blast radius (ingest + cluster health)",
           "sectionHeader": {
@@ -871,7 +871,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 72,
+        "yPos": 54,
         "width": 4,
         "height": 8,
         "widget": {
@@ -906,7 +906,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 72,
+        "yPos": 54,
         "width": 4,
         "height": 8,
         "widget": {
@@ -1007,7 +1007,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 72,
+        "yPos": 54,
         "width": 4,
         "height": 8,
         "widget": {

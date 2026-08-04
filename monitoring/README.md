@@ -127,18 +127,32 @@ ES cluster shape, pool caps) or the next load-test campaign.
 | 4 — ES mean search latency | **10 ms** | ~5 ms on a clean cluster, 17–38 ms during the 07-31 nightly cold-read storm. 10 ms separates the two regimes. |
 | 6 — `ingex/freshness_sec` p95 | **600 s** | Matches the existing "Megastream/Jetstream P50 Lag SLA" alert policies (p50 > 600 s over 30 m, verified 2026-08-02). This chart plots p95, and p95 ≥ p50 always, so the p95 series crossing 600 s strictly leads the alert — an early-warning line consistent with the SLA rather than a second invented number. |
 
-### Post-deploy verification checklist
+### Layout and serialization constraints
 
-Deploying the template renders JSON that hasn't all been eyeballed against a
-live dashboard yet. After `deploy.sh stage` / `deploy.sh prod`, confirm:
+Settled against the live stage dashboard on 2026-08-03; all 26 tiles and 20
+charts round-tripped. Each of these was a silent or fatal failure first time:
 
-- The zero-value threshold line on the row-4 rejected-count chart survives the
-  proto3 round trip (a `0` threshold can serialize as an absent field).
-- The row-3 `instance_count` state-label legend distinguishes instance states
-  rather than rendering one indistinguishable series.
-- The `analyze.py` deep-link's `;startTime=…;endTime=…` matrix-param format
-  actually pre-sets the console's time range when opened, rather than landing
-  on the default window.
+- **A `sectionHeader` with a subtitle must be height 1** in a 12-column
+  layout — any other height is rejected outright at deploy
+  (`INVALID_ARGUMENT`). The mosaic is stacked around height-1 headers, so
+  inserting a row means re-stacking every `yPos` below it.
+- **A `0`-valued threshold is dropped on the round trip.** proto3 omits
+  default-valued scalars, so the row-4 rejected-count line silently vanished
+  from the deployed dashboard. It is now `0.001` — below any real rejection
+  rate (that series is a per-second rate over 5m, so one rejection is
+  ~0.0033/s) and above a flat zero. Never set a threshold to `0`.
+- **`instance_count` needs `${metric.labels.state}` in its legend.** The chart
+  groups by `state`, and a static legend rendered active and idle as two
+  indistinguishable series.
+- **Updates need an etag.** Cloud Monitoring rejects an update whose config
+  carries no `etag` (the optimistic-concurrency token). `deploy.sh` reads it
+  from the deployed resource and splices it into the rendered JSON.
+
+Still open: whether the `analyze.py` deep-link's `;startTime=…;endTime=…`
+matrix-param format actually pre-sets the console's time range, rather than
+landing on the default window. A stage dashboard now exists, so this is
+checkable by running `analyze.py` against any results file and opening the
+printed link.
 
 ## Chart inventory
 

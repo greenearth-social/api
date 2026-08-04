@@ -84,6 +84,27 @@ EXISTING="$(gcloud monitoring dashboards list \
 
 if [[ -n "$EXISTING" ]]; then
     echo "updating existing dashboard: ${EXISTING}"
+    # Cloud Monitoring rejects an update whose config carries no etag
+    # ("Update Dashboard should specify a non empty etag") -- it is the
+    # optimistic-concurrency token, and it lives on the deployed resource
+    # rather than in the template, so read it and splice it in.
+    ETAG="$(gcloud monitoring dashboards describe "$EXISTING" \
+        --project "$PROJECT_ID" --format 'value(etag)')"
+    if [[ -z "$ETAG" ]]; then
+        echo "ERROR: could not read the current etag for ${EXISTING}" >&2
+        exit 1
+    fi
+    python3 - "$RENDERED" "$ETAG" <<'ETAG_PY'
+import json
+import sys
+
+path, etag = sys.argv[1], sys.argv[2]
+with open(path) as handle:
+    dashboard = json.load(handle)
+dashboard["etag"] = etag
+with open(path, "w") as handle:
+    json.dump(dashboard, handle)
+ETAG_PY
     DASHBOARD_NAME="$(gcloud monitoring dashboards update "$EXISTING" \
         --project "$PROJECT_ID" \
         --config-from-file="$RENDERED" \
