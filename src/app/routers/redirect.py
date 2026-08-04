@@ -66,7 +66,15 @@ async def redirect_slug(
 
     utm_params = _extract_utm(utm_source, utm_medium, utm_campaign, utm_content, utm_term)
     destination = _build_destination(record.url, utm_params)
-    track_redirect(get_posthog_client(), slug, record.url, utm_params)
+
+    # Merge UTMs baked into stored URL with any request-level overrides for PostHog
+    stored_utm = {
+        k: v[0]
+        for k, v in parse_qs(urlparse(record.url).query).items()
+        if k.startswith("utm_")
+    }
+    stored_utm.update(utm_params)
+    track_redirect(get_posthog_client(), slug, record.url, stored_utm)
     return RedirectResponse(url=destination, status_code=302)
 
 
