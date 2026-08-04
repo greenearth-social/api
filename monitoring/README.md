@@ -1,15 +1,18 @@
-# Load Test & Bottleneck Attribution dashboard
+# API performance dashboard
 
-Cloud Monitoring dashboard, defined as code, that answers one question during a
-load test or a regression: **which layer owns the latency?** It is laid out to be
-read top-to-bottom against the attribution playbook below.
+The standing view of how the API is performing, and — when it is performing
+badly — which layer owns the latency. It is laid out to be read top to bottom
+against the attribution playbook below: user experience first, then the stage
+that owns the time, then whether the cause is the api process, Elasticsearch,
+or something downstream.
+
+It is not a load-test-only tool. Load tests are simply the case where you know
+in advance which window to look at; the same rows answer "why was the feed slow
+at 09:00" on an ordinary day.
 
 - Template: [`dashboards/bottleneck.json.tmpl`](dashboards/bottleneck.json.tmpl)
 - Deploy: [`deploy.sh`](deploy.sh)
 - Deployed dashboard ids (written by `deploy.sh`): `dashboards/ids.env`
-- Design context: [issue #343](https://github.com/greenearth-social/api/issues/343)
-  (attribution plan, metric inventory, and the 07-31 load-test timeline used as
-  the worked example below)
 
 ## Deploying
 
@@ -45,18 +48,23 @@ Only those four exact tokens are substituted, so Cloud Monitoring's own legend
 syntax (`${metric.labels.traffic}`, `${resource.labels.task_id}`) passes through
 untouched.
 
-### Cluster-scope note
+### One dashboard per environment
 
-Every row is per-environment. **Rows 4 and 5 show the environment's own
-Elasticsearch cluster** — each environment has one
-(`greenearth-stage-cluster` / `greenearth-prod-cluster`), both reporting
-exporter and GKE metrics (verified 2026-08-02), and the api's
-`scripts/deploy.sh` wires each api environment to its matching cluster.
-**Row 6 (`ingex/*`) uses the environment's own ingest pipeline**: series
-exist for both `namespace=stage` and `namespace=prod`
-(`resource.label."namespace"`), and every row-6 chart filters on
-`${NAMESPACE}` so the stage dashboard shows stage ingest and the prod
-dashboard shows prod ingest.
+`deploy.sh` deploys a separate dashboard for stage and prod rather than one
+dashboard with an environment picker. A Cloud Monitoring dashboard filter binds
+a single label key to a single value, and the four families of series here
+identify their environment four different ways:
+
+| Series | Label | stage value |
+|---|---|---|
+| api / inference custom metrics | `namespace` (resource) | `stage` |
+| Cloud Run built-ins | `service_name` (resource) | `greenearth-api-stage` |
+| Elasticsearch exporter | `cluster` (metric) | `greenearth-stage-cluster` |
+| GKE container metrics | `namespace_name` (metric) | `greenearth-stage` |
+
+No single filter value drives all four, and a dashboard filter cannot rewrite a
+value into another format, so the environment is resolved at deploy time by
+template substitution instead. Every row is per-environment, including ingest.
 
 ### Percentile aggregation
 
@@ -84,104 +92,122 @@ the point that matters; add the boundary alongside the threshold.
 
 ## Attribution playbook
 
-Read a regression off the dashboard as a decision table. The 2026-07-31 load-test
-bursts (timeline in [issue #343](https://github.com/greenearth-social/api/issues/343))
-are the worked example.
+Read a regression off the dashboard as a decision table.
 
-| Pattern | Diagnosis | Where on the dashboard | 07-31 evidence |
-|---|---|---|---|
-| All stage p95s spike together, incl. external calls; `eventloop.lag_ms` ↑; ES `took` ≈ flat; instance count rising during burst | **api instance saturation / scale-up lag** | rows 1+2+3 | Burst 1: two_tower, followed_users, heavy_ranker, perspective all ~4.6 s from 1 instance; clean at 2–4 instances (burst 2) |
-| `es.query.took_ms` ↑ + major faults/s ↑ + device read MB/s ↑ | **ES page-cache churn (cold reads)** | rows 4+5 | Mean search 5→38 ms with 2.5k faults/s, 78 MB/s reads |
-| `es.query.took_ms` ↑ + search thread-pool queue/rejected ↑, faults flat | **ES CPU/concurrency ceiling** | row 4 | — (not yet observed) |
-| `rank.model.duration_ms` ↑ with `inference.predict.duration_ms` ↑ | **inference-service capacity** | row 2 gap chart | — |
-| `rank.model.duration_ms` ↑ with `inference.predict.duration_ms` flat | **api-side queuing to inference** | row 2 gap chart + row 3 client charts | — |
-| `perspective` duration ↑ with 429s | **external rate limit** | row 2 | — |
-| `es.query.duration − took` gap ↑ on every `op`, `took` flat, `eventloop.lag_ms` flat, CPU well below 100%; `es.client.in_flight` pinned at the pool cap | **ES client connection-pool starvation** (client-side queuing per dependency, not loop-wide) | row 4 gap chart + row 3 lag/CPU + row 3 in-flight chart | #344 cause 1: pool of 10 exhausted by kNN, trivial terms lookups queued to p50 ≈ 918 ms while ES `took` ≈ 10 ms, CPU ≈ 64 %. Pool now 100 (`GE_ES_CONNECTIONS_PER_NODE`) |
-| Any dependency's client-side duration ↑ with its server-side signal flat; that client's `pool.wait_ms` ↑ or `in_flight` pinned at its cap | **client-side queuing for that dependency** — the general #344-class pattern (Perspective session, shared httpx pool, any capped parallel workflow) | row 3 queue-position + in-flight charts, paired with the matching row-2/row-4 backend series | #250: Perspective head-of-line blocking under `asyncio.gather` bursts (pre-dates these metrics) |
-| Connection-class failures (`status_code=connection` / `error=connection`) spike on ≥2 dependencies at once; backend `took` / server latencies flat | **process-wide client/transport pathology** (event-loop or fd bookkeeping, e.g. uvloop fd race) | row 3 dependency-failure chart | #344 cause 2: `Bad file descriptor` storms hit Perspective, inference, and ES together during both 150 qpm windows; fixed by `--loop asyncio` |
-| `freshness_sec` ↑ during serving load test | **serving load starving ingest (shared ES)** | row 6 | — |
+| Pattern | Diagnosis | Where on the dashboard |
+| --- | --- | --- |
+| All stage p95s spike together, incl. external calls; `eventloop.lag_ms` ↑; ES `took` ≈ flat; instance count rising during burst | **api instance saturation / scale-up lag** | rows 1+2+3 |
+| `es.query.took_ms` ↑ + major faults/s ↑ + device read MB/s ↑ | **ES page-cache churn (cold reads)** | rows 4+5 |
+| `es.query.took_ms` ↑ + search thread-pool queue/rejected ↑, faults flat | **ES CPU/concurrency ceiling** | row 4 |
+| `rank.model.duration_ms` ↑ with `inference.predict.duration_ms` ↑ | **inference-service capacity** | row 2 gap chart |
+| `rank.model.duration_ms` ↑ with `inference.predict.duration_ms` flat | **api-side queuing to inference** | row 2 gap chart + row 3 client charts |
+| `perspective` duration ↑ with 429s | **external rate limit** | row 2 |
+| `es.query.duration − took` gap ↑ on every `op`, `took` flat, `eventloop.lag_ms` flat, CPU well below 100%; `es.client.in_flight` pinned at the pool cap | **ES client connection-pool starvation** (client-side queuing per dependency, not loop-wide) | row 4 gap chart + row 3 lag/CPU + row 3 in-flight chart |
+| Any dependency's client-side duration ↑ with its server-side signal flat; that client's `in_flight` pinned at its cap | **client-side queuing for that dependency** (any pooled client or capped parallel workflow) | row 3 in-flight chart, paired with the matching row-2/row-4 backend series |
+| Connection-class failures (`status_code=connection` / `error=connection`) spike on ≥2 dependencies at once; backend `took` / server latencies flat | **process-wide client/transport pathology** (event-loop or fd bookkeeping, e.g. uvloop fd race) | row 3 dependency-failure chart |
+| `freshness_sec` ↑ during serving load test | **serving load starving ingest (shared ES)** | row 6 |
 
-The two #344 root causes are deliberately separable without ad-hoc queries: cause
-1 is *one* dependency queuing client-side (its own queue-position chart) with a
-flat backend; cause 2 is *several* dependencies failing on `connection` at the
-same instant with all backends flat.
-
+The last two rows are deliberately separable: one dependency queuing
+client-side against a flat backend is a pool problem for that dependency;
+several dependencies failing on `connection` at the same instant, with every
+backend flat, is a process-wide transport problem.
 ## Baseline threshold lines
 
-These are **chart annotations, not alert policies**. They are eyeball baselines
-derived from the 2026-07-29..31 measured data so a reader can tell "normal" from
-"this is the regression" at a glance, and they are cheap to adjust.
-
-**Reviewed 2026-08.** Re-review after any capacity change (instance sizing,
-ES cluster shape, pool caps) or the next load-test campaign.
+These are **chart annotations, not alert policies** — reference lines that let
+a reader tell "normal" from "this is the regression" at a glance. Re-review
+them after any capacity change (instance sizing, ES cluster shape, pool caps).
 
 | Row / chart | Threshold | Source measurement |
 |---|---|---|
-| 1 — `feed.render` p50/p95 by traffic | **2500 ms** | Steady-state probe p95 1.6–2.2 s in the clean 07-31 burst 2; burst 1 pinned at the 10 s ceiling. 2500 ms sits just above healthy, well below broken. |
-| 1 — Failures + degraded + 5xx per min | **1 / min** | Clean burst 2 ran ~0 failures, trace degraded, ≤0.5 5xx/min; burst 1 ran 2–3 failures + 15–18 degraded + 7–9 5xx per minute. |
-| 3 — `eventloop.lag_ms` p95 per instance | **100 ms** | Healthy asyncio loop lags <10 ms; a saturated instance lags into the seconds. 100 ms is an order of magnitude above healthy and an order below saturated. No 07-31 data (metric postdates the test). |
+| 1 — `feed.render` p50/p95 by traffic | **2500 ms** | Healthy steady-state probe p95 is 1.6–2.2 s; a saturated instance pins at the 10 s client ceiling. 2,500 ms sits just above healthy and well below broken. |
+| 1 — Failure, degradation and 5xx rate | **1%** | Expressed as a share of renders rather than a count per minute, so the goal is comparable between a quiet night and a load test. |
+| 3 — `eventloop.lag_ms` p95 per instance | **100 ms** | A healthy asyncio loop lags <10 ms; a saturated instance lags into the seconds. 100 ms is an order of magnitude above healthy and an order below saturated. |
 | 3 — Dependency failures/min by class | **1 / min** | Dependency failures are ≈0 in steady state; any sustained non-zero class is a finding. Same basis as the row-1 failure line. |
-| 3 — `client.pool.wait_ms` p95 | **10 ms** | A non-contended connector hands out a connection in well under 1 ms; 10 ms of queuing means the pool is the bottleneck for that client. |
 | 3 — `client.in_flight` / `es.client.in_flight` p95 | **100** | The pool caps: `GE_HTTP_MAX_CONNECTIONS` (default 100, `lib/http_client.py`) for the shared httpx client, and `GE_ES_CONNECTIONS_PER_NODE` (default 100, introduced in PR #346) for the ES client. Either series flattening at its cap is the client-side starvation signal. |
-| 4 — ES search thread pool rejected/s | **0** (any rejection) | Rejections are never normal; the line exists so a non-zero series is visually unambiguous. |
-| 4 — ES mean search latency | **10 ms** | ~5 ms on a clean cluster, 17–38 ms during the 07-31 nightly cold-read storm. 10 ms separates the two regimes. |
-| 6 — `ingex/freshness_sec` p95 | **600 s** | Matches the existing "Megastream/Jetstream P50 Lag SLA" alert policies (p50 > 600 s over 30 m, verified 2026-08-02). This chart plots p95, and p95 ≥ p50 always, so the p95 series crossing 600 s strictly leads the alert — an early-warning line consistent with the SLA rather than a second invented number. |
+| 4 — ES search thread pool rejected/s | **0.001** (any rejection) | Rejections are never normal; the line exists so a non-zero series is visually unambiguous. |
+| 4 — ES mean search latency | **10 ms** | ~5 ms with a warm page cache, 17–38 ms while the working set is being evicted. 10 ms separates the two regimes. |
+| 6 — `ingex/freshness_sec` p95 | **600 s** | Matches the "Megastream/Jetstream P50 Lag SLA" alert policies (p50 > 600 s over 30 m). This chart plots p95, and p95 ≥ p50 always, so the p95 series crossing 600 s strictly leads the alert — an early-warning line consistent with the SLA rather than a second invented number. |
 
-### Post-deploy verification checklist
+### Template constraints
 
-Deploying the template renders JSON that hasn't all been eyeballed against a
-live dashboard yet. After `deploy.sh stage` / `deploy.sh prod`, confirm:
+Cloud Monitoring enforces these; each one fails silently or at deploy time:
 
-- The zero-value threshold line on the row-4 rejected-count chart survives the
-  proto3 round trip (a `0` threshold can serialize as an absent field).
-- The row-3 `instance_count` state-label legend distinguishes instance states
-  rather than rendering one indistinguishable series.
-- The `analyze.py` deep-link's `;startTime=…;endTime=…` matrix-param format
-  actually pre-sets the console's time range when opened, rather than landing
-  on the default window.
+- A `sectionHeader` carrying a subtitle must be **height 1** in a 12-column
+  layout. The mosaic is stacked around height-1 headers, so inserting a row
+  means re-stacking every `yPos` below it.
+- A threshold **must not be `0`** — proto3 omits default-valued scalars, so a
+  zero-valued threshold is dropped on write and the line silently disappears.
+  Use a small positive value instead.
+- A chart grouped by a label must name that label in its `legendTemplate`
+  (`${metric.labels.<key>}`), or every group renders with the same legend.
+- Updating a dashboard requires the current `etag`; `deploy.sh` reads it from
+  the deployed resource and splices it into the rendered config.
 
 ## Chart inventory
 
 Six rows, 20 charts, one section header per row.
 
-| Row | Chart | Query type |
-|---|---|---|
-| 1 Load & UX | Renders/min by `traffic` | `feed.render.success_count` + `.failure_count`, ALIGN_DELTA/60 s, REDUCE_SUM by `traffic` |
-| 1 | `feed.render` p50/p95 by `traffic` | ALIGN_PERCENTILE_50/95, REDUCE_MEAN by `traffic`, `timeshiftDuration: 86400s` |
-| 1 | Failures + degraded + 5xx per min | `.failure_count` by `status_code`, `.degraded_count`, Cloud Run `request_count` 5xx |
-| 2 Stages | `candidates.generate` p95 by `generator_name` | ALIGN_PERCENTILE_95 |
-| 2 | `rank.model` p95 vs `inference.predict` p95 | two percentile series (api + inference metric prefixes) |
-| 2 | `perspective.score` p95 + failures/min by `status_code` | percentile on Y1, counter delta on Y2 |
-| 3 api saturation | `eventloop.lag_ms` p95 per instance | ALIGN_PERCENTILE_95, grouped by `resource.label.task_id` (no cross-instance mean) |
-| 3 | Cloud Run instances / CPU / memory | `instance_count` on Y1, `cpu/utilizations` + `memory/utilizations` p95 on Y2 |
-| 3 | Dependency failures/min by class | stacked `es.query.error_count` (by `error`), `perspective.score.failure_count`, `bsky.follows.failure_count`, `rank.model.failure_count` (by `status_code`) |
-| 3 | Client queue position | `client.pool.wait_ms` p95 by `client` + `client.connect.duration_ms` p95 by `client` |
-| 3 | Client in-flight vs caps | `client.in_flight` p95 by `host` + `es.client.in_flight` p95 by `op` |
-| 4 ES | `es.query.duration_ms` vs `took_ms` p95 by `op` | two percentile series per `op` |
-| 4 | Search thread-pool queue + rejected | PromQL `elasticsearch_thread_pool_queue_count` / `_rejected_count` |
-| 4 | ES mean search latency | PromQL — mean search latency, data nodes |
-| 5 Page cache | Major faults/s per pod | PromQL — major page faults/s (cache-miss rate) |
-| 5 | Device read MB/s per node | PromQL — device read KB/s (cold-read throughput) |
-| 5 | Evictable bytes per pod | PromQL — evictable container memory (page-cache size) |
-| 6 Blast radius | `ingex/freshness_sec` p95 by source | percentile, grouped by `resource.label.job` (`jetstream-ingest` / `megastream-ingest`) |
-| 6 | `ingex/es.bulk_index_*.took_ms` p95 | one percentile series per bulk op (posts, likes, inferences, tombstones, like_tombstones) |
-| 6 | JVM GC/s + breakers tripped/s + PD IO latency | PromQL exporter series on Y1, `compute.googleapis.com` disk IO latency on Y2 |
+p50 is charted alongside p95 only where the shape of the distribution is the
+question — feed render latency and Perspective scoring. Everywhere else the
+tail is the signal (a saturation threshold, a pool cap, a slow generator) and
+a median line would only add series to read past.
 
-Row 2's `rank.model` p95 vs `inference.predict` p95 gap chart pairs series across
-repos by `model_name`: api's `rank.model.duration_ms` values `two_tower` /
-`heavy_ranker` correspond to inference-service's `inference.predict.duration_ms`
-values `user-tower` / `ranker` respectively — the two services don't share a
-naming convention for the same model, so match the pairs by that mapping, not by
-literal label equality, when reading the gap chart.
+| Row | Chart | Series | Query |
+|---|---|---|---|
+| 1 | Feed renders per minute by traffic class | 2 | PromQL |
+| 1 | Feed render latency by traffic class | 2 | PromQL |
+| 1 | Failure, degradation and 5xx rate (% of renders) | 3 | PromQL |
+| 2 | Candidate generation latency by generator | 1 | PromQL |
+| 2 | Ranking latency: api client-side vs inference server-side | 2 | PromQL |
+| 2 | Perspective scoring latency and failures per minute | 3 | PromQL |
+| 3 | Event-loop scheduling lag per instance | 1 | PromQL |
+| 3 | Cloud Run instances, CPU and memory utilization | 3 | builder |
+| 3 | Dependency failures per minute by cause | 4 | PromQL |
+| 3 | Outbound connection setup time by client | 1 | PromQL |
+| 3 | Concurrent outbound requests in flight vs pool cap | 2 | PromQL |
+| 4 | Elasticsearch query latency: api client-side vs cluster-reported | 2 | PromQL |
+| 4 | Elasticsearch search thread pool: queued and rejected | 2 | PromQL |
+| 4 | Elasticsearch mean search latency, data nodes | 1 | PromQL |
+| 5 | Major page faults per second per data node (cache misses) | 1 | PromQL |
+| 5 | Disk read throughput per data node (cold reads) | 1 | PromQL |
+| 5 | Page-cache memory per data node | 1 | PromQL |
+| 6 | Ingest freshness by source | 1 | builder |
+| 6 | Ingest bulk-index latency by index | 5 | builder |
+| 6 | Cluster health: JVM GC, circuit breakers and disk latency | 3 | mixed |
+
+Row 2's ranking gap chart pairs series across repos by `model_name`: api's
+`rank.model.duration_ms` values `two_tower` / `heavy_ranker` correspond to
+inference-service's `inference.predict.duration_ms` values `user-tower` /
+`ranker` respectively — the two services don't share a naming convention for
+the same model, so match the pairs by that mapping rather than by literal label
+equality.
+
+### Smoothing
+
+Most latency and rate charts are PromQL with a **5-minute sliding window**
+(`rate(...[5m])`). A sliding window averages five minutes of samples behind
+every point while the points themselves stay at the chart's own step, so the
+line smooths without losing temporal resolution — which simply widening the
+alignment period cannot do. Five minutes is the compromise that keeps a
+ten-minute load test legible: it shows a ramp and a plateau rather than one
+blended average.
+
+Percentiles are computed with `histogram_quantile` over the exported histogram
+buckets, so the percentile is taken across merged buckets rather than by
+averaging per-instance percentiles.
+
+The charts still on the query builder (Cloud Run built-ins, ingest) align over
+120s; distributions there are noisier at 60s, which is one export per bucket.
+
+A percentile is only as stable as the number of samples behind it. At low
+traffic a p95 is estimated from few requests and stays jumpy no matter the
+window — widen the time range rather than reading minute-to-minute movement.
 
 ### Deliberate omissions
 
-Two charts from the original design layout are intentionally left out of v1:
-Cloud Run request concurrency (row 3) and PD IO queue depth (row 6). Neither
-had a clear finding to hang off of during the 07-31 case study, so they were
-cut to keep the dashboard to the charts that earned their place. Add them back
-if a future regression raises an instance-level saturation question (row 3) or
-a disk-queue-depth question (row 6) that the existing charts can't answer.
+Cloud Run request concurrency and disk queue depth are not charted. Add them if
+a regression raises an instance-level saturation or disk-queue question the
+existing charts can't answer.
 
 ## Window comparison
 
