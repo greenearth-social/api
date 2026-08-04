@@ -13,6 +13,7 @@ import math
 import os
 import random
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 
 def gcloud_env() -> dict[str, str]:
@@ -40,6 +41,13 @@ CLOUD_RUN_SERVICES = {
     "prod": "greenearth-api-prod",
 }
 CLOUD_RUN_REGION = "us-east1"
+
+# monitoring/deploy.sh writes DASHBOARD_ID_<ENV>=projects/<num>/dashboards/<id>
+# lines here after each dashboard deploy.
+DASHBOARD_IDS_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "monitoring", "dashboards", "ids.env",
+)
 
 # The three cohorts a run is drawn from (see the api#189 plan). Order is the
 # fill order when rounding leaves a remainder.
@@ -274,3 +282,27 @@ def percentiles(values: list[float], ps: tuple[float, ...] = (50, 95, 99)) -> di
         rank = max(1, math.ceil(p / 100.0 * len(ordered)))
         out[p] = ordered[min(rank, len(ordered)) - 1]
     return out
+
+
+def dashboard_url(environment: str, start: datetime, end: datetime) -> str | None:
+    """Console deep-link to the bottleneck dashboard, time range pre-set."""
+    try:
+        with open(DASHBOARD_IDS_FILE) as f:
+            ids = dict(
+                line.strip().split("=", 1)
+                for line in f
+                if "=" in line and not line.startswith("#")
+            )
+    except FileNotFoundError:
+        return None
+    resource = ids.get(f"DASHBOARD_ID_{environment.upper()}")
+    if not resource:
+        return None
+    dashboard_id = resource.rsplit("/", 1)[-1]
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    s = start.astimezone(timezone.utc).strftime(fmt)
+    e = end.astimezone(timezone.utc).strftime(fmt)
+    return (
+        f"https://console.cloud.google.com/monitoring/dashboards/builder/{dashboard_id}"
+        f";startTime={s};endTime={e}?project={GCP_PROJECT}"
+    )

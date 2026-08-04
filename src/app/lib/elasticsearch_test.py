@@ -453,3 +453,29 @@ class TestFetchPostEmbeddings:
         })
         vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
         assert vecs == [("at://1", [0.1, 0.2])]
+
+
+@pytest.mark.asyncio
+async def test_fetch_recent_liked_post_uris_passes_likes_op():
+    captured = {}
+
+    class _FakeES:
+        async def search(self, **kwargs):
+            captured.update(kwargs)
+            return {"took": 1, "hits": {"hits": []}}
+
+    await fetch_recent_liked_post_uris(_FakeES(), "did:plc:x")
+    assert captured["op"] == "likes"
+
+
+@pytest.mark.asyncio
+async def test_fetch_post_embeddings_passes_hydrate_op():
+    captured = {}
+
+    class _FakeES:
+        async def search(self, **kwargs):
+            captured.update(kwargs)
+            return {"took": 1, "hits": {"hits": []}}
+
+    await fetch_post_embeddings(_FakeES(), ["at://x"])
+    assert captured["op"] == "hydrate"

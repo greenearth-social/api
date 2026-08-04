@@ -5,6 +5,7 @@ import json
 import logging
 
 import pytest
+from elastic_transport import ConnectionError as EsConnectionError
 from elastic_transport import ConnectionTimeout
 
 from . import es_client as es_client_module
@@ -200,3 +201,154 @@ def test_threshold_is_re_read_per_call(caplog, monkeypatch):
     with caplog.at_level(logging.WARNING, logger=es_client_module.logger.name):
         asyncio.run(es.search(index="posts", query={"match_all": {}}))
     assert any("slow_es_query" in r.message for r in caplog.records)
+
+
+class _RecordingCollector:
+    def __init__(self):
+        self.records = []
+
+    def record(self, name, value, **attrs):
+        self.records.append((name, value, attrs))
+
+
+@pytest.mark.asyncio
+async def test_search_records_duration_and_took_metrics(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            return {"took": 42, "hits": {"hits": []}}
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    await wrapped.search(index="likes", op="likes")
+
+    names = {name: attrs for name, _, attrs in collector.records}
+    assert names["es.query.duration_ms"] == {"op": "likes"}
+    assert names["es.query.took_ms"] == {"op": "likes"}
+    took = [v for n, v, _ in collector.records if n == "es.query.took_ms"]
+    assert took == [42]
+
+
+@pytest.mark.asyncio
+async def test_search_does_not_forward_op_to_client(monkeypatch):
+    seen_kwargs = {}
+
+    class _FakeES:
+        async def search(self, **kwargs):
+            seen_kwargs.update(kwargs)
+            return {"took": 1}
+
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: None)
+    wrapped = SlowQueryLoggingES(_FakeES())
+    await wrapped.search(index="posts", op="hydrate")
+    assert "op" not in seen_kwargs
+
+
+@pytest.mark.asyncio
+async def test_search_defaults_op_to_unlabeled_and_tolerates_missing_took(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            return {"hits": {"hits": []}}  # no "took" key
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    await wrapped.search(index="posts")
+
+    by_name = {n: attrs for n, _, attrs in collector.records}
+    assert by_name["es.query.duration_ms"] == {"op": "unlabeled"}
+    assert "es.query.took_ms" not in by_name
+
+
+@pytest.mark.asyncio
+async def test_search_records_duration_on_timeout(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            raise ConnectionTimeout("boom")
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    with pytest.raises(ConnectionTimeout):
+        await wrapped.search(index="posts", op="knn")
+
+    names = [n for n, _, _ in collector.records]
+    assert "es.query.duration_ms" in names
+    assert "es.query.took_ms" not in names
+
+
+@pytest.mark.asyncio
+async def test_search_records_error_count_on_timeout(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            raise ConnectionTimeout("boom")
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    with pytest.raises(ConnectionTimeout):
+        await wrapped.search(index="posts", op="knn")
+
+    assert ("es.query.error_count", 1, {"op": "knn", "error": "timeout"}) in collector.records
+
+
+@pytest.mark.asyncio
+async def test_search_records_error_count_on_connection_error(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            raise EsConnectionError("connection refused")
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    with pytest.raises(EsConnectionError):
+        await wrapped.search(index="posts", op="knn")
+
+    assert ("es.query.error_count", 1, {"op": "knn", "error": "connection"}) in collector.records
+    # An errored query still consumed client-side time.
+    names = [n for n, _, _ in collector.records]
+    assert "es.query.duration_ms" in names
+
+
+@pytest.mark.asyncio
+async def test_search_records_error_count_on_other_exception(monkeypatch):
+    class _FakeES:
+        async def search(self, **kwargs):
+            raise ValueError("boom")
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_FakeES())
+    with pytest.raises(ValueError):
+        await wrapped.search(index="posts", op="likes")
+
+    assert ("es.query.error_count", 1, {"op": "likes", "error": "other"}) in collector.records
+
+
+@pytest.mark.asyncio
+async def test_search_records_in_flight_count(monkeypatch):
+    release = asyncio.Event()
+
+    class _BlockingES:
+        async def search(self, **kwargs):
+            await release.wait()
+            return {"took": 1, "hits": {"hits": []}}
+
+    collector = _RecordingCollector()
+    monkeypatch.setattr(es_client_module, "get_metric_collector", lambda: collector)
+
+    wrapped = SlowQueryLoggingES(_BlockingES())
+    t1 = asyncio.create_task(wrapped.search(index="posts", op="knn"))
+    t2 = asyncio.create_task(wrapped.search(index="posts", op="likes"))
+    await asyncio.sleep(0.01)
+    release.set()
+    await asyncio.gather(t1, t2)
+
+    in_flight = sorted(v for n, v, _ in collector.records if n == "es.client.in_flight")
+    assert in_flight == [1, 2]

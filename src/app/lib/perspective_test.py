@@ -1,5 +1,6 @@
 """Tests for PRC scoring and Perspective API candidate scoring."""
 
+import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -142,6 +143,22 @@ class _FakeResponseCM:
         self._response = response
 
     async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _BlockingResponseCM:
+    """Async context manager whose __aenter__ blocks on an asyncio.Event,
+    to overlap concurrent score() calls in flight-tracking tests."""
+
+    def __init__(self, event: "asyncio.Event", response):
+        self._event = event
+        self._response = response
+
+    async def __aenter__(self):
+        await self._event.wait()
         return self._response
 
     async def __aexit__(self, *exc_info):
@@ -291,7 +308,8 @@ class TestPerspectiveClientScore:
                     enable_cleanup_closed=True,
                     keepalive_timeout=45,
                 )
-                mock_session_cls.assert_called_once_with(connector=mock_connector.return_value)
+                assert mock_session_cls.call_args.kwargs["connector"] == mock_connector.return_value
+                assert len(mock_session_cls.call_args.kwargs["trace_configs"]) == 1
 
         asyncio.run(_build())
 
@@ -321,6 +339,58 @@ class TestPerspectiveClientScore:
             client = PerspectiveClient()
 
         asyncio.run(client.close())  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_score_records_in_flight_and_resets_after_completion(self, monkeypatch):
+        """client.in_flight is the saturation signal for Perspective's
+        unbounded connector: two concurrent score() calls against a blocked
+        session record samples [1, 2]; a later, non-overlapping call
+        records 1 again -- the counter doesn't leak across calls."""
+        import asyncio
+
+        from .perspective import PerspectiveClient
+
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        release = asyncio.Event()
+        response = _fake_response(status=200, json_body=_SUCCESS_BODY)
+        session = MagicMock()
+        session.post = MagicMock(return_value=_BlockingResponseCM(release, response))
+
+        # Pin the host: the label is derived from GE_PERSPECTIVE_HOST, which is
+        # set to a stub in the local dev environment, so asserting the
+        # production hostname would make this test environment-dependent.
+        env = {
+            "GE_PERSPECTIVE_API_KEY": "test-key",
+            "GE_PERSPECTIVE_HOST": "https://perspective.test",
+        }
+        with patch.dict("os.environ", env):
+            client = PerspectiveClient()
+
+        with patch.dict("os.environ", env), patch.object(
+            PerspectiveClient, "_get_session", return_value=session
+        ):
+            t1 = asyncio.create_task(client.score("hi"))
+            t2 = asyncio.create_task(client.score("there"))
+            await asyncio.sleep(0.01)  # let both reach the blocked response
+            release.set()
+            await asyncio.gather(t1, t2)
+
+            concurrent_samples = [
+                (v, a) for n, v, a in collector.records if n == "client.in_flight"
+            ]
+            assert sorted(v for v, _ in concurrent_samples) == [1, 2]
+            assert all(a == {"host": "perspective.test"} for _, a in concurrent_samples)
+
+            # A later, non-overlapping call starts from a reset counter.
+            release2 = asyncio.Event()
+            release2.set()
+            session.post = MagicMock(return_value=_BlockingResponseCM(release2, response))
+            await client.score("again")
+
+        later_samples = [v for n, v, _ in collector.records if n == "client.in_flight"]
+        assert later_samples[-1] == 1
 
 
 class TestScoreCandidates:
@@ -473,6 +543,145 @@ class TestClosePerspectiveClient:
 # ---------------------------------------------------------------------------
 # Degradation tracking
 # ---------------------------------------------------------------------------
+
+
+class _RecordingCollector:
+    def __init__(self):
+        self.records = []
+
+    def record(self, name, value, **attrs):
+        self.records.append((name, value, attrs))
+
+
+def test_get_session_attaches_trace_config(monkeypatch):
+    import asyncio
+
+    captured = {}
+
+    class _FakeSession:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(perspective_module.aiohttp, "ClientSession", _FakeSession)
+    client = perspective_module.PerspectiveClient.__new__(perspective_module.PerspectiveClient)
+    client._session = None
+
+    async def _build():
+        client._get_session()
+
+    asyncio.run(_build())
+    assert len(captured["trace_configs"]) == 1
+
+
+class TestScoreCandidatesFailureCounters:
+    """perspective.score.failure_count is recorded with a status_code label
+    for every external-reason scoring failure, but not for expected content
+    behavior (unsupported language)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_perspective_client(self, monkeypatch):
+        monkeypatch.setattr(perspective_module, "_client", None)
+
+    @pytest.mark.asyncio
+    async def test_counts_429_failures(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=429)
+        )
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        result = await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert result == {"at://a": None}
+        assert ("perspective.score.failure_count", 1, {"status_code": "429"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_timeout_failures(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(side_effect=TimeoutError())
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert ("perspective.score.failure_count", 1, {"status_code": "timeout"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_connection_errors(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(side_effect=aiohttp.ClientOSError(9, "Bad file descriptor"))
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert ("perspective.score.failure_count", 1, {"status_code": "connection"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_server_disconnected_as_connection(self, monkeypatch):
+        """aiohttp.ServerDisconnectedError is a ClientConnectionError but not
+        a ClientOSError/ClientConnectorError -- it must still classify as
+        "connection" now that the branch is broadened to the common
+        ancestor."""
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(side_effect=aiohttp.ServerDisconnectedError())
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert ("perspective.score.failure_count", 1, {"status_code": "connection"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_other_500_failures(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(
+            side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=500)
+        )
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert ("perspective.score.failure_count", 1, {"status_code": "500"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_quota_exhaustion(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        fake = _fake_client([0.9])
+        perspective_module._rate_bucket_minute = int(__import__("time").time()) // 60
+        perspective_module._rate_count = perspective_module._QUOTA_RPM
+        monkeypatch.setattr(perspective_module, "_client", fake)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert ("perspective.score.failure_count", 1, {"status_code": "quota"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_does_not_count_language_not_supported(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(perspective_module, "get_metric_collector", lambda: collector)
+
+        mock_client = MagicMock()
+        mock_client.score = AsyncMock(side_effect=PerspectiveLanguageNotSupportedError("ja"))
+        monkeypatch.setattr(perspective_module, "_client", mock_client)
+
+        await score_candidates([_make_candidate("at://a", content="hi")])
+
+        assert not [r for r in collector.records if r[0] == "perspective.score.failure_count"]
 
 
 class TestScoreCandidatesDegradation:

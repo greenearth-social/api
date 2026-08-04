@@ -1,5 +1,6 @@
 """Tests for MetricCollector."""
 
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -270,3 +271,148 @@ def test_set_and_get_metric_collector():
 async def test_shutdown_does_not_raise():
     collector, _ = _make_collector()
     await collector.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Histogram bucket boundaries
+#
+# The OTel default boundaries (…, 1000, 2500, 5000, 7500, 10000) leave only
+# four buckets above 1s, so a p95 anywhere in the 1–5s serving range is an
+# interpolation across a 1.5–2.5s-wide bucket. Ratio metrics are worse: every
+# value in [0, 1] falls in the first default bucket.
+# ---------------------------------------------------------------------------
+
+from .metrics import (  # noqa: E402
+    CONCURRENCY_BOUNDARIES,
+    FAST_MS_BOUNDARIES,
+    LATENCY_MS_BOUNDARIES,
+    RATIO_BOUNDARIES,
+    histogram_boundaries,
+)
+
+
+class TestHistogramBoundaries:
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "feed.render.duration_ms",
+            "candidates.generate.duration_ms",
+            "rank.model.duration_ms",
+            "perspective.score.duration_ms",
+            "es.query.duration_ms",
+            "es.query.took_ms",
+        ],
+    )
+    def test_latency_metrics(self, name):
+        assert histogram_boundaries(name) == LATENCY_MS_BOUNDARIES
+
+    @pytest.mark.parametrize(
+        "name",
+        ["eventloop.lag_ms", "client.pool.wait_ms", "client.connect.duration_ms"],
+    )
+    def test_near_zero_metrics(self, name):
+        assert histogram_boundaries(name) == FAST_MS_BOUNDARIES
+
+    @pytest.mark.parametrize(
+        "name", ["client.in_flight", "es.client.in_flight", "feed.slate.exclusion_size"]
+    )
+    def test_concurrency_metrics(self, name):
+        assert histogram_boundaries(name) == CONCURRENCY_BOUNDARIES
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "candidates.generate.retrieved_share",
+            "feed.slate.kept_share",
+            "feed.mean_similarity_score",
+        ],
+    )
+    def test_ratio_metrics(self, name):
+        assert histogram_boundaries(name) == RATIO_BOUNDARIES
+
+    def test_unknown_metric_falls_back_to_sdk_default(self):
+        assert histogram_boundaries("something.unrecognised") is None
+
+    def test_boundaries_are_sorted_and_unique(self):
+        for bounds in (
+            LATENCY_MS_BOUNDARIES,
+            FAST_MS_BOUNDARIES,
+            CONCURRENCY_BOUNDARIES,
+            RATIO_BOUNDARIES,
+        ):
+            assert list(bounds) == sorted(bounds)
+            assert len(set(bounds)) == len(bounds)
+
+    def test_dashboard_threshold_lines_are_exact_bucket_edges(self):
+        """monitoring/dashboards/bottleneck.json.tmpl draws baseline lines at
+        these values. A threshold that is itself a boundary makes the
+        percentile estimate exact where it matters — at the threshold."""
+        assert 2500 in LATENCY_MS_BOUNDARIES  # feed.render p95
+        assert 100 in FAST_MS_BOUNDARIES  # eventloop.lag_ms p95
+        assert 10 in FAST_MS_BOUNDARIES  # client.pool.wait_ms p95
+        assert 100 in CONCURRENCY_BOUNDARIES  # pool caps
+
+    def test_serving_range_is_finely_resolved(self):
+        """The 1–5s range is where the serving SLOs live; the OTel default has
+        two buckets there, which is what made p95 unmeasurable."""
+        in_range = [b for b in LATENCY_MS_BOUNDARIES if 1000 <= b <= 5000]
+        assert len(in_range) >= 10
+        widest = max(b - a for a, b in zip(in_range, in_range[1:], strict=False))
+        assert widest <= 500
+
+
+class TestHistogramBoundariesApplied:
+    # data_points is a union of point types; the concrete one depends on the
+    # instrument, so return Any rather than narrowing at every call site.
+    def _points(self, reader, name) -> Any:
+        for rm in reader.get_metrics_data().resource_metrics:
+            for sm in rm.scope_metrics:
+                for metric in sm.metrics:
+                    if metric.name == name:
+                        return list(metric.data.data_points)[0]
+        raise AssertionError(f"metric {name} not exported")
+
+    def test_latency_histogram_uses_custom_bounds(self):
+        collector, reader = _make_collector()
+        collector.record("feed.render.duration_ms", 2425.0)
+        point = self._points(reader, "feed.render.duration_ms")
+        assert tuple(point.explicit_bounds) == tuple(LATENCY_MS_BOUNDARIES)
+
+    def test_nearby_multi_second_values_separate_into_buckets(self):
+        """2425 and 4881 sat in 1000–2500 and 2500–5000 under the defaults, so
+        every p95 in between was an interpolation. They must now be resolvable
+        to a few hundred ms."""
+        collector, reader = _make_collector()
+        for value in (2425.0, 2485.0, 4881.0, 4937.0):
+            collector.record("feed.render.duration_ms", value)
+        point = self._points(reader, "feed.render.duration_ms")
+        occupied = [i for i, count in enumerate(point.bucket_counts) if count]
+        assert len(occupied) >= 2
+        bounds = list(point.explicit_bounds)
+        for index in occupied:
+            lower = bounds[index - 1] if index else 0
+            upper = bounds[index] if index < len(bounds) else float("inf")
+            assert upper - lower <= 500
+
+    def test_ratio_histogram_separates_values_in_zero_to_one(self):
+        """Under the SDK default every share/score landed in the first bucket."""
+        collector, reader = _make_collector()
+        for value in (0.05, 0.5, 0.95):
+            collector.record("feed.slate.kept_share", value)
+        point = self._points(reader, "feed.slate.kept_share")
+        assert len([i for i, count in enumerate(point.bucket_counts) if count]) == 3
+
+    def test_concurrency_histogram_separates_small_integers(self):
+        """in_flight of 1 vs 4 both fell in the default 0–5 bucket, which made
+        the pool-saturation signal unreadable at the low end."""
+        collector, reader = _make_collector()
+        for value in (1, 2, 4):
+            collector.record("es.client.in_flight", value)
+        point = self._points(reader, "es.client.in_flight")
+        assert len([i for i, count in enumerate(point.bucket_counts) if count]) == 3
+
+    def test_counters_are_unaffected(self):
+        collector, reader = _make_collector()
+        collector.record("feed.render.failure_count", 1)
+        point = self._points(reader, "feed.render.failure_count")
+        assert point.value == 1

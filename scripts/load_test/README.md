@@ -11,7 +11,7 @@ Four scripts, run in order:
 |---|---|---|
 | 1 | `select_users.py` | Pick a diverse cohort of real user DIDs → JSON manifest |
 | 2 | `run.py` | Generate load (getFeedSkeleton + paging + sendInteractions), write per-request JSONL, then clean up (unless `--skip-cleanup`) |
-| 3 | `analyze.py` | Report client-side latency + server-side percentiles from the JSONL |
+| 3 | `analyze.py` | Report client-side latency + server-side percentiles from the JSONL, plus a deep-link to the bottleneck-attribution dashboard |
 | 4 | `cleanup.py` | Delete the data the run created, restoring the pre-run baseline (run automatically by step 2; also standalone) |
 
 ## How test traffic is isolated
@@ -46,8 +46,7 @@ that env var, the headers do nothing and the request is treated as anonymous.
   `GE_LOAD_TEST_SECRET` set. The client scripts read the matching secret from
   `--secret`, then `$GE_LOAD_TEST_SECRET`, then Secret Manager
   (`load-test-secret-<env>`).
-- **`gcloud` auth:** `select_users.py` and `cleanup.py` talk to Firestore, and
-  `analyze.py`'s server-side section reads Cloud Monitoring — run
+- **`gcloud` auth:** `select_users.py` and `cleanup.py` talk to Firestore — run
   `gcloud auth application-default login` first.
 - **Elasticsearch:** `select_users.py` queries ES for the active/low cohorts.
   For stage/prod, port-forward it:
@@ -128,15 +127,20 @@ pipenv run python scripts/load_test/analyze.py \
     --results results.jsonl --environment stage
 ```
 
-Reports client-side latency by feed × phase × cohort, then server-side
-`feed.render.duration_ms` percentiles (p50/p95/p99) grouped by `traffic` class
-(real vs load_test) and Cloud Run log/error counts over the run window. (The
-server-side split is by traffic class only, not by feed.)
+Reports client-side latency by feed × phase × cohort, then prints a
+console deep-link to the bottleneck-attribution Cloud Monitoring dashboard
+with the run window pre-set (`feed.render.duration_ms` percentiles by
+`traffic` class, Cloud Run log/error counts, and the rest of the
+attribution playbook — see
+[`monitoring/README.md`](../../monitoring/README.md)). The link requires a
+dashboard to have been deployed for the target environment
+(`monitoring/deploy.sh <env>`, which writes `monitoring/dashboards/ids.env`);
+without that file — or without an entry for the target environment —
+`analyze.py` prints a hint to run it instead of a link.
 
 `analyze.py` **reads nothing from Firestore** — all the context it needs is
 stamped on each JSONL record — so you can run cleanup *before* analysis if you
-like. Use `--no-server` for a client-side-only report (e.g. against dev, which
-has no Cloud Monitoring). Accepts multiple `--results` files.
+like. Accepts multiple `--results` files.
 
 ### 4. Cleanup
 
@@ -205,12 +209,13 @@ The bypass is off in dev by default. To smoke-test the whole flow locally:
        --out scripts/load_test/results.jsonl
    ```
 
-4. **Analyze** with `--no-server`, then **cleanup** — one pass — with
-   `--environment dev` (which fails closed unless a Firestore emulator host is
-   set; `devctl exec` provides one):
+4. **Analyze**, then **cleanup** — one pass — with `--environment dev`
+   (cleanup fails closed unless a Firestore emulator host is set; `devctl exec`
+   provides one). Dev has no dashboard deployed, so `analyze.py` prints the
+   client-side report and a hint instead of a dashboard link:
    ```bash
    devctl exec api pipenv run python scripts/load_test/analyze.py \
-       --results scripts/load_test/results.jsonl --no-server
+       --results scripts/load_test/results.jsonl
    devctl exec api pipenv run python scripts/load_test/cleanup.py \
        --environment dev --users scripts/load_test/users.json --execute
    ```

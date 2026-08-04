@@ -42,6 +42,7 @@ async def random_posts_search(
 
     resp = await es.search(
         index="posts_recent",
+        op="random",
         query=query,
         size=num_candidates,
         _source=CANDIDATE_SOURCE_FIELDS,

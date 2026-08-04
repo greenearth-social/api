@@ -9,6 +9,28 @@ from .http_client import get_http_client
 
 logger = logging.getLogger(__name__)
 
+
+def get_metric_collector():
+    """Indirection point so tests can monkeypatch at module level."""
+    from .metrics import get_metric_collector as _get
+    return _get()
+
+
+def _status_code_label(exc: BaseException) -> str:
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    if isinstance(exc, (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError)):
+        return "connection"
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return str(status) if status else "other"
+
+
+def _count_failure(metric: str, exc: BaseException) -> None:
+    collector = get_metric_collector()
+    if collector is not None:
+        collector.record(metric, 1, status_code=_status_code_label(exc))
+
+
 # ---------------------------------------------------------------------------
 # Parameters
 # ---------------------------------------------------------------------------
@@ -101,6 +123,12 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
                     FollowedUsersLookupError,
                 ) as exc:
                     if followed_dids:
+                        # Terminal outcome for this lookup (partial success) —
+                        # count it here since it never reaches the outer
+                        # handlers below. A bare re-raise, in contrast, is
+                        # counted once by whichever outer handler catches it,
+                        # so we must not double-count here.
+                        _count_failure("bsky.follows.failure_count", exc)
                         logger.warning(
                             "Returning %s partial followed users for %s after "
                             "follow lookup page failed: %s",
@@ -122,6 +150,7 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
                 if not isinstance(cursor, str) or not cursor:
                     break
     except TimeoutError as exc:
+        _count_failure("bsky.follows.failure_count", exc)
         if followed_dids:
             logger.warning(
                 "Returning %s partial followed users for %s after follow lookup "
@@ -134,9 +163,11 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
         raise FollowedUsersLookupError(
             f"Failed to fetch followed users for {user_did}"
         ) from exc
-    except FollowedUsersLookupError:
+    except FollowedUsersLookupError as exc:
+        _count_failure("bsky.follows.failure_count", exc)
         raise
     except (httpx.HTTPError, ValueError) as exc:
+        _count_failure("bsky.follows.failure_count", exc)
         raise FollowedUsersLookupError(
             f"Failed to fetch followed users for {user_did}"
         ) from exc

@@ -73,6 +73,7 @@ async def fetch_recent_liked_post_uri_page(
 
     resp = await es.search(
         index="likes",
+        op="likes",
         query=query,
         size=size,
         sort=[{"created_at": "desc"}],
@@ -130,6 +131,7 @@ async def fetch_posts_by_uris(
 
     resp = await es.search(
         index="posts",
+        op="hydrate",
         query=posts_query,
         size=len(at_uris),
         _source=CANDIDATE_SOURCE_FIELDS,

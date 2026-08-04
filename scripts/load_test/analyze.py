@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """Analyze a load-test run (issue api#189).
 
-Reports client-side latency/error stats from the generator's JSONL output and
-server-side signals from Cloud Monitoring and Cloud Run logs, comparing
-load-test traffic against real traffic over the run window.
+Reports client-side latency/error stats from the generator's JSONL output,
+then prints a deep-link to the Cloud Monitoring dashboard (with the run
+window pre-set) for server-side signals — Cloud Monitoring metrics and
+Cloud Run logs, comparing load-test traffic against real traffic over the
+run window. See ``monitoring/README.md`` for the dashboard playbook.
 
 This script deliberately reads **nothing from Firestore** — all cohort/DID
 context it needs is stamped on every record in the results file — so it can be
 run after scripts/load_test/cleanup.py has already removed the test data.
 
-Run from the api/ directory (server-side sections need
-``gcloud auth application-default login``):
+Run from the api/ directory:
 
     pipenv run python scripts/load_test/analyze.py --results results.jsonl \
         --environment stage
-
-``--no-server`` skips the Cloud Monitoring / logs sections (client-side only).
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -33,11 +31,15 @@ from rich.table import Table
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # scripts/
 
-from load_test.lib import CLOUD_RUN_SERVICES, GCP_PROJECT, gcloud_env, percentiles
+from load_test.lib import (
+    CLOUD_RUN_SERVICES,
+    GCP_PROJECT,
+    dashboard_url,
+    gcloud_env,
+    percentiles,
+)
 
 console = Console()
-
-METRIC_PREFIX = "custom.googleapis.com/greenearth-api"
 
 
 def _read_records(paths: list[str]) -> list[dict]:
@@ -266,6 +268,15 @@ def run(args: argparse.Namespace) -> None:
     )
 
     _client_summary(records)
+
+    url = dashboard_url(args.environment, start, end)
+    if url:
+        console.print(f"\n[bold]Dashboard (run window pre-set):[/bold] {url}")
+    else:
+        console.print(
+            "\n[yellow]No dashboard ID recorded for this environment — "
+            "run monitoring/deploy.sh first.[/yellow]"
+        )
 
     if args.no_server:
         return

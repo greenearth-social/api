@@ -1,9 +1,11 @@
 """Tests for the pure helpers shared by the load-testing scripts."""
 
 import random
+from datetime import datetime, timezone
 
 import pytest
 
+from load_test import lib
 from load_test.lib import (
     COHORTS,
     assign_feeds,
@@ -225,3 +227,26 @@ class TestPercentiles:
 
     def test_empty_is_zero(self):
         assert percentiles([]) == {50: 0.0, 95: 0.0, 99: 0.0}
+
+
+class TestDashboardUrl:
+    def test_dashboard_url_builds_console_link(self, tmp_path, monkeypatch):
+        ids = tmp_path / "ids.env"
+        ids.write_text("DASHBOARD_ID_STAGE=projects/12345/dashboards/abcd-ef\n")
+        monkeypatch.setattr(lib, "DASHBOARD_IDS_FILE", str(ids))
+
+        start = datetime(2026, 7, 31, 2, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 31, 4, 0, tzinfo=timezone.utc)
+        url = lib.dashboard_url("stage", start, end)
+
+        assert "console.cloud.google.com/monitoring/dashboards/builder/abcd-ef" in url
+        assert "project=greenearth-471522" in url
+        # time range encoded as start/end ISO timestamps
+        assert "2026-07-31T02:00" in url and "2026-07-31T04:00" in url
+
+    def test_dashboard_url_returns_none_without_ids_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(lib, "DASHBOARD_IDS_FILE", str(tmp_path / "missing.env"))
+        assert (
+            lib.dashboard_url("stage", datetime.now(timezone.utc), datetime.now(timezone.utc))
+            is None
+        )

@@ -46,6 +46,148 @@ def fake_http_client(monkeypatch):
     return client
 
 
+class _RecordingCollector:
+    def __init__(self):
+        self.records = []
+
+    def record(self, name, value, **attrs):
+        self.records.append((name, value, attrs))
+
+
+class TestGetFollowedUserDidsFailureCounters:
+    """bsky.follows.failure_count is recorded with a status_code label once
+    per failed lookup, whether it raises or falls back to partial results."""
+
+    @pytest.mark.asyncio
+    async def test_counts_http_status_failures(self, fake_http_client, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
+
+        request = httpx.Request("GET", "https://example.test")
+        response = httpx.Response(503, request=request)
+        fake_http_client.response = FakeResponse(
+            status_exc=httpx.HTTPStatusError(
+                "service unavailable", request=request, response=response
+            )
+        )
+
+        with pytest.raises(FollowedUsersLookupError):
+            await get_followed_user_dids("did:plc:x", limit=10)
+
+        assert ("bsky.follows.failure_count", 1, {"status_code": "503"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_timeouts(self, fake_http_client, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
+
+        request = httpx.Request("GET", "https://example.test")
+        fake_http_client.response = FakeResponse(
+            status_exc=httpx.ConnectTimeout("connect timed out", request=request)
+        )
+
+        with pytest.raises(FollowedUsersLookupError):
+            await get_followed_user_dids("did:plc:x", limit=10)
+
+        assert ("bsky.follows.failure_count", 1, {"status_code": "timeout"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_connection_failures(self, fake_http_client, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
+
+        request = httpx.Request("GET", "https://example.test")
+        fake_http_client.response = FakeResponse(
+            status_exc=httpx.ConnectError("connection refused", request=request)
+        )
+
+        with pytest.raises(FollowedUsersLookupError):
+            await get_followed_user_dids("did:plc:x", limit=10)
+
+        assert (
+            "bsky.follows.failure_count",
+            1,
+            {"status_code": "connection"},
+        ) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_counts_exactly_once_when_first_page_fails_with_no_partials(
+        self, fake_http_client, monkeypatch
+    ):
+        """A lookup that fails on its first page (no partial data accumulated
+        yet) re-raises out of the inner per-page handler and is counted once
+        by the outer handler that catches it -- not twice."""
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
+
+        request = httpx.Request("GET", "https://example.test")
+        response = httpx.Response(503, request=request)
+        fake_http_client.response = FakeResponse(
+            status_exc=httpx.HTTPStatusError(
+                "service unavailable", request=request, response=response
+            )
+        )
+
+        with pytest.raises(FollowedUsersLookupError):
+            await get_followed_user_dids("did:plc:x", limit=10)
+
+        failures = [r for r in collector.records if r[0] == "bsky.follows.failure_count"]
+        assert failures == [("bsky.follows.failure_count", 1, {"status_code": "503"})]
+
+    @pytest.mark.asyncio
+    async def test_counts_malformed_first_page_with_no_partials(
+        self, fake_http_client, monkeypatch
+    ):
+        """A malformed first-page response (not a list of follows) raises
+        FollowedUsersLookupError through the inner handler's bare re-raise,
+        then through the outer `except FollowedUsersLookupError: raise`
+        clause -- it must still be counted exactly once, matching the
+        malformed-response-with-partials case."""
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
+
+        fake_http_client.response = FakeResponse({"follows": {"did": "not-a-list"}})
+
+        with pytest.raises(FollowedUsersLookupError, match="Unexpected follows response"):
+            await get_followed_user_dids("did:plc:x", limit=10)
+
+        failures = [r for r in collector.records if r[0] == "bsky.follows.failure_count"]
+        assert failures == [("bsky.follows.failure_count", 1, {"status_code": "other"})]
+
+    @pytest.mark.asyncio
+    async def test_counts_once_for_partial_result_fallback(
+        self, fake_http_client, monkeypatch, caplog
+    ):
+        """A later-page failure that falls back to partial results still
+        counts as one external failure."""
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
+
+        async def fake_sleep(delay):
+            return None
+
+        monkeypatch.setattr(bsky_module.asyncio, "sleep", fake_sleep)
+        request = httpx.Request("GET", "https://example.test")
+        response = httpx.Response(503, request=request)
+        first_page = [{"did": f"did:plc:follow{i}"} for i in range(100)]
+        error_page = FakeResponse(
+            status_exc=httpx.HTTPStatusError(
+                "service unavailable", request=request, response=response
+            )
+        )
+        fake_http_client.responses = [
+            FakeResponse({"follows": first_page, "cursor": "next-page"}),
+            error_page,
+            error_page,
+        ]
+
+        dids = await get_followed_user_dids("did:plc:user1", limit=200)
+
+        assert dids == [f"did:plc:follow{i}" for i in range(100)]
+        failures = [r for r in collector.records if r[0] == "bsky.follows.failure_count"]
+        assert failures == [("bsky.follows.failure_count", 1, {"status_code": "503"})]
+
+
 class TestGetFollowedUserDids:
     @pytest.mark.asyncio
     async def test_returns_followed_dids_and_uses_query_params(self, fake_http_client):

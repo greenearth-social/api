@@ -3,9 +3,18 @@
 import asyncio
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from . import inference as inference_module
+
+
+class _RecordingCollector:
+    def __init__(self):
+        self.records = []
+
+    def record(self, name, value, **attrs):
+        self.records.append((name, value, attrs))
 
 
 @pytest.fixture(autouse=True)
@@ -154,6 +163,136 @@ async def test_predict_heavy_ranker_single_user_raises_for_http_error(monkeypatc
             base_url="https://inference.example",
             api_key="secret",
         )
+
+
+class TestPredictFailureCounters:
+    """rank.model.failure_count is recorded with a status_code label for
+    both prediction call paths."""
+
+    @pytest.mark.asyncio
+    async def test_ranker_counts_non_2xx_status(self, monkeypatch):
+        class FakeResponse:
+            is_error = True
+            status_code = 500
+            text = "ranker down"
+
+        class FakeClient:
+            async def post(self, url, json, headers):
+                return FakeResponse()
+
+        collector = _RecordingCollector()
+        monkeypatch.setattr(inference_module, "get_metric_collector", lambda: collector)
+        monkeypatch.setattr(inference_module, "get_http_client", lambda: FakeClient())
+
+        with pytest.raises(RuntimeError, match="ranker inference failed status=500"):
+            await inference_module.predict_heavy_ranker_single_user(
+                history_embeddings=[],
+                history_author_dids=[],
+                history_liked_at_times=[],
+                history_like_counts=[],
+                candidate_post_embeddings=[[0.0, 1.0]],
+                candidate_author_dids=["did:plc:candidate"],
+                candidate_like_counts=[0],
+                base_url="https://inference.example",
+                api_key="secret",
+            )
+
+        assert ("rank.model.failure_count", 1, {"status_code": "500"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_ranker_counts_connect_errors(self, monkeypatch):
+        class FakeClient:
+            async def post(self, url, json, headers):
+                raise httpx.ConnectError("boom", request=httpx.Request("POST", url))
+
+        collector = _RecordingCollector()
+        monkeypatch.setattr(inference_module, "get_metric_collector", lambda: collector)
+        monkeypatch.setattr(inference_module, "get_http_client", lambda: FakeClient())
+
+        with pytest.raises(httpx.ConnectError):
+            await inference_module.predict_heavy_ranker_single_user(
+                history_embeddings=[],
+                history_author_dids=[],
+                history_liked_at_times=[],
+                history_like_counts=[],
+                candidate_post_embeddings=[[0.0, 1.0]],
+                candidate_author_dids=["did:plc:candidate"],
+                candidate_like_counts=[0],
+                base_url="https://inference.example",
+                api_key="secret",
+            )
+
+        assert ("rank.model.failure_count", 1, {"status_code": "connection"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_ranker_counts_read_timeout(self, monkeypatch):
+        class FakeClient:
+            async def post(self, url, json, headers):
+                raise httpx.ReadTimeout("boom", request=httpx.Request("POST", url))
+
+        collector = _RecordingCollector()
+        monkeypatch.setattr(inference_module, "get_metric_collector", lambda: collector)
+        monkeypatch.setattr(inference_module, "get_http_client", lambda: FakeClient())
+
+        with pytest.raises(httpx.ReadTimeout):
+            await inference_module.predict_heavy_ranker_single_user(
+                history_embeddings=[],
+                history_author_dids=[],
+                history_liked_at_times=[],
+                history_like_counts=[],
+                candidate_post_embeddings=[[0.0, 1.0]],
+                candidate_author_dids=["did:plc:candidate"],
+                candidate_like_counts=[0],
+                base_url="https://inference.example",
+                api_key="secret",
+            )
+
+        assert ("rank.model.failure_count", 1, {"status_code": "timeout"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_user_tower_counts_non_2xx_status(self, monkeypatch):
+        class FakeResponse:
+            is_error = True
+            status_code = 503
+            text = "user-tower down"
+
+        class FakeClient:
+            async def post(self, url, json, headers):
+                return FakeResponse()
+
+        collector = _RecordingCollector()
+        monkeypatch.setattr(inference_module, "get_metric_collector", lambda: collector)
+        monkeypatch.setattr(inference_module, "get_http_client", lambda: FakeClient())
+
+        with pytest.raises(RuntimeError, match="user-tower inference failed status=503"):
+            await inference_module.predict_user_tower_single(
+                history_embeddings=[],
+                history_author_dids=[],
+                base_url="https://inference.example",
+                api_key="secret",
+            )
+
+        assert ("rank.model.failure_count", 1, {"status_code": "503"}) in collector.records
+
+    @pytest.mark.asyncio
+    async def test_user_tower_counts_connect_errors(self, monkeypatch):
+        class FakeClient:
+            async def post(self, url, json, headers):
+                raise httpx.ConnectError("boom", request=httpx.Request("POST", url))
+
+        collector = _RecordingCollector()
+        monkeypatch.setattr(inference_module, "get_metric_collector", lambda: collector)
+        monkeypatch.setattr(inference_module, "get_http_client", lambda: FakeClient())
+
+        with pytest.raises(httpx.ConnectError):
+            await inference_module.predict_user_tower_single(
+                history_embeddings=[],
+                history_author_dids=[],
+                base_url="https://inference.example",
+                api_key="secret",
+            )
+
+        assert ("rank.model.failure_count", 1, {"status_code": "connection"}) in collector.records
 
 
 @pytest.mark.asyncio

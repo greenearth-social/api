@@ -6,10 +6,12 @@ import asyncio
 import logging
 import os
 import time
+from urllib.parse import urlsplit
 
 import aiohttp
 
 from ..models import CandidatePost
+from .client_metrics import aiohttp_trace_config
 from .http_client import get_http_client
 from .pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from .telemetry import timed
@@ -21,10 +23,38 @@ _SCORE_TIMEOUT_SECONDS = 1.0
 _SCORE_ATTEMPTS = 2
 
 
+def get_metric_collector():
+    """Indirection point so tests can monkeypatch at module level."""
+    from .metrics import get_metric_collector as _get
+    return _get()
+
+
+def _status_code_label(exc: BaseException) -> str:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, aiohttp.ClientConnectionError):
+        return "connection"
+    status = getattr(exc, "status", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    return str(status) if status else "other"
+
+
+def _count_failure(metric: str, exc: BaseException) -> None:
+    collector = get_metric_collector()
+    if collector is not None:
+        collector.record(metric, 1, status_code=_status_code_label(exc))
+
+
 def _perspective_url() -> str:
     """Perspective API endpoint URL, overridable via GE_PERSPECTIVE_HOST for local profiling."""
     host = os.environ.get("GE_PERSPECTIVE_HOST", _PERSPECTIVE_HOST_DEFAULT)
     return f"{host}/v1alpha1/comments:analyze"
+
+
+def _perspective_host_label() -> str:
+    """Host label for the `client.in_flight` metric, matching the httpx
+    transport's host-label semantics (InFlightTransport uses
+    `request.url.host`)."""
+    return urlsplit(_perspective_url()).hostname or "unknown"
 
 
 class PerspectiveLanguageNotSupportedError(Exception):
@@ -124,6 +154,7 @@ class PerspectiveClient:
             raise RuntimeError("GE_PERSPECTIVE_API_KEY environment variable is not set")
         self._api_key = key
         self._session: aiohttp.ClientSession | None = None
+        self._in_flight = 0
 
     def _get_session(self) -> aiohttp.ClientSession:
         """Lazily build the dedicated aiohttp session.
@@ -143,7 +174,10 @@ class PerspectiveClient:
                 enable_cleanup_closed=True,
                 keepalive_timeout=45,
             )
-            self._session = aiohttp.ClientSession(connector=connector)
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                trace_configs=[aiohttp_trace_config("perspective")],
+            )
         return self._session
 
     async def close(self) -> None:
@@ -196,29 +230,46 @@ class PerspectiveClient:
         session = self._get_session()
         timeout = aiohttp.ClientTimeout(total=_SCORE_TIMEOUT_SECONDS)
 
-        for attempt in range(_SCORE_ATTEMPTS):
-            try:
-                async with timed(logger, "perspective.score.duration_ms", record_metric=True):
-                    async with session.post(
-                        _perspective_url(),
-                        params={"key": self._api_key},
-                        json=payload,
-                        timeout=timeout,
-                    ) as response:
-                        if response.status != 200:
-                            await self._handle_error_response(response, content)
-                        data = await response.json()
-                return self._extract_score(data)
-            except TimeoutError:
-                if attempt == _SCORE_ATTEMPTS - 1:
-                    raise
-                logger.warning(
-                    "Perspective API timeout (%ss) scoring content %.80r; retrying",
-                    _SCORE_TIMEOUT_SECONDS,
-                    content,
+        # `client.in_flight` is the saturation signal for this session: the
+        # connector is unbounded (limit=0/limit_per_host=0, see
+        # _get_session), so `client.pool.wait_ms` can structurally never
+        # fire here -- there's no pool cap to queue behind. This counter
+        # tracks concurrent score() calls instead. Increment/record happen
+        # inside the try so the `finally` decrement always runs, even if
+        # `collector.record` itself raises.
+        self._in_flight += 1
+        try:
+            collector = get_metric_collector()
+            if collector is not None:
+                collector.record(
+                    "client.in_flight", self._in_flight, host=_perspective_host_label()
                 )
 
-        raise AssertionError("unreachable: loop above always returns or raises")
+            for attempt in range(_SCORE_ATTEMPTS):
+                try:
+                    async with timed(logger, "perspective.score.duration_ms", record_metric=True):
+                        async with session.post(
+                            _perspective_url(),
+                            params={"key": self._api_key},
+                            json=payload,
+                            timeout=timeout,
+                        ) as response:
+                            if response.status != 200:
+                                await self._handle_error_response(response, content)
+                            data = await response.json()
+                    return self._extract_score(data)
+                except TimeoutError:
+                    if attempt == _SCORE_ATTEMPTS - 1:
+                        raise
+                    logger.warning(
+                        "Perspective API timeout (%ss) scoring content %.80r; retrying",
+                        _SCORE_TIMEOUT_SECONDS,
+                        content,
+                    )
+
+            raise AssertionError("unreachable: loop above always returns or raises")
+        finally:
+            self._in_flight -= 1
 
 
 # Client-side rate limiter tracking usage within the current calendar-minute
@@ -279,6 +330,9 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
             return None
         if not await _rate_limit_acquire():
             logger.warning("Perspective API minute quota exhausted; using missing score for post %s", c.at_uri)
+            collector = get_metric_collector()
+            if collector is not None:
+                collector.record("perspective.score.failure_count", 1, status_code="quota")
             return None
         try:
             return await client.score(c.content)
@@ -290,6 +344,7 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
             )
             return None  # expected — not a degradation
         except aiohttp.ClientResponseError as exc:
+            _count_failure("perspective.score.failure_count", exc)
             if exc.status == 429:
                 logger.warning(
                     "Perspective API rate limited for post %s; using missing score", c.at_uri
@@ -305,6 +360,7 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
                 ))
             return None
         except Exception as exc:
+            _count_failure("perspective.score.failure_count", exc)
             logger.exception("Perspective API scoring failed for post %s", c.at_uri)
             ctx = current_pipeline_context()
             if ctx is not None:

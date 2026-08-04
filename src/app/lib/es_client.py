@@ -5,6 +5,15 @@ the wrapper logs a single WARNING line carrying the full request body
 so the query can be replayed verbatim — paste the ``body=`` JSON into
 curl or Kibana to reproduce.
 
+Records metrics:
+- ``es.query.duration_ms``: client-side elapsed time (histogram, labeled by ``op``)
+- ``es.query.took_ms``: server-side time from ES response (histogram, labeled by ``op``; omitted if missing)
+- ``es.query.error_count``: counted on any exception, labeled by ``op`` and
+  ``error`` (``"timeout"`` | ``"connection"`` | ``"other"``)
+- ``es.client.in_flight``: concurrent in-flight ``.search()`` calls sampled
+  per call (histogram, labeled by ``op``) — the queue-position signal for
+  this wrapper (see issue #344)
+
 Other attributes (e.g. ``close``, ``indices``) are exposed transparently
 via ``__getattr__`` so the wrapper is a drop-in for the underlying
 ``AsyncElasticsearch`` client.
@@ -18,10 +27,42 @@ import os
 import time
 
 from elastic_transport import ConnectionTimeout
+from elastic_transport import ConnectionError as EsConnectionError
 
 from .request_context import get_request_id
 
 logger = logging.getLogger(__name__)
+
+
+def get_metric_collector():
+    """Indirection point so tests can monkeypatch at module level."""
+    from .metrics import get_metric_collector as _get
+    return _get()
+
+
+def _extract_took(resp) -> float | None:
+    body = getattr(resp, "body", resp)
+    if isinstance(body, dict):
+        took = body.get("took")
+        if isinstance(took, (int, float)):
+            return float(took)
+    return None
+
+
+def _record_query_metrics(op: str, elapsed_ms: float, took_ms: float | None) -> None:
+    collector = get_metric_collector()
+    if collector is None:
+        return
+    collector.record("es.query.duration_ms", elapsed_ms, op=op)
+    if took_ms is not None:
+        collector.record("es.query.took_ms", took_ms, op=op)
+
+
+def _record_query_error(op: str, error: str) -> None:
+    collector = get_metric_collector()
+    if collector is None:
+        return
+    collector.record("es.query.error_count", 1, op=op, error=error)
 
 
 def _slow_threshold_ms() -> float:
@@ -37,6 +78,7 @@ class SlowQueryLoggingES:
 
     def __init__(self, wrapped) -> None:
         self._wrapped = wrapped
+        self._in_flight = 0
 
     def __getattr__(self, name: str):
         # Delegated for every attribute other than the ones explicitly
@@ -44,19 +86,36 @@ class SlowQueryLoggingES:
         # context-manager protocols, etc.
         return getattr(self._wrapped, name)
 
-    async def search(self, *args, **kwargs):
+    async def search(self, *args, op: str = "unlabeled", **kwargs):
         start = time.monotonic()
         timed_out = False
+        took_ms: float | None = None
+        self._in_flight += 1
+        collector = get_metric_collector()
+        if collector is not None:
+            collector.record("es.client.in_flight", self._in_flight, op=op)
         try:
-            return await self._wrapped.search(*args, **kwargs)
+            resp = await self._wrapped.search(*args, **kwargs)
+            took_ms = _extract_took(resp)
+            return resp
         except ConnectionTimeout:
             timed_out = True
             elapsed_ms = (time.monotonic() - start) * 1000
             _log_timeout_search(elapsed_ms, args, kwargs)
+            _record_query_metrics(op, elapsed_ms, None)
+            _record_query_error(op, "timeout")
+            raise
+        except EsConnectionError:
+            _record_query_error(op, "connection")
+            raise
+        except Exception:
+            _record_query_error(op, "other")
             raise
         finally:
+            self._in_flight -= 1
             if not timed_out:
                 elapsed_ms = (time.monotonic() - start) * 1000
+                _record_query_metrics(op, elapsed_ms, took_ms)
                 if elapsed_ms >= _slow_threshold_ms():
                     _log_slow_search(elapsed_ms, args, kwargs)
 
