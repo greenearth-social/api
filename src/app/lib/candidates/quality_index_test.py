@@ -109,10 +109,12 @@ class TestTwoTowerUsesQualityIndex:
         ):
             await generator.generate(object(), "did:plc:user1", num_candidates=10)
 
-        assert knn_search.await_args.kwargs["index"] == POSTS_QUALITY_KNN_INDEX
+        assert knn_search.await_args is not None
+        kwargs = knn_search.await_args.kwargs
+        assert kwargs["index"] == POSTS_QUALITY_KNN_INDEX
         # The pre-filter and the window cap are unchanged by this switch.
-        assert knn_search.await_args.kwargs["min_like_count"] == MIN_LIKE_COUNT
-        assert knn_search.await_args.kwargs["max_age_hours"] == TWO_TOWER_MAX_AGE_CAP_HOURS
+        assert kwargs["min_like_count"] == MIN_LIKE_COUNT
+        assert kwargs["max_age_hours"] == TWO_TOWER_MAX_AGE_CAP_HOURS
 
     @pytest.mark.asyncio
     async def test_generate_honours_the_index_override(self, monkeypatch):
@@ -127,4 +129,5 @@ class TestTwoTowerUsesQualityIndex:
         ):
             await generator.generate(object(), "did:plc:user1", num_candidates=10)
 
+        assert knn_search.await_args is not None
         assert knn_search.await_args.kwargs["index"] == POSTS_KNN_INDEX
