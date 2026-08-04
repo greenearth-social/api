@@ -120,7 +120,7 @@ them after any capacity change (instance sizing, ES cluster shape, pool caps).
 | Row / chart | Threshold | Source measurement |
 |---|---|---|
 | 1 — `feed.render` p50/p95 by traffic | **2500 ms** | Healthy steady-state probe p95 is 1.6–2.2 s; a saturated instance pins at the 10 s client ceiling. 2,500 ms sits just above healthy and well below broken. |
-| 1 — Failures + degraded + 5xx per min | **1 / min** | Clean burst 2 ran ~0 failures, trace degraded, ≤0.5 5xx/min; burst 1 ran 2–3 failures + 15–18 degraded + 7–9 5xx per minute. |
+| 1 — Failure, degradation and 5xx rate | **1%** | Expressed as a share of renders rather than a count per minute, so the goal is comparable between a quiet night and a load test. |
 | 3 — `eventloop.lag_ms` p95 per instance | **100 ms** | A healthy asyncio loop lags <10 ms; a saturated instance lags into the seconds. 100 ms is an order of magnitude above healthy and an order below saturated. |
 | 3 — Dependency failures/min by class | **1 / min** | Dependency failures are ≈0 in steady state; any sustained non-zero class is a finding. Same basis as the row-1 failure line. |
 | 3 — `client.in_flight` / `es.client.in_flight` p95 | **100** | The pool caps: `GE_HTTP_MAX_CONNECTIONS` (default 100, `lib/http_client.py`) for the shared httpx client, and `GE_ES_CONNECTIONS_PER_NODE` (default 100, introduced in PR #346) for the ES client. Either series flattening at its cap is the client-side starvation signal. |
@@ -145,32 +145,35 @@ Cloud Monitoring enforces these; each one fails silently or at deploy time:
 
 ## Chart inventory
 
-Six rows, 20 charts, one section header per row. Every latency chart
-carries both p95 and p50: the tail is what users feel, the median tells you
-whether the tail is the whole distribution moving or a few slow requests.
+Six rows, 20 charts, one section header per row.
 
-| Row | Chart | Series |
-|---|---|---|
-| 1 | Feed renders per minute by traffic class | 2 |
-| 1 | Feed render latency by traffic class (dashed: 24h earlier) | 3 |
-| 1 | Failed, degraded and 5xx responses per minute | 3 |
-| 2 | Candidate generation latency by generator | 2 |
-| 2 | Ranking latency: api client-side vs inference server-side | 4 |
-| 2 | Perspective scoring latency and failures per minute | 3 |
-| 3 | Event-loop scheduling lag per instance | 2 |
-| 3 | Cloud Run instances, CPU and memory utilization | 5 |
-| 3 | Dependency failures per minute by cause | 4 |
-| 3 | Outbound connection setup time by client | 2 |
-| 3 | Concurrent outbound requests in flight vs pool cap | 4 |
-| 4 | Elasticsearch query latency: api client-side vs cluster-reported | 4 |
-| 4 | Elasticsearch search thread pool: queued and rejected | 2 |
-| 4 | Elasticsearch mean search latency, data nodes | 1 |
-| 5 | Major page faults per second per data node (cache misses) | 1 |
-| 5 | Disk read throughput per data node (cold reads) | 1 |
-| 5 | Page-cache memory per data node | 1 |
-| 6 | Ingest freshness by source | 2 |
-| 6 | Ingest bulk-index latency by index | 10 |
-| 6 | Cluster health: JVM GC, circuit breakers and disk latency | 3 |
+p50 is charted alongside p95 only where the shape of the distribution is the
+question — feed render latency and Perspective scoring. Everywhere else the
+tail is the signal (a saturation threshold, a pool cap, a slow generator) and
+a median line would only add series to read past.
+
+| Row | Chart | Series | Query |
+|---|---|---|---|
+| 1 | Feed renders per minute by traffic class | 2 | PromQL |
+| 1 | Feed render latency by traffic class | 2 | PromQL |
+| 1 | Failure, degradation and 5xx rate (% of renders) | 3 | PromQL |
+| 2 | Candidate generation latency by generator | 1 | PromQL |
+| 2 | Ranking latency: api client-side vs inference server-side | 2 | PromQL |
+| 2 | Perspective scoring latency and failures per minute | 3 | PromQL |
+| 3 | Event-loop scheduling lag per instance | 1 | PromQL |
+| 3 | Cloud Run instances, CPU and memory utilization | 3 | builder |
+| 3 | Dependency failures per minute by cause | 4 | PromQL |
+| 3 | Outbound connection setup time by client | 1 | PromQL |
+| 3 | Concurrent outbound requests in flight vs pool cap | 2 | PromQL |
+| 4 | Elasticsearch query latency: api client-side vs cluster-reported | 2 | PromQL |
+| 4 | Elasticsearch search thread pool: queued and rejected | 2 | PromQL |
+| 4 | Elasticsearch mean search latency, data nodes | 1 | PromQL |
+| 5 | Major page faults per second per data node (cache misses) | 1 | PromQL |
+| 5 | Disk read throughput per data node (cold reads) | 1 | PromQL |
+| 5 | Page-cache memory per data node | 1 | PromQL |
+| 6 | Ingest freshness by source | 1 | builder |
+| 6 | Ingest bulk-index latency by index | 5 | builder |
+| 6 | Cluster health: JVM GC, circuit breakers and disk latency | 3 | mixed |
 
 Row 2's ranking gap chart pairs series across repos by `model_name`: api's
 `rank.model.duration_ms` values `two_tower` / `heavy_ranker` correspond to
@@ -179,14 +182,26 @@ inference-service's `inference.predict.duration_ms` values `user-tower` /
 the same model, so match the pairs by that mapping rather than by literal label
 equality.
 
-### Aggregation windows
+### Smoothing
 
-Distribution (percentile) charts align over **120 s**; counter charts stay at
-**60 s**. Metrics export every 60 s, so a 60 s percentile bucket holds a single
-export and reads as noise. Doubling the window halves that noise and puts more
-samples behind each percentile, while still leaving five points across a
-ten-minute load test. Counters keep the 60 s window so the axis and the
-threshold lines both mean "per minute" literally.
+Most latency and rate charts are PromQL with a **5-minute sliding window**
+(`rate(...[5m])`). A sliding window averages five minutes of samples behind
+every point while the points themselves stay at the chart's own step, so the
+line smooths without losing temporal resolution — which simply widening the
+alignment period cannot do. Five minutes is the compromise that keeps a
+ten-minute load test legible: it shows a ramp and a plateau rather than one
+blended average.
+
+Percentiles are computed with `histogram_quantile` over the exported histogram
+buckets, so the percentile is taken across merged buckets rather than by
+averaging per-instance percentiles.
+
+The charts still on the query builder (Cloud Run built-ins, ingest) align over
+120s; distributions there are noisier at 60s, which is one export per bucket.
+
+A percentile is only as stable as the number of samples behind it. At low
+traffic a p95 is estimated from few requests and stays jumpy no matter the
+window — widen the time range rather than reading minute-to-minute movement.
 
 ### Deliberate omissions
 

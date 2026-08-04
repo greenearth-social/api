@@ -31,37 +31,15 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "success traffic=${metric.labels.traffic}",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.success_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": [
-                        "metric.label.\"traffic\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "60 * sum by (traffic)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.success_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m]))"
                 }
               },
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "failure traffic=${metric.labels.traffic}",
+                "legendTemplate": "failed traffic=${metric.labels.traffic}",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": [
-                        "metric.label.\"traffic\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "60 * sum by (traffic)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m]))"
                 }
               }
             ],
@@ -82,27 +60,15 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "Feed render latency by traffic class (dashed: 24h earlier)",
+          "title": "Feed render latency by traffic class",
           "xyChart": {
-            "timeshiftDuration": "86400s",
             "dataSets": [
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
                 "legendTemplate": "p95 traffic=${metric.labels.traffic}",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": [
-                        "metric.label.\"traffic\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, traffic)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               },
               {
@@ -110,37 +76,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "p50 traffic=${metric.labels.traffic}",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "metric.label.\"traffic\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "p50 traffic=${metric.labels.traffic}",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "metric.label.\"traffic\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.5, sum by (le, traffic)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               }
             ],
@@ -167,74 +103,43 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "Failed, degraded and 5xx responses per minute",
+          "title": "Failure, degradation and 5xx rate (% of renders)",
           "xyChart": {
             "dataSets": [
               {
-                "plotType": "STACKED_AREA",
+                "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "failed status_code=${metric.labels.status_code}",
+                "legendTemplate": "failed % of renders",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": [
-                        "metric.label.\"status_code\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "STACKED_AREA",
-                "targetAxis": "Y1",
-                "legendTemplate": "degraded feed=${metric.labels.feed_name}",
-                "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/feed.render.degraded_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": [
-                        "metric.label.\"feed_name\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "100 * (sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)) / clamp_min((sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.success_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)) + (sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)), 0.0001)"
                 }
               },
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "Cloud Run 5xx responses",
+                "legendTemplate": "degraded % of renders",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"run.googleapis.com/request_count\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\" metric.label.\"response_code_class\"=\"5xx\"",
-                    "aggregation": {
-                      "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": []
-                    }
-                  }
+                  "prometheusQuery": "100 * (sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.degraded_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)) / clamp_min((sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.success_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)) + (sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)), 0.0001)"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "5xx % of requests",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "100 * (sum(rate({__name__=\"run.googleapis.com/request_count\", monitored_resource=\"cloud_run_revision\", service_name=\"greenearth-api-${ENV}\", response_code_class=\"5xx\"}[5m])) or vector(0)) / clamp_min(sum(rate({__name__=\"run.googleapis.com/request_count\", monitored_resource=\"cloud_run_revision\", service_name=\"greenearth-api-${ENV}\"}[5m])), 0.0001)"
                 }
               }
             ],
             "thresholds": [
               {
                 "value": 1,
-                "label": "expected ceiling (1/min)",
+                "label": "failure-rate goal (1%)",
                 "targetAxis": "Y1"
               }
             ],
             "yAxis": {
-              "label": "events / min",
+              "label": "% of renders",
               "scale": "LINEAR"
             },
             "chartOptions": {
@@ -270,37 +175,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "p95 generator=${metric.labels.generator_name}",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/candidates.generate.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": [
-                        "metric.label.\"generator_name\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "p50 generator=${metric.labels.generator_name}",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/candidates.generate.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "metric.label.\"generator_name\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, generator_name)(rate({__name__=\"custom.googleapis.com/greenearth-api/candidates.generate.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               }
             ],
@@ -329,37 +204,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "api p95 model=${metric.labels.model_name}",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/rank.model.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": [
-                        "metric.label.\"model_name\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "api p50 model=${metric.labels.model_name}",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/rank.model.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "metric.label.\"model_name\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, model_name)(rate({__name__=\"custom.googleapis.com/greenearth-api/rank.model.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               },
               {
@@ -367,37 +212,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "inference p95 model=${metric.labels.model_name}",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-inference/inference.predict.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": [
-                        "metric.label.\"model_name\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "inference p50 model=${metric.labels.model_name}",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-inference/inference.predict.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "metric.label.\"model_name\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, model_name)(rate({__name__=\"custom.googleapis.com/greenearth-inference/inference.predict.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               }
             ],
@@ -426,16 +241,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "p95 duration",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/perspective.score.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": []
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/perspective.score.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               },
               {
@@ -443,35 +249,15 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "p50 duration",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/perspective.score.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": []
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.5, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/perspective.score.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               },
               {
-                "plotType": "STACKED_BAR",
+                "plotType": "LINE",
                 "targetAxis": "Y2",
-                "legendTemplate": "failures status_code=${metric.labels.status_code}",
+                "legendTemplate": "failures/min status_code=${metric.labels.status_code}",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/perspective.score.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": [
-                        "metric.label.\"status_code\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "60 * sum by (status_code)(rate({__name__=\"custom.googleapis.com/greenearth-api/perspective.score.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m]))"
                 }
               }
             ],
@@ -515,39 +301,9 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "p95 instance=${resource.labels.task_id}",
+                "legendTemplate": "p95 instance=${metric.labels.task_id}",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/eventloop.lag_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": [
-                        "resource.label.\"task_id\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "p50 instance=${resource.labels.task_id}",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/eventloop.lag_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "resource.label.\"task_id\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, task_id)(rate({__name__=\"custom.googleapis.com/greenearth-api/eventloop.lag_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               }
             ],
@@ -616,23 +372,6 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y2",
-                "legendTemplate": "CPU p50",
-                "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"run.googleapis.com/container/cpu/utilizations\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_50",
-                      "crossSeriesReducer": "REDUCE_MEAN",
-                      "groupByFields": []
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y2",
                 "legendTemplate": "memory p95",
                 "timeSeriesQuery": {
                   "unitOverride": "1",
@@ -641,23 +380,6 @@
                     "aggregation": {
                       "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_PERCENTILE_95",
-                      "crossSeriesReducer": "REDUCE_MEAN",
-                      "groupByFields": []
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y2",
-                "legendTemplate": "memory p50",
-                "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"run.googleapis.com/container/memory/utilizations\" resource.type=\"cloud_run_revision\" resource.label.\"service_name\"=\"greenearth-api-${ENV}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_PERCENTILE_50",
                       "crossSeriesReducer": "REDUCE_MEAN",
                       "groupByFields": []
                     }
@@ -690,79 +412,35 @@
           "xyChart": {
             "dataSets": [
               {
-                "plotType": "STACKED_AREA",
+                "plotType": "LINE",
                 "targetAxis": "Y1",
                 "legendTemplate": "elasticsearch error=${metric.labels.error}",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.error_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": [
-                        "metric.label.\"error\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "60 * sum by (error)(rate({__name__=\"custom.googleapis.com/greenearth-api/es.query.error_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m]))"
                 }
               },
               {
-                "plotType": "STACKED_AREA",
+                "plotType": "LINE",
                 "targetAxis": "Y1",
                 "legendTemplate": "perspective status_code=${metric.labels.status_code}",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/perspective.score.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": [
-                        "metric.label.\"status_code\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "60 * sum by (status_code)(rate({__name__=\"custom.googleapis.com/greenearth-api/perspective.score.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m]))"
                 }
               },
               {
-                "plotType": "STACKED_AREA",
+                "plotType": "LINE",
                 "targetAxis": "Y1",
                 "legendTemplate": "bluesky follows status_code=${metric.labels.status_code}",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/bsky.follows.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": [
-                        "metric.label.\"status_code\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "60 * sum by (status_code)(rate({__name__=\"custom.googleapis.com/greenearth-api/bsky.follows.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m]))"
                 }
               },
               {
-                "plotType": "STACKED_AREA",
+                "plotType": "LINE",
                 "targetAxis": "Y1",
                 "legendTemplate": "inference status_code=${metric.labels.status_code}",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/rank.model.failure_count\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "60s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_SUM",
-                      "groupByFields": [
-                        "metric.label.\"status_code\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "60 * sum by (status_code)(rate({__name__=\"custom.googleapis.com/greenearth-api/rank.model.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m]))"
                 }
               }
             ],
@@ -797,37 +475,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "connect p95 client=${metric.labels.client}",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.connect.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": [
-                        "metric.label.\"client\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "connect p50 client=${metric.labels.client}",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.connect.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "metric.label.\"client\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, client)(rate({__name__=\"custom.googleapis.com/greenearth-api/client.connect.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               }
             ],
@@ -856,37 +504,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "in flight p95 host=${metric.labels.host}",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": [
-                        "metric.label.\"host\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "in flight p50 host=${metric.labels.host}",
-                "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "metric.label.\"host\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, host)(rate({__name__=\"custom.googleapis.com/greenearth-api/client.in_flight_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               },
               {
@@ -894,37 +512,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "elasticsearch in flight p95 op=${metric.labels.op}",
                 "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": [
-                        "metric.label.\"op\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "elasticsearch in flight p50 op=${metric.labels.op}",
-                "timeSeriesQuery": {
-                  "unitOverride": "1",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.client.in_flight\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "metric.label.\"op\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, op)(rate({__name__=\"custom.googleapis.com/greenearth-api/es.client.in_flight_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               }
             ],
@@ -972,37 +560,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "client duration p95 op=${metric.labels.op}",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": [
-                        "metric.label.\"op\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "client duration p50 op=${metric.labels.op}",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.duration_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "metric.label.\"op\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, op)(rate({__name__=\"custom.googleapis.com/greenearth-api/es.query.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               },
               {
@@ -1010,37 +568,7 @@
                 "targetAxis": "Y1",
                 "legendTemplate": "cluster took p95 op=${metric.labels.op}",
                 "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": [
-                        "metric.label.\"op\""
-                      ]
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "cluster took p50 op=${metric.labels.op}",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/greenearth-api/es.query.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "metric.label.\"op\""
-                      ]
-                    }
-                  }
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, op)(rate({__name__=\"custom.googleapis.com/greenearth-api/es.query.took_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
               }
             ],
@@ -1277,25 +805,6 @@
                     }
                   }
                 }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "p50 source=${resource.labels.job}",
-                "timeSeriesQuery": {
-                  "unitOverride": "s",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/freshness_sec\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": [
-                        "resource.label.\"job\""
-                      ]
-                    }
-                  }
-                }
               }
             ],
             "thresholds": [
@@ -1344,23 +853,6 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "p50 index=posts",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_posts.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": []
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
                 "legendTemplate": "p95 index=likes",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
@@ -1370,23 +862,6 @@
                       "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": []
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "p50 index=likes",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_likes.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
                       "groupByFields": []
                     }
                   }
@@ -1412,23 +887,6 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "p50 index=inferences",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_inferences.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": []
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
                 "legendTemplate": "p95 index=tombstones",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
@@ -1446,23 +904,6 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "p50 index=tombstones",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_tombstones.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
-                      "groupByFields": []
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
                 "legendTemplate": "p95 index=like_tombstones",
                 "timeSeriesQuery": {
                   "unitOverride": "ms",
@@ -1472,23 +913,6 @@
                       "alignmentPeriod": "120s",
                       "perSeriesAligner": "ALIGN_DELTA",
                       "crossSeriesReducer": "REDUCE_PERCENTILE_95",
-                      "groupByFields": []
-                    }
-                  }
-                }
-              },
-              {
-                "plotType": "LINE",
-                "targetAxis": "Y1",
-                "legendTemplate": "p50 index=like_tombstones",
-                "timeSeriesQuery": {
-                  "unitOverride": "ms",
-                  "timeSeriesFilter": {
-                    "filter": "metric.type=\"custom.googleapis.com/ingex/es.bulk_index_like_tombstones.took_ms\" resource.type=\"generic_task\" resource.label.\"namespace\"=\"${NAMESPACE}\"",
-                    "aggregation": {
-                      "alignmentPeriod": "120s",
-                      "perSeriesAligner": "ALIGN_DELTA",
-                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
                       "groupByFields": []
                     }
                   }
