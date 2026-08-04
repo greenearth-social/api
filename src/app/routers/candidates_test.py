@@ -81,6 +81,23 @@ def fake_app_es():
                             ]
                         }
                     }
+            # two_tower kNN reads the lean quality corpus (ingex#442); the
+            # other generators still read the full posts_recent alias.
+            if index == "posts_recent_quality":
+                return {
+                    "hits": {
+                        "hits": [
+                            {
+                                "_score": 0.88,
+                                "_source": {
+                                    "at_uri": "at://result/1",
+                                    "content": "a cool post",
+                                    "embeddings": {MINILM_L12_EMBEDDING_KEY: [0.2, 0.3]},
+                                },
+                            }
+                        ]
+                    }
+                }
             if index == "posts_recent":
                 # function_score (popularity, random_posts)
                 if isinstance(query, dict) and "function_score" in query:

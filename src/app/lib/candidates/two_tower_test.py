@@ -11,6 +11,7 @@ from ..candidates.two_tower import (
     TWO_TOWER_MAX_AGE_CAP_HOURS,
     TwoTowerCandidateGenerator,
 )
+from ..elasticsearch import POSTS_QUALITY_KNN_INDEX
 from ..embeddings import GE_POST_EMBEDDING_FIELD
 
 TWO_TOWER_GENERATOR_NAME = "two_tower"
@@ -112,6 +113,7 @@ class TestTwoTowerCandidateGenerator:
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=MIN_LIKE_COUNT,
             max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
+            index=POSTS_QUALITY_KNN_INDEX,
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == candidates
@@ -225,6 +227,7 @@ class TestTwoTowerCandidateGenerator:
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=MIN_LIKE_COUNT,
             max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
+            index=POSTS_QUALITY_KNN_INDEX,
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == []
@@ -299,6 +302,7 @@ class TestTwoTowerCandidateGenerator:
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=MIN_LIKE_COUNT,
             max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
+            index=POSTS_QUALITY_KNN_INDEX,
         )
         assert result.candidates == []
 

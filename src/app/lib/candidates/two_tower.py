@@ -15,6 +15,7 @@ from ..inference import (
     HistoryMode,
 )
 from .es_candidates import knn_search_posts
+from ..elasticsearch import two_tower_knn_index
 from ..embeddings import GE_POST_EMBEDDING_FIELD
 
 logger = logging.getLogger(__name__)
@@ -22,14 +23,18 @@ logger = logging.getLogger(__name__)
 
 MIN_LIKE_COUNT = 20
 # Hard cap on the freshness window for two-tower, independent of the user's
-# freshness preference. The selective MIN_LIKE_COUNT filter makes Lucene
-# abandon the HNSW graph and brute-force scan every matching vector, so cost
-# scales with how many posts pass like_count>=20 inside the window:
-# ~928k over the 7-day default (a ~30s cold scan on prod) versus ~320k at 96h
-# (~95k/day; 100-350ms warm, measured on prod). The scanned set is identical
-# for every user, so it stays hot in the page cache and a cold scan re-warms
-# it for everyone in one query. Freshness preferences below this cap (6h-72h)
-# pass through unchanged; only the 7-day preset is clamped here.
+# freshness preference.
+#
+# This cap was introduced to bound a brute-force scan: against posts_recent the
+# selective MIN_LIKE_COUNT filter made Lucene abandon the HNSW graph and scan
+# every matching vector, so cost scaled with how many posts passed
+# like_count>=20 inside the window (~928k over the 7-day default, a ~30s cold
+# scan on prod, versus ~320k at 96h). Searching posts_recent_quality removes
+# that scan — membership *is* the like filter there, so the graph is used —
+# which removes this cap's original justification. It is left in place so the
+# index switch lands as a single variable; retiring it is greenearth-social/api#324.
+# Freshness preferences below this cap (6h-72h) pass through unchanged; only the
+# 7-day preset is clamped here.
 TWO_TOWER_MAX_AGE_CAP_HOURS = 96
 
 
@@ -105,6 +110,7 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
             ge_post_embedding_model_uuid=post_tower_uuid, min_like_count=MIN_LIKE_COUNT,
             max_age_hours=effective_max_age_hours,
+            index=two_tower_knn_index(),
         )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

@@ -22,20 +22,25 @@ async def knn_search_posts(
     ge_post_embedding_model_uuid: str | None = None,
     min_like_count: int | None = None,
     max_age_hours: int = 168,
+    index: str = POSTS_KNN_INDEX,
 ) -> list[CandidatePost]:
-    """Run a kNN search against the ``posts_recent`` index and return candidate posts.
+    """Run a kNN search against a posts index and return candidate posts.
 
     Filters are passed inside the kNN clause so ES applies them during HNSW
-    traversal. The ``posts_recent`` index contains only top-level posts (no
-    replies), so no reply-exclusion filter is needed.
+    traversal. Both ``posts_recent`` and ``posts_recent_quality`` contain only
+    top-level posts (no replies), so no reply-exclusion filter is needed.
+
+    ``index`` selects the corpus. Filter *selectivity* is what decides whether
+    Lucene stays on the HNSW graph: a filter matching a small fraction of a
+    segment makes it bypass the graph and exact-scan instead. ``two_tower``
+    therefore searches ``posts_recent_quality``, where its ``min_like_count``
+    filter is satisfied by ~every document, rather than ``posts_recent``, where
+    it matches ~4.6% (see greenearth-social/ingex#442).
 
     ``max_age_hours`` bounds candidates to recently created posts. It is typed
     ``int`` rather than ``MaxAgeHours`` because callers may pass a value off the
-    user-facing freshness ladder: when a selective filter such as
-    ``min_like_count`` is present, Lucene abandons the HNSW graph and
-    brute-force scans every vector matching the filter, so ``two_tower`` caps
-    the window well below the 7-day default to keep that scan affordable (and
-    hot in the page cache, since the scanned set is identical for every user).
+    user-facing freshness ladder — ``two_tower`` caps its window below the
+    7-day default (see ``TWO_TOWER_MAX_AGE_CAP_HOURS``).
     """
     # Freshness filters returned candidate posts only. Actual availability can
     # be shorter when posts_recent retains less data than the requested bound.
@@ -72,11 +77,11 @@ async def knn_search_posts(
     async with timed(
         logger,
         "knn_search_posts",
-        index=POSTS_KNN_INDEX,
+        index=index,
         num_candidates=num_candidates,
     ):
         resp = await es.search(
-            index=POSTS_KNN_INDEX,
+            index=index,
             op="knn",
             knn=knn_clause,
             size=num_candidates,
