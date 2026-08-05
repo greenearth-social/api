@@ -5,6 +5,7 @@ routers and candidate generators.
 """
 
 import logging
+import os
 
 from elastic_transport import ObjectApiResponse
 from fastapi import HTTPException
@@ -20,6 +21,24 @@ DEFAULT_LIKED_POSTS_LIMIT = 50
 
 # Index alias for KNN searches — targets only the last ~1 week of posts for speed.
 POSTS_KNN_INDEX = "posts_recent"
+
+# Lean two-week corpus holding only posts at or above the two-tower like
+# threshold (greenearth-social/ingex#442). Because membership *is* the
+# ``like_count>=20`` predicate, that filter matches ~100% of this index instead
+# of ~4.6% of posts_recent — which is the difference between Lucene searching
+# the HNSW graph and abandoning it to exact-scan every matching vector.
+POSTS_QUALITY_KNN_INDEX = "posts_recent_quality"
+
+
+def two_tower_knn_index() -> str:
+    """Return the index two-tower kNN should search.
+
+    ``GE_TWO_TOWER_KNN_INDEX`` pins this back to ``posts_recent`` for
+    environments where the quality corpus has not been backfilled yet
+    (``ingest/cmd/backfill_quality_index`` in the ingex repo).
+    """
+    configured = os.environ.get("GE_TWO_TOWER_KNN_INDEX", "").strip()
+    return configured or POSTS_QUALITY_KNN_INDEX
 
 
 POST_EMBEDDING_SOURCE_FIELDS = [ "content" ]

@@ -17,6 +17,16 @@ ENVIRONMENT="stage"
 # Elasticsearch configuration
 GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 
+# Index two-tower kNN searches. posts_recent_quality holds only posts at or
+# above MIN_LIKE_COUNT, so that filter is non-selective there and Lucene keeps
+# using the HNSW graph instead of exact-scanning every matching vector
+# (greenearth-social/ingex#442). Set explicitly rather than relying on the app
+# default so the deployed value is visible on the revision. Override with
+# GE_TWO_TOWER_KNN_INDEX=posts_recent to fall back to the full corpus — needed
+# in any environment where the quality corpus has not been backfilled yet
+# (ingex ingest/cmd/backfill_quality_index).
+GE_TWO_TOWER_KNN_INDEX="${GE_TWO_TOWER_KNN_INDEX:-posts_recent_quality}"
+
 # Inference configuration
 GE_INFERENCE_BASE_URL=""
 
@@ -254,6 +264,7 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_GIT_SHA=$GIT_SHA"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$GE_ELASTICSEARCH_URL"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_TWO_TOWER_KNN_INDEX=$GE_TWO_TOWER_KNN_INDEX"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_PROBE_USER_DID=did:plc:s4tl2ajfsnstzuxtegl7r33g"
@@ -472,6 +483,10 @@ while [[ $# -gt 0 ]]; do
             GE_ELASTICSEARCH_URL="$2"
             shift 2
             ;;
+        --two-tower-knn-index)
+            GE_TWO_TOWER_KNN_INDEX="$2"
+            shift 2
+            ;;
         --min-instances)
             API_INSTANCES_MIN="$2"
             shift 2
@@ -492,6 +507,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --region REGION          GCP region (default: us-east1)"
             echo "  --environment ENV        Environment name (default: stage)"
             echo "  --elasticsearch-url URL  Elasticsearch URL (default: INTERNAL_LB_PLACEHOLDER)"
+            echo "  --two-tower-knn-index IDX  Index for two-tower kNN (default: posts_recent_quality;"
+            echo "                             use posts_recent if the quality corpus is not backfilled)"
             echo "  --min-instances N        Minimum instances (default: 1)"
             echo "  --max-instances N        Maximum instances (default: 10)"
             echo "  --timeout SECONDS        Cloud Run request timeout (default: 60)"
