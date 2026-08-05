@@ -77,11 +77,25 @@ class TestKnnSearchPostsIndexParam:
         assert es.calls[0]["index"] == POSTS_KNN_INDEX
 
     @pytest.mark.asyncio
-    async def test_like_count_filter_is_still_applied(self):
-        # Kept deliberately. Against the quality corpus it is non-selective, so
-        # it costs nothing and does not trip Lucene's fallbacks — but it keeps
-        # the query's semantics identical to today's (a pre-filter, not a
-        # post-filter) and screens out any member whose count later drifts.
+    async def test_min_like_count_filter_is_emitted_when_a_caller_passes_one(self):
+        # knn_search_posts itself stays a plain query builder: it emits the
+        # filter whenever a caller supplies min_like_count, regardless of which
+        # index that caller chose. Whether to pass one is two_tower's decision
+        # (see TestTwoTowerUsesQualityIndex below), not this function's.
+        es = FakeEs()
+        await knn_search_posts(
+            es,
+            [0.1, 0.2],
+            num_candidates=10,
+            search_field=GE_POST_EMBEDDING_FIELD,
+            index=POSTS_KNN_INDEX,
+            min_like_count=20,
+        )
+        filters = es.calls[0]["knn"]["filter"]["bool"]["filter"]
+        assert {"range": {"like_count": {"gte": 20}}} in filters
+
+    @pytest.mark.asyncio
+    async def test_min_like_count_filter_is_omitted_when_a_caller_passes_none(self):
         es = FakeEs()
         await knn_search_posts(
             es,
@@ -89,10 +103,10 @@ class TestKnnSearchPostsIndexParam:
             num_candidates=10,
             search_field=GE_POST_EMBEDDING_FIELD,
             index=POSTS_QUALITY_KNN_INDEX,
-            min_like_count=20,
+            min_like_count=None,
         )
         filters = es.calls[0]["knn"]["filter"]["bool"]["filter"]
-        assert {"range": {"like_count": {"gte": 20}}} in filters
+        assert not any("like_count" in str(f) for f in filters)
 
 
 class TestTwoTowerUsesQualityIndex:
@@ -112,8 +126,11 @@ class TestTwoTowerUsesQualityIndex:
         assert knn_search.await_args is not None
         kwargs = knn_search.await_args.kwargs
         assert kwargs["index"] == POSTS_QUALITY_KNN_INDEX
-        # The pre-filter and the window cap are unchanged by this switch.
-        assert kwargs["min_like_count"] == MIN_LIKE_COUNT
+        # No traction filter against the quality corpus: membership already
+        # guarantees it, so reapplying MIN_LIKE_COUNT here would only add a
+        # cross-repo constant that has to track ingex's own promotion
+        # threshold for no behavioral benefit.
+        assert kwargs["min_like_count"] is None
         assert kwargs["max_age_hours"] == TWO_TOWER_MAX_AGE_CAP_HOURS
 
     @pytest.mark.asyncio
@@ -130,4 +147,8 @@ class TestTwoTowerUsesQualityIndex:
             await generator.generate(object(), "did:plc:user1", num_candidates=10)
 
         assert knn_search.await_args is not None
-        assert knn_search.await_args.kwargs["index"] == POSTS_KNN_INDEX
+        kwargs = knn_search.await_args.kwargs
+        assert kwargs["index"] == POSTS_KNN_INDEX
+        # Pinned back to the full corpus, MIN_LIKE_COUNT is the only thing
+        # enforcing any traction preference at all — it must still be applied.
+        assert kwargs["min_like_count"] == MIN_LIKE_COUNT

@@ -7,7 +7,6 @@ import pytest
 from ...models import CandidatePost
 from ..candidates import get_generator, list_generators
 from ..candidates.two_tower import (
-    MIN_LIKE_COUNT,
     TWO_TOWER_MAX_AGE_CAP_HOURS,
     TwoTowerCandidateGenerator,
 )
@@ -111,7 +110,7 @@ class TestTwoTowerCandidateGenerator:
             video_only=True,
             exclude_uris=["at://old/1", "at://old/2"],
             ge_post_embedding_model_uuid="post-tower-uuid",
-            min_like_count=MIN_LIKE_COUNT,
+            min_like_count=None,
             max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
             index=POSTS_QUALITY_KNN_INDEX,
         )
@@ -225,7 +224,7 @@ class TestTwoTowerCandidateGenerator:
             video_only=False,
             exclude_uris=None,
             ge_post_embedding_model_uuid="post-tower-uuid",
-            min_like_count=MIN_LIKE_COUNT,
+            min_like_count=None,
             max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
             index=POSTS_QUALITY_KNN_INDEX,
         )
@@ -300,7 +299,7 @@ class TestTwoTowerCandidateGenerator:
             video_only=False,
             exclude_uris=None,
             ge_post_embedding_model_uuid="post-tower-uuid",
-            min_like_count=MIN_LIKE_COUNT,
+            min_like_count=None,
             max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
             index=POSTS_QUALITY_KNN_INDEX,
         )

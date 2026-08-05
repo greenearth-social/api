@@ -15,12 +15,22 @@ from ..inference import (
     HistoryMode,
 )
 from .es_candidates import knn_search_posts
-from ..elasticsearch import two_tower_knn_index
+from ..elasticsearch import POSTS_QUALITY_KNN_INDEX, two_tower_knn_index
 from ..embeddings import GE_POST_EMBEDDING_FIELD
 
 logger = logging.getLogger(__name__)
 
 
+# Traction bar for the posts_recent fallback path only (see two_tower_knn_index
+# in lib/elasticsearch.py). Corpus membership in posts_recent_quality already
+# guarantees like_count was at or above ingex's own promotion threshold at
+# promotion time, so applying this filter there would be redundant — worse,
+# it would require this constant to be kept in sync with ingex's
+# GE_QUALITY_LIKE_THRESHOLD, which is exactly the cross-repo coupling this
+# design should not need. Against posts_recent it is the only thing enforcing
+# any traction preference at all, so it stays load-bearing there. The two
+# values are intentionally independent: this one describes what bar the api
+# wants on an *unfiltered* corpus, not ingex's corpus-entry criterion.
 MIN_LIKE_COUNT = 20
 # Hard cap on the freshness window for two-tower, independent of the user's
 # freshness preference.
@@ -105,12 +115,17 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         # used above to compute the user embedding. Cap the requested window at
         # TWO_TOWER_MAX_AGE_CAP_HOURS to bound the brute-force vector scan.
         effective_max_age_hours = min(max_age_hours, TWO_TOWER_MAX_AGE_CAP_HOURS)
+        resolved_index = two_tower_knn_index()
+        # Only apply the traction filter on the posts_recent fallback — see
+        # MIN_LIKE_COUNT's docstring for why it would be redundant against the
+        # quality corpus.
+        min_like_count = None if resolved_index == POSTS_QUALITY_KNN_INDEX else MIN_LIKE_COUNT
         candidates = await knn_search_posts(
             es, user_embedding, num_candidates, search_field=GE_POST_EMBEDDING_FIELD,
             generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
-            ge_post_embedding_model_uuid=post_tower_uuid, min_like_count=MIN_LIKE_COUNT,
+            ge_post_embedding_model_uuid=post_tower_uuid, min_like_count=min_like_count,
             max_age_hours=effective_max_age_hours,
-            index=two_tower_knn_index(),
+            index=resolved_index,
         )
 
         return CandidateResult(generator_name=self.name, candidates=candidates)

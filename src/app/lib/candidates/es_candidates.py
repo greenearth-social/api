@@ -33,9 +33,15 @@ async def knn_search_posts(
     ``index`` selects the corpus. Filter *selectivity* is what decides whether
     Lucene stays on the HNSW graph: a filter matching a small fraction of a
     segment makes it bypass the graph and exact-scan instead. ``two_tower``
-    therefore searches ``posts_recent_quality``, where its ``min_like_count``
-    filter is satisfied by ~every document, rather than ``posts_recent``, where
-    it matches ~4.6% (see greenearth-social/ingex#442).
+    searches ``posts_recent_quality`` by default, where corpus membership
+    already guarantees the traction bar, so it omits ``min_like_count``
+    entirely there rather than reapplying a filter that would be redundant —
+    matching every document, it costs nothing, but it also isn't doing
+    anything. Its ``posts_recent`` fallback still passes it, since it's the
+    only thing enforcing traction preference on the unfiltered corpus; that
+    filter matches ~4.6% there, which is the exact-scan problem
+    greenearth-social/ingex#442 built the quality corpus to avoid — an
+    accepted cost of the fallback, not something the fallback fixes.
 
     ``max_age_hours`` bounds candidates to recently created posts. It is typed
     ``int`` rather than ``MaxAgeHours`` because callers may pass a value off the
