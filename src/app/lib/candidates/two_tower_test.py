@@ -6,10 +6,7 @@ import pytest
 
 from ...models import CandidatePost
 from ..candidates import get_generator, list_generators
-from ..candidates.two_tower import (
-    TWO_TOWER_MAX_AGE_CAP_HOURS,
-    TwoTowerCandidateGenerator,
-)
+from ..candidates.two_tower import TwoTowerCandidateGenerator
 from ..elasticsearch import POSTS_QUALITY_KNN_INDEX
 from ..embeddings import GE_POST_EMBEDDING_FIELD
 
@@ -111,7 +108,7 @@ class TestTwoTowerCandidateGenerator:
             exclude_uris=["at://old/1", "at://old/2"],
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=None,
-            max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
+            max_age_hours=168,
             index=POSTS_QUALITY_KNN_INDEX,
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
@@ -225,18 +222,16 @@ class TestTwoTowerCandidateGenerator:
             exclude_uris=None,
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=None,
-            max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
+            max_age_hours=168,
             index=POSTS_QUALITY_KNN_INDEX,
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == []
 
     @pytest.mark.asyncio
-    async def test_generate_passes_fresher_window_below_cap_through(self, generator):
-        # A freshness preset below the cap is honored as-is; only windows above
-        # TWO_TOWER_MAX_AGE_CAP_HOURS get clamped.
-        fresh_hours = 24
-        assert fresh_hours < TWO_TOWER_MAX_AGE_CAP_HOURS
+    async def test_generate_passes_max_age_hours_through_unclamped(self, generator):
+        # The requested window is honored as-is, with no serving-side cap.
+        fresh_hours = 168
         es = object()
         user_embedding = [0.5, 0.6]
 
@@ -300,7 +295,7 @@ class TestTwoTowerCandidateGenerator:
             exclude_uris=None,
             ge_post_embedding_model_uuid="post-tower-uuid",
             min_like_count=None,
-            max_age_hours=TWO_TOWER_MAX_AGE_CAP_HOURS,
+            max_age_hours=168,
             index=POSTS_QUALITY_KNN_INDEX,
         )
         assert result.candidates == []

@@ -32,20 +32,6 @@ logger = logging.getLogger(__name__)
 # values are intentionally independent: this one describes what bar the api
 # wants on an *unfiltered* corpus, not ingex's corpus-entry criterion.
 MIN_LIKE_COUNT = 20
-# Hard cap on the freshness window for two-tower, independent of the user's
-# freshness preference.
-#
-# This cap was introduced to bound a brute-force scan: against posts_recent the
-# selective MIN_LIKE_COUNT filter made Lucene abandon the HNSW graph and scan
-# every matching vector, so cost scaled with how many posts passed
-# like_count>=20 inside the window (~928k over the 7-day default, a ~30s cold
-# scan on prod, versus ~320k at 96h). Searching posts_recent_quality removes
-# that scan — membership *is* the like filter there, so the graph is used —
-# which removes this cap's original justification. It is left in place so the
-# index switch lands as a single variable; retiring it is greenearth-social/api#324.
-# Freshness preferences below this cap (6h-72h) pass through unchanged; only the
-# 7-day preset is clamped here.
-TWO_TOWER_MAX_AGE_CAP_HOURS = 96
 
 
 class TwoTowerCandidateGenerator(CandidateGenerator):
@@ -111,10 +97,6 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                 reason="no_user_like_history",
             )
 
-        # Freshness filters returned candidates, not the interaction history
-        # used above to compute the user embedding. Cap the requested window at
-        # TWO_TOWER_MAX_AGE_CAP_HOURS to bound the brute-force vector scan.
-        effective_max_age_hours = min(max_age_hours, TWO_TOWER_MAX_AGE_CAP_HOURS)
         resolved_index = two_tower_knn_index()
         # Only apply the traction filter on the posts_recent fallback — see
         # MIN_LIKE_COUNT's docstring for why it would be redundant against the
@@ -124,7 +106,7 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             es, user_embedding, num_candidates, search_field=GE_POST_EMBEDDING_FIELD,
             generator_name=self.name, video_only=video_only, exclude_uris=exclude_uris,
             ge_post_embedding_model_uuid=post_tower_uuid, min_like_count=min_like_count,
-            max_age_hours=effective_max_age_hours,
+            max_age_hours=max_age_hours,
             index=resolved_index,
         )
 
