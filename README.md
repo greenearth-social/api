@@ -570,9 +570,26 @@ Conventions:
 - `scripts/backfill_posthog.py` stamps the same annotations, so historical
   API-origin events are not a gap in the partition.
 
+### User identity
+
 `distinct_id` is the user's `did:plc:…` on both surfaces (the frontend's Firebase
 `uid` is that same DID), so a user is one PostHog person across both. Feature
-flags are evaluated on the DID for the same reason.
+flags are evaluated on the DID for the same reason. The DID is deliberately the
+key: Bluesky handles are mutable, so keying on the handle would fork a person on
+every rename and detach their history.
+
+The handle is the identifier a *human* reads, and rides along on every event:
+
+| Property | Purpose |
+|---|---|
+| `$set: {username: <handle>}` | Populates the PostHog person display name. `$set`, not `$set_once`, so a rename propagates. |
+| `user_handle` | Event-level copy, so an insight can break down by handle without joining to the person. |
+
+Both are best-effort — when the handle can't be resolved they are omitted rather
+than written as null, so a transient failure never erases a handle PostHog
+already has. `feedLoaded` takes the handle from the live PLC resolution;
+interaction events read it from the Firestore user doc that the same request
+already wrote, avoiding an extra directory round-trip on a background path.
 
 ## Elasticsearch Query Profiling
 
