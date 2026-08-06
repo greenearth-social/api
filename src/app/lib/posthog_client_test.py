@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.lib.posthog_client import (
+    evaluate_fail_fast_flag,
+    evaluate_network_likes_flag,
     get_posthog_client,
     init_posthog_client,
     set_posthog_client,
@@ -120,9 +122,6 @@ def test_real_posthog_client_is_disabled_in_tests():
     assert client.disabled is True
 
 
-from app.lib.posthog_client import evaluate_fail_fast_flag
-
-
 def test_evaluate_fail_fast_flag_none_client_returns_false():
     assert evaluate_fail_fast_flag(None, "did:plc:abc123") is False
 
@@ -151,3 +150,35 @@ def test_evaluate_fail_fast_flag_sdk_returns_none_returns_false():
     mock = MagicMock()
     mock.feature_enabled.return_value = None
     assert evaluate_fail_fast_flag(mock, "did:plc:abc123") is False
+
+
+def test_evaluate_network_likes_flag_none_client_returns_false():
+    assert evaluate_network_likes_flag(None, "did:plc:abc123") is False
+
+
+def test_evaluate_network_likes_flag_enabled_returns_true():
+    mock = MagicMock()
+    mock.feature_enabled.return_value = True
+    result = evaluate_network_likes_flag(mock, "did:plc:abc123")
+    assert result is True
+    mock.feature_enabled.assert_called_once_with(
+        "network-likes-in-your-feed", "did:plc:abc123"
+    )
+
+
+def test_evaluate_network_likes_flag_disabled_returns_false():
+    mock = MagicMock()
+    mock.feature_enabled.return_value = False
+    assert evaluate_network_likes_flag(mock, "did:plc:abc123") is False
+
+
+def test_evaluate_network_likes_flag_sdk_exception_returns_false():
+    mock = MagicMock()
+    mock.feature_enabled.side_effect = RuntimeError("network error")
+    assert evaluate_network_likes_flag(mock, "did:plc:abc123") is False
+
+
+def test_evaluate_network_likes_flag_sdk_returns_none_returns_false():
+    mock = MagicMock()
+    mock.feature_enabled.return_value = None
+    assert evaluate_network_likes_flag(mock, "did:plc:abc123") is False

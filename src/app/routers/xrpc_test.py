@@ -44,6 +44,9 @@ RANDOM_FEED_RKEY = "random"
 RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
 RANKED_FEED_RKEY = "your-feed"
 RANKED_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANKED_FEED_RKEY}"
+CUTOFF_PREVIEW_FEED_URI = (
+    f"at://{SERVICE_DID}/app.bsky.feed.generator/cutoff-preview"
+)
 COLD_START_FEED_RKEY = "cold-start"
 COLD_START_FEED_URI = (
     f"at://{SERVICE_DID}/app.bsky.feed.generator/{COLD_START_FEED_RKEY}"
@@ -58,6 +61,7 @@ CANDIDATE_ONLY_FEEDS = (
     ("network-likes", "network_likes"),
     ("popularity", "popularity"),
     ("two-tower", "two_tower"),
+    ("two-tower-empty-history", "two_tower_empty_history"),
 )
 TEST_EMBEDDING = encode_float32_b64([1.0, 0.0, 0.0])
 
@@ -3056,7 +3060,7 @@ class TestSocialRadiusOverride:
     def test_applies_social_radius_preset_0(self, mock_pipeline, mock_get_user):
         """social_radius=0 (Friends) → followed_users-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from .xrpc import SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -3072,7 +3076,7 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[0]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[0]
         assert gen_request.max_age_hours == 12
 
     @patch("app.routers.xrpc.get_user")
@@ -3080,7 +3084,7 @@ class TestSocialRadiusOverride:
     def test_applies_social_radius_preset_4(self, mock_pipeline, mock_get_user):
         """social_radius=4 (Everyone) → popularity-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from .xrpc import SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -3095,12 +3099,18 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[4]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[4]
 
+    @patch("app.routers.xrpc.evaluate_network_likes_flag")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
-    def test_applies_social_radius_to_cold_start(self, mock_pipeline, mock_get_user):
-        """Cold-start keeps the radius mix but uses empty-history two-tower."""
+    def test_cold_start_ignores_social_radius(
+        self,
+        mock_pipeline,
+        mock_get_user,
+        mock_network_likes_flag,
+    ):
+        """Cold-start always uses popularity for a brand-new user."""
         from ..documents import UserDocument
         from .xrpc import PipelineResult
 
@@ -3121,17 +3131,20 @@ class TestSocialRadiusOverride:
             (generator.name, generator.weight)
             for generator in gen_request.generators
         ] == [
-            ("followed_users", 0.20),
-            ("two_tower_empty_history", 0.40),
-            ("popularity", 0.40),
+            ("popularity", 1.0),
         ]
+        mock_network_likes_flag.assert_not_called()
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_default_radius_when_missing(self, mock_pipeline, mock_get_user):
         """User doc without social_radius field → defaults to 3 (balanced)."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from .xrpc import (
+            DEFAULT_SOCIAL_RADIUS,
+            SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
+            PipelineResult,
+        )
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -3145,7 +3158,10 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
+        assert (
+            gen_request.generators
+            == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+        )
         assert gen_request.max_age_hours == 168
 
     @patch("app.routers.xrpc.get_user")
@@ -3176,7 +3192,11 @@ class TestSocialRadiusOverride:
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_fallen_back_to_defaults_when_user_has_no_doc(self, mock_pipeline, mock_get_user):
         """User doc is None → no override, defaults used."""
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from .xrpc import (
+            DEFAULT_SOCIAL_RADIUS,
+            SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
+            PipelineResult,
+        )
 
         mock_get_user.return_value = None
         mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
@@ -3188,7 +3208,43 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
+        assert (
+            gen_request.generators
+            == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+        )
+
+    @pytest.mark.parametrize(
+        "feed_uri",
+        (RANKED_FEED_URI, FEED_URI, CUTOFF_PREVIEW_FEED_URI),
+    )
+    @patch("app.routers.xrpc.evaluate_network_likes_flag", return_value=True)
+    @patch("app.routers.xrpc.get_user")
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_network_likes_flag_uses_treatment_presets(
+        self,
+        mock_pipeline,
+        mock_get_user,
+        mock_network_likes_flag,
+        feed_uri,
+    ):
+        from ..documents import UserDocument
+        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=3,
+        )
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
+
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": feed_uri, "limit": 30},
+        )
+
+        assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
+        mock_network_likes_flag.assert_called_once()
 
 
 class TestGetFeedSkeletonMetrics:
