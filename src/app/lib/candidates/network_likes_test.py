@@ -134,6 +134,7 @@ class TestFetchRecentLikedPostUriPage:
             size=50,
             search_after=["cursor"],
             max_age_hours=48,
+            exclude_uris=["at://post/seen"],
         )
 
         assert page.uris == ["at://post/1", "at://post/2"]
@@ -147,6 +148,9 @@ class TestFetchRecentLikedPostUriPage:
                 "filter": [
                     {"terms": {"author_did": ["did:plc:follow1"]}},
                     {"range": {"created_at": {"gte": "now-48h"}}},
+                ],
+                "must_not": [
+                    {"terms": {"subject_uri": ["at://post/seen"]}},
                 ],
             }
         }
@@ -305,6 +309,35 @@ class TestNetworkLikesSearch:
         posts_call = next(call for call in es.calls if call["index"] == "posts_recent")
         assert expected_range in likes_call["query"]["bool"]["filter"]
         assert expected_range in posts_call["query"]["bool"]["filter"]
+
+    @pytest.mark.asyncio
+    async def test_excludes_seen_uris_from_likes_query(self, monkeypatch):
+        stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+        es = FakeEs(
+            likes_pages=[
+                likes_response([
+                    like_hit("at://post/seen", 2),
+                    like_hit("at://post/a", 1),
+                ])
+            ],
+            posts_by_uri={
+                "at://post/seen": post_hit("at://post/seen"),
+                "at://post/a": post_hit("at://post/a"),
+            },
+        )
+
+        candidates = await network_likes_search(
+            es,
+            "did:plc:user1",
+            num_candidates=1,
+            exclude_uris=["at://post/seen"],
+        )
+
+        assert [candidate.at_uri for candidate in candidates] == ["at://post/a"]
+        likes_call = next(call for call in es.calls if call["index"] == "likes")
+        assert likes_call["query"]["bool"]["must_not"] == [
+            {"terms": {"subject_uri": ["at://post/seen"]}},
+        ]
 
     @pytest.mark.asyncio
     async def test_respects_hard_likes_scan_cap(self, monkeypatch):

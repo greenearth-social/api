@@ -61,6 +61,7 @@ async def fetch_recent_liked_post_uri_page(
     size: int,
     search_after: list[Any] | None = None,
     max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
+    exclude_uris: list[str] | None = None,
 ) -> LikedPostUriPage:
     """Return one page of recently liked post URIs for the given users."""
     if not user_dids or size <= 0:
@@ -74,6 +75,10 @@ async def fetch_recent_liked_post_uri_page(
             ],
         }
     }
+    if exclude_uris:
+        query["bool"]["must_not"] = [
+            {"terms": {"subject_uri": exclude_uris}},
+        ]
 
     search_kwargs: dict[str, Any] = {}
     if search_after is not None:
@@ -213,6 +218,7 @@ async def network_likes_search(
                 size=min(page_size, remaining_budget),
                 search_after=search_after,
                 max_age_hours=max_age_hours,
+                exclude_uris=exclude_uris,
             )
 
             if page.hit_count == 0:
