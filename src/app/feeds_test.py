@@ -51,10 +51,10 @@ class TestFeedsRegistry:
                 for generator in presets[0]
             ] == [("followed_users", 1.0)]
 
-    def test_static_feed_defaults_fail_closed_without_network_likes(self):
+    def test_static_feed_defaults_include_network_likes(self):
         assert (
             FEEDS["your-feed"].gen_request_template.generators
-            == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+            == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
         )
 
     def test_network_likes_treatment_only_adds_network_likes_outside_friends(self):

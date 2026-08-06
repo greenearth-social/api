@@ -92,7 +92,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="e2 S",
         avatar="assets/icons/unranked-your-feed.png",
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
+            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
             infill="popularity",
             num_candidates=30,
             video_only=False,
@@ -138,7 +138,7 @@ FEEDS: dict[str, FeedConfig] = {
         min_rank_score=0.425,
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
+            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
             num_candidates=30,
             video_only=False,
@@ -191,7 +191,7 @@ FEEDS: dict[str, FeedConfig] = {
         # Same generator mix as your-feed, so cutoff behavior here previews what
         # real users would see.
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
+            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
             num_candidates=30,
             video_only=False,

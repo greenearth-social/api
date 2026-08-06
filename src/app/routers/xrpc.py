@@ -1431,7 +1431,12 @@ async def get_feed_skeleton(
             applied_social_radius = user_doc.social_radius
         else:
             applied_social_radius = DEFAULT_SOCIAL_RADIUS
-        network_likes_in_your_feed = evaluate_network_likes_flag(get_posthog_client(), user_did)
+        posthog_client = get_posthog_client()
+        network_likes_in_your_feed = (
+            True
+            if posthog_client is None
+            else evaluate_network_likes_flag(posthog_client, user_did)
+        )
         if network_likes_in_your_feed:
             social_radius_presets = SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES
         else:

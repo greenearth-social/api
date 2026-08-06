@@ -100,6 +100,11 @@ def _patch_unranked_your_feed_generators(
             else followed_users_candidates
         ),
     )
+    network_likes_gen = AsyncMock()
+    network_likes_gen.generate.return_value = CandidateResult(
+        generator_name="network_likes",
+        candidates=two_tower_candidates,
+    )
     infill_gen = AsyncMock()
     infill_gen.generate.return_value = CandidateResult(
         generator_name="popularity",
@@ -111,6 +116,8 @@ def _patch_unranked_your_feed_generators(
             return two_tower_gen
         if name == "followed_users":
             return followed_users_gen
+        if name == "network_likes":
+            return network_likes_gen
         if name == "popularity":
             return infill_gen
         return None
@@ -364,6 +371,10 @@ class TestGetFeedSkeleton:
         followed_gen.generate.return_value = CandidateResult(
             generator_name="followed_users", candidates=[],
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes", candidates=[],
+        )
         infill_gen = AsyncMock()
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[],
@@ -373,6 +384,7 @@ class TestGetFeedSkeleton:
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -406,6 +418,10 @@ class TestGetFeedSkeleton:
         followed_gen.generate.return_value = CandidateResult(
             generator_name="followed_users", candidates=[],
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes", candidates=[],
+        )
         infill_gen = AsyncMock()
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[],
@@ -415,6 +431,7 @@ class TestGetFeedSkeleton:
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -673,11 +690,17 @@ class TestGetFeedSkeleton:
             generator_name="followed_users",
             candidates=[],
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes",
+            candidates=[],
+        )
 
         def fake_get(name):
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_users_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -1097,11 +1120,16 @@ class TestFeedSkeletonCursor:
         followed_users_gen.generate.return_value = CandidateResult(
             generator_name="followed_users", candidates=[],
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes", candidates=[],
+        )
 
         def fake_get(name):
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_users_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -1426,6 +1454,10 @@ class TestRankedFeed:
         followed_gen.generate.return_value = CandidateResult(
             generator_name="followed_users", candidates=[]
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes", candidates=[]
+        )
         infill_gen = AsyncMock()
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[]
@@ -1435,6 +1467,7 @@ class TestRankedFeed:
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -1632,6 +1665,10 @@ class TestSlateCutoffs:
         followed_gen.generate.return_value = CandidateResult(
             generator_name="followed_users", candidates=[]
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes", candidates=[]
+        )
         infill_gen = AsyncMock()
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[]
@@ -1641,6 +1678,7 @@ class TestSlateCutoffs:
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -3060,7 +3098,7 @@ class TestSocialRadiusOverride:
     def test_applies_social_radius_preset_0(self, mock_pipeline, mock_get_user):
         """social_radius=0 (Friends) → followed_users-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES, PipelineResult
+        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -3076,7 +3114,7 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[0]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[0]
         assert gen_request.max_age_hours == 12
 
     @patch("app.routers.xrpc.get_user")
@@ -3084,7 +3122,7 @@ class TestSocialRadiusOverride:
     def test_applies_social_radius_preset_4(self, mock_pipeline, mock_get_user):
         """social_radius=4 (Everyone) → popularity-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES, PipelineResult
+        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -3099,7 +3137,7 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[4]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[4]
 
     @patch("app.routers.xrpc.evaluate_network_likes_flag")
     @patch("app.routers.xrpc.get_user")
@@ -3142,7 +3180,7 @@ class TestSocialRadiusOverride:
         from ..documents import UserDocument
         from .xrpc import (
             DEFAULT_SOCIAL_RADIUS,
-            SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
+            SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
             PipelineResult,
         )
 
@@ -3160,7 +3198,7 @@ class TestSocialRadiusOverride:
         gen_request = mock_pipeline.call_args.args[1]
         assert (
             gen_request.generators
-            == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+            == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
         )
         assert gen_request.max_age_hours == 168
 
@@ -3194,7 +3232,7 @@ class TestSocialRadiusOverride:
         """User doc is None → no override, defaults used."""
         from .xrpc import (
             DEFAULT_SOCIAL_RADIUS,
-            SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
+            SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
             PipelineResult,
         )
 
@@ -3210,7 +3248,7 @@ class TestSocialRadiusOverride:
         gen_request = mock_pipeline.call_args.args[1]
         assert (
             gen_request.generators
-            == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+            == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
         )
 
     @pytest.mark.parametrize(
@@ -3218,12 +3256,53 @@ class TestSocialRadiusOverride:
         (RANKED_FEED_URI, FEED_URI, CUTOFF_PREVIEW_FEED_URI),
     )
     @patch("app.routers.xrpc.evaluate_network_likes_flag", return_value=True)
+    @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_network_likes_flag_uses_treatment_presets(
         self,
         mock_pipeline,
         mock_get_user,
+        mock_get_posthog_client,
+        mock_network_likes_flag,
+        feed_uri,
+    ):
+        from ..documents import UserDocument
+        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=3,
+        )
+        mock_get_posthog_client.return_value.feature_enabled.return_value = False
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
+
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": feed_uri, "limit": 30},
+        )
+
+        assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
+        mock_network_likes_flag.assert_called_once_with(
+            mock_get_posthog_client.return_value,
+            "did:plc:testuser",
+        )
+
+    @pytest.mark.parametrize(
+        "feed_uri",
+        (RANKED_FEED_URI, FEED_URI, CUTOFF_PREVIEW_FEED_URI),
+    )
+    @patch("app.routers.xrpc.evaluate_network_likes_flag")
+    @patch("app.routers.xrpc.get_posthog_client", return_value=None)
+    @patch("app.routers.xrpc.get_user")
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_missing_posthog_client_uses_network_likes_defaults(
+        self,
+        mock_pipeline,
+        mock_get_user,
+        mock_get_posthog_client,
         mock_network_likes_flag,
         feed_uri,
     ):
@@ -3244,7 +3323,42 @@ class TestSocialRadiusOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
-        mock_network_likes_flag.assert_called_once()
+        mock_get_posthog_client.assert_any_call()
+        mock_network_likes_flag.assert_not_called()
+
+    @patch("app.routers.xrpc.evaluate_network_likes_flag", return_value=False)
+    @patch("app.routers.xrpc.get_posthog_client")
+    @patch("app.routers.xrpc.get_user")
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_disabled_network_likes_flag_uses_rollback_presets(
+        self,
+        mock_pipeline,
+        mock_get_user,
+        mock_get_posthog_client,
+        mock_network_likes_flag,
+    ):
+        from ..documents import UserDocument
+        from .xrpc import SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES, PipelineResult
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=3,
+        )
+        mock_get_posthog_client.return_value.feature_enabled.return_value = False
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
+
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": RANKED_FEED_URI, "limit": 30},
+        )
+
+        assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[3]
+        mock_network_likes_flag.assert_called_once_with(
+            mock_get_posthog_client.return_value,
+            "did:plc:testuser",
+        )
 
 
 class TestGetFeedSkeletonMetrics:
