@@ -87,7 +87,22 @@ class FakeEs:
 
         if index == "likes":
             if self.likes_pages:
-                return self.likes_pages.pop(0)
+                response = self.likes_pages.pop(0)
+                query_body = query if isinstance(query, dict) else {}
+                excluded_uris = {
+                    uri
+                    for clause in query_body.get("bool", {}).get("must_not", [])
+                    for uri in clause.get("terms", {}).get("subject_uri", [])
+                }
+                if excluded_uris:
+                    hits = response.get("hits", {}).get("hits", [])
+                    return likes_response([
+                        hit
+                        for hit in hits
+                        if (hit.get("_source") or {}).get("subject_uri")
+                        not in excluded_uris
+                    ])
+                return response
             return likes_response([])
 
         if index == "posts_recent":
@@ -338,6 +353,8 @@ class TestNetworkLikesSearch:
         assert likes_call["query"]["bool"]["must_not"] == [
             {"terms": {"subject_uri": ["at://post/seen"]}},
         ]
+        posts_call = next(call for call in es.calls if call["index"] == "posts_recent")
+        assert post_terms_from_query(posts_call["query"]) == ["at://post/a"]
 
     @pytest.mark.asyncio
     async def test_respects_hard_likes_scan_cap(self, monkeypatch):

@@ -39,10 +39,10 @@ from ..documents import (
     PipelineItemMeta,
 )
 from ..feeds import (
-    FEEDS,
-    SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
-    SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
     DEFAULT_SOCIAL_RADIUS,
+    FEEDS,
+    SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
+    SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
 )
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
@@ -53,7 +53,6 @@ from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
-from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     delete_feed_snapshot,
@@ -68,6 +67,7 @@ from ..lib.firestore import (
     upsert_user,
     write_feed_debug,
 )
+from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.metrics import get_metric_collector
 from ..lib.pipeline_context import (
     DegradationEvent,
@@ -84,8 +84,8 @@ from ..lib.posthog_client import (
     track_interaction,
     track_session,
 )
-from ..lib.release import api_release_sha
 from ..lib.rankers import run_predict
+from ..lib.release import api_release_sha
 from ..lib.request_cache import request_cache_scope
 from ..lib.request_context import set_traffic
 from ..lib.telemetry import timed

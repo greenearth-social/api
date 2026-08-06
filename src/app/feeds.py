@@ -317,7 +317,9 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "cold-start": FeedConfig(
         display_name="Cold Start",
-        description="Main Green Earth feed for a user with no like history and no followed accounts.",
+        description=(
+            "Main Green Earth feed for a user with no like history and no followed accounts."
+        ),
         public=False,
         internal_rkey="mf-cs",
         internal_display_name="mf CS",

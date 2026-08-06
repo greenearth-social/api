@@ -57,7 +57,7 @@ class TestFeedsRegistry:
             == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
         )
 
-    def test_network_likes_treatment_only_adds_network_likes_outside_friends(self):
+    def test_network_likes_enabled_presets_add_network_likes_outside_friends(self):
         for radius in range(1, 5):
             with_network_likes = {
                 generator.name

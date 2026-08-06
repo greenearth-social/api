@@ -136,8 +136,10 @@ def test_evaluate_feature_flags_none_client_returns_false_values():
 
 def test_evaluate_feature_flags_uses_one_sdk_request():
     mock = MagicMock()
-    evaluated = mock.evaluate_flags.return_value
-    evaluated.is_enabled.side_effect = lambda key: key == NETWORK_LIKES_FLAG
+    mock.get_all_flags.return_value = {
+        FAIL_FAST_FLAG: False,
+        NETWORK_LIKES_FLAG: True,
+    }
 
     result = evaluate_feature_flags(
         mock,
@@ -149,15 +151,15 @@ def test_evaluate_feature_flags_uses_one_sdk_request():
         FAIL_FAST_FLAG: False,
         NETWORK_LIKES_FLAG: True,
     }
-    mock.evaluate_flags.assert_called_once_with(
+    mock.get_all_flags.assert_called_once_with(
         "did:plc:abc123",
-        flag_keys=[FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
+        flag_keys_to_evaluate=[FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
     )
 
 
 def test_evaluate_feature_flags_sdk_exception_returns_false_values():
     mock = MagicMock()
-    mock.evaluate_flags.side_effect = RuntimeError("network error")
+    mock.get_all_flags.side_effect = RuntimeError("network error")
     assert evaluate_feature_flags(
         mock,
         "did:plc:abc123",

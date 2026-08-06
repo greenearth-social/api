@@ -3262,7 +3262,7 @@ class TestSocialRadiusOverride:
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
-    def test_network_likes_flag_uses_treatment_presets(
+    def test_enabled_network_likes_flag_uses_network_likes_presets(
         self,
         mock_pipeline,
         mock_get_user,

@@ -121,8 +121,12 @@ def evaluate_feature_flags(
     if client is None:
         return values
     try:
-        evaluated = client.evaluate_flags(user_did, flag_keys=flag_keys)
-        return {key: evaluated.is_enabled(key) for key in flag_keys}
+        # The batch API does not emit $feature_flag_called exposure events.
+        evaluated = client.get_all_flags(
+            user_did,
+            flag_keys_to_evaluate=flag_keys,
+        ) or {}
+        return {key: bool(evaluated.get(key, False)) for key in flag_keys}
     except Exception:
         logger.warning("PostHog feature flag evaluation failed for %s", user_did)
         return values
