@@ -3139,14 +3139,14 @@ class TestSocialRadiusOverride:
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[4]
 
-    @patch("app.routers.xrpc.evaluate_network_likes_flag")
+    @patch("app.routers.xrpc.evaluate_feature_flags")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_cold_start_ignores_social_radius(
         self,
         mock_pipeline,
         mock_get_user,
-        mock_network_likes_flag,
+        mock_feature_flags,
     ):
         """Cold-start always uses popularity for a brand-new user."""
         from ..documents import UserDocument
@@ -3171,7 +3171,7 @@ class TestSocialRadiusOverride:
         ] == [
             ("popularity", 1.0),
         ]
-        mock_network_likes_flag.assert_not_called()
+        mock_feature_flags.assert_not_called()
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
@@ -3255,7 +3255,10 @@ class TestSocialRadiusOverride:
         "feed_uri",
         (RANKED_FEED_URI, FEED_URI, CUTOFF_PREVIEW_FEED_URI),
     )
-    @patch("app.routers.xrpc.evaluate_network_likes_flag", return_value=True)
+    @patch(
+        "app.routers.xrpc.evaluate_feature_flags",
+        return_value={"fail-fast-feed": False, "network-likes-in-your-feed": True},
+    )
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
@@ -3264,7 +3267,7 @@ class TestSocialRadiusOverride:
         mock_pipeline,
         mock_get_user,
         mock_get_posthog_client,
-        mock_network_likes_flag,
+        mock_feature_flags,
         feed_uri,
     ):
         from ..documents import UserDocument
@@ -3274,7 +3277,6 @@ class TestSocialRadiusOverride:
             user_did="did:plc:testuser",
             social_radius=3,
         )
-        mock_get_posthog_client.return_value.feature_enabled.return_value = False
         mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
 
         resp = client.get(
@@ -3285,16 +3287,17 @@ class TestSocialRadiusOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
-        mock_network_likes_flag.assert_called_once_with(
+        mock_feature_flags.assert_called_once_with(
             mock_get_posthog_client.return_value,
             "did:plc:testuser",
+            ["fail-fast-feed", "network-likes-in-your-feed"],
         )
 
     @pytest.mark.parametrize(
         "feed_uri",
         (RANKED_FEED_URI, FEED_URI, CUTOFF_PREVIEW_FEED_URI),
     )
-    @patch("app.routers.xrpc.evaluate_network_likes_flag")
+    @patch("app.routers.xrpc.evaluate_feature_flags")
     @patch("app.routers.xrpc.get_posthog_client", return_value=None)
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
@@ -3303,7 +3306,7 @@ class TestSocialRadiusOverride:
         mock_pipeline,
         mock_get_user,
         mock_get_posthog_client,
-        mock_network_likes_flag,
+        mock_feature_flags,
         feed_uri,
     ):
         from ..documents import UserDocument
@@ -3324,9 +3327,12 @@ class TestSocialRadiusOverride:
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
         mock_get_posthog_client.assert_any_call()
-        mock_network_likes_flag.assert_not_called()
+        mock_feature_flags.assert_not_called()
 
-    @patch("app.routers.xrpc.evaluate_network_likes_flag", return_value=False)
+    @patch(
+        "app.routers.xrpc.evaluate_feature_flags",
+        return_value={"fail-fast-feed": False, "network-likes-in-your-feed": False},
+    )
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
@@ -3335,7 +3341,7 @@ class TestSocialRadiusOverride:
         mock_pipeline,
         mock_get_user,
         mock_get_posthog_client,
-        mock_network_likes_flag,
+        mock_feature_flags,
     ):
         from ..documents import UserDocument
         from .xrpc import SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES, PipelineResult
@@ -3344,7 +3350,6 @@ class TestSocialRadiusOverride:
             user_did="did:plc:testuser",
             social_radius=3,
         )
-        mock_get_posthog_client.return_value.feature_enabled.return_value = False
         mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
 
         resp = client.get(
@@ -3355,9 +3360,10 @@ class TestSocialRadiusOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[3]
-        mock_network_likes_flag.assert_called_once_with(
+        mock_feature_flags.assert_called_once_with(
             mock_get_posthog_client.return_value,
             "did:plc:testuser",
+            ["fail-fast-feed", "network-likes-in-your-feed"],
         )
 
 
@@ -3719,10 +3725,16 @@ class TestFailFastFeatureFlag:
     def test_flag_enabled_calls_set_fail_fast_true(self):
         """When PostHog returns True for the user, set_fail_fast_for_request(True) is called."""
         mock_ph = MagicMock()
-        mock_ph.feature_enabled.return_value = True
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags",
+                return_value={
+                    "fail-fast-feed": True,
+                    "network-likes-in-your-feed": False,
+                },
+            ),
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
             client.get(
@@ -3735,10 +3747,16 @@ class TestFailFastFeatureFlag:
     def test_flag_disabled_calls_set_fail_fast_false(self):
         """When PostHog returns False, set_fail_fast_for_request(False) is called."""
         mock_ph = MagicMock()
-        mock_ph.feature_enabled.return_value = False
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags",
+                return_value={
+                    "fail-fast-feed": False,
+                    "network-likes-in-your-feed": True,
+                },
+            ),
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
             client.get(

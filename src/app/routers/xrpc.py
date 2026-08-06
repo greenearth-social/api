@@ -77,8 +77,9 @@ from ..lib.pipeline_context import (
     pipeline_context_scope,
 )
 from ..lib.posthog_client import (
-    evaluate_fail_fast_flag,
-    evaluate_network_likes_flag,
+    FAIL_FAST_FLAG,
+    NETWORK_LIKES_FLAG,
+    evaluate_feature_flags,
     get_posthog_client,
     track_interaction,
     track_session,
@@ -1408,7 +1409,27 @@ async def get_feed_skeleton(
         _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
     )
 
-    set_fail_fast_for_request(evaluate_fail_fast_flag(get_posthog_client(), user_did))
+    uses_network_likes_flag = feed_name in (
+        "your-feed",
+        "unranked-your-feed",
+        "cutoff-preview",
+    )
+    flag_keys = [FAIL_FAST_FLAG]
+    if uses_network_likes_flag:
+        flag_keys.append(NETWORK_LIKES_FLAG)
+
+    posthog_client = get_posthog_client()
+    feature_flags = (
+        await asyncio.to_thread(
+            evaluate_feature_flags,
+            posthog_client,
+            user_did,
+            flag_keys,
+        )
+        if posthog_client is not None
+        else {}
+    )
+    set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
@@ -1426,16 +1447,15 @@ async def get_feed_skeleton(
     # Apply its preference override to personalized-feed generator weights.
     generators_override: dict = {}
     applied_social_radius: int | None = None
-    if feed_name in ("your-feed", "unranked-your-feed", "cutoff-preview"):
+    if uses_network_likes_flag:
         if user_doc is not None:
             applied_social_radius = user_doc.social_radius
         else:
             applied_social_radius = DEFAULT_SOCIAL_RADIUS
-        posthog_client = get_posthog_client()
         network_likes_in_your_feed = (
             True
             if posthog_client is None
-            else evaluate_network_likes_flag(posthog_client, user_did)
+            else feature_flags.get(NETWORK_LIKES_FLAG, False)
         )
         if network_likes_in_your_feed:
             social_radius_presets = SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES

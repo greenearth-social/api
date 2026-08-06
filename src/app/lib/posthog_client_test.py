@@ -6,8 +6,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.lib.posthog_client import (
-    evaluate_fail_fast_flag,
-    evaluate_network_likes_flag,
+    FAIL_FAST_FLAG,
+    NETWORK_LIKES_FLAG,
+    evaluate_feature_flags,
     get_posthog_client,
     init_posthog_client,
     set_posthog_client,
@@ -122,63 +123,46 @@ def test_real_posthog_client_is_disabled_in_tests():
     assert client.disabled is True
 
 
-def test_evaluate_fail_fast_flag_none_client_returns_false():
-    assert evaluate_fail_fast_flag(None, "did:plc:abc123") is False
+def test_evaluate_feature_flags_none_client_returns_false_values():
+    assert evaluate_feature_flags(
+        None,
+        "did:plc:abc123",
+        [FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
+    ) == {
+        FAIL_FAST_FLAG: False,
+        NETWORK_LIKES_FLAG: False,
+    }
 
 
-def test_evaluate_fail_fast_flag_enabled_returns_true():
+def test_evaluate_feature_flags_uses_one_sdk_request():
     mock = MagicMock()
-    mock.feature_enabled.return_value = True
-    result = evaluate_fail_fast_flag(mock, "did:plc:abc123")
-    assert result is True
-    mock.feature_enabled.assert_called_once_with("fail-fast-feed", "did:plc:abc123")
+    evaluated = mock.evaluate_flags.return_value
+    evaluated.is_enabled.side_effect = lambda key: key == NETWORK_LIKES_FLAG
 
+    result = evaluate_feature_flags(
+        mock,
+        "did:plc:abc123",
+        [FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
+    )
 
-def test_evaluate_fail_fast_flag_disabled_returns_false():
-    mock = MagicMock()
-    mock.feature_enabled.return_value = False
-    assert evaluate_fail_fast_flag(mock, "did:plc:abc123") is False
-
-
-def test_evaluate_fail_fast_flag_sdk_exception_returns_false():
-    mock = MagicMock()
-    mock.feature_enabled.side_effect = RuntimeError("network error")
-    assert evaluate_fail_fast_flag(mock, "did:plc:abc123") is False
-
-
-def test_evaluate_fail_fast_flag_sdk_returns_none_returns_false():
-    mock = MagicMock()
-    mock.feature_enabled.return_value = None
-    assert evaluate_fail_fast_flag(mock, "did:plc:abc123") is False
-
-
-def test_evaluate_network_likes_flag_none_client_returns_false():
-    assert evaluate_network_likes_flag(None, "did:plc:abc123") is False
-
-
-def test_evaluate_network_likes_flag_enabled_returns_true():
-    mock = MagicMock()
-    mock.feature_enabled.return_value = True
-    result = evaluate_network_likes_flag(mock, "did:plc:abc123")
-    assert result is True
-    mock.feature_enabled.assert_called_once_with(
-        "network-likes-in-your-feed", "did:plc:abc123"
+    assert result == {
+        FAIL_FAST_FLAG: False,
+        NETWORK_LIKES_FLAG: True,
+    }
+    mock.evaluate_flags.assert_called_once_with(
+        "did:plc:abc123",
+        flag_keys=[FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
     )
 
 
-def test_evaluate_network_likes_flag_disabled_returns_false():
+def test_evaluate_feature_flags_sdk_exception_returns_false_values():
     mock = MagicMock()
-    mock.feature_enabled.return_value = False
-    assert evaluate_network_likes_flag(mock, "did:plc:abc123") is False
-
-
-def test_evaluate_network_likes_flag_sdk_exception_returns_false():
-    mock = MagicMock()
-    mock.feature_enabled.side_effect = RuntimeError("network error")
-    assert evaluate_network_likes_flag(mock, "did:plc:abc123") is False
-
-
-def test_evaluate_network_likes_flag_sdk_returns_none_returns_false():
-    mock = MagicMock()
-    mock.feature_enabled.return_value = None
-    assert evaluate_network_likes_flag(mock, "did:plc:abc123") is False
+    mock.evaluate_flags.side_effect = RuntimeError("network error")
+    assert evaluate_feature_flags(
+        mock,
+        "did:plc:abc123",
+        [FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
+    ) == {
+        FAIL_FAST_FLAG: False,
+        NETWORK_LIKES_FLAG: False,
+    }

@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 _posthog_client: Posthog | None = None
 
+FAIL_FAST_FLAG = "fail-fast-feed"
+NETWORK_LIKES_FLAG = "network-likes-in-your-feed"
+
 
 def set_posthog_client(client: Posthog | None) -> None:
     global _posthog_client
@@ -108,33 +111,18 @@ def track_redirect(
     )
 
 
-def evaluate_fail_fast_flag(client: Posthog | None, user_did: str) -> bool:
-    """Evaluate the fail-fast-feed PostHog feature flag for this user.
-
-    Returns True only when the client is present and the flag is enabled for
-    user_did. Soft-fails to False on any SDK exception so a PostHog outage
-    never breaks feed serving.
-    """
+def evaluate_feature_flags(
+    client: Posthog | None,
+    user_did: str,
+    flag_keys: list[str],
+) -> dict[str, bool]:
+    """Evaluate the requested flags in one PostHog request, defaulting to False."""
+    values = {key: False for key in flag_keys}
     if client is None:
-        return False
+        return values
     try:
-        return bool(client.feature_enabled("fail-fast-feed", user_did))
+        evaluated = client.evaluate_flags(user_did, flag_keys=flag_keys)
+        return {key: evaluated.is_enabled(key) for key in flag_keys}
     except Exception:
         logger.warning("PostHog feature flag evaluation failed for %s", user_did)
-        return False
-
-
-def evaluate_network_likes_flag(client: Posthog | None, user_did: str) -> bool:
-    """Evaluate the network-likes PostHog feature flag for this user.
-
-    Returns True only when the client is present and the flag is enabled for
-    user_did. Soft-fails to False on any SDK exception so a PostHog outage
-    never breaks feed serving.
-    """
-    if client is None:
-        return False
-    try:
-        return bool(client.feature_enabled("network-likes-in-your-feed", user_did))
-    except Exception:
-        logger.warning("PostHog feature flag evaluation failed for %s", user_did)
-        return False
+        return values
