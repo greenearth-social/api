@@ -20,6 +20,7 @@ from ...models import CandidatePost, MaxAgeHours
 from ..bsky import FollowedUsersLookupError, get_followed_user_dids
 from ..config import fail_fast
 from ..elasticsearch import unwrap_es_response
+from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 
@@ -167,10 +168,11 @@ async def network_likes_search(
     """Fetch posts liked by users followed by user_did."""
 
     try:
-        followed_dids: list[str] = await get_followed_user_dids(
-            user_did,
-            limit=MAX_FOLLOWED_USERS,
-        )
+        async with timed(logger, "bsky_get_follows", user_did=user_did):
+            followed_dids: list[str] = await get_followed_user_dids(
+                user_did,
+                limit=MAX_FOLLOWED_USERS,
+            )
     except FollowedUsersLookupError as exc:
         logger.warning(
             "Skipping network_likes candidate generation for %s after follow "
@@ -197,44 +199,50 @@ async def network_likes_search(
     liked_uri_order = 0
     candidates_by_uri: dict[str, CandidatePost] = {}
 
-    while len(candidates_by_uri) < num_candidates and scanned_likes < MAX_LIKES_SCANNED:
-        remaining_budget = MAX_LIKES_SCANNED - scanned_likes
-        page = await fetch_recent_liked_post_uri_page(
-            es,
-            followed_dids,
-            size=min(page_size, remaining_budget),
-            search_after=search_after,
-            max_age_hours=max_age_hours,
-        )
+    async with timed(
+        logger,
+        "es_network_likes_search",
+        n_followed=len(followed_dids),
+        num_candidates=num_candidates,
+    ):
+        while len(candidates_by_uri) < num_candidates and scanned_likes < MAX_LIKES_SCANNED:
+            remaining_budget = MAX_LIKES_SCANNED - scanned_likes
+            page = await fetch_recent_liked_post_uri_page(
+                es,
+                followed_dids,
+                size=min(page_size, remaining_budget),
+                search_after=search_after,
+                max_age_hours=max_age_hours,
+            )
 
-        if page.hit_count == 0:
-            break
+            if page.hit_count == 0:
+                break
 
-        scanned_likes += page.hit_count
+            scanned_likes += page.hit_count
 
-        new_uris: list[str] = []
-        for uri in page.uris:
-            like_counts[uri] = like_counts.get(uri, 0) + 1
-            last_seen_order[uri] = liked_uri_order
-            liked_uri_order += 1
-            if uri not in queried_uris:
-                queried_uris.add(uri)
-                new_uris.append(uri)
+            new_uris: list[str] = []
+            for uri in page.uris:
+                like_counts[uri] = like_counts.get(uri, 0) + 1
+                last_seen_order[uri] = liked_uri_order
+                liked_uri_order += 1
+                if uri not in queried_uris:
+                    queried_uris.add(uri)
+                    new_uris.append(uri)
 
-        for candidate in await fetch_posts_by_uris(
-            es,
-            new_uris,
-            generator_name=generator_name,
-            video_only=video_only,
-            exclude_uris=exclude_uris,
-            max_age_hours=max_age_hours,
-        ):
-            if candidate.at_uri:
-                candidates_by_uri[candidate.at_uri] = candidate
+            for candidate in await fetch_posts_by_uris(
+                es,
+                new_uris,
+                generator_name=generator_name,
+                video_only=video_only,
+                exclude_uris=exclude_uris,
+                max_age_hours=max_age_hours,
+            ):
+                if candidate.at_uri:
+                    candidates_by_uri[candidate.at_uri] = candidate
 
-        if page.next_search_after is None or page.hit_count < min(page_size, remaining_budget):
-            break
-        search_after = page.next_search_after
+            if page.next_search_after is None or page.hit_count < min(page_size, remaining_budget):
+                break
+            search_after = page.next_search_after
 
     candidates = [
         candidate.model_copy(update={"score": float(like_counts[at_uri])})
