@@ -122,3 +122,19 @@ def evaluate_fail_fast_flag(client: Posthog | None, user_did: str) -> bool:
     except Exception:
         logger.warning("PostHog feature flag evaluation failed for %s", user_did)
         return False
+
+
+def evaluate_network_likes_flag(client: Posthog | None, user_did: str) -> bool:
+    """Evaluate the network-likes PostHog feature flag for this user.
+
+    Returns True only when the client is present and the flag is enabled for
+    user_did. Soft-fails to False on any SDK exception so a PostHog outage
+    never breaks feed serving.
+    """
+    if client is None:
+        return False
+    try:
+        return bool(client.feature_enabled("network-likes-in-your-feed", user_did))
+    except Exception:
+        logger.warning("PostHog feature flag evaluation failed for %s", user_did)
+        return False

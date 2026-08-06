@@ -38,10 +38,15 @@ from ..documents import (
     InteractionDocument,
     PipelineItemMeta,
 )
-from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
+from ..feeds import (
+    FEEDS,
+    SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
+    SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
+    DEFAULT_SOCIAL_RADIUS,
+)
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
-from ..lib.config import fail_fast, set_fail_fast_for_request
+from ..lib.config import set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
 from ..lib.elasticsearch import fetch_post_embeddings
 from ..lib.embeddings import encode_float32_b64
@@ -73,6 +78,7 @@ from ..lib.pipeline_context import (
 )
 from ..lib.posthog_client import (
     evaluate_fail_fast_flag,
+    evaluate_network_likes_flag,
     get_posthog_client,
     track_interaction,
     track_session,
@@ -1420,9 +1426,17 @@ async def get_feed_skeleton(
     # Apply its preference override to personalized-feed generator weights.
     generators_override: dict = {}
     applied_social_radius: int | None = None
-    if feed_name == "your-feed":
-        applied_social_radius = user_doc.social_radius if user_doc is not None else 3
-        preset = SOCIAL_RADIUS_PRESETS.get(applied_social_radius)
+    if feed_name in ("your-feed", "unranked-your-feed", "cutoff-preview"):
+        if user_doc is not None:
+            applied_social_radius = user_doc.social_radius
+        else:
+            applied_social_radius = DEFAULT_SOCIAL_RADIUS
+        network_likes_in_your_feed = evaluate_network_likes_flag(get_posthog_client(), user_did)
+        if network_likes_in_your_feed:
+            social_radius_presets = SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES
+        else:
+            social_radius_presets = SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES
+        preset = social_radius_presets.get(applied_social_radius)
         if preset is not None:
             generators_override = {"generators": preset}
 
