@@ -11,6 +11,18 @@ PostHog events emitted:
   feedLoaded       — one per getFeedSkeleton call (drives DAU/MAU/session counts)
   <interaction>    — behavioural events forwarded from sendInteractions
                      e.g. interactionLike, clickthroughItem, requestMore
+
+Every event carries two annotations, applied by :func:`annotate_event_properties`:
+
+  surface         — which producer emitted the event. The frontend writes to the
+                    same PostHog project and stamps ``greenearth_web``; this
+                    service stamps ``greenearth_api``. Filter on it whenever an
+                    insight should cover one producer rather than both.
+  schema_version  — version of *this surface's* event schema. It is scoped to
+                    the surface, so it is only meaningful alongside it — the
+                    frontend versions its own schema independently. Bump it when
+                    an existing event's properties change shape in a way that
+                    would break a saved insight.
 """
 
 from __future__ import annotations
@@ -23,6 +35,24 @@ from posthog import Posthog
 logger = logging.getLogger(__name__)
 
 _posthog_client: Posthog | None = None
+
+EVENT_SURFACE = "greenearth_api"
+EVENT_SCHEMA_VERSION = 1
+
+
+def annotate_event_properties(properties: dict) -> dict:
+    """Return *properties* stamped with the surface and schema version.
+
+    The annotations are applied last so a caller-supplied property can never
+    overwrite them — ``surface`` partitions this service's events from the
+    frontend's inside a shared PostHog project, and an event that could quietly
+    reassign itself to another producer would corrupt every insight built on it.
+    """
+    return {
+        **properties,
+        "surface": EVENT_SURFACE,
+        "schema_version": EVENT_SCHEMA_VERSION,
+    }
 
 
 def set_posthog_client(client: Posthog | None) -> None:
@@ -60,7 +90,7 @@ def track_session(
     client.capture(
         distinct_id=user_did,
         event="feedLoaded",
-        properties=properties,
+        properties=annotate_event_properties(properties),
         timestamp=timestamp,
     )
 
@@ -87,7 +117,7 @@ def track_interaction(
     client.capture(
         distinct_id=user_did,
         event=event,
-        properties=properties,
+        properties=annotate_event_properties(properties),
         timestamp=timestamp,
     )
 
