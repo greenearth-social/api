@@ -45,8 +45,7 @@ async def knn_search_posts(
 
     ``max_age_hours`` bounds candidates to recently created posts. It is typed
     ``int`` rather than ``MaxAgeHours`` because callers may pass a value off the
-    user-facing freshness ladder — ``two_tower`` caps its window below the
-    7-day default (see ``TWO_TOWER_MAX_AGE_CAP_HOURS``).
+    user-facing freshness ladder.
     """
     # Freshness filters returned candidate posts only. Actual availability can
     # be shorter when posts_recent retains less data than the requested bound.

@@ -20,7 +20,7 @@ from ..elasticsearch import (
 from ..embeddings import GE_POST_EMBEDDING_FIELD
 from .es_candidates import knn_search_posts
 from .es_candidates_test import FakeEs
-from .two_tower import MIN_LIKE_COUNT, TWO_TOWER_MAX_AGE_CAP_HOURS, TwoTowerCandidateGenerator
+from .two_tower import MIN_LIKE_COUNT, TwoTowerCandidateGenerator
 
 INFERENCE_SETTINGS = ("https://inference", "api-key")
 GET_INFERENCE_SETTINGS = "app.lib.candidates.two_tower.get_inference_settings"
@@ -131,7 +131,7 @@ class TestTwoTowerUsesQualityIndex:
         # cross-repo constant that has to track ingex's own promotion
         # threshold for no behavioral benefit.
         assert kwargs["min_like_count"] is None
-        assert kwargs["max_age_hours"] == TWO_TOWER_MAX_AGE_CAP_HOURS
+        assert kwargs["max_age_hours"] == 168
 
     @pytest.mark.asyncio
     async def test_generate_honours_the_index_override(self, monkeypatch):
