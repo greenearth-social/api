@@ -39,6 +39,9 @@ LIKED_POSTS_PAGE_SIZE = 100
 # Hard cap on how many like documents to scan while looking for post hits.
 MAX_LIKES_SCANNED = 5_000
 
+# Lookback window for finding the matching posts
+MAX_AGE_HOURS = 168
+
 
 # ---------------------------------------------------------------------------
 # Query helper
@@ -56,6 +59,7 @@ async def fetch_recent_liked_post_uri_page(
     user_dids: list[str],
     size: int,
     search_after: list[Any] | None = None,
+    max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
 ) -> LikedPostUriPage:
     """Return one page of recently liked post URIs for the given users."""
     if not user_dids or size <= 0:
@@ -63,7 +67,10 @@ async def fetch_recent_liked_post_uri_page(
 
     query = {
         "bool": {
-            "filter": [{"terms": {"author_did": user_dids}}],
+            "filter": [
+                {"terms": {"author_did": user_dids}},
+                {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}},
+            ],
         }
     }
 
@@ -106,14 +113,12 @@ async def fetch_posts_by_uris(
     generator_name: str | None = None,
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
-    max_age_hours: MaxAgeHours = 168,
+    max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
 ) -> list[CandidatePost]:
     """Fetch posts for the supplied URIs, preserving the requested URI order."""
     if not at_uris:
         return []
 
-    # Freshness applies to candidate post created_at, not the timestamp of the
-    # followed user's like event.
     filters: list[dict] = [
         {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}},
     ]
@@ -130,7 +135,7 @@ async def fetch_posts_by_uris(
     }
 
     resp = await es.search(
-        index="posts",
+        index="posts_recent",
         op="hydrate",
         query=posts_query,
         size=len(at_uris),
@@ -157,7 +162,7 @@ async def network_likes_search(
     generator_name: str | None = None,
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
-    max_age_hours: MaxAgeHours = 168,
+    max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
 ) -> list[CandidatePost]:
     """Fetch posts liked by users followed by user_did."""
 
@@ -199,6 +204,7 @@ async def network_likes_search(
             followed_dids,
             size=min(page_size, remaining_budget),
             search_after=search_after,
+            max_age_hours=max_age_hours,
         )
 
         if page.hit_count == 0:
@@ -258,7 +264,7 @@ class NetworkLikesCandidateGenerator(CandidateGenerator):
         num_candidates: int = 100,
         video_only: bool = False,
         exclude_uris: list[str] | None = None,
-        max_age_hours: MaxAgeHours = 168,
+        max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
     ) -> CandidateResult:
         candidates = await network_likes_search(
             es,
