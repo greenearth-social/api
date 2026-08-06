@@ -80,7 +80,7 @@ FEEDS: dict[str, FeedConfig] = {
         avatar="assets/icons/random.png",
         diversify=False,
         exclude_seen_posts=False,
-        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5uvuzydy2o",
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetia5l7y2j",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="random_posts", weight=1.0)],
             infill=None,
@@ -96,7 +96,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
         avatar="assets/icons/green-earth.png",
-        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mrash36z5b2c",
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetfgpr3t2s",
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
         # min_rank_score=0.425 maps the old -0.15 floor into the current [0, 1]
@@ -134,7 +134,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="fd-bof",
         internal_display_name="fd BOF",
         avatar="assets/icons/best-of-friends.png",
-        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3mq5uvi4exl2s",
+        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetho32pa2g",
         # Slate-cutoff starting points — tune from the feed.slate.kept_share and
         # feed.slate.cutoff_count metrics once live (see issue #248). min_rank_score
         # matches your-feed's empirically-calibrated value above; this feed's own
