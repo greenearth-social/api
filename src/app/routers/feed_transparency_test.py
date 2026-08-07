@@ -559,8 +559,9 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
     assert data["purpose"] == 0.65
 
 
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
 @patch("app.routers.feed_transparency.set_user_preferences")
-def test_put_preferences_updates_value(mock_set_prefs, client):
+def test_put_preferences_updates_value(mock_set_prefs, mock_delete_seen, client):
     response = client.put(
         "/api/feeds/preferences",
         json={
@@ -577,10 +578,12 @@ def test_put_preferences_updates_value(mock_set_prefs, client):
     assert data["politics"] == 1.5
     assert data["purpose"] == 0.8
     mock_set_prefs.assert_awaited_once()
+    mock_delete_seen.assert_awaited_once()
 
 
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
 @patch("app.routers.feed_transparency.set_user_preferences")
-def test_put_preferences_rejects_out_of_range(mock_set_prefs, client):
+def test_put_preferences_rejects_out_of_range(mock_set_prefs, mock_delete_seen, client):
     response = client.put(
         "/api/feeds/preferences",
         json={
@@ -591,10 +594,12 @@ def test_put_preferences_rejects_out_of_range(mock_set_prefs, client):
         },
     )
     assert response.status_code == 422
+    mock_delete_seen.assert_not_awaited()
 
 
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
 @patch("app.routers.feed_transparency.set_user_preferences")
-def test_put_preferences_rejects_camel_case_body(mock_set_prefs, client):
+def test_put_preferences_rejects_camel_case_body(mock_set_prefs, mock_delete_seen, client):
     response = client.put(
         "/api/feeds/preferences",
         json={
@@ -607,10 +612,12 @@ def test_put_preferences_rejects_camel_case_body(mock_set_prefs, client):
 
     assert response.status_code == 422
     mock_set_prefs.assert_not_awaited()
+    mock_delete_seen.assert_not_awaited()
 
 
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
 @patch("app.routers.feed_transparency.set_user_preferences")
-def test_put_preferences_creates_user_doc_if_missing(mock_set_prefs, client):
+def test_put_preferences_creates_user_doc_if_missing(mock_set_prefs, mock_delete_seen, client):
     response = client.put(
         "/api/feeds/preferences",
         json={
@@ -623,6 +630,7 @@ def test_put_preferences_creates_user_doc_if_missing(mock_set_prefs, client):
     assert response.status_code == 200
     assert response.json()["social_radius"] == 1
     mock_set_prefs.assert_awaited_once()
+    mock_delete_seen.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
