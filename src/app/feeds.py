@@ -20,10 +20,42 @@ from .models import (
     RankPredictRequest,
 )
 
+DEFAULT_SOCIAL_RADIUS: int = 3
+
 # Social-radius preset generator weights for your-feed.
 # Index 3 (balanced) matches the default weights defined in the "your-feed"
 # FeedConfig below — keep them in sync when tuning.
-SOCIAL_RADIUS_PRESETS: dict[int, list[GeneratorSpec]] = {
+SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
+    0: [  # Friends — only from people you follow
+        GeneratorSpec(name="followed_users", weight=1.00),
+    ],
+    1: [  # Closer
+        GeneratorSpec(name="followed_users", weight=0.70),
+        GeneratorSpec(name="two_tower", weight=0.10),
+        GeneratorSpec(name="popularity", weight=0.10),
+        GeneratorSpec(name="network_likes", weight=0.10),
+    ],
+    2: [
+        GeneratorSpec(name="followed_users", weight=0.50),
+        GeneratorSpec(name="two_tower", weight=0.15),
+        GeneratorSpec(name="popularity", weight=0.15),
+        GeneratorSpec(name="network_likes", weight=0.20),
+    ],
+    3: [  # Balanced — same as your-feed defaults
+        GeneratorSpec(name="followed_users", weight=0.30),
+        GeneratorSpec(name="two_tower", weight=0.25),
+        GeneratorSpec(name="popularity", weight=0.25),
+        GeneratorSpec(name="network_likes", weight=0.20),
+    ],
+    4: [  # Everyone — mostly discovery
+        GeneratorSpec(name="followed_users", weight=0.10),
+        GeneratorSpec(name="two_tower", weight=0.40),
+        GeneratorSpec(name="popularity", weight=0.40),
+        GeneratorSpec(name="network_likes", weight=0.10),
+    ],
+}
+
+SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
     0: [  # Friends — only from people you follow
         GeneratorSpec(name="followed_users", weight=1.00),
     ],
@@ -60,11 +92,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="e2 S",
         avatar="assets/icons/unranked-your-feed.png",
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=[
-                GeneratorSpec(name="two_tower", weight=0.35),
-                GeneratorSpec(name="followed_users", weight=0.35),
-                GeneratorSpec(name="popularity", weight=0.3),
-            ],
+            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
             infill="popularity",
             num_candidates=30,
             video_only=False,
@@ -110,11 +138,7 @@ FEEDS: dict[str, FeedConfig] = {
         min_rank_score=0.425,
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=[
-                GeneratorSpec(name="followed_users", weight=0.40),
-                GeneratorSpec(name="two_tower", weight=0.30),
-                GeneratorSpec(name="popularity", weight=0.30),
-            ],
+            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
             num_candidates=30,
             video_only=False,
@@ -167,11 +191,7 @@ FEEDS: dict[str, FeedConfig] = {
         # Same generator mix as your-feed, so cutoff behavior here previews what
         # real users would see.
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=[
-                GeneratorSpec(name="followed_users", weight=0.40),
-                GeneratorSpec(name="two_tower", weight=0.30),
-                GeneratorSpec(name="popularity", weight=0.30),
-            ],
+            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
             num_candidates=30,
             video_only=False,
@@ -278,9 +298,28 @@ FEEDS: dict[str, FeedConfig] = {
             exclude_uris=[],
         ),
     ),
+    "two-tower-empty-history": FeedConfig(
+        display_name="TwoTower Cold Start",
+        description="Development feed — two-tower candidates for a user with no like history.",
+        internal_rkey="tt-eh",
+        internal_display_name="tt EH",
+        avatar="assets/icons/two-tower.png",
+        diversify=False,
+        exclude_seen_posts=False,
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[
+                GeneratorSpec(name="two_tower_empty_history", weight=1.0),
+            ],
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
+        ),
+    ),
     "cold-start": FeedConfig(
         display_name="Cold Start",
-        description="Main Green Earth feed for a user with no like history.",
+        description=(
+            "Main Green Earth feed for a user with no like history and no followed accounts."
+        ),
         public=False,
         internal_rkey="mf-cs",
         internal_display_name="mf CS",
@@ -290,9 +329,7 @@ FEEDS: dict[str, FeedConfig] = {
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="followed_users", weight=0.40),
-                GeneratorSpec(name="two_tower_empty_history", weight=0.30),
-                GeneratorSpec(name="popularity", weight=0.30),
+                GeneratorSpec(name="popularity", weight=1.0),
             ],
             infill=None,
             num_candidates=30,

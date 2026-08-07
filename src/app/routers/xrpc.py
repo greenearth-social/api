@@ -38,17 +38,21 @@ from ..documents import (
     InteractionDocument,
     PipelineItemMeta,
 )
-from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
+from ..feeds import (
+    DEFAULT_SOCIAL_RADIUS,
+    FEEDS,
+    SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
+    SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
+)
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
-from ..lib.config import fail_fast, set_fail_fast_for_request
+from ..lib.config import set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
 from ..lib.elasticsearch import fetch_post_embeddings
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
-from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     delete_feed_snapshot,
@@ -63,6 +67,7 @@ from ..lib.firestore import (
     upsert_user,
     write_feed_debug,
 )
+from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.metrics import get_metric_collector
 from ..lib.pipeline_context import (
     DegradationEvent,
@@ -72,13 +77,15 @@ from ..lib.pipeline_context import (
     pipeline_context_scope,
 )
 from ..lib.posthog_client import (
-    evaluate_fail_fast_flag,
+    FAIL_FAST_FLAG,
+    NETWORK_LIKES_FLAG,
+    evaluate_feature_flags,
     get_posthog_client,
     track_interaction,
     track_session,
 )
-from ..lib.release import api_release_sha
 from ..lib.rankers import run_predict
+from ..lib.release import api_release_sha
 from ..lib.request_cache import request_cache_scope
 from ..lib.request_context import set_traffic
 from ..lib.telemetry import timed
@@ -1402,7 +1409,27 @@ async def get_feed_skeleton(
         _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
     )
 
-    set_fail_fast_for_request(evaluate_fail_fast_flag(get_posthog_client(), user_did))
+    uses_network_likes_flag = feed_name in (
+        "your-feed",
+        "unranked-your-feed",
+        "cutoff-preview",
+    )
+    flag_keys = [FAIL_FAST_FLAG]
+    if uses_network_likes_flag:
+        flag_keys.append(NETWORK_LIKES_FLAG)
+
+    posthog_client = get_posthog_client()
+    feature_flags = (
+        await asyncio.to_thread(
+            evaluate_feature_flags,
+            posthog_client,
+            user_did,
+            flag_keys,
+        )
+        if posthog_client is not None
+        else {}
+    )
+    set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
@@ -1418,23 +1445,24 @@ async def get_feed_skeleton(
     # Social Radius only reallocates the fixed candidate batch among sources;
     # it never increases the total candidate count or per-request batch cap.
     # Apply its preference override to personalized-feed generator weights.
-    # Cold-start uses the same source mix as your-feed, but forces the
-    # empty-history two-tower variant.
-    # The override is computed once and threaded through model_copy in both
-    # generation paths so the shared module-level template is never mutated.
     generators_override: dict = {}
     applied_social_radius: int | None = None
-    if feed_name in ("your-feed", "cold-start"):
-        applied_social_radius = user_doc.social_radius if user_doc is not None else 3
-        preset = SOCIAL_RADIUS_PRESETS.get(applied_social_radius)
+    if uses_network_likes_flag:
+        if user_doc is not None:
+            applied_social_radius = user_doc.social_radius
+        else:
+            applied_social_radius = DEFAULT_SOCIAL_RADIUS
+        network_likes_in_your_feed = (
+            True
+            if posthog_client is None
+            else feature_flags.get(NETWORK_LIKES_FLAG, False)
+        )
+        if network_likes_in_your_feed:
+            social_radius_presets = SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES
+        else:
+            social_radius_presets = SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES
+        preset = social_radius_presets.get(applied_social_radius)
         if preset is not None:
-            if feed_name == "cold-start":
-                preset = [
-                    spec.model_copy(update={"name": "two_tower_empty_history"})
-                    if spec.name == "two_tower"
-                    else spec
-                    for spec in preset
-                ]
             generators_override = {"generators": preset}
 
     freshness_index = (

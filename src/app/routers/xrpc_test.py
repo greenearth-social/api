@@ -44,6 +44,9 @@ RANDOM_FEED_RKEY = "random"
 RANDOM_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANDOM_FEED_RKEY}"
 RANKED_FEED_RKEY = "your-feed"
 RANKED_FEED_URI = f"at://{SERVICE_DID}/app.bsky.feed.generator/{RANKED_FEED_RKEY}"
+CUTOFF_PREVIEW_FEED_URI = (
+    f"at://{SERVICE_DID}/app.bsky.feed.generator/cutoff-preview"
+)
 COLD_START_FEED_RKEY = "cold-start"
 COLD_START_FEED_URI = (
     f"at://{SERVICE_DID}/app.bsky.feed.generator/{COLD_START_FEED_RKEY}"
@@ -58,6 +61,7 @@ CANDIDATE_ONLY_FEEDS = (
     ("network-likes", "network_likes"),
     ("popularity", "popularity"),
     ("two-tower", "two_tower"),
+    ("two-tower-empty-history", "two_tower_empty_history"),
 )
 TEST_EMBEDDING = encode_float32_b64([1.0, 0.0, 0.0])
 
@@ -96,6 +100,11 @@ def _patch_unranked_your_feed_generators(
             else followed_users_candidates
         ),
     )
+    network_likes_gen = AsyncMock()
+    network_likes_gen.generate.return_value = CandidateResult(
+        generator_name="network_likes",
+        candidates=two_tower_candidates,
+    )
     infill_gen = AsyncMock()
     infill_gen.generate.return_value = CandidateResult(
         generator_name="popularity",
@@ -107,6 +116,8 @@ def _patch_unranked_your_feed_generators(
             return two_tower_gen
         if name == "followed_users":
             return followed_users_gen
+        if name == "network_likes":
+            return network_likes_gen
         if name == "popularity":
             return infill_gen
         return None
@@ -360,6 +371,10 @@ class TestGetFeedSkeleton:
         followed_gen.generate.return_value = CandidateResult(
             generator_name="followed_users", candidates=[],
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes", candidates=[],
+        )
         infill_gen = AsyncMock()
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[],
@@ -369,6 +384,7 @@ class TestGetFeedSkeleton:
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -402,6 +418,10 @@ class TestGetFeedSkeleton:
         followed_gen.generate.return_value = CandidateResult(
             generator_name="followed_users", candidates=[],
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes", candidates=[],
+        )
         infill_gen = AsyncMock()
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[],
@@ -411,6 +431,7 @@ class TestGetFeedSkeleton:
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -669,11 +690,17 @@ class TestGetFeedSkeleton:
             generator_name="followed_users",
             candidates=[],
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes",
+            candidates=[],
+        )
 
         def fake_get(name):
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_users_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -1093,11 +1120,16 @@ class TestFeedSkeletonCursor:
         followed_users_gen.generate.return_value = CandidateResult(
             generator_name="followed_users", candidates=[],
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes", candidates=[],
+        )
 
         def fake_get(name):
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_users_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -1422,6 +1454,10 @@ class TestRankedFeed:
         followed_gen.generate.return_value = CandidateResult(
             generator_name="followed_users", candidates=[]
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes", candidates=[]
+        )
         infill_gen = AsyncMock()
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[]
@@ -1431,6 +1467,7 @@ class TestRankedFeed:
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -1628,6 +1665,10 @@ class TestSlateCutoffs:
         followed_gen.generate.return_value = CandidateResult(
             generator_name="followed_users", candidates=[]
         )
+        network_likes_gen = AsyncMock()
+        network_likes_gen.generate.return_value = CandidateResult(
+            generator_name="network_likes", candidates=[]
+        )
         infill_gen = AsyncMock()
         infill_gen.generate.return_value = CandidateResult(
             generator_name="popularity", candidates=[]
@@ -1637,6 +1678,7 @@ class TestSlateCutoffs:
             return {
                 "two_tower": primary_gen,
                 "followed_users": followed_gen,
+                "network_likes": network_likes_gen,
                 "popularity": infill_gen,
             }.get(name)
 
@@ -3056,7 +3098,7 @@ class TestSocialRadiusOverride:
     def test_applies_social_radius_preset_0(self, mock_pipeline, mock_get_user):
         """social_radius=0 (Friends) → followed_users-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -3072,7 +3114,7 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[0]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[0]
         assert gen_request.max_age_hours == 12
 
     @patch("app.routers.xrpc.get_user")
@@ -3080,7 +3122,7 @@ class TestSocialRadiusOverride:
     def test_applies_social_radius_preset_4(self, mock_pipeline, mock_get_user):
         """social_radius=4 (Everyone) → popularity-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -3095,12 +3137,18 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[4]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[4]
 
+    @patch("app.routers.xrpc.evaluate_feature_flags")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
-    def test_applies_social_radius_to_cold_start(self, mock_pipeline, mock_get_user):
-        """Cold-start keeps the radius mix but uses empty-history two-tower."""
+    def test_cold_start_ignores_social_radius(
+        self,
+        mock_pipeline,
+        mock_get_user,
+        mock_feature_flags,
+    ):
+        """Cold-start always uses popularity for a brand-new user."""
         from ..documents import UserDocument
         from .xrpc import PipelineResult
 
@@ -3121,17 +3169,20 @@ class TestSocialRadiusOverride:
             (generator.name, generator.weight)
             for generator in gen_request.generators
         ] == [
-            ("followed_users", 0.20),
-            ("two_tower_empty_history", 0.40),
-            ("popularity", 0.40),
+            ("popularity", 1.0),
         ]
+        mock_feature_flags.assert_not_called()
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_default_radius_when_missing(self, mock_pipeline, mock_get_user):
         """User doc without social_radius field → defaults to 3 (balanced)."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from .xrpc import (
+            DEFAULT_SOCIAL_RADIUS,
+            SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
+            PipelineResult,
+        )
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -3145,7 +3196,10 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
+        assert (
+            gen_request.generators
+            == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+        )
         assert gen_request.max_age_hours == 168
 
     @patch("app.routers.xrpc.get_user")
@@ -3176,7 +3230,11 @@ class TestSocialRadiusOverride:
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_fallen_back_to_defaults_when_user_has_no_doc(self, mock_pipeline, mock_get_user):
         """User doc is None → no override, defaults used."""
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from .xrpc import (
+            DEFAULT_SOCIAL_RADIUS,
+            SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
+            PipelineResult,
+        )
 
         mock_get_user.return_value = None
         mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
@@ -3188,7 +3246,125 @@ class TestSocialRadiusOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
+        assert (
+            gen_request.generators
+            == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+        )
+
+    @pytest.mark.parametrize(
+        "feed_uri",
+        (RANKED_FEED_URI, FEED_URI, CUTOFF_PREVIEW_FEED_URI),
+    )
+    @patch(
+        "app.routers.xrpc.evaluate_feature_flags",
+        return_value={"fail-fast-feed": False, "network-likes-in-your-feed": True},
+    )
+    @patch("app.routers.xrpc.get_posthog_client")
+    @patch("app.routers.xrpc.get_user")
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_enabled_network_likes_flag_uses_network_likes_presets(
+        self,
+        mock_pipeline,
+        mock_get_user,
+        mock_get_posthog_client,
+        mock_feature_flags,
+        feed_uri,
+    ):
+        from ..documents import UserDocument
+        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=3,
+        )
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
+
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": feed_uri, "limit": 30},
+        )
+
+        assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
+        mock_feature_flags.assert_called_once_with(
+            mock_get_posthog_client.return_value,
+            "did:plc:testuser",
+            ["fail-fast-feed", "network-likes-in-your-feed"],
+        )
+
+    @pytest.mark.parametrize(
+        "feed_uri",
+        (RANKED_FEED_URI, FEED_URI, CUTOFF_PREVIEW_FEED_URI),
+    )
+    @patch("app.routers.xrpc.evaluate_feature_flags")
+    @patch("app.routers.xrpc.get_posthog_client", return_value=None)
+    @patch("app.routers.xrpc.get_user")
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_missing_posthog_client_uses_network_likes_defaults(
+        self,
+        mock_pipeline,
+        mock_get_user,
+        mock_get_posthog_client,
+        mock_feature_flags,
+        feed_uri,
+    ):
+        from ..documents import UserDocument
+        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=3,
+        )
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
+
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": feed_uri, "limit": 30},
+        )
+
+        assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
+        mock_get_posthog_client.assert_any_call()
+        mock_feature_flags.assert_not_called()
+
+    @patch(
+        "app.routers.xrpc.evaluate_feature_flags",
+        return_value={"fail-fast-feed": False, "network-likes-in-your-feed": False},
+    )
+    @patch("app.routers.xrpc.get_posthog_client")
+    @patch("app.routers.xrpc.get_user")
+    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    def test_disabled_network_likes_flag_uses_rollback_presets(
+        self,
+        mock_pipeline,
+        mock_get_user,
+        mock_get_posthog_client,
+        mock_feature_flags,
+    ):
+        from ..documents import UserDocument
+        from .xrpc import SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES, PipelineResult
+
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=3,
+        )
+        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
+
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": RANKED_FEED_URI, "limit": 30},
+        )
+
+        assert resp.status_code == 200
+        gen_request = mock_pipeline.call_args.args[1]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[3]
+        mock_feature_flags.assert_called_once_with(
+            mock_get_posthog_client.return_value,
+            "did:plc:testuser",
+            ["fail-fast-feed", "network-likes-in-your-feed"],
+        )
 
 
 class TestGetFeedSkeletonMetrics:
@@ -3549,10 +3725,16 @@ class TestFailFastFeatureFlag:
     def test_flag_enabled_calls_set_fail_fast_true(self):
         """When PostHog returns True for the user, set_fail_fast_for_request(True) is called."""
         mock_ph = MagicMock()
-        mock_ph.feature_enabled.return_value = True
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags",
+                return_value={
+                    "fail-fast-feed": True,
+                    "network-likes-in-your-feed": False,
+                },
+            ),
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
             client.get(
@@ -3565,10 +3747,16 @@ class TestFailFastFeatureFlag:
     def test_flag_disabled_calls_set_fail_fast_false(self):
         """When PostHog returns False, set_fail_fast_for_request(False) is called."""
         mock_ph = MagicMock()
-        mock_ph.feature_enabled.return_value = False
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags",
+                return_value={
+                    "fail-fast-feed": False,
+                    "network-likes-in-your-feed": True,
+                },
+            ),
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
             client.get(
