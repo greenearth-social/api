@@ -1,6 +1,7 @@
 """Tests for the popularity candidate generator."""
 
 from datetime import datetime, timezone
+from typing import cast
 
 import pytest
 
@@ -11,9 +12,12 @@ from ..candidates.popularity import (
     recency_decay_scale,
     take_from_pool,
 )
-from ..candidates.popularity_cache import PopularityPool, set_popularity_cache
+from ..candidates.popularity_cache import (
+    PopularityCache,
+    PopularityPool,
+    set_popularity_cache,
+)
 from ..embeddings import MINILM_L12_EMBEDDING_KEY
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -310,12 +314,11 @@ class StubCache:
 
 @pytest.fixture
 def install_cache():
-    installed: list[StubCache] = []
+    """Install a StubCache as the process-level cache for one test."""
 
     def _install(pool: list[CandidatePost] | None) -> StubCache:
         cache = StubCache(pool)
-        installed.append(cache)
-        set_popularity_cache(cache)
+        set_popularity_cache(cast(PopularityCache, cache))
         return cache
 
     yield _install

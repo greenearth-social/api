@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -62,6 +63,11 @@ def _cache() -> tuple[PopularityCache, AsyncMock]:
     collection_ref.document.return_value = doc_ref
     db.collection.return_value = collection_ref
     return PopularityCache(db), doc_ref
+
+
+def _db_of(cache: PopularityCache) -> MagicMock:
+    """The mock Firestore behind *cache*, typed so assertions on it check out."""
+    return cast(MagicMock, cache._db)
 
 
 def _snapshot(data: dict | None):
@@ -171,7 +177,7 @@ class TestGetPool:
             "at://post/1",
             "at://post/2",
         ]
-        cache._db.collection.assert_called_with(POPULARITY_CACHE_COLLECTION)
+        _db_of(cache).collection.assert_called_with(POPULARITY_CACHE_COLLECTION)
         await cache.drain()
         fetch.assert_not_awaited()
 
@@ -438,7 +444,7 @@ class TestRefreshLease:
         )
         await cache.drain()
 
-        cache._db.collection.return_value.document.assert_called_with("24h-video")
+        _db_of(cache).collection.return_value.document.assert_called_with("24h-video")
         assert doc_ref.set.call_args[0][0]["count"] == 7
 
 
