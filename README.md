@@ -126,6 +126,10 @@ gea_<8-char key_id><48-char secret>
 The plaintext key is shown **once** at generation and never stored.
 Authenticate requests by passing the key in the `X-API-Key` header.
 
+Keys also carry an `admin` flag, required to access `/admin/*` endpoints.
+Existing keys default to non-admin. Only issue admin keys to the greenearth
+team.
+
 ### CLI commands
 
 Run all commands from the `api/` directory:
@@ -133,6 +137,9 @@ Run all commands from the `api/` directory:
 ```bash
 # Issue a new key
 pipenv run python scripts/apikeys.py generate alice@example.com
+
+# Issue an admin key (greenearth team only)
+pipenv run python scripts/apikeys.py generate alice@greenearth.social --admin
 
 # List all keys
 pipenv run python scripts/apikeys.py list
