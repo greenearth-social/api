@@ -16,6 +16,7 @@ from google.cloud.firestore import AsyncClient
 from ..documents import FeedSnapshotDocument, PipelineItemMeta
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import (
+    delete_most_recent_seen_bucket,
     get_feed_snapshot,
     get_recent_feed_snapshots,
     get_user,
@@ -230,16 +231,23 @@ async def put_preferences(
     body: Preferences,
     user_doc_id: FirebaseUser,
 ) -> Preferences:
-    """Update the preferences for the authenticated user."""
+    """Update the preferences for the authenticated user.
+
+    Also clears today's seen-posts bucket so the user sees fresh candidates
+    after adjusting their feed controls. Repeated changes on the same day are
+    safe: the delete is idempotent once the bucket is gone.
+    """
     db: AsyncClient = request.app.state.firestore
+    did = f"did:plc:{user_doc_id}"
     await set_user_preferences(
         db,
-        f"did:plc:{user_doc_id}",
+        did,
         social_radius=body.social_radius,
         freshness=body.freshness,
         politics=body.politics,
         purpose=body.purpose,
     )
+    await delete_most_recent_seen_bucket(db, did)
     return body
 
 

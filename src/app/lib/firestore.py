@@ -452,6 +452,24 @@ async def get_recent_seen_uris(
     return await _get_recent_bucket_uris(db, user_did, SEEN_POSTS_COLLECTION, max_uris)
 
 
+async def delete_most_recent_seen_bucket(db: AsyncClient, user_did: str) -> None:
+    """Delete the current UTC day's seen-posts bucket for the user.
+
+    Idempotent: no-op if the bucket does not exist. Called on settings changes so
+    the user sees fresh candidates after adjusting their feed controls; repeated
+    settings changes within the same day are safe because the document is already
+    gone after the first call.
+    """
+    bucket_id = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ref = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(SEEN_POSTS_COLLECTION)
+        .document(bucket_id)
+    )
+    await ref.delete()
+
+
 async def record_discarded_posts(
     db: AsyncClient, user_did: str, post_uris: list[str], *, load_test: bool = False
 ) -> None:
