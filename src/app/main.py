@@ -43,6 +43,7 @@ from .lib.atproto_auth import init_id_resolver
 from .lib.firebase_auth import init_firebase_auth
 from .lib.es_client import SlowQueryLoggingES
 from .lib.eventloop_monitor import start_eventloop_monitor, stop_eventloop_monitor
+from .lib.candidates.popularity_cache import PopularityCache, set_popularity_cache
 from .lib.feed_cache import FirestoreFeedCache
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
@@ -145,6 +146,8 @@ async def lifespan(app: FastAPI):
     app.state.id_resolver = init_id_resolver()
     app.state.firestore = init_firestore_client()
     app.state.feed_cache = FirestoreFeedCache(app.state.firestore)
+    app.state.popularity_cache = PopularityCache(app.state.firestore)
+    set_popularity_cache(app.state.popularity_cache)
     try:
         init_firebase_auth()
     except Exception:
@@ -155,6 +158,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Let in-flight popularity refreshes finish before the clients they
+        # write through are closed.
+        set_popularity_cache(None)
+        try:
+            await app.state.popularity_cache.drain()
+        except Exception:
+            pass
         try:
             await es.close()
         except Exception:

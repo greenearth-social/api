@@ -546,6 +546,37 @@ Disable when done (full capture has storage/perf cost):
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --disable
 ```
 
+## Popularity Candidate Cache
+
+Popularity candidates are identical for every user, so the API keeps one shared
+pool of them in Firestore (`popularity_cache`) instead of running its ~1.5s
+Elasticsearch query per request. Requests filter their own exclusions out of the
+pool in memory; only a background refresh touches Elasticsearch, and only one
+instance at a time (a transactional lease on the document). A user request never
+waits on a refresh — a stale pool is served while the new one is built. See
+`src/app/lib/candidates/popularity_cache.py`.
+
+There is one document per (freshness window, `video_only`) combination, created
+on demand — real traffic typically populates two or three of them.
+
+| Variable | Default | What it controls |
+|---|---|---|
+| `GE_POPULARITY_CACHE_POOL_SIZE` | 500 | Candidates per pool. Must stay well above one feed's popularity allocation so heavily-excluded users still fill their slate. |
+| `GE_POPULARITY_CACHE_TTL_SEC` | 300 | How long a pool is served before a refresh is triggered. |
+| `GE_POPULARITY_CACHE_LOCAL_TTL_SEC` | 30 | How long an instance reuses its in-memory copy before re-reading Firestore. |
+| `GE_POPULARITY_CACHE_LEASE_SEC` | 60 | Refresh lease. Must exceed one pool query plus its write. |
+
+**Observability.** Every lookup records
+`candidates.popularity_cache.age_seconds` (plus `lookup_count` /
+`refresh_count`, labelled by outcome). A pool served at 20 minutes or older also
+logs at ERROR — refreshes are failing, and that is the condition worth alerting
+on.
+
+**Firestore.** The `payload` field is exempted from indexing in the frontend
+repo's `firestore.indexes.json`; without that exemption a deployed write of a
+blob this size is rejected. Deploy the exemption before the API release that
+starts writing it.
+
 ## Elasticsearch Query Profiling
 
 The API logs any ES query that exceeds `GE_SLOW_ES_THRESHOLD_MS` (default 500 ms) to Cloud Run as a

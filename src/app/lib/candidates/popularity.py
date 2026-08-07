@@ -20,6 +20,7 @@ import logging
 
 from ...models import CandidatePost, MaxAgeHours
 from .base import CandidateGenerator, CandidateResult
+from .popularity_cache import get_popularity_cache, pool_size
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 from ..telemetry import timed
 
@@ -137,11 +138,40 @@ async def popularity_search(
 # Generator class
 # ---------------------------------------------------------------------------
 
+def take_from_pool(
+    pool: list[CandidatePost], exclude_uris: list[str] | None, num_candidates: int
+) -> list[CandidatePost]:
+    """Take the top *num_candidates* of *pool* that aren't excluded.
+
+    The pool is already in descending popularity order, so this is the same
+    selection the Elasticsearch query would have made with the exclusions
+    pushed into its ``must_not``.
+
+    The taken candidates are copied: the pool is shared by every request in
+    the process, and pipeline stages downstream of here are only safe to hand
+    request-owned objects.
+    """
+    exclude_set = set(exclude_uris or ())
+    taken: list[CandidatePost] = []
+    for candidate in pool:
+        if candidate.at_uri in exclude_set:
+            continue
+        taken.append(candidate.model_copy())
+        if len(taken) == num_candidates:
+            break
+    return taken
+
+
 class PopularityCandidateGenerator(CandidateGenerator):
     """Returns recent popular posts.
 
     ``user_did`` is accepted for interface consistency but is not used –
-    popularity candidates are the same for every user.
+    popularity candidates are the same for every user.  That is what makes the
+    result cacheable: when a shared pool is available (see
+    ``popularity_cache``) this generator filters it in memory instead of
+    running its Elasticsearch query, which is the most expensive one on the
+    feed path.  Without a cache — or when a user's exclusions have eaten
+    through the whole pool — it falls back to querying directly.
     """
 
     @property
@@ -157,6 +187,33 @@ class PopularityCandidateGenerator(CandidateGenerator):
         exclude_uris: list[str] | None = None,
         max_age_hours: MaxAgeHours = 168,
     ) -> CandidateResult:
+        cache = get_popularity_cache()
+        if cache is not None:
+            async def fetch_pool(size: int) -> list[CandidatePost]:
+                # No exclusions: the pool is shared by every user.
+                return await popularity_search(
+                    es, size, generator_name=self.name, video_only=video_only,
+                    max_age_hours=max_age_hours,
+                )
+
+            pool = await cache.get_pool(
+                video_only=video_only, max_age_hours=max_age_hours, fetch=fetch_pool
+            )
+            if pool is not None:
+                candidates = take_from_pool(pool.candidates, exclude_uris, num_candidates)
+                # A pool that came back short of the size we asked for holds
+                # every eligible post there is, so a direct query can't beat
+                # it. Short of that, coming up empty-handed means this user's
+                # exclusions ate the pool — query directly rather than
+                # short-change their feed.
+                if len(candidates) >= num_candidates or len(pool.candidates) < pool_size():
+                    return CandidateResult(generator_name=self.name, candidates=candidates)
+                logger.info(
+                    "Popularity pool yielded %d/%d after exclusions; querying directly",
+                    len(candidates),
+                    num_candidates,
+                )
+
         candidates = await popularity_search(
             es, num_candidates, generator_name=self.name, video_only=video_only,
             exclude_uris=exclude_uris, max_age_hours=max_age_hours,
