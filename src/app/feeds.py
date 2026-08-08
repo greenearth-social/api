@@ -91,6 +91,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="e2-s",
         internal_display_name="e2 S",
         avatar="assets/icons/unranked-your-feed.png",
+        preference_source="your-feed",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
             infill="popularity",
@@ -106,6 +107,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="67-r",
         internal_display_name="67 R",
         avatar="assets/icons/random.png",
+        controls=("freshness",),
         diversify=False,
         exclude_seen_posts=False,
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetia5l7y2j",
@@ -124,6 +126,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
         avatar="assets/icons/green-earth.png",
+        controls=("source_weights", "freshness", "purpose"),
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetfgpr3t2s",
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
@@ -158,6 +161,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="fd-bof",
         internal_display_name="fd BOF",
         avatar="assets/icons/best-of-friends.png",
+        controls=("freshness", "purpose"),
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetho32pa2g",
         # Slate-cutoff starting points — tune from the feed.slate.kept_share and
         # feed.slate.cutoff_count metrics once live (see issue #248). min_rank_score
@@ -188,6 +192,7 @@ FEEDS: dict[str, FeedConfig] = {
         "limits enabled, for observing and tuning thresholds (see issue #248).",
         internal_rkey="qr-cp",
         internal_display_name="qr CP",
+        preference_source="your-feed",
         # Same generator mix as your-feed, so cutoff behavior here previews what
         # real users would see.
         gen_request_template=CandidateGenerateRequest.model_construct(
@@ -228,7 +233,6 @@ FEEDS: dict[str, FeedConfig] = {
         min_rank_score=0.425,
         min_mmr_score=-0.05,
     ),
-
     ### (Private) Pure Candidate Generator Feeds, mostly for testing and debugging ###
     "followed-users": FeedConfig(
         display_name="Followed Users",
@@ -344,3 +348,17 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
 }
+
+
+def canonical_feed_name(feed_identifier: str) -> str | None:
+    """Resolve a configured feed name from its canonical or published rkey."""
+    if feed_identifier in FEEDS:
+        return feed_identifier
+    return next(
+        (
+            feed_name
+            for feed_name, config in FEEDS.items()
+            if config.internal_rkey == feed_identifier
+        ),
+        None,
+    )

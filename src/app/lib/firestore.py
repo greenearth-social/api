@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from google.cloud.firestore import (  # type: ignore[import-untyped]
     ArrayUnion,
@@ -22,11 +22,13 @@ from google.cloud.firestore import (  # type: ignore[import-untyped]
 from ..documents import (
     FeedActivityDocument,
     FeedDebugDocument,
+    FeedPreferencesDocument,
     FeedSnapshotDocument,
     InteractionDocument,
     RedirectDocument,
     UserDocument,
 )
+from .feed_preferences import preference_source, resolve_feed_preferences
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,8 @@ DISCARDED_POSTS_COLLECTION = "discarded_posts"
 FEED_DEBUG_COLLECTION = "feed_debug"
 FEED_SNAPSHOTS_COLLECTION = "feed_snapshots"
 MAX_FEED_SNAPSHOT_ITEMS = 500
+MAX_FEED_SNAPSHOT_DOCUMENTS = 100
+FIRESTORE_WRITE_BATCH_LIMIT = 500
 
 # Suffix appended to a daily-bucket document ID (``YYYY-MM-DD``) for load-test
 # traffic. Test buckets live in the same subcollection as real ones so the
@@ -148,7 +152,7 @@ async def upsert_user(
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     doc = await ref.get()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if doc.exists:
         data = doc.to_dict()
@@ -219,7 +223,7 @@ async def set_user_debug_flag(db: AsyncClient, user_did: str, enabled: bool) -> 
     doc = await ref.get()
     if not doc.exists:
         raise ValueError(f"No user document for {user_did}")
-    await ref.update({"debug_feeds": enabled, "updated_at": datetime.now(timezone.utc)})
+    await ref.update({"debug_feeds": enabled, "updated_at": datetime.now(UTC)})
 
 
 async def set_user_social_radius(db: AsyncClient, user_did: str, social_radius: int) -> None:
@@ -268,6 +272,42 @@ async def set_user_preferences(
     )
 
 
+async def patch_user_feed_preferences(
+    db: AsyncClient,
+    user_did: str,
+    feed_name: str,
+    patch: FeedPreferencesDocument,
+) -> FeedPreferencesDocument:
+    """Atomically patch and materialize one feed without replacing siblings."""
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _patch(transaction) -> FeedPreferencesDocument:
+        snapshot = await ref.get(transaction=transaction)
+        data = snapshot.to_dict() if snapshot.exists else None
+        user = UserDocument.model_validate(data) if data is not None else None
+        resolved = resolve_feed_preferences(user, feed_name)
+        values = resolved.model_dump(exclude_none=True)
+        values.update(patch.model_dump(exclude_none=True))
+        updated = FeedPreferencesDocument.model_validate(values)
+        transaction.set(
+            ref,
+            {
+                "user_did": user_did,
+                "feed_preferences": {
+                    preference_source(feed_name): updated.model_dump(exclude_none=True),
+                },
+                "created_by_load_test": False,
+                "updated_at": datetime.now(UTC),
+            },
+            merge=True,
+        )
+        return updated
+
+    return await _patch(transaction)
+
+
 # ---------------------------------------------------------------------------
 # Feed activity
 # ---------------------------------------------------------------------------
@@ -309,13 +349,14 @@ async def upsert_feed_activity(
     )
     doc = await ref.get()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if doc.exists:
         data = doc.to_dict()
         if data is None:
             raise ValueError(
-                f"Firestore feed_activity document exists but to_dict() returned None for {user_did}/{feed_name}"
+                "Firestore feed_activity document exists but to_dict() returned "
+                f"None for {user_did}/{feed_name}"
             )
         await ref.update({"last_seen_at": now})
         data["last_seen_at"] = now
@@ -375,7 +416,7 @@ async def _record_daily_bucket_uris(
     if not post_uris:
         return
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     bucket_id = now.strftime("%Y-%m-%d")
     if load_test:
         bucket_id += LOAD_TEST_BUCKET_SUFFIX
@@ -405,7 +446,7 @@ async def _get_recent_bucket_uris(
     ``ArrayUnion`` preserves append order, so the result is roughly the most
     recent URIs.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     query = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
@@ -555,12 +596,8 @@ def _merge_feed_snapshots(
     meta_by_uri = {meta.at_uri: meta for meta in earlier.items_meta}
     meta_by_uri.update({meta.at_uri: meta for meta in later.items_meta})
     items_meta = [meta_by_uri[uri] for uri in ordered_items if uri in meta_by_uri]
-    existing_diag = {
-        (diag.name, diag.mode): diag for diag in existing.generator_diagnostics
-    }
-    incoming_diag = {
-        (diag.name, diag.mode): diag for diag in incoming.generator_diagnostics
-    }
+    existing_diag = {(diag.name, diag.mode): diag for diag in existing.generator_diagnostics}
+    incoming_diag = {(diag.name, diag.mode): diag for diag in incoming.generator_diagnostics}
     incoming_new = set(incoming.items) - set(existing.items)
     diagnostics = []
     for key in dict.fromkeys([*existing_diag, *incoming_diag]):
@@ -610,7 +647,12 @@ def _merge_feed_snapshots(
 
 
 async def merge_feed_snapshot(
-    db: AsyncClient, user_did: str, request_id: str, doc: FeedSnapshotDocument
+    db: AsyncClient,
+    user_did: str,
+    request_id: str,
+    doc: FeedSnapshotDocument,
+    *,
+    enforce_document_cap: bool = True,
 ) -> bool:
     """Atomically create or extend a feed-session snapshot.
 
@@ -642,22 +684,65 @@ async def merge_feed_snapshot(
     transaction = db.transaction()
 
     @async_transactional
-    async def _merge(transaction) -> bool:
+    async def _merge(transaction) -> tuple[bool, bool]:
         snapshot = await ref.get(transaction=transaction)
         if not snapshot.exists:
             transaction.set(ref, doc.model_dump())
-            return initial_truncated
+            return initial_truncated, True
 
         data = snapshot.to_dict()
         if data is None:
             transaction.set(ref, doc.model_dump())
-            return initial_truncated
+            return initial_truncated, False
 
         merged, truncated = _merge_feed_snapshots(FeedSnapshotDocument.model_validate(data), doc)
         transaction.set(ref, merged.model_dump())
-        return truncated
+        return truncated, False
 
-    return await _merge(transaction)
+    truncated, created = await _merge(transaction)
+    if created and enforce_document_cap:
+        await prune_feed_snapshots(db, user_did)
+    return truncated
+
+
+async def prune_feed_snapshots(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    max_documents: int = MAX_FEED_SNAPSHOT_DOCUMENTS,
+) -> int:
+    """Delete snapshots older than the newest *max_documents* for a user.
+
+    The cap is enforced after a new snapshot is committed. Pruning is
+    intentionally fail-soft: a later snapshot creation retries the same query,
+    while feed serving remains unaffected by a cleanup failure.
+    """
+    try:
+        collection = (
+            db.collection(USERS_COLLECTION)
+            .document(user_doc_id(user_did))
+            .collection(FEED_SNAPSHOTS_COLLECTION)
+        )
+        query = collection.order_by("generated_at", direction=Query.DESCENDING).offset(
+            max_documents
+        )
+        overflow = [snapshot async for snapshot in query.stream()]
+
+        # The query returns newest-first. Reverse it so the oldest overflow
+        # documents are enqueued for deletion first, including across batches.
+        overflow.reverse()
+        for start in range(0, len(overflow), FIRESTORE_WRITE_BATCH_LIMIT):
+            batch = db.batch()
+            for snapshot in overflow[start : start + FIRESTORE_WRITE_BATCH_LIMIT]:
+                batch.delete(snapshot.reference)
+            await batch.commit()
+        return len(overflow)
+    except Exception:
+        logger.exception(
+            "Failed to prune feed snapshots for user '%s'",
+            user_did,
+        )
+        return 0
 
 
 async def get_feed_snapshot(
@@ -812,7 +897,7 @@ async def create_redirect(
 async def update_redirect(
     db: AsyncClient, slug: str, url: str, description: str | None = None
 ) -> RedirectDocument | None:
-    """Update the URL (and optionally description) for an existing slug. Returns ``None`` if not found."""
+    """Update an existing slug, returning ``None`` when it is not found."""
     ref = db.collection(REDIRECTS_COLLECTION).document(slug)
     existing = await ref.get()
     if not existing.exists:
