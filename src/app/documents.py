@@ -439,6 +439,47 @@ class FeedSnapshotDocument(BaseModel):
     items_meta: list[PipelineItemMeta] = Field(default_factory=list)
 
 
+class PopularityCacheDocument(BaseModel):
+    """A shared pool of popularity candidates, cached for every user.
+
+    One document per (freshness window, video_only) combination in the
+    ``popularity_cache`` collection; the document ID is that combination
+    (see ``lib.candidates.popularity_cache.pool_key``).
+
+    ``payload`` holds the whole candidate pool as one opaque blob rather than
+    a structured array — the candidates are only ever read as a unit, and a
+    single compressed field is both smaller than the equivalent Firestore map
+    array and far cheaper to write.  It is excluded from indexing via a
+    ``fieldOverrides`` entry in the frontend repo's ``firestore.indexes.json``
+    (Firestore rejects writes whose index entries exceed 7.5 KiB).
+
+    ``refresh_started_at`` is the cross-instance refresh lease: an instance
+    that wants to regenerate the pool stamps it inside a transaction, so only
+    one of the many API instances serving a stale entry pays for the
+    Elasticsearch query.  It is cleared when the refresh completes.
+    """
+
+    generated_at: datetime | None = Field(
+        default=None,
+        description="When the cached pool was generated; None while only a lease is held",
+    )
+    payload: bytes | None = Field(
+        default=None, description="Serialized candidate pool (see ``payload_format``)"
+    )
+    payload_format: str | None = Field(
+        default=None,
+        description="Encoding of ``payload``. Entries in an unrecognized format are "
+        "treated as a cache miss, so the format string doubles as a schema version.",
+    )
+    count: int = Field(default=0, description="Number of candidates in ``payload``")
+    refresh_started_at: datetime | None = Field(
+        default=None, description="Refresh lease timestamp; None when no refresh is in flight"
+    )
+    api_release_sha: str | None = Field(
+        default=None, description="Git SHA of the API instance that wrote this entry"
+    )
+
+
 class RedirectDocument(BaseModel):
     """A slug → URL mapping stored in the ``redirects`` collection.
 
