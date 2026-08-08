@@ -5,6 +5,7 @@ from app.feeds import (
     FEEDS,
     SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
     SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
+    canonical_feed_name,
 )
 
 CANDIDATE_ONLY_FEEDS = {
@@ -14,6 +15,15 @@ CANDIDATE_ONLY_FEEDS = {
     "two-tower": "two_tower",
     "two-tower-empty-history": "two_tower_empty_history",
 }
+
+
+def test_canonical_feed_name_resolves_configured_and_published_rkeys():
+    assert canonical_feed_name("your-feed") == "your-feed"
+    assert canonical_feed_name("a0-yf") == "your-feed"
+    assert canonical_feed_name("fd-bof") == "best-of-friends"
+    assert canonical_feed_name("67-r") == "random"
+    assert canonical_feed_name("missing") is None
+
 
 # AT Protocol app.bsky.feed.generator caps displayName at 24 graphemes. Published
 # names are composed from this metadata: prod publishes public feeds under the raw
@@ -33,9 +43,7 @@ class TestFeedsRegistry:
             SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
         ):
             for generators in presets.values():
-                weights = {
-                    generator.name: generator.weight for generator in generators
-                }
+                weights = {generator.name: generator.weight for generator in generators}
                 assert weights.get("two_tower", 0.0) == pytest.approx(
                     weights.get("popularity", 0.0)
                 )
@@ -46,10 +54,9 @@ class TestFeedsRegistry:
             SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
             SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
         ):
-            assert [
-                (generator.name, generator.weight)
-                for generator in presets[0]
-            ] == [("followed_users", 1.0)]
+            assert [(generator.name, generator.weight) for generator in presets[0]] == [
+                ("followed_users", 1.0)
+            ]
 
     def test_static_feed_defaults_include_network_likes(self):
         assert (
@@ -60,12 +67,10 @@ class TestFeedsRegistry:
     def test_network_likes_enabled_presets_add_network_likes_outside_friends(self):
         for radius in range(1, 5):
             with_network_likes = {
-                generator.name
-                for generator in SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[radius]
+                generator.name for generator in SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[radius]
             }
             without_network_likes = {
-                generator.name
-                for generator in SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[radius]
+                generator.name for generator in SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[radius]
             }
             assert "network_likes" in with_network_likes
             assert "network_likes" not in without_network_likes
@@ -73,9 +78,7 @@ class TestFeedsRegistry:
     def test_no_collision_between_internal_rkeys_and_primary_rkeys(self):
         primary_rkeys = set(FEEDS.keys())
         internal_rkeys = {
-            cfg.internal_rkey
-            for cfg in FEEDS.values()
-            if cfg.internal_rkey is not None
+            cfg.internal_rkey for cfg in FEEDS.values() if cfg.internal_rkey is not None
         }
         overlap = primary_rkeys & internal_rkeys
         assert not overlap, f"internal_rkey collides with a primary rkey: {overlap}"
@@ -94,9 +97,10 @@ class TestFeedsRegistry:
         for feed_name in ("your-feed", "best-of-friends"):
             cfg = FEEDS[feed_name]
             assert cfg.rank_request_template is not None
-            assert [
-                spec.name for spec in cfg.rank_request_template.models
-            ] == ["heavy_ranker", "perspective"]
+            assert [spec.name for spec in cfg.rank_request_template.models] == [
+                "heavy_ranker",
+                "perspective",
+            ]
 
     def test_ranked_feeds_have_slate_cutoffs(self):
         for feed_name in ("your-feed", "best-of-friends"):
@@ -108,17 +112,11 @@ class TestFeedsRegistry:
     def test_cold_start_feed_uses_empty_history_models(self):
         cfg = FEEDS["cold-start"]
         assert cfg.public is False
-        assert [
-            (spec.name, spec.weight)
-            for spec in cfg.gen_request_template.generators
-        ] == [
+        assert [(spec.name, spec.weight) for spec in cfg.gen_request_template.generators] == [
             ("popularity", 1.0),
         ]
         assert cfg.rank_request_template is not None
-        assert [
-            (spec.name, spec.weight)
-            for spec in cfg.rank_request_template.models
-        ] == [
+        assert [(spec.name, spec.weight) for spec in cfg.rank_request_template.models] == [
             ("heavy_ranker_empty_history", 1.0),
             ("perspective", 1.0),
         ]
@@ -142,9 +140,10 @@ class TestFeedsRegistry:
         cfg = FEEDS["cutoff-preview"]
         assert cfg.public is False
         assert cfg.rank_request_template is not None
-        assert [
-            spec.name for spec in cfg.rank_request_template.models
-        ] == ["heavy_ranker", "perspective"]
+        assert [spec.name for spec in cfg.rank_request_template.models] == [
+            "heavy_ranker",
+            "perspective",
+        ]
         assert cfg.diversify is True
         assert (
             cfg.gen_request_template.generators
@@ -167,9 +166,7 @@ class TestFeedNameLengths:
     @pytest.mark.parametrize("feed_name,cfg", list(FEEDS.items()))
     def test_internal_display_name_fits_with_prefix_and_sha(self, feed_name, cfg):
         # Worst case: dev/stage publishes internal feeds as "GE <name> <sha>".
-        composed = (
-            len(DEV_STAGE_PREFIX) + len(cfg.internal_display_name) + GIT_SHA_SUFFIX_LEN
-        )
+        composed = len(DEV_STAGE_PREFIX) + len(cfg.internal_display_name) + GIT_SHA_SUFFIX_LEN
         assert composed <= MAX_DISPLAY_NAME_GRAPHEMES, (
             f"{feed_name}: internal_display_name {cfg.internal_display_name!r} is too long — "
             f"'GE {cfg.internal_display_name} <sha>' would be {composed} chars "

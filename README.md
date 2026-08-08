@@ -505,7 +505,7 @@ from the public API.  This is available regardless of whether `debug_feeds` is
 enabled for the account.
 
 ```bash
-# List recent feed loads for your account (within the 15-min cache window)
+# List up to 100 recent feed loads for your account (within the last 24 hours)
 curl http://localhost:8000/api/feeds \
   -H "Authorization: Bearer <firebase-custom-token>"
 
