@@ -99,10 +99,38 @@ async def test_backfill_users_emits_feed_loaded_per_feed():
                 "username": "alice.bsky.app",
                 "posthog_created_at": NOW.isoformat(),
             },
+            "user_handle": "alice.bsky.app",
             **ANNOTATIONS,
         },
         timestamp=EARLIER,
     )
+
+
+@pytest.mark.asyncio
+async def test_backfill_users_omits_identity_for_a_user_without_a_handle():
+    """A stored user with no handle must not backfill an empty one over a
+    handle PostHog may already have."""
+    ph = MagicMock()
+    user_doc = _make_user_doc(username="")
+    activity_doc = _make_activity_doc()
+
+    async def _stream_users():
+        yield user_doc
+
+    async def _stream_activity(user_did):
+        yield activity_doc
+
+    await backfill.backfill_users(
+        AsyncMock(),
+        ph,
+        stream_users=_stream_users,
+        stream_feed_activity=_stream_activity,
+        dry_run=False,
+    )
+
+    properties = ph.capture.call_args.kwargs["properties"]
+    assert "user_handle" not in properties
+    assert "username" not in properties.get("$set", {})
 
 
 @pytest.mark.asyncio
