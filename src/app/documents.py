@@ -156,6 +156,9 @@ class ApiKeyDocument(BaseModel):
     key_hash: str = Field(..., description="SHA-256(full_key.encode()) as hex")
     email: str = Field(..., description="Owner email address")
     is_active: bool = Field(default=True, description="Whether this API key is valid and usable")
+    is_admin: bool = Field(
+        default=False, description="Whether this key may access /admin/* endpoints"
+    )
     created_at: datetime = Field(default_factory=_utcnow, description="When the key was created")
     last_used_at: datetime = Field(
         default_factory=_utcnow, description="Last time this key was used for an API request"

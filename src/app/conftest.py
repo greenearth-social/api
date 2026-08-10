@@ -2,7 +2,7 @@ import pytest
 from posthog import Posthog
 
 from .main import app
-from .security import verify_api_key
+from .security import verify_admin_api_key, verify_api_key
 
 
 @pytest.fixture(autouse=True)
@@ -14,8 +14,10 @@ def _default_api_key_override():
     one and win because they also call app.dependency_overrides[verify_api_key].
     """
     app.dependency_overrides.setdefault(verify_api_key, lambda: "test-key-id")
+    app.dependency_overrides.setdefault(verify_admin_api_key, lambda: "test-key-id")
     yield
     app.dependency_overrides.pop(verify_api_key, None)
+    app.dependency_overrides.pop(verify_admin_api_key, None)
 
 
 @pytest.fixture(autouse=True)

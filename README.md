@@ -126,6 +126,10 @@ gea_<8-char key_id><48-char secret>
 The plaintext key is shown **once** at generation and never stored.
 Authenticate requests by passing the key in the `X-API-Key` header.
 
+Keys also carry an `admin` flag, required to access `/admin/*` endpoints.
+Existing keys default to non-admin. Only issue admin keys to the greenearth
+team.
+
 ### CLI commands
 
 Run all commands from the `api/` directory:
@@ -133,6 +137,9 @@ Run all commands from the `api/` directory:
 ```bash
 # Issue a new key
 pipenv run python scripts/apikeys.py generate alice@example.com
+
+# Issue an admin key (greenearth team only)
+pipenv run python scripts/apikeys.py generate alice@greenearth.social --admin
 
 # List all keys
 pipenv run python scripts/apikeys.py list
@@ -576,6 +583,51 @@ on.
 repo's `firestore.indexes.json`; without that exemption a deployed write of a
 blob this size is rejected. Deploy the exemption before the API release that
 starts writing it.
+
+## Analytics (PostHog)
+
+This service and the frontend write to the **same PostHog project**, so every
+event this service emits is annotated to identify its producer. Annotations are
+applied centrally in `src/app/lib/posthog_client.py` — call sites never set them.
+
+| Property | Value here | Purpose |
+|---|---|---|
+| `surface` | `greenearth_api` | Which producer emitted the event. The frontend stamps `greenearth_web`. |
+| `schema_version` | `1` | Version of *this surface's* event schema; scoped to `surface`, versioned independently of the frontend. |
+
+Conventions:
+
+- **Filter on `surface`** in any insight that should cover one producer rather
+  than both. Event names are not namespaced, so a name collision between the two
+  surfaces is possible and only `surface` separates them.
+- `schema_version` is only meaningful alongside `surface` — the two surfaces'
+  version numbers are unrelated. Bump it when an existing event's properties
+  change shape in a way that would break a saved insight.
+- Annotations are applied *after* caller-supplied properties, so an event
+  property can never overwrite the partition key.
+- `scripts/backfill_posthog.py` stamps the same annotations, so historical
+  API-origin events are not a gap in the partition.
+
+### User identity
+
+`distinct_id` is the user's `did:plc:…` on both surfaces (the frontend's Firebase
+`uid` is that same DID), so a user is one PostHog person across both. Feature
+flags are evaluated on the DID for the same reason. The DID is deliberately the
+key: Bluesky handles are mutable, so keying on the handle would fork a person on
+every rename and detach their history.
+
+The handle is the identifier a *human* reads, and rides along on every event:
+
+| Property | Purpose |
+|---|---|
+| `$set: {username: <handle>}` | Populates the PostHog person display name. `$set`, not `$set_once`, so a rename propagates. |
+| `user_handle` | Event-level copy, so an insight can break down by handle without joining to the person. |
+
+Both are best-effort — when the handle can't be resolved they are omitted rather
+than written as null, so a transient failure never erases a handle PostHog
+already has. `feedLoaded` takes the handle from the live PLC resolution;
+interaction events read it from the Firestore user doc that the same request
+already wrote, avoiding an extra directory round-trip on a background path.
 
 ## Elasticsearch Query Profiling
 

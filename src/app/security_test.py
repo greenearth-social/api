@@ -1,9 +1,12 @@
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
+from .documents import ApiKeyDocument
 from .main import app
-from .security import verify_api_key
+from .security import verify_admin_api_key, verify_api_key
 
 
 @pytest.fixture
@@ -56,3 +59,42 @@ class TestHealthEndpointNoAuth:
     def test_health_returns_ok_status(self, client_invalid):
         response = client_invalid.get("/health")
         assert response.json()["status"] == "ok"
+
+
+def _make_request() -> MagicMock:
+    request = MagicMock()
+    request.app.state.firestore = MagicMock()
+    return request
+
+
+def _admin_doc(is_admin: bool) -> ApiKeyDocument:
+    return ApiKeyDocument(
+        key_id="a1b2c3d4",
+        key_hash="deadbeef",
+        email="test@example.com",
+        is_admin=is_admin,
+    )
+
+
+class TestVerifyAdminApiKey:
+    @pytest.mark.asyncio
+    async def test_raises_401_when_key_invalid(self):
+        with patch("app.security.authenticate_api_key", new=AsyncMock(return_value=None)):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify_admin_api_key(_make_request(), "gea_bad")
+        assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+    @pytest.mark.asyncio
+    async def test_raises_403_when_key_not_admin(self):
+        doc = _admin_doc(is_admin=False)
+        with patch("app.security.authenticate_api_key", new=AsyncMock(return_value=doc)):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify_admin_api_key(_make_request(), "gea_valid")
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+
+    @pytest.mark.asyncio
+    async def test_returns_key_id_when_admin(self):
+        doc = _admin_doc(is_admin=True)
+        with patch("app.security.authenticate_api_key", new=AsyncMock(return_value=doc)):
+            result = await verify_admin_api_key(_make_request(), "gea_valid")
+        assert result == "a1b2c3d4"
