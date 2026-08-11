@@ -1,20 +1,21 @@
 """Tests for the heavy ranker."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ...models import CandidatePost
 from ..embeddings import encode_float32_b64
+from ..user_history import UserHistory, UserHistoryItem
 from . import get_ranker
 from . import heavy_ranker as heavy_ranker_module
 from .heavy_ranker import HeavyRanker
 
 
-def _time(hour: int) -> datetime:
-    return datetime(2026, 1, 1, hour, tzinfo=timezone.utc)
+def _time(hour: int) -> str:
+    return datetime(2026, 1, 1, hour, tzinfo=UTC).isoformat()
 
 
 def test_score_bounds_match_inference_service_output_range():
@@ -52,17 +53,30 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
     liked_times = [_time(1), _time(2), _time(3)]
     seen = {}
 
-    async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
+    async def fake_fetch_user_history_features(es, user_did):
         assert user_did == "did:plc:user1"
-        return ["at://liked/a", "at://liked/b", "at://liked/c"], liked_times
+        return UserHistory(
+            items=[
+                UserHistoryItem(
+                    "at://liked/a",
+                    liked_times[0],
+                    [1.0, 0.0],
+                    "did:plc:liked-a",
+                    5,
+                ),
+                UserHistoryItem("at://liked/b", liked_times[1], None),
+                UserHistoryItem(
+                    "at://liked/c",
+                    liked_times[2],
+                    [0.0, 1.0],
+                    "did:plc:liked-c",
+                    7,
+                ),
+            ]
+        )
 
     async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         seen.setdefault("fetch_calls", []).append((list(at_uris), index))
-        if at_uris == ["at://liked/a", "at://liked/b", "at://liked/c"]:
-            return [
-                ("at://liked/a", [1.0, 0.0], "did:plc:liked-a", 5),
-                ("at://liked/c", [0.0, 1.0], "did:plc:liked-c", 7),
-            ]
         if at_uris == ["at://post/a", "at://post/b", "at://post/missing"]:
             return [
                 ("at://post/b", [0.0, 1.0], "did:plc:b", 20),
@@ -97,8 +111,8 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
 
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_recent_liked_post_uris_and_times",
-        fake_fetch_recent_liked_post_uris_and_times,
+        "fetch_user_history_features",
+        fake_fetch_user_history_features,
     )
     monkeypatch.setattr(
         heavy_ranker_module,
@@ -124,7 +138,6 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
     )
 
     assert seen["fetch_calls"] == [
-        (["at://liked/a", "at://liked/b", "at://liked/c"], "posts"),
         (["at://post/a", "at://post/b", "at://post/missing"], "posts_recent"),
     ]
     assert seen["ranker_call"] == {
@@ -153,8 +166,8 @@ def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates
     )
     seen = {}
 
-    async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
-        return [], []
+    async def fake_fetch_user_history_features(es, user_did):
+        return UserHistory(items=[])
 
     async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         seen["fetched_candidate_uris"] = list(at_uris)
@@ -186,8 +199,8 @@ def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates
 
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_recent_liked_post_uris_and_times",
-        fake_fetch_recent_liked_post_uris_and_times,
+        "fetch_user_history_features",
+        fake_fetch_user_history_features,
     )
     monkeypatch.setattr(
         heavy_ranker_module,
@@ -239,7 +252,7 @@ def test_empty_history_mode_skips_like_history_and_ranks_candidates(monkeypatch)
         "get_inference_settings",
         lambda: ("https://example.com", "secret"),
     )
-    fetch_recent_likes = AsyncMock()
+    fetch_history = AsyncMock()
     recorder = MagicMock()
     seen = {}
 
@@ -274,8 +287,8 @@ def test_empty_history_mode_skips_like_history_and_ranks_candidates(monkeypatch)
 
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_recent_liked_post_uris_and_times",
-        fetch_recent_likes,
+        "fetch_user_history_features",
+        fetch_history,
     )
     monkeypatch.setattr(
         heavy_ranker_module,
@@ -312,7 +325,7 @@ def test_empty_history_mode_skips_like_history_and_ranks_candidates(monkeypatch)
         )
     )
 
-    fetch_recent_likes.assert_not_awaited()
+    fetch_history.assert_not_awaited()
     recorder.record_user_features.assert_called_once_with(
         "heavy_ranker_empty_history",
         [],
@@ -347,12 +360,12 @@ def test_predict_calls_ranker_with_empty_history_when_likes_have_no_embeddings(m
     )
     seen = {}
 
-    async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
-        return ["at://liked/a"], [_time(1)]
+    async def fake_fetch_user_history_features(es, user_did):
+        return UserHistory(
+            items=[UserHistoryItem("at://liked/a", _time(1), None)]
+        )
 
     async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
-        if at_uris == ["at://liked/a"]:
-            return []
         return [("at://post/a", [1.0, 0.0], "did:plc:a", 12)]
 
     async def fake_predict_heavy_ranker_single_user(
@@ -375,8 +388,8 @@ def test_predict_calls_ranker_with_empty_history_when_likes_have_no_embeddings(m
 
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_recent_liked_post_uris_and_times",
-        fake_fetch_recent_liked_post_uris_and_times,
+        "fetch_user_history_features",
+        fake_fetch_user_history_features,
     )
     monkeypatch.setattr(
         heavy_ranker_module,
@@ -415,8 +428,8 @@ def test_predict_returns_unscored_candidates_when_candidate_features_are_missing
         lambda: ("https://example.com", "secret"),
     )
 
-    async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
-        return [], []
+    async def fake_fetch_user_history_features(es, user_did):
+        return UserHistory(items=[])
 
     async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         return []
@@ -426,8 +439,8 @@ def test_predict_returns_unscored_candidates_when_candidate_features_are_missing
 
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_recent_liked_post_uris_and_times",
-        fake_fetch_recent_liked_post_uris_and_times,
+        "fetch_user_history_features",
+        fake_fetch_user_history_features,
     )
     monkeypatch.setattr(
         heavy_ranker_module,
@@ -464,8 +477,8 @@ def test_predict_returns_unscored_candidates_when_output_count_mismatches(monkey
         lambda: ("https://example.com", "secret"),
     )
 
-    async def fake_fetch_recent_liked_post_uris_and_times(es, user_did):
-        return [], []
+    async def fake_fetch_user_history_features(es, user_did):
+        return UserHistory(items=[])
 
     async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         return [
@@ -478,8 +491,8 @@ def test_predict_returns_unscored_candidates_when_output_count_mismatches(monkey
 
     monkeypatch.setattr(
         heavy_ranker_module,
-        "fetch_recent_liked_post_uris_and_times",
-        fake_fetch_recent_liked_post_uris_and_times,
+        "fetch_user_history_features",
+        fake_fetch_user_history_features,
     )
     monkeypatch.setattr(
         heavy_ranker_module,

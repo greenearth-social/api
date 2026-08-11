@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from . import inference as inference_module
+from .user_history import UserHistory, UserHistoryItem
 
 
 class _RecordingCollector:
@@ -299,18 +300,12 @@ class TestPredictFailureCounters:
 async def test_compute_user_embedding_with_empty_history_skips_elasticsearch(
     monkeypatch,
 ):
-    fetch_recent_likes = AsyncMock()
-    fetch_history_embeddings = AsyncMock()
+    fetch_history = AsyncMock()
     predict_user_tower = AsyncMock(return_value=[[0.1, 0.2]])
     monkeypatch.setattr(
         inference_module,
-        "fetch_recent_liked_post_uris_and_times",
-        fetch_recent_likes,
-    )
-    monkeypatch.setattr(
-        inference_module,
-        "fetch_post_embeddings_and_metadata",
-        fetch_history_embeddings,
+        "fetch_user_history_features",
+        fetch_history,
     )
     monkeypatch.setattr(
         inference_module,
@@ -328,8 +323,7 @@ async def test_compute_user_embedding_with_empty_history_skips_elasticsearch(
     )
 
     assert result == [0.1, 0.2]
-    fetch_recent_likes.assert_not_awaited()
-    fetch_history_embeddings.assert_not_awaited()
+    fetch_history.assert_not_awaited()
     predict_user_tower.assert_awaited_once_with(
         [],
         [],
@@ -340,18 +334,12 @@ async def test_compute_user_embedding_with_empty_history_skips_elasticsearch(
 
 @pytest.mark.asyncio
 async def test_compute_user_embedding_disallows_empty_actual_history(monkeypatch):
-    fetch_recent_likes = AsyncMock(return_value=([], []))
-    fetch_history_embeddings = AsyncMock()
+    fetch_history = AsyncMock(return_value=UserHistory(items=[]))
     predict_user_tower = AsyncMock()
     monkeypatch.setattr(
         inference_module,
-        "fetch_recent_liked_post_uris_and_times",
-        fetch_recent_likes,
-    )
-    monkeypatch.setattr(
-        inference_module,
-        "fetch_post_embeddings_and_metadata",
-        fetch_history_embeddings,
+        "fetch_user_history_features",
+        fetch_history,
     )
     monkeypatch.setattr(
         inference_module,
@@ -370,8 +358,7 @@ async def test_compute_user_embedding_disallows_empty_actual_history(monkeypatch
     )
 
     assert result is None
-    fetch_recent_likes.assert_awaited_once()
-    fetch_history_embeddings.assert_not_awaited()
+    fetch_history.assert_awaited_once()
     predict_user_tower.assert_not_awaited()
 
 
@@ -379,20 +366,22 @@ async def test_compute_user_embedding_disallows_empty_actual_history(monkeypatch
 async def test_compute_user_embedding_disallows_actual_history_without_embeddings(
     monkeypatch,
 ):
-    fetch_recent_likes = AsyncMock(
-        return_value=(["at://did:plc:author/app.bsky.feed.post/1"], [123]),
+    fetch_history = AsyncMock(
+        return_value=UserHistory(
+            items=[
+                UserHistoryItem(
+                    at_uri="at://did:plc:author/app.bsky.feed.post/1",
+                    liked_at="2026-01-01T00:00:00+00:00",
+                    embedding=None,
+                )
+            ]
+        )
     )
-    fetch_history_embeddings = AsyncMock(return_value=[])
     predict_user_tower = AsyncMock()
     monkeypatch.setattr(
         inference_module,
-        "fetch_recent_liked_post_uris_and_times",
-        fetch_recent_likes,
-    )
-    monkeypatch.setattr(
-        inference_module,
-        "fetch_post_embeddings_and_metadata",
-        fetch_history_embeddings,
+        "fetch_user_history_features",
+        fetch_history,
     )
     monkeypatch.setattr(
         inference_module,
@@ -411,8 +400,7 @@ async def test_compute_user_embedding_disallows_actual_history_without_embedding
     )
 
     assert result is None
-    fetch_recent_likes.assert_awaited_once()
-    fetch_history_embeddings.assert_awaited_once()
+    fetch_history.assert_awaited_once()
     predict_user_tower.assert_not_awaited()
 
 
