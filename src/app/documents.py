@@ -147,6 +147,61 @@ class FeedCacheDocument(BaseModel):
     )
 
 
+class FollowedUsersCacheDocument(BaseModel):
+    """Cached Bluesky follow list for one user.
+
+    The document ID is the user's ``user_doc_id``.  Replaces a live
+    ``app.bsky.graph.getFollows`` walk on every feed request (see issue #83).
+
+    Two writers touch this document.  The API owns ``follows`` and rewrites it
+    on refresh; the jetstream ingester only ever appends to ``pending_adds``
+    (via ``ArrayUnion``, so it never reads first) or stamps ``invalidated_at``.
+    That split is what keeps the two writers from clobbering each other.
+    """
+
+    follows: list[str] = Field(
+        default_factory=list,
+        description="Followed DIDs.  Stored uncompressed: ~1000 DIDs is ~40 KB against a "
+        "1 MiB document limit, and array fields index per element so the 7.5 KiB "
+        "index-entry limit is never in play.",
+    )
+    complete: bool = Field(
+        default=False,
+        description="True when the walk that produced 'follows' exhausted the cursor or hit "
+        "the follow cap.  False means it was truncated by an error or an expired "
+        "budget, and the entry is refreshed on the next read however young it is "
+        "— otherwise one Bluesky blip pins a user to a partial follow set for a "
+        "whole TTL.  Defaults False so a legacy or unreadable document is "
+        "refreshed rather than trusted.",
+    )
+    generated_at: datetime | None = Field(
+        default=None, description="When 'follows' was fetched from Bluesky"
+    )
+    pending_adds: list[str] = Field(
+        default_factory=list,
+        description="DIDs followed since the last refresh, appended by jetstream ingest.  "
+        "Merged into 'follows' on read and folded in on refresh.",
+    )
+    invalidated_at: datetime | None = Field(
+        default=None,
+        description="Stamped by jetstream ingest on an unfollow.  Jetstream deletes carry no "
+        "subject DID, so the entry is marked stale and reconciled by the next "
+        "refresh rather than edited in place.",
+    )
+    refresh_started_at: datetime | None = Field(
+        default=None, description="Refresh lease; held across instances, expires on its own"
+    )
+    refresh_failed_at: datetime | None = Field(
+        default=None,
+        description="Last failed refresh.  Imposes a short cooldown so a user whose follows "
+        "cannot be fetched does not spawn a refresh task on every request.",
+    )
+    expires_at: datetime | None = Field(
+        default=None, description="UTC expiration timestamp; drives native Firestore TTL"
+    )
+    api_release_sha: str | None = None
+
+
 class SeenPostsDocument(BaseModel):
     """Post URIs a user has seen on a given UTC day.
 

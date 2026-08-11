@@ -5,7 +5,6 @@ import pytest
 from .. import bsky as bsky_module
 from ..candidates import network_likes as network_likes_module
 from ..candidates.network_likes import (
-    MAX_FOLLOWED_USERS,
     NetworkLikesCandidateGenerator,
     fetch_posts_by_uris,
     fetch_recent_liked_post_uri_page,
@@ -120,15 +119,14 @@ class FakeEs:
 
 
 def stub_followed_dids(monkeypatch, dids: list[str]):
-    async def fake_get_followed_user_dids(user_did: str, limit: int):
+    async def fake_get_followed_dids(user_did: str):
         assert user_did == "did:plc:user1"
-        assert limit == MAX_FOLLOWED_USERS
         return dids
 
     monkeypatch.setattr(
         network_likes_module,
-        "get_followed_user_dids",
-        fake_get_followed_user_dids,
+        "get_followed_dids_cached",
+        fake_get_followed_dids,
     )
 
 
@@ -414,13 +412,13 @@ class TestNetworkLikesSearch:
 
     @pytest.mark.asyncio
     async def test_lookup_error_returns_empty_and_skips_es(self, monkeypatch):
-        async def fake_get_followed_user_dids(user_did: str, limit: int):
+        async def fake_get_followed_dids(user_did: str):
             raise bsky_module.FollowedUsersLookupError("lookup exploded")
 
         monkeypatch.setattr(
             network_likes_module,
-            "get_followed_user_dids",
-            fake_get_followed_user_dids,
+            "get_followed_dids_cached",
+            fake_get_followed_dids,
         )
         es = FakeEs()
 

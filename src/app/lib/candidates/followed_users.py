@@ -7,15 +7,16 @@ that the requesting user follows.
 import logging
 
 from ...models import CandidatePost, MaxAgeHours
-from ..bsky import FollowedUsersLookupError, get_followed_user_dids
+from ..bsky import FollowedUsersLookupError
 from ..config import fail_fast
+from ..followed_users_cache import MAX_FOLLOWED_USERS, get_followed_dids_cached
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 
 logger = logging.getLogger(__name__)
 
-MAX_FOLLOWED_USERS = 1_000
+__all__ = ["MAX_FOLLOWED_USERS", "FollowedUsersCandidateGenerator", "followed_users_search"]
 
 
 async def followed_users_search(
@@ -33,11 +34,8 @@ async def followed_users_search(
         filters.append({"term": {"contains_video": True}})
 
     try:
-        async with timed(logger, "bsky_get_follows", user_did=user_did):
-            followed_dids = await get_followed_user_dids(
-                user_did,
-                limit=MAX_FOLLOWED_USERS,
-            )
+        async with timed(logger, "follows_lookup", user_did=user_did):
+            followed_dids = await get_followed_dids_cached(user_did)
     except FollowedUsersLookupError as exc:
         logger.warning(
             "Skipping followed_users candidate generation for %s after follow "

@@ -4,7 +4,6 @@ import pytest
 
 from ..candidates import followed_users as followed_users_module
 from ..candidates.followed_users import (
-    MAX_FOLLOWED_USERS,
     FollowedUsersCandidateGenerator,
     FollowedUsersLookupError,
     followed_users_search,
@@ -36,28 +35,27 @@ class FakeEs:
 
 
 def stub_followed_dids(monkeypatch, dids: list[str]):
-    async def fake_get_followed_user_dids(user_did: str, limit: int):
+    async def fake_get_followed_dids(user_did: str):
         return dids
 
     monkeypatch.setattr(
         followed_users_module,
-        "get_followed_user_dids",
-        fake_get_followed_user_dids,
+        "get_followed_dids_cached",
+        fake_get_followed_dids,
     )
 
 
 class TestFollowedUsersSearch:
     @pytest.mark.asyncio
     async def test_returns_candidates_scored(self, monkeypatch):
-        async def fake_get_followed_user_dids(user_did: str, limit: int):
+        async def fake_get_followed_dids(user_did: str):
             assert user_did == "did:plc:user1"
-            assert limit == MAX_FOLLOWED_USERS
             return ["did:plc:follow1", "did:plc:follow2"]
 
         monkeypatch.setattr(
             followed_users_module,
-            "get_followed_user_dids",
-            fake_get_followed_user_dids,
+            "get_followed_dids_cached",
+            fake_get_followed_dids,
         )
         es = FakeEs(responses={
             "posts_recent": {
@@ -201,13 +199,13 @@ class TestFollowedUsersSearch:
 
     @pytest.mark.asyncio
     async def test_lookup_errors_return_empty_and_skip_es(self, monkeypatch):
-        async def fake_get_followed_user_dids(user_did: str, limit: int):
+        async def fake_get_followed_dids(user_did: str):
             raise FollowedUsersLookupError("lookup exploded")
 
         monkeypatch.setattr(
             followed_users_module,
-            "get_followed_user_dids",
-            fake_get_followed_user_dids,
+            "get_followed_dids_cached",
+            fake_get_followed_dids,
         )
         es = FakeEs()
 
