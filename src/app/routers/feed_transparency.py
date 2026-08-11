@@ -13,13 +13,15 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, HTTPException, Request, status
 from google.cloud.firestore import AsyncClient
 
-from ..documents import FeedSnapshotDocument, PipelineItemMeta
+from ..documents import FeedPreferencesDocument, FeedSnapshotDocument, PipelineItemMeta
+from ..feeds import FEEDS, canonical_feed_name
+from ..lib.feed_preferences import resolve_feed_preferences
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import (
     get_feed_snapshot,
     get_recent_feed_snapshots,
     get_user,
-    set_user_preferences,
+    patch_user_feed_preferences,
 )
 from ..lib.post_hydration import hydrate_posts
 from ..models_feed_transparency import (
@@ -29,20 +31,21 @@ from ..models_feed_transparency import (
     FeedDetailResponse,
     FeedItemView,
     FeedListResponse,
+    FeedPreferences,
     FeedSummary,
-    GeneratorView,
     GeneratorDiagnosticView,
+    GeneratorView,
     MediaView,
     ModelScoreView,
-    Preferences,
+    PreferencesResponse,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["feed-transparency"], prefix="/api/feeds")
 
-CACHE_WINDOW_MINUTES = 15
-DEFAULT_LIST_LIMIT = 20
+CACHE_WINDOW_HOURS = 24
+DEFAULT_LIST_LIMIT = 100
 PUBLIC_MODERATION_LABELS = frozenset(
     {
         "porn",
@@ -163,23 +166,23 @@ async def list_feeds(
 ) -> FeedListResponse:
     """Return recent feed snapshots within the cache window."""
     db: AsyncClient = request.app.state.firestore
-    cutoff = datetime.now(UTC) - timedelta(minutes=CACHE_WINDOW_MINUTES)
+    cutoff = datetime.now(UTC) - timedelta(hours=CACHE_WINDOW_HOURS)
 
-    # Every feed the user loaded, not one hardcoded name: each summary carries
-    # its own feed_name, so which of them to surface is the client's call.
-    # Dropping the filter also drops the (feed_name, generated_at) composite
-    # index this query used to need.
-    docs = await get_recent_feed_snapshots(
-        db, user_doc_id, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT
-    )
+    # Query all recent loads without a feed-name index, then expose only the
+    # configured public pages below. In-memory canonicalization also keeps
+    # legacy snapshots written with a stage/internal published rkey visible.
+    docs = await get_recent_feed_snapshots(db, user_doc_id, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT)
 
     summaries: list[FeedSummary] = []
     seen_snapshots: set[tuple[str, tuple[str, ...]]] = set()
     for doc in docs:
+        resolved_feed_name = canonical_feed_name(doc.feed_name)
+        if resolved_feed_name is None or not FEEDS[resolved_feed_name].public:
+            continue
         # Treat the complete ordered post sequence as the snapshot identity.
         # Documents are newest-first, so skipping a repeated key retains the
         # newest load while preserving snapshots with different posts or order.
-        snapshot_key = (doc.feed_name, tuple(doc.items))
+        snapshot_key = (resolved_feed_name, tuple(doc.items))
         if snapshot_key in seen_snapshots:
             continue
         seen_snapshots.add(snapshot_key)
@@ -188,7 +191,7 @@ async def list_feeds(
             FeedSummary(
                 request_id=doc.request_id,
                 generated_at=doc.generated_at,
-                feed_name=doc.feed_name,
+                feed_name=resolved_feed_name,
                 api_release_sha=doc.api_release_sha,
                 applied_social_radius=doc.applied_social_radius,
                 generator_diagnostics=[
@@ -202,45 +205,77 @@ async def list_feeds(
 
 
 # ---------------------------------------------------------------------------
-# GET / PUT /api/feeds/preferences  (must precede /{request_id})
+# GET/PATCH /api/feeds/preferences  (must precede /{request_id})
 # ---------------------------------------------------------------------------
 
 
-@router.get("/preferences", response_model=Preferences)
+@router.get(
+    "/preferences",
+    response_model=PreferencesResponse,
+    response_model_exclude_none=True,
+)
 async def get_preferences(
     request: Request,
     user_doc_id: FirebaseUser,
-) -> Preferences:
-    """Return the current preferences for the authenticated user."""
+) -> PreferencesResponse:
+    """Return configured controls and values for every public feed."""
     db: AsyncClient = request.app.state.firestore
     user_doc = await get_user(db, f"did:plc:{user_doc_id}")
-    if user_doc is None:
-        return Preferences()
-    return Preferences(
-        social_radius=user_doc.social_radius,
-        freshness=user_doc.freshness,
-        politics=user_doc.politics,
-        purpose=user_doc.purpose,
+    return PreferencesResponse(
+        feeds={
+            feed_name: FeedPreferences.model_validate(
+                resolve_feed_preferences(user_doc, feed_name).model_dump(exclude_none=True)
+            )
+            for feed_name, feed in FEEDS.items()
+            if feed.public and feed.controls
+        }
     )
 
 
-@router.put("/preferences", response_model=Preferences)
-async def put_preferences(
+@router.patch(
+    "/preferences/{feed_name}",
+    response_model=FeedPreferences,
+    response_model_exclude_none=True,
+)
+async def patch_preferences(
     request: Request,
-    body: Preferences,
+    feed_name: str,
+    body: FeedPreferences,
     user_doc_id: FirebaseUser,
-) -> Preferences:
-    """Update the preferences for the authenticated user."""
+) -> FeedPreferences:
+    """Update only the supplied controls for one configured public feed."""
+    feed = FEEDS.get(feed_name)
+    if feed is None or not feed.public or not feed.controls:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown feed")
+
+    supplied = body.model_fields_set
+    if not supplied:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="At least one control is required",
+        )
+    if any(getattr(body, control) is None for control in supplied):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Control values cannot be null",
+        )
+    unsupported = supplied.difference(feed.controls)
+    if unsupported:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported controls for {feed_name}: {', '.join(sorted(unsupported))}",
+        )
+
     db: AsyncClient = request.app.state.firestore
-    await set_user_preferences(
+    user_did = f"did:plc:{user_doc_id}"
+    patch = FeedPreferencesDocument.model_validate(body.model_dump(exclude_none=True))
+    updated = await patch_user_feed_preferences(
         db,
-        f"did:plc:{user_doc_id}",
-        social_radius=body.social_radius,
-        freshness=body.freshness,
-        politics=body.politics,
-        purpose=body.purpose,
+        user_did,
+        feed_name,
+        patch,
     )
-    return body
+    return FeedPreferences.model_validate(updated.model_dump(exclude_none=True))
 
 
 @router.get("/{request_id}", response_model=FeedDetailResponse)

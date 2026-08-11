@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # GET /api/feeds
@@ -17,7 +17,7 @@ class FeedSummary(BaseModel):
     feed_name: str
     api_release_sha: str | None = None
     applied_social_radius: int | None = None
-    generator_diagnostics: list["GeneratorDiagnosticView"] = Field(default_factory=list)
+    generator_diagnostics: list[GeneratorDiagnosticView] = Field(default_factory=list)
 
 
 class FeedListResponse(BaseModel):
@@ -107,14 +107,34 @@ class FeedDetailResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# GET / PUT /api/feeds/preferences
+# GET /api/feeds/preferences and PATCH /api/feeds/preferences/{feed_name}
 # ---------------------------------------------------------------------------
 
 
-class Preferences(BaseModel):
+class SourceWeights(BaseModel):
     model_config = {"extra": "forbid"}
 
-    social_radius: int = Field(default=3, ge=0, le=4)
-    freshness: int = Field(default=5, ge=0, le=5)
-    politics: float = Field(default=1.0, ge=0.5, le=1.5)
-    purpose: float = Field(default=0.5, ge=0.2, le=0.8)
+    following: float = Field(ge=0.0, le=1.0)
+    network_likes: float = Field(default=0.0, ge=0.0, le=1.0)
+    authors_topics: float = Field(ge=0.0, le=1.0)
+    popular: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def weights_sum_to_one(self) -> SourceWeights:
+        total = self.following + self.network_likes + self.authors_topics + self.popular
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError("source weights must sum to 1.0")
+        return self
+
+
+class FeedPreferences(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    source_weights: SourceWeights | None = None
+    freshness: int | None = Field(default=None, ge=0, le=5)
+    politics: float | None = Field(default=None, ge=0.5, le=1.5)
+    purpose: float | None = Field(default=None, ge=0.2, le=0.8)
+
+
+class PreferencesResponse(BaseModel):
+    feeds: dict[str, FeedPreferences]

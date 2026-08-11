@@ -2,24 +2,30 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from google.cloud.firestore import ArrayUnion
 
-from ..documents import FeedDebugDocument, FeedSnapshotDocument, InteractionDocument, PipelineItemMeta, UserDocument
-from ..models import CandidateGenerateRequest, GeneratorSpec
+from ..documents import (
+    FeedDebugDocument,
+    FeedPreferencesDocument,
+    FeedSnapshotDocument,
+    InteractionDocument,
+    PipelineItemMeta,
+)
 from ..lib.firestore import (
     DISCARDED_POSTS_COLLECTION,
-    FEED_DEBUG_COLLECTION,
     FEED_SNAPSHOTS_COLLECTION,
-    LOAD_TEST_BUCKET_SUFFIX,
-    MAX_FEED_SNAPSHOT_ITEMS,
+    FIRESTORE_WRITE_BATCH_LIMIT,
     INTERACTIONS_COLLECTION,
+    LOAD_TEST_BUCKET_SUFFIX,
+    MAX_FEED_SNAPSHOT_DOCUMENTS,
+    MAX_FEED_SNAPSHOT_ITEMS,
     SEEN_POSTS_COLLECTION,
     USERS_COLLECTION,
+    _merge_feed_snapshots,
     delete_feed_snapshot,
     get_feed_activity,
     get_feed_debug,
@@ -29,9 +35,10 @@ from ..lib.firestore import (
     get_recent_seen_uris,
     get_user,
     get_user_by_username,
-    _merge_feed_snapshots,
     init_firestore_client,
     merge_feed_snapshot,
+    patch_user_feed_preferences,
+    prune_feed_snapshots,
     record_discarded_posts,
     record_interaction,
     record_seen_posts,
@@ -41,7 +48,7 @@ from ..lib.firestore import (
     user_doc_id,
     write_feed_debug,
 )
-
+from ..models import CandidateGenerateRequest, GeneratorSpec
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,7 +62,8 @@ FEED_NAME = "unranked-your-feed"
 def _mock_feed_activity_client():
     db = MagicMock()
     doc_ref = AsyncMock()
-    db.collection.return_value.document.return_value.collection.return_value.document.return_value = doc_ref
+    feed_activity = db.collection.return_value.document.return_value.collection
+    feed_activity.return_value.document.return_value = doc_ref
     return db, doc_ref
 
 
@@ -63,7 +71,8 @@ def _mock_seen_posts_write_client():
     """Mock the users/{did}/seen_posts/{bucket} document-write chain."""
     db = MagicMock()
     doc_ref = AsyncMock()
-    db.collection.return_value.document.return_value.collection.return_value.document.return_value = doc_ref
+    seen_posts = db.collection.return_value.document.return_value.collection
+    seen_posts.return_value.document.return_value = doc_ref
     return db, doc_ref
 
 
@@ -80,7 +89,8 @@ def _mock_seen_posts_query_client(buckets):
     db = MagicMock()
     query = MagicMock()
     query.stream.return_value = _async_iter(buckets)
-    db.collection.return_value.document.return_value.collection.return_value.where.return_value = query
+    seen_posts = db.collection.return_value.document.return_value.collection
+    seen_posts.return_value.where.return_value = query
     return db, query
 
 
@@ -215,14 +225,17 @@ class TestGetUser:
     @pytest.mark.asyncio
     async def test_returns_user_when_exists(self):
         db, _, doc_ref = _mock_firestore_client()
-        now = datetime.now(timezone.utc)
-        doc_ref.get.return_value = _mock_doc_snapshot(True, {
-            "user_did": USER_DID,
-            "username": USERNAME,
-            "created_at": now,
-            "updated_at": now,
-            "last_seen_at": now,
-        })
+        now = datetime.now(UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "user_did": USER_DID,
+                "username": USERNAME,
+                "created_at": now,
+                "updated_at": now,
+                "last_seen_at": now,
+            },
+        )
 
         user = await get_user(db, USER_DID)
 
@@ -272,14 +285,17 @@ class TestUpsertUser:
     @pytest.mark.asyncio
     async def test_updates_existing_user(self):
         db, _, doc_ref = _mock_firestore_client()
-        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        doc_ref.get.return_value = _mock_doc_snapshot(True, {
-            "user_did": USER_DID,
-            "username": USERNAME,
-            "created_at": original_time,
-            "updated_at": original_time,
-            "last_seen_at": original_time,
-        })
+        original_time = datetime(2026, 1, 1, tzinfo=UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "user_did": USER_DID,
+                "username": USERNAME,
+                "created_at": original_time,
+                "updated_at": original_time,
+                "last_seen_at": original_time,
+            },
+        )
 
         user = await upsert_user(db, USER_DID, USERNAME)
 
@@ -312,14 +328,17 @@ class TestUpsertUser:
     async def test_unresolved_handle_does_not_erase_a_known_one(self):
         # A directory blip shouldn't wipe a handle we already resolved.
         db, _, doc_ref = _mock_firestore_client()
-        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        doc_ref.get.return_value = _mock_doc_snapshot(True, {
-            "user_did": USER_DID,
-            "username": USERNAME,
-            "created_at": original_time,
-            "updated_at": original_time,
-            "last_seen_at": original_time,
-        })
+        original_time = datetime(2026, 1, 1, tzinfo=UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "user_did": USER_DID,
+                "username": USERNAME,
+                "created_at": original_time,
+                "updated_at": original_time,
+                "last_seen_at": original_time,
+            },
+        )
 
         user = await upsert_user(db, USER_DID, None)
 
@@ -332,14 +351,17 @@ class TestUpsertUser:
     @pytest.mark.asyncio
     async def test_updates_username_when_changed(self):
         db, _, doc_ref = _mock_firestore_client()
-        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        doc_ref.get.return_value = _mock_doc_snapshot(True, {
-            "user_did": USER_DID,
-            "username": "old-handle.bsky.app",
-            "created_at": original_time,
-            "updated_at": original_time,
-            "last_seen_at": original_time,
-        })
+        original_time = datetime(2026, 1, 1, tzinfo=UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "user_did": USER_DID,
+                "username": "old-handle.bsky.app",
+                "created_at": original_time,
+                "updated_at": original_time,
+                "last_seen_at": original_time,
+            },
+        )
 
         user = await upsert_user(db, USER_DID, USERNAME)
 
@@ -367,14 +389,17 @@ class TestUpsertUser:
     @pytest.mark.asyncio
     async def test_load_test_existing_user_is_left_untouched(self):
         db, _, doc_ref = _mock_firestore_client()
-        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        doc_ref.get.return_value = _mock_doc_snapshot(True, {
-            "user_did": USER_DID,
-            "username": USERNAME,
-            "created_at": original_time,
-            "updated_at": original_time,
-            "last_seen_at": original_time,
-        })
+        original_time = datetime(2026, 1, 1, tzinfo=UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "user_did": USER_DID,
+                "username": USERNAME,
+                "created_at": original_time,
+                "updated_at": original_time,
+                "last_seen_at": original_time,
+            },
+        )
 
         user = await upsert_user(db, USER_DID, USERNAME, is_load_test=True)
 
@@ -386,15 +411,18 @@ class TestUpsertUser:
     @pytest.mark.asyncio
     async def test_real_request_clears_load_test_flag(self):
         db, _, doc_ref = _mock_firestore_client()
-        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        doc_ref.get.return_value = _mock_doc_snapshot(True, {
-            "user_did": USER_DID,
-            "username": USERNAME,
-            "created_at": original_time,
-            "updated_at": original_time,
-            "last_seen_at": original_time,
-            "created_by_load_test": True,
-        })
+        original_time = datetime(2026, 1, 1, tzinfo=UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "user_did": USER_DID,
+                "username": USERNAME,
+                "created_at": original_time,
+                "updated_at": original_time,
+                "last_seen_at": original_time,
+                "created_by_load_test": True,
+            },
+        )
 
         user = await upsert_user(db, USER_DID, USERNAME)
 
@@ -407,20 +435,54 @@ class TestUpsertUser:
     @pytest.mark.asyncio
     async def test_real_request_on_unflagged_user_leaves_flag_alone(self):
         db, _, doc_ref = _mock_firestore_client()
-        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        doc_ref.get.return_value = _mock_doc_snapshot(True, {
-            "user_did": USER_DID,
-            "username": USERNAME,
-            "created_at": original_time,
-            "updated_at": original_time,
-            "last_seen_at": original_time,
-        })
+        original_time = datetime(2026, 1, 1, tzinfo=UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "user_did": USER_DID,
+                "username": USERNAME,
+                "created_at": original_time,
+                "updated_at": original_time,
+                "last_seen_at": original_time,
+            },
+        )
 
         await upsert_user(db, USER_DID, USERNAME)
 
         update_fields = doc_ref.update.call_args[0][0]
         assert "created_by_load_test" not in update_fields
         assert "created_at" not in update_fields
+
+
+@pytest.mark.asyncio
+async def test_patch_user_feed_preferences_materializes_in_transaction():
+    db, _, doc_ref = _mock_firestore_client()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    doc_ref.get.return_value = _mock_doc_snapshot(
+        True,
+        {
+            "user_did": USER_DID,
+            "freshness": 4,
+            "purpose": 0.65,
+            "feed_preferences": {"random": {"freshness": 1}},
+        },
+    )
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        updated = await patch_user_feed_preferences(
+            db,
+            USER_DID,
+            "best-of-friends",
+            FeedPreferencesDocument(freshness=2),
+        )
+
+    assert updated.model_dump(exclude_none=True) == {"freshness": 2, "purpose": 0.65}
+    doc_ref.get.assert_awaited_once_with(transaction=transaction)
+    written = transaction.set.call_args.args[1]
+    assert written["feed_preferences"] == {"best-of-friends": {"freshness": 2, "purpose": 0.65}}
+    assert written["created_by_load_test"] is False
+    assert transaction.set.call_args.kwargs == {"merge": True}
 
 
 # ---------------------------------------------------------------------------
@@ -432,12 +494,15 @@ class TestGetFeedActivity:
     @pytest.mark.asyncio
     async def test_returns_doc_when_exists(self):
         db, doc_ref = _mock_feed_activity_client()
-        now = datetime.now(timezone.utc)
-        doc_ref.get.return_value = _mock_doc_snapshot(True, {
-            "feed_name": FEED_NAME,
-            "first_seen_at": now,
-            "last_seen_at": now,
-        })
+        now = datetime.now(UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "feed_name": FEED_NAME,
+                "first_seen_at": now,
+                "last_seen_at": now,
+            },
+        )
 
         activity = await get_feed_activity(db, USER_DID, FEED_NAME)
 
@@ -481,12 +546,15 @@ class TestUpsertFeedActivity:
     @pytest.mark.asyncio
     async def test_updates_only_last_seen_at_on_revisit(self):
         db, doc_ref = _mock_feed_activity_client()
-        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        doc_ref.get.return_value = _mock_doc_snapshot(True, {
-            "feed_name": FEED_NAME,
-            "first_seen_at": original_time,
-            "last_seen_at": original_time,
-        })
+        original_time = datetime(2026, 1, 1, tzinfo=UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "feed_name": FEED_NAME,
+                "first_seen_at": original_time,
+                "last_seen_at": original_time,
+            },
+        )
 
         activity = await upsert_feed_activity(db, USER_DID, FEED_NAME)
 
@@ -500,12 +568,15 @@ class TestUpsertFeedActivity:
     @pytest.mark.asyncio
     async def test_does_not_overwrite_first_seen_at(self):
         db, doc_ref = _mock_feed_activity_client()
-        original_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        doc_ref.get.return_value = _mock_doc_snapshot(True, {
-            "feed_name": FEED_NAME,
-            "first_seen_at": original_time,
-            "last_seen_at": original_time,
-        })
+        original_time = datetime(2026, 1, 1, tzinfo=UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "feed_name": FEED_NAME,
+                "first_seen_at": original_time,
+                "last_seen_at": original_time,
+            },
+        )
 
         activity = await upsert_feed_activity(db, USER_DID, FEED_NAME)
 
@@ -564,7 +635,7 @@ class TestRecordSeenPosts:
             SEEN_POSTS_COLLECTION
         )
         # Bucket id is the current UTC date.
-        bucket_id = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        bucket_id = datetime.now(UTC).strftime("%Y-%m-%d")
         db.collection.return_value.document.return_value.collection.return_value.document.assert_called_with(
             bucket_id
         )
@@ -575,7 +646,7 @@ class TestRecordSeenPosts:
         assert kwargs == {"merge": True}
         assert isinstance(payload["post_uris"], ArrayUnion)
         assert payload["post_uris"].values == ["at://post/1", "at://post/2"]
-        assert payload["expires_at"] > datetime.now(timezone.utc)
+        assert payload["expires_at"] > datetime.now(UTC)
 
     @pytest.mark.asyncio
     async def test_noop_on_empty(self):
@@ -592,7 +663,7 @@ class TestRecordSeenPosts:
         await record_seen_posts(db, USER_DID, ["at://post/1"], load_test=True)
 
         # Bucket id gets the load-test suffix; a separate doc from real seen posts.
-        bucket_id = datetime.now(timezone.utc).strftime("%Y-%m-%d") + LOAD_TEST_BUCKET_SUFFIX
+        bucket_id = datetime.now(UTC).strftime("%Y-%m-%d") + LOAD_TEST_BUCKET_SUFFIX
         db.collection.return_value.document.return_value.collection.return_value.document.assert_called_with(
             bucket_id
         )
@@ -619,7 +690,8 @@ class TestGetRecentSeenUris:
         # Newest bucket first, duplicate "at://b" collapsed.
         assert uris == ["at://b", "at://c", "at://a"]
         # Query filters on a future expiry.
-        where_args = db.collection.return_value.document.return_value.collection.return_value.where.call_args[0]
+        seen_posts = db.collection.return_value.document.return_value.collection
+        where_args = seen_posts.return_value.where.call_args[0]
         assert where_args[0] == "expires_at"
         assert where_args[1] == ">"
 
@@ -668,7 +740,7 @@ class TestDiscardedPosts:
         db.collection.return_value.document.return_value.collection.assert_called_with(
             DISCARDED_POSTS_COLLECTION
         )
-        bucket_id = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        bucket_id = datetime.now(UTC).strftime("%Y-%m-%d")
         db.collection.return_value.document.return_value.collection.return_value.document.assert_called_with(
             bucket_id
         )
@@ -679,7 +751,7 @@ class TestDiscardedPosts:
         assert kwargs == {"merge": True}
         assert isinstance(payload["post_uris"], ArrayUnion)
         assert payload["post_uris"].values == ["at://post/1", "at://post/2"]
-        assert payload["expires_at"] > datetime.now(timezone.utc)
+        assert payload["expires_at"] > datetime.now(UTC)
 
     @pytest.mark.asyncio
     async def test_noop_on_empty(self):
@@ -723,7 +795,7 @@ REQUEST_ID = "req-abc123"
 
 
 def _feed_debug_doc() -> FeedDebugDocument:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return FeedDebugDocument(
         request_id=REQUEST_ID,
         user_did=USER_DID,
@@ -746,14 +818,17 @@ def _feed_debug_doc() -> FeedDebugDocument:
 class TestGetUserByUsername:
     @pytest.mark.asyncio
     async def test_returns_first_match(self):
-        now = datetime.now(timezone.utc)
-        snap = _mock_doc_snapshot(True, {
-            "user_did": USER_DID,
-            "username": USERNAME,
-            "created_at": now,
-            "updated_at": now,
-            "last_seen_at": now,
-        })
+        now = datetime.now(UTC)
+        snap = _mock_doc_snapshot(
+            True,
+            {
+                "user_did": USER_DID,
+                "username": USERNAME,
+                "created_at": now,
+                "updated_at": now,
+                "last_seen_at": now,
+            },
+        )
         db = MagicMock()
         query = MagicMock()
         query.stream.return_value = _async_iter([snap])
@@ -856,7 +931,7 @@ class TestGetFeedDebug:
 class TestGetNewerFeedSnapshotUris:
     @pytest.mark.asyncio
     async def test_returns_uris_from_newer_snapshots(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         db = MagicMock()
         snap1 = _mock_doc_snapshot(True, {"items": ["at://a", "at://b"]})
         snap2 = _mock_doc_snapshot(True, {"items": ["at://c"]})
@@ -874,7 +949,7 @@ class TestGetNewerFeedSnapshotUris:
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_newer_snapshots(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         db = MagicMock()
         query = MagicMock()
         query.stream.return_value = _async_iter([])
@@ -890,7 +965,7 @@ class TestGetNewerFeedSnapshotUris:
 
     @pytest.mark.asyncio
     async def test_allows_empty_items_lists(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         db = MagicMock()
         snap = _mock_doc_snapshot(True, {"items": []})
         query = MagicMock()
@@ -908,10 +983,12 @@ class TestGetNewerFeedSnapshotUris:
 
 class TestMergeFeedSnapshots:
     def test_appends_regeneration_and_extends_expiration(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         initial = _feed_snapshot("session-1", now, ["at://a", "at://b"])
         regenerated = _feed_snapshot(
-            "session-1", now + timedelta(minutes=2), ["at://c"],
+            "session-1",
+            now + timedelta(minutes=2),
+            ["at://c"],
             expires_at=now + timedelta(minutes=17),
         )
 
@@ -923,7 +1000,7 @@ class TestMergeFeedSnapshots:
         assert truncated is False
 
     def test_deduplicates_and_uses_newer_metadata(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         initial = _feed_snapshot("session-1", now, ["at://a", "at://b"])
         regenerated = _feed_snapshot("session-1", now + timedelta(minutes=1), ["at://b", "at://c"])
         regenerated.items_meta[0] = PipelineItemMeta(at_uri="at://b", rank=99)
@@ -934,7 +1011,7 @@ class TestMergeFeedSnapshots:
         assert next(m for m in merged.items_meta if m.at_uri == "at://b").rank == 99
 
     def test_orders_out_of_order_background_writes(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         later = _feed_snapshot("session-1", now + timedelta(minutes=1), ["at://c"])
         earlier = _feed_snapshot("session-1", now, ["at://a", "at://b"])
 
@@ -944,7 +1021,7 @@ class TestMergeFeedSnapshots:
         assert merged.generated_at == now
 
     def test_preserves_originating_api_release(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         initial = _feed_snapshot(
             "session-1",
             now,
@@ -963,9 +1040,10 @@ class TestMergeFeedSnapshots:
         assert merged.api_release_sha == "origin-sha"
 
     def test_caps_session_at_item_limit(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         initial = _feed_snapshot(
-            "session-1", now,
+            "session-1",
+            now,
             [f"at://post/{i}" for i in range(MAX_FEED_SNAPSHOT_ITEMS)],
         )
         later = _feed_snapshot("session-1", now + timedelta(minutes=1), ["at://overflow"])
@@ -978,27 +1056,141 @@ class TestMergeFeedSnapshots:
 
     @pytest.mark.asyncio
     async def test_creates_snapshot_in_transaction(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         doc = _feed_snapshot("session-1", now, ["at://a"])
         db, doc_ref = _mock_feed_activity_client()
         transaction = MagicMock()
         db.transaction.return_value = transaction
         doc_ref.get.return_value = _mock_doc_snapshot(False)
 
-        with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        with (
+            patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn),
+            patch("app.lib.firestore.prune_feed_snapshots", new_callable=AsyncMock) as prune,
+        ):
             truncated = await merge_feed_snapshot(db, USER_DID, "session-1", doc)
 
         assert truncated is False
         doc_ref.get.assert_awaited_once_with(transaction=transaction)
         transaction.set.assert_called_once_with(doc_ref, doc.model_dump())
+        prune.assert_awaited_once_with(db, USER_DID)
+
+    @pytest.mark.asyncio
+    async def test_extending_snapshot_does_not_prune_documents(self):
+        now = datetime.now(UTC)
+        existing = _feed_snapshot("session-1", now, ["at://a"])
+        incoming = _feed_snapshot("session-1", now + timedelta(minutes=1), ["at://b"])
+        db, doc_ref = _mock_feed_activity_client()
+        transaction = MagicMock()
+        db.transaction.return_value = transaction
+        doc_ref.get.return_value = _mock_doc_snapshot(True, existing.model_dump())
+
+        with (
+            patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn),
+            patch("app.lib.firestore.prune_feed_snapshots", new_callable=AsyncMock) as prune,
+        ):
+            truncated = await merge_feed_snapshot(db, USER_DID, "session-1", incoming)
+
+        assert truncated is False
+        prune.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_creation_can_skip_document_cap(self):
+        doc = _feed_snapshot("session-1", datetime.now(UTC), ["at://a"])
+        db, doc_ref = _mock_feed_activity_client()
+        db.transaction.return_value = MagicMock()
+        doc_ref.get.return_value = _mock_doc_snapshot(False)
+
+        with (
+            patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn),
+            patch("app.lib.firestore.prune_feed_snapshots", new_callable=AsyncMock) as prune,
+        ):
+            await merge_feed_snapshot(
+                db,
+                USER_DID,
+                "session-1",
+                doc,
+                enforce_document_cap=False,
+            )
+
+        prune.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_empty_batch_skips_transaction(self):
-        doc = _feed_snapshot("session-1", datetime.now(timezone.utc), [])
+        doc = _feed_snapshot("session-1", datetime.now(UTC), [])
         db = MagicMock()
 
         assert await merge_feed_snapshot(db, USER_DID, "session-1", doc) is False
         db.transaction.assert_not_called()
+
+
+class TestPruneFeedSnapshots:
+    @staticmethod
+    def _client_with_overflow(snapshots):
+        db = MagicMock()
+        collection = MagicMock()
+        query = MagicMock()
+        query.stream.return_value = _async_iter(snapshots)
+        collection.order_by.return_value.offset.return_value = query
+        (db.collection.return_value.document.return_value.collection.return_value) = collection
+        return db, collection
+
+    @pytest.mark.asyncio
+    async def test_keeps_newest_documents_when_no_overflow_exists(self):
+        db, collection = self._client_with_overflow([])
+
+        deleted = await prune_feed_snapshots(db, USER_DID)
+
+        assert deleted == 0
+        collection.order_by.return_value.offset.assert_called_once_with(MAX_FEED_SNAPSHOT_DOCUMENTS)
+        db.batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_deletes_overflow_oldest_first(self):
+        oldest = MagicMock()
+        middle = MagicMock()
+        newest_overflow = MagicMock()
+        db, _ = self._client_with_overflow([newest_overflow, middle, oldest])
+        batch = MagicMock()
+        batch.commit = AsyncMock()
+        db.batch.return_value = batch
+
+        deleted = await prune_feed_snapshots(db, USER_DID)
+
+        assert deleted == 3
+        assert [call.args[0] for call in batch.delete.call_args_list] == [
+            oldest.reference,
+            middle.reference,
+            newest_overflow.reference,
+        ]
+        batch.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_deletes_large_overflow_in_firestore_sized_batches(self):
+        overflow = [MagicMock() for _ in range(FIRESTORE_WRITE_BATCH_LIMIT + 7)]
+        db, _ = self._client_with_overflow(overflow)
+        batches = [MagicMock(), MagicMock()]
+        for batch in batches:
+            batch.commit = AsyncMock()
+        db.batch.side_effect = batches
+
+        deleted = await prune_feed_snapshots(db, USER_DID)
+
+        assert deleted == FIRESTORE_WRITE_BATCH_LIMIT + 7
+        assert batches[0].delete.call_count == FIRESTORE_WRITE_BATCH_LIMIT
+        assert batches[1].delete.call_count == 7
+        batches[0].commit.assert_awaited_once()
+        batches[1].commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failure_is_non_fatal(self, caplog):
+        db = MagicMock()
+        collection = db.collection.return_value.document.return_value.collection.return_value
+        collection.order_by.side_effect = RuntimeError("query failed")
+
+        deleted = await prune_feed_snapshots(db, USER_DID)
+
+        assert deleted == 0
+        assert "Failed to prune feed snapshots" in caplog.text
 
 
 class TestDeleteFeedSnapshot:

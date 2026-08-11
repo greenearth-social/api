@@ -12,16 +12,51 @@ Convention:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .lib.candidates.base import CandidateResult
 from .models import CandidateGenerateRequest, CandidatePost, RankPredictResult
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
+
+
+class SourceWeightsDocument(BaseModel):
+    """Atomic relative weights for the configurable GreenEarth sources."""
+
+    model_config = {"extra": "forbid"}
+
+    following: float = Field(ge=0.0, le=1.0)
+    # Defaults to zero so three-source documents written before Network Likes
+    # remain readable without a bulk Firestore migration.
+    network_likes: float = Field(default=0.0, ge=0.0, le=1.0)
+    authors_topics: float = Field(ge=0.0, le=1.0)
+    popular: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def weights_sum_to_one(self) -> SourceWeightsDocument:
+        total = self.following + self.network_likes + self.authors_topics + self.popular
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError("source weights must sum to 1.0")
+        return self
+
+
+class FeedPreferencesDocument(BaseModel):
+    """Sparse preference values for one configured feed."""
+
+    model_config = {"extra": "forbid"}
+
+    source_weights: SourceWeightsDocument | None = None
+    # Read-only migration fallback. New preference responses and patches expose
+    # source_weights instead, but existing Firestore documents may still carry
+    # a social-radius preset.
+    social_radius: int | None = Field(default=None, ge=0, le=4)
+    freshness: int | None = Field(default=None, ge=0, le=5)
+    politics: float | None = Field(default=None, ge=0.5, le=1.5)
+    purpose: float | None = Field(default=None, ge=0.2, le=0.8)
 
 
 class UserDocument(BaseModel):
@@ -67,8 +102,7 @@ class UserDocument(BaseModel):
         default=1.0,
         ge=0.5,
         le=1.5,
-        description="Politics multiplier: 0.5-1.5.  "
-        "Applied to political content scores.",
+        description="Politics multiplier: 0.5-1.5.  Applied to political content scores.",
     )
     purpose: float = Field(
         default=0.5,
@@ -76,6 +110,10 @@ class UserDocument(BaseModel):
         le=0.8,
         description="Purpose preference: 0.2=engaging, 0.5=balanced, 0.8=constructive.  "
         "Used to weight engaging vs constructive content.",
+    )
+    feed_preferences: dict[str, FeedPreferencesDocument] = Field(
+        default_factory=dict,
+        description="Per-feed control values keyed by canonical feed name.",
     )
     created_by_load_test: bool = Field(
         default=False,
@@ -94,9 +132,10 @@ class FeedCacheDocument(BaseModel):
 
     items: list[str] = Field(default_factory=list, description="Cached AT URI list")
     expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")
-    items_meta: list["PipelineItemMeta"] = Field(default_factory=list)
-    generator_diagnostics: list["GeneratorDiagnostic"] = Field(default_factory=list)
+    items_meta: list[PipelineItemMeta] = Field(default_factory=list)
+    generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
     applied_social_radius: int | None = None
+    user_did: str | None = None
     feed_name: str | None = None
     generated_at: datetime | None = None
     api_release_sha: str | None = None
@@ -299,7 +338,9 @@ class FeedDebugDocument(BaseModel):
     feed_name: str = Field(..., description="Feed rkey that was loaded")
     regenerated: bool = Field(
         default=False,
-        description="True when this capture came from the cursor-regeneration path rather than a fresh load",
+        description=(
+            "True when this capture came from the cursor-regeneration path rather than a fresh load"
+        ),
     )
 
     # Inputs
@@ -337,7 +378,9 @@ class FeedDebugDocument(BaseModel):
     )
     diversification: list[FeedDebugDiversificationEntry] = Field(
         default_factory=list,
-        description="Per-item diversification breakdown in final order (empty when diversify was off)",
+        description=(
+            "Per-item diversification breakdown in final order (empty when diversify was off)"
+        ),
     )
     n_retrieved: int = Field(
         default=0,
@@ -425,7 +468,9 @@ class FeedSnapshotDocument(BaseModel):
     debug tool and is only written for debug-flagged users.
     """
 
-    request_id: str = Field(..., description="Feed-cache key / feedContext id (also the document ID)")
+    request_id: str = Field(
+        ..., description="Feed-cache key / feedContext id (also the document ID)"
+    )
     items: list[str] = Field(default_factory=list, description="AT URIs in final served order")
     feed_name: str
     generated_at: datetime
@@ -447,7 +492,9 @@ class RedirectDocument(BaseModel):
 
     slug: str = Field(..., description="Short identifier (also the document ID)")
     url: str = Field(..., description="Destination https:// URL")
-    description: str | None = Field(default=None, description="Human-readable label for this redirect")
+    description: str | None = Field(
+        default=None, description="Human-readable label for this redirect"
+    )
     created_at: datetime = Field(
         default_factory=_utcnow, description="When this mapping was created"
     )
