@@ -23,11 +23,12 @@ from app.lib.api_keys import create_api_key, get_api_key_doc, list_api_keys, rev
 from app.lib.firestore import init_firestore_client
 
 
-async def cmd_generate(email: str) -> None:
+async def cmd_generate(email: str, admin: bool) -> None:
     db = init_firestore_client()
-    doc, full_key = await create_api_key(db, email)
+    doc, full_key = await create_api_key(db, email, is_admin=admin)
     print(f"Key ID : {doc.key_id}")
     print(f"Email  : {doc.email}")
+    print(f"Admin  : {doc.is_admin}")
     print(f"Key    : {full_key}")
     print()
     print("IMPORTANT: This is the only time the plaintext key will be shown.")
@@ -39,11 +40,14 @@ async def cmd_list() -> None:
     if not keys:
         print("No API keys found.")
         return
-    print(f"{'key_id':<10} {'email':<30} {'active':<8} {'calls/mo':<10} {'last_used_at'}")
-    print("-" * 80)
+    print(f"{'key_id':<10} {'email':<30} {'active':<8} {'admin':<7} {'calls/mo':<10} {'last_used_at'}")
+    print("-" * 90)
     for k in keys:
         last_used = k.last_used_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-        print(f"{k.key_id:<10} {k.email:<30} {str(k.is_active):<8} {k.monthly_call_count:<10} {last_used}")
+        print(
+            f"{k.key_id:<10} {k.email:<30} {str(k.is_active):<8} {str(k.is_admin):<7} "
+            f"{k.monthly_call_count:<10} {last_used}"
+        )
 
 
 async def cmd_revoke(key_id: str) -> None:
@@ -77,6 +81,11 @@ def main() -> None:
 
     gen = sub.add_parser("generate", help="Issue a new API key")
     gen.add_argument("email", help="Owner email address")
+    gen.add_argument(
+        "--admin",
+        action="store_true",
+        help="Issue an admin key with access to /admin/* endpoints (greenearth team only)",
+    )
 
     sub.add_parser("list", help="List all API keys")
 
@@ -89,7 +98,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "generate":
-        asyncio.run(cmd_generate(args.email))
+        asyncio.run(cmd_generate(args.email, args.admin))
     elif args.command == "list":
         asyncio.run(cmd_list())
     elif args.command == "revoke":

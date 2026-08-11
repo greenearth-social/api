@@ -43,7 +43,11 @@ from app.lib.firestore import (
     init_firestore_client,
     user_doc_id,
 )
-from app.lib.posthog_client import init_posthog_client
+from app.lib.posthog_client import (
+    annotate_event_properties,
+    init_posthog_client,
+    user_identity_properties,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,13 +146,20 @@ async def backfill_users(
             )
 
             if not dry_run:
-                set_props: dict = {"username": username}
+                # `or None` so a stored user with no handle omits the identity
+                # properties entirely rather than backfilling an empty string
+                # over a handle PostHog may already have.
+                identity = user_identity_properties(username or None)
+                set_props: dict = dict(identity.pop("$set", {}))
                 if created_at:
                     set_props["posthog_created_at"] = created_at.isoformat()
+                properties: dict = {"feed_name": feed_name, **identity}
+                if set_props:
+                    properties["$set"] = set_props
                 ph.capture(
                     distinct_id=user_did,
                     event="feedLoaded",
-                    properties={"feed_name": feed_name, "$set": set_props},
+                    properties=annotate_event_properties(properties),
                     timestamp=first_seen_at,
                 )
 
@@ -204,7 +215,7 @@ async def backfill_interactions(
             ph.capture(
                 distinct_id=user_did,
                 event=event,
-                properties=properties,
+                properties=annotate_event_properties(properties),
                 timestamp=created_at,
             )
 

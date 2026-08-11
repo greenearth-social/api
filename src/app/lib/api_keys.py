@@ -75,7 +75,9 @@ async def get_api_key_doc(db: AsyncClient, key_id: str) -> ApiKeyDocument | None
     return ApiKeyDocument.model_validate(data)
 
 
-async def create_api_key(db: AsyncClient, email: str) -> tuple[ApiKeyDocument, str]:
+async def create_api_key(
+    db: AsyncClient, email: str, is_admin: bool = False
+) -> tuple[ApiKeyDocument, str]:
     """Issue a new API key. Returns (document, plaintext_full_key).
 
     The plaintext key is returned exactly once and never stored.
@@ -87,6 +89,7 @@ async def create_api_key(db: AsyncClient, email: str) -> tuple[ApiKeyDocument, s
         key_hash=key_hash,
         email=email,
         is_active=True,
+        is_admin=is_admin,
         created_at=now,
         last_used_at=now,
         monthly_call_count=0,

@@ -138,6 +138,18 @@ class TestGetApiKeyDoc:
         db.collection.assert_called_with(API_KEYS_COLLECTION)
 
     @pytest.mark.asyncio
+    async def test_existing_key_without_is_admin_field_defaults_to_non_admin(self):
+        """Keys written before the admin flag existed have no is_admin field in Firestore."""
+        data = _make_doc_data()
+        assert "is_admin" not in data
+        db, _ = _mock_firestore(data, exists=True)
+
+        result = await get_api_key_doc(db, "a1b2c3d4")
+
+        assert result is not None
+        assert result.is_admin is False
+
+    @pytest.mark.asyncio
     async def test_returns_none_when_not_found(self):
         db, _ = _mock_firestore(exists=False)
 
@@ -164,6 +176,24 @@ class TestCreateApiKey:
         assert full_key.startswith("gea_")
         assert len(full_key) == FULL_KEY_LEN
         doc_ref.set.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_non_admin(self):
+        db, _ = _mock_firestore(exists=False)
+
+        doc, _ = await create_api_key(db, "alice@example.com")
+
+        assert doc.is_admin is False
+
+    @pytest.mark.asyncio
+    async def test_can_issue_admin_key(self):
+        db, doc_ref = _mock_firestore(exists=False)
+
+        doc, _ = await create_api_key(db, "alice@greenearth.social", is_admin=True)
+
+        assert doc.is_admin is True
+        written = doc_ref.set.call_args[0][0]
+        assert written["is_admin"] is True
 
     @pytest.mark.asyncio
     async def test_written_data_contains_hash_not_plaintext(self):
