@@ -8,7 +8,14 @@ Run from the api/ directory:
     pipenv run python scripts/apikeys.py usage a1b2c3d4
 
 Reads Firestore connection from the same env vars as the API server:
-    GE_FIRESTORE_PROJECT, GE_FIRESTORE_DATABASE, GE_FIRESTORE_EMULATOR_HOST
+    GE_FIRESTORE_PROJECT      GCP project ID (default: greenearth-471522)
+    GE_FIRESTORE_DATABASE     Firestore database ID (default: "(default)")
+    GE_FIRESTORE_EMULATOR_HOST  Set for local emulator; leave unset for prod
+
+Production database is "greenearth-prod" — always pass it explicitly to avoid
+writing to the wrong database:
+    GE_FIRESTORE_PROJECT=greenearth-471522 GE_FIRESTORE_DATABASE=greenearth-prod \
+        pipenv run python scripts/apikeys.py generate someone@example.com
 """
 from __future__ import annotations
 
