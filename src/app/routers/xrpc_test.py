@@ -2502,9 +2502,7 @@ class TestSendInteractions:
         with (
             patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
             patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
-            patch(
-                "app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user
-            ) as get_u,
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user) as get_u,
             patch("app.routers.xrpc.track_interaction") as track,
         ):
             await _record_interactions(db, interactions)
