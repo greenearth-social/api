@@ -12,7 +12,7 @@ from ..documents import (
     FeedCacheDocument,
     PipelineItemMeta,
 )
-from ..feeds import FEEDS
+from ..feeds import FEEDS, LOGGED_OUT_POST_URI
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import FeedCache
@@ -4108,6 +4108,20 @@ class TestGetFeedSkeletonMetrics:
             "status_code": "401",
         }
 
+    def test_logged_out_render_records_success_not_failure(self):
+        """A public feed's explainer is a served feed, not a failed one — logged-out
+        traffic must not read as a failure spike on the dashboards (issue #384)."""
+        response = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": RANKED_FEED_URI},
+        )
+
+        assert response.status_code == 200
+        assert not [call for call in self.mc.calls if call[0] == "feed.render.failure_count"]
+        success_calls = [call for call in self.mc.calls if call[0] == "feed.render.success_count"]
+        assert len(success_calls) == 1
+        assert success_calls[0][2]["feed_name"] == RANKED_FEED_RKEY
+
     def test_pipeline_timeout_records_failure_count_504(self, monkeypatch):
         monkeypatch.setenv("GE_FEED_REQUEST_TIMEOUT_SEC", "0.05")
 
@@ -4430,3 +4444,152 @@ class TestFailFastFeatureFlag:
             )
 
         mock_set.assert_called_once_with(False)
+
+
+# ---------------------------------------------------------------------------
+# Logged-out requests
+# ---------------------------------------------------------------------------
+
+
+class TestLoggedOut:
+    """What a signed-out Bluesky visitor gets from getFeedSkeleton (issue #384).
+
+    Every request here has no Authorization header, which is exactly how the
+    AppView calls us when nobody is signed in.
+    """
+
+    def _patch_random_generator(self, candidates):
+        generator = AsyncMock()
+        generator.generate.return_value = CandidateResult(
+            generator_name="random_posts", candidates=candidates
+        )
+        return patch("app.lib.candidates.generate.get_generator", return_value=generator)
+
+    @pytest.mark.parametrize("feed_uri", [RANKED_FEED_URI, BEST_OF_FRIENDS_FEED_URI])
+    def test_personalized_feed_serves_only_the_explainer_post(self, feed_uri):
+        with patch("app.lib.candidates.generate.get_generator") as get_generator:
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": feed_uri},
+            )
+
+        assert resp.status_code == 200
+        # One post, no cursor (this is the whole feed) and no feedContext —
+        # there is no user to attribute an interaction to.
+        assert resp.json() == {"feed": [{"post": LOGGED_OUT_POST_URI}]}
+        get_generator.assert_not_called()
+
+    def test_feed_can_override_the_explainer_post(self):
+        from app.routers import xrpc as xrpc_mod
+
+        override = "at://did:plc:explainer/app.bsky.feed.post/loggedout"
+        patched_feeds = {
+            **FEEDS,
+            "your-feed": FEEDS["your-feed"].model_copy(update={"logged_out_post_uri": override}),
+        }
+        with patch.object(xrpc_mod, "FEEDS", patched_feeds):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        assert [item["post"] for item in resp.json()["feed"]] == [override]
+
+    def test_explainer_response_touches_no_user_data(self):
+        with (
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock) as get_user_mock,
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock) as upsert_mock,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        assert resp.status_code == 200
+        get_user_mock.assert_not_awaited()
+        upsert_mock.assert_not_awaited()
+
+    def test_private_feed_still_requires_auth(self):
+        """Development feeds nobody should see stay 401 rather than explaining themselves."""
+        resp = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": FEED_URI},
+        )
+
+        assert resp.status_code == 401
+
+    def test_random_feed_serves_posts_without_auth(self):
+        candidates = _make_candidates("did:plc:a", 5, "random_posts")
+        with self._patch_random_generator(candidates):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 10},
+            )
+
+        assert resp.status_code == 200
+        items = resp.json()["feed"]
+        posts = [item["post"] for item in items]
+        assert posts[0] == FEEDS["random"].pinned_post_uri
+        assert "at://did:plc:a/0" in posts
+        # No feedContext: interactions reported for these can't be attributed.
+        assert all("feedContext" not in item for item in items)
+
+    def test_random_feed_records_nothing_for_an_anonymous_caller(self):
+        candidates = _make_candidates("did:plc:a", 5, "random_posts")
+        with (
+            self._patch_random_generator(candidates),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock) as get_user_mock,
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock) as upsert_mock,
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock) as snapshot_mock,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 10},
+            )
+
+        assert resp.status_code == 200
+        get_user_mock.assert_not_awaited()
+        upsert_mock.assert_not_awaited()
+        snapshot_mock.assert_not_awaited()
+
+    def test_random_feed_pages_without_auth(self):
+        candidates = _make_candidates("did:plc:a", 12, "random_posts")
+        with self._patch_random_generator(candidates):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 5},
+            ).json()
+            assert first["cursor"]
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 5, "cursor": first["cursor"]},
+            ).json()
+
+        first_posts = [item["post"] for item in first["feed"]]
+        second_posts = [item["post"] for item in second["feed"]]
+        assert second_posts
+        assert not set(first_posts) & set(second_posts)
+
+    def test_explainer_is_tagged_as_logged_out_traffic(self):
+        """Metrics recorded on this path carry traffic=logged_out, so signed-out
+        views can be told apart from real ones on the dashboards."""
+        with patch("app.routers.xrpc.set_traffic") as set_traffic_mock:
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        set_traffic_mock.assert_called_once_with("logged_out")
+
+    def test_anonymous_feed_is_tagged_as_logged_out_traffic(self):
+        candidates = _make_candidates("did:plc:a", 5, "random_posts")
+        with (
+            self._patch_random_generator(candidates),
+            patch("app.routers.xrpc.set_traffic") as set_traffic_mock,
+        ):
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANDOM_FEED_URI, "limit": 10},
+            )
+
+        set_traffic_mock.assert_called_once_with("logged_out")
