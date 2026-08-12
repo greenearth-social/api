@@ -17,9 +17,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...models import CandidatePost, MaxAgeHours
-from ..bsky import FollowedUsersLookupError, get_followed_user_dids
+from ..bsky import FollowedUsersLookupError
 from ..config import fail_fast
 from ..elasticsearch import unwrap_es_response
+from ..followed_users_cache import MAX_FOLLOWED_USERS, get_followed_dids_cached
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
@@ -31,8 +32,9 @@ logger = logging.getLogger(__name__)
 # Parameters
 # ---------------------------------------------------------------------------
 
-# Maximum number of followed users to use in the query
-MAX_FOLLOWED_USERS = 1_000
+# Maximum number of followed users to use in the query is MAX_FOLLOWED_USERS,
+# imported from followed_users_cache so the fetch cap and the query cap cannot
+# drift apart.
 
 # Minimum number of recent likes to fetch in each page.
 LIKED_POSTS_PAGE_SIZE = 100
@@ -173,11 +175,8 @@ async def network_likes_search(
     """Fetch posts liked by users followed by user_did."""
 
     try:
-        async with timed(logger, "bsky_get_follows", user_did=user_did):
-            followed_dids: list[str] = await get_followed_user_dids(
-                user_did,
-                limit=MAX_FOLLOWED_USERS,
-            )
+        async with timed(logger, "follows_lookup", user_did=user_did):
+            followed_dids: list[str] = await get_followed_dids_cached(user_did)
     except FollowedUsersLookupError as exc:
         logger.warning(
             "Skipping network_likes candidate generation for %s after follow "

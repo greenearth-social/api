@@ -4,7 +4,12 @@ import httpx
 import pytest
 
 from . import bsky as bsky_module
-from .bsky import FollowedUsersLookupError, get_followed_user_dids
+from .bsky import (
+    FollowedUsersLookupError,
+    FollowsFetch,
+    fetch_followed_user_dids,
+    get_followed_user_dids,
+)
 
 
 class FakeResponse:
@@ -410,3 +415,133 @@ class TestGetFollowedUserDids:
 
         with pytest.raises(FollowedUsersLookupError, match="Unexpected follows response"):
             await get_followed_user_dids("did:plc:user1", limit=100)
+
+
+class TestFetchFollowedUserDidsCompleteness:
+    """``complete`` distinguishes an exhaustive walk from a truncated one.
+
+    The followed-users cache persists this: an entry built from an incomplete
+    fetch must never be treated as authoritative, or a single Bluesky blip
+    would pin a user to a truncated follow set for a whole TTL.
+    """
+
+    @pytest.mark.asyncio
+    async def test_complete_when_cursor_is_exhausted(self, fake_http_client):
+        fake_http_client.response = FakeResponse({
+            "follows": [{"did": "did:plc:follow1"}],
+        })
+
+        result = await fetch_followed_user_dids("did:plc:user1", limit=100)
+
+        assert result == FollowsFetch(dids=["did:plc:follow1"], complete=True)
+
+    @pytest.mark.asyncio
+    async def test_complete_when_limit_cap_is_reached_with_cursor_remaining(
+        self,
+        fake_http_client,
+    ):
+        # Stopping at MAX_FOLLOWED_USERS is a deliberate bound, not a failure:
+        # the walk did everything it was asked to do.
+        page = [{"did": f"did:plc:follow{i}"} for i in range(100)]
+        fake_http_client.response = FakeResponse({"follows": page, "cursor": "more"})
+
+        result = await fetch_followed_user_dids("did:plc:user1", limit=100)
+
+        assert result.complete is True
+        assert len(result.dids) == 100
+
+    @pytest.mark.asyncio
+    async def test_incomplete_when_a_later_page_fails(self, fake_http_client, monkeypatch):
+        async def fake_sleep(delay):
+            return None
+
+        monkeypatch.setattr(bsky_module.asyncio, "sleep", fake_sleep)
+        request = httpx.Request("GET", "https://example.test")
+        error_page = FakeResponse(
+            status_exc=httpx.HTTPStatusError(
+                "service unavailable",
+                request=request,
+                response=httpx.Response(503, request=request),
+            )
+        )
+        first_page = [{"did": f"did:plc:follow{i}"} for i in range(100)]
+        fake_http_client.responses = [
+            FakeResponse({"follows": first_page, "cursor": "next-page"}),
+            error_page,
+            error_page,
+        ]
+
+        result = await fetch_followed_user_dids("did:plc:user1", limit=200)
+
+        assert result.complete is False
+        assert len(result.dids) == 100
+
+    @pytest.mark.asyncio
+    async def test_incomplete_when_budget_expires(self, fake_http_client, monkeypatch):
+        class ExpiringTimeout:
+            def __init__(self, delay):
+                self.delay = delay
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                raise TimeoutError
+
+        monkeypatch.setattr(bsky_module.asyncio, "timeout", ExpiringTimeout)
+        fake_http_client.response = FakeResponse({"follows": [{"did": "did:plc:follow1"}]})
+
+        result = await fetch_followed_user_dids("did:plc:user1", limit=100)
+
+        assert result == FollowsFetch(dids=["did:plc:follow1"], complete=False)
+
+    @pytest.mark.asyncio
+    async def test_empty_result_is_complete(self, fake_http_client):
+        # A user who follows nobody is a legitimate complete answer, not a
+        # cold entry to be refreshed on every request forever.
+        fake_http_client.response = FakeResponse({"follows": []})
+
+        result = await fetch_followed_user_dids("did:plc:user1", limit=100)
+
+        assert result == FollowsFetch(dids=[], complete=True)
+
+    @pytest.mark.asyncio
+    async def test_raises_when_nothing_could_be_fetched(self, fake_http_client):
+        fake_http_client.response = FakeResponse(json_exc=ValueError("bad json"))
+
+        with pytest.raises(FollowedUsersLookupError):
+            await fetch_followed_user_dids("did:plc:user1", limit=100)
+
+    @pytest.mark.asyncio
+    async def test_caller_supplied_budget_overrides_the_request_path_default(
+        self,
+        fake_http_client,
+        monkeypatch,
+    ):
+        # The background refresh is not on the request path, so it buys a
+        # bigger budget than the 1s clamp a feed request can afford.
+        budgets: list[float] = []
+
+        class RecordingTimeout:
+            def __init__(self, delay):
+                budgets.append(delay)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(bsky_module.asyncio, "timeout", RecordingTimeout)
+        fake_http_client.response = FakeResponse({"follows": []})
+
+        await fetch_followed_user_dids("did:plc:user1", limit=100, timeout_seconds=15.0)
+        await fetch_followed_user_dids("did:plc:user1", limit=100)
+
+        assert budgets == [15.0, bsky_module.FOLLOWS_LOOKUP_TIMEOUT_SECONDS]
+
+    @pytest.mark.asyncio
+    async def test_get_followed_user_dids_still_returns_a_plain_list(self, fake_http_client):
+        fake_http_client.response = FakeResponse({"follows": [{"did": "did:plc:follow1"}]})
+
+        assert await get_followed_user_dids("did:plc:user1", limit=100) == ["did:plc:follow1"]

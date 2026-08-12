@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -57,6 +58,26 @@ class FollowedUsersLookupError(Exception):
     """Raised when followed-user lookup fails."""
 
 
+@dataclass(frozen=True)
+class FollowsFetch:
+    """The outcome of one followed-users walk.
+
+    ``complete`` is ``True`` only when the walk ended on its own terms — the
+    cursor ran out, or ``limit`` was reached, which is a deliberate bound
+    rather than a failure. A page error or an expired budget yields whatever
+    was collected with ``complete=False``.
+
+    The distinction exists for the followed-users cache: a partial list is
+    still worth serving (it beats no candidates at all), but storing one as
+    authoritative would pin a user to a truncated follow set until the entry
+    expires. Callers that only want the DIDs can use
+    :func:`get_followed_user_dids`.
+    """
+
+    dids: list[str] = field(default_factory=list)
+    complete: bool = True
+
+
 def _is_retryable_follow_lookup_error(exc: httpx.HTTPError) -> bool:
     if isinstance(exc, httpx.TimeoutException):
         return True
@@ -88,17 +109,38 @@ async def _get_follows_page(
 
 
 async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
+    """Followed DIDs only, discarding the completeness signal."""
+    return (await fetch_followed_user_dids(user_did, limit)).dids
+
+
+async def fetch_followed_user_dids(
+    user_did: str,
+    limit: int,
+    timeout_seconds: float | None = None,
+) -> FollowsFetch:
+    """Walk ``app.bsky.graph.getFollows`` for *user_did*.
+
+    *timeout_seconds* bounds the whole walk; it defaults to the tight
+    request-path budget, and the background cache refresh passes a larger one
+    because it is not blocking a response.
+
+    Raises :class:`FollowedUsersLookupError` only when nothing at all could be
+    fetched. Any partial result comes back with ``complete=False``.
+    """
     base_url = "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows"
     followed_dids: list[str] = []
     cursor: str | None = None
 
     if limit <= 0:
-        return followed_dids
+        return FollowsFetch(dids=followed_dids, complete=True)
+
+    if timeout_seconds is None:
+        timeout_seconds = FOLLOWS_LOOKUP_TIMEOUT_SECONDS
 
     client = get_http_client()
 
     try:
-        async with asyncio.timeout(FOLLOWS_LOOKUP_TIMEOUT_SECONDS):
+        async with asyncio.timeout(timeout_seconds):
             while len(followed_dids) < limit:
                 page_limit = min(FOLLOWS_PAGE_LIMIT, limit - len(followed_dids))
                 params = {"actor": user_did, "limit": page_limit}
@@ -136,7 +178,7 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
                             user_did,
                             exc,
                         )
-                        return followed_dids[:limit]
+                        return FollowsFetch(dids=followed_dids[:limit], complete=False)
                     raise
 
                 followed_dids.extend(
@@ -157,9 +199,9 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
                 "exceeded %.1fs",
                 len(followed_dids),
                 user_did,
-                FOLLOWS_LOOKUP_TIMEOUT_SECONDS,
+                timeout_seconds,
             )
-            return followed_dids[:limit]
+            return FollowsFetch(dids=followed_dids[:limit], complete=False)
         raise FollowedUsersLookupError(
             f"Failed to fetch followed users for {user_did}"
         ) from exc
@@ -172,4 +214,6 @@ async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
             f"Failed to fetch followed users for {user_did}"
         ) from exc
 
-    return followed_dids[:limit]
+    # Fell out of the loop on an exhausted cursor or a reached limit: both are
+    # the walk finishing on its own terms.
+    return FollowsFetch(dids=followed_dids[:limit], complete=True)
