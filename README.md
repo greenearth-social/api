@@ -347,7 +347,7 @@ Available configuration inputs across `gcp_setup.sh` and `deploy.sh`:
 - `GE_INFERENCE_DOMAIN` - Domain-mapped inference host used when base URL override is not set
 - `GE_ENABLE_INFERENCE_DOMAIN_MAPPING` - Toggle mapped-domain resolution in `deploy.sh` (default: true)
 - `API_INSTANCES_MIN` - Minimum instances (default: 1)
-- `API_INSTANCES_MAX` - Maximum instances (default: 10)
+- `API_INSTANCES_MAX` - Maximum instances (default: 20)
 
 For occasional local inference development while keeping stage/prod defaults:
 
