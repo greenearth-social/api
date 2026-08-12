@@ -462,6 +462,99 @@ class TestNetworkLikesSearch:
         assert es.calls == []
 
 
+class _RecordingCollector:
+    def __init__(self):
+        self.records = []
+
+    def record(self, name, value, **attrs):
+        self.records.append((name, value, attrs))
+
+    def value(self, name):
+        return next(value for recorded, value, _ in self.records if recorded == name)
+
+    def names(self):
+        return [name for name, _, _ in self.records]
+
+
+class TestNetworkLikesTelemetry:
+    """Under-fill is the risk of scanning once instead of paging: these metrics
+    say whether it happened and which limit caused it."""
+
+    @pytest.fixture
+    def collector(self, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(network_likes_module, "get_metric_collector", lambda: collector)
+        return collector
+
+    @pytest.mark.asyncio
+    async def test_records_hydrate_yield_and_no_saturation_when_under_the_limits(
+        self,
+        collector,
+        monkeypatch,
+    ):
+        stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+        es = FakeEs(
+            likes=likes_response([
+                like_hit("at://post/a", 3),
+                like_hit("at://missing/1", 2),
+                like_hit("at://missing/2", 1),
+            ]),
+            posts_by_uri={"at://post/a": post_hit("at://post/a")},
+        )
+
+        await network_likes_search(es, "did:plc:user1", num_candidates=10)
+
+        assert collector.value("candidates.network_likes.hydrate_hit_share") == 1 / 3
+        assert "candidates.network_likes.likes_scan_saturated_count" not in collector.names()
+        assert "candidates.network_likes.hydrate_truncated_count" not in collector.names()
+
+    @pytest.mark.asyncio
+    async def test_counts_a_saturated_likes_scan(self, collector, monkeypatch):
+        stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+        monkeypatch.setattr(network_likes_module, "MIN_LIKES_SCANNED", 2)
+        monkeypatch.setattr(network_likes_module, "MAX_LIKES_SCANNED", 2)
+        es = FakeEs(
+            likes=likes_response([
+                like_hit("at://post/a", 2),
+                like_hit("at://post/b", 1),
+            ]),
+            posts_by_uri={"at://post/a": post_hit("at://post/a")},
+        )
+
+        await network_likes_search(es, "did:plc:user1", num_candidates=10)
+
+        assert collector.value("candidates.network_likes.likes_scan_saturated_count") == 1
+
+    @pytest.mark.asyncio
+    async def test_counts_a_truncated_hydrate(self, collector, monkeypatch):
+        stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+        monkeypatch.setattr(network_likes_module, "MAX_HYDRATED_URIS", 1)
+        es = FakeEs(
+            likes=likes_response([
+                like_hit("at://post/a", 2),
+                like_hit("at://post/b", 1),
+            ]),
+            posts_by_uri={"at://post/a": post_hit("at://post/a")},
+        )
+
+        await network_likes_search(es, "did:plc:user1", num_candidates=10)
+
+        assert collector.value("candidates.network_likes.hydrate_truncated_count") == 1
+
+    @pytest.mark.asyncio
+    async def test_records_nothing_when_there_are_no_likes_to_hydrate(
+        self,
+        collector,
+        monkeypatch,
+    ):
+        stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+        es = FakeEs(likes=likes_response([]))
+
+        await network_likes_search(es, "did:plc:user1", num_candidates=10)
+
+        assert collector.names() == []
+
+
 class TestNetworkLikesCandidateGenerator:
     @pytest.mark.asyncio
     async def test_name(self, generator):

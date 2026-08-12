@@ -311,6 +311,21 @@ class TestGeneratorTimeout:
         _, _, attrs = success_calls[0]
         assert attrs == {"generator_name": "popular", "is_infill": "false"}
 
+    @pytest.mark.asyncio
+    async def test_success_records_fill_share_metric(self, monkeypatch):
+        """A generator that under-fills its allocation is visible per generator."""
+        _stub_generators(monkeypatch, {"popular": _EmptyGenerator("popular")})
+        mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, mc))
+
+        await run_generate(_make_request("popular", num_candidates=4), es=None)
+
+        fill_calls = [c for c in mc.calls if c[0] == "candidates.generate.fill_share"]
+        assert len(fill_calls) == 1
+        _, value, attrs = fill_calls[0]
+        assert value == 0.0
+        assert attrs == {"generator_name": "popular", "is_infill": "false"}
+
 
 # ---------------------------------------------------------------------------
 # Infill generator timeout/error tests

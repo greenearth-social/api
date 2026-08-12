@@ -21,6 +21,7 @@ from ..bsky import FollowedUsersLookupError
 from ..config import fail_fast
 from ..elasticsearch import unwrap_es_response
 from ..followed_users_cache import MAX_FOLLOWED_USERS, get_followed_dids_cached
+from ..metrics import get_metric_collector
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
@@ -169,6 +170,40 @@ async def fetch_posts_by_uris(
     ]
 
 
+def _record_scan_telemetry(
+    *,
+    scanned_likes: int,
+    scan_size: int,
+    unique_uris: int,
+    hydrated_uris: int,
+    hydrated_hits: int,
+) -> None:
+    """Report whether either single-query limit was the binding constraint.
+
+    Scanning once instead of paging trades round trips for the risk of
+    under-filling a user's request. These say whether that happened and which
+    limit caused it: a saturated scan means more recent likes existed than the
+    scan window covered, a truncated hydrate means the scan found more unique
+    URIs than one hydrate query carries, and the hit share is the measured
+    likes-to-candidates yield the two limits are sized against.
+    """
+    if not hydrated_uris:
+        return
+
+    collector = get_metric_collector()
+    if collector is None:
+        return
+
+    collector.record(
+        "candidates.network_likes.hydrate_hit_share",
+        hydrated_hits / hydrated_uris,
+    )
+    if scanned_likes >= scan_size:
+        collector.record("candidates.network_likes.likes_scan_saturated_count", 1)
+    if unique_uris > hydrated_uris:
+        collector.record("candidates.network_likes.hydrate_truncated_count", 1)
+
+
 async def network_likes_search(
     es,
     user_did: str,
@@ -235,6 +270,14 @@ async def network_likes_search(
             exclude_uris=exclude_uris,
             max_age_hours=max_age_hours,
         )
+
+    _record_scan_telemetry(
+        scanned_likes=len(liked_uris),
+        scan_size=scan_size,
+        unique_uris=len(like_counts),
+        hydrated_uris=len(ranked_uris),
+        hydrated_hits=len(hydrated),
+    )
 
     # fetch_posts_by_uris preserves the requested URI order, which is already
     # the final ranking.
