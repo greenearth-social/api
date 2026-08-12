@@ -27,6 +27,14 @@ GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 # (ingex ingest/cmd/backfill_quality_index).
 GE_TWO_TOWER_KNN_INDEX="${GE_TWO_TOWER_KNN_INDEX:-posts_recent_quality}"
 
+# User-history cache policy. Keep these visible on the Cloud Run revision and
+# allow one-off stage/prod tuning through environment overrides to deploy.sh.
+GE_USER_HISTORY_CACHE_TTL_SEC="${GE_USER_HISTORY_CACHE_TTL_SEC:-600}"
+GE_USER_HISTORY_CACHE_MAX_AGE_SEC="${GE_USER_HISTORY_CACHE_MAX_AGE_SEC:-1800}"
+GE_USER_HISTORY_CACHE_LEASE_SEC="${GE_USER_HISTORY_CACHE_LEASE_SEC:-30}"
+GE_USER_HISTORY_REFRESH_TIMEOUT_SEC="${GE_USER_HISTORY_REFRESH_TIMEOUT_SEC:-10}"
+GE_USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC="${GE_USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC:-60}"
+
 # Inference configuration
 GE_INFERENCE_BASE_URL=""
 
@@ -278,6 +286,11 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=4"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_RANK_MODEL_TIMEOUT_SEC=2.5"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_EMBED_HYDRATION_TIMEOUT_SEC=1.5"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_USER_HISTORY_CACHE_TTL_SEC=$GE_USER_HISTORY_CACHE_TTL_SEC"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_USER_HISTORY_CACHE_MAX_AGE_SEC=$GE_USER_HISTORY_CACHE_MAX_AGE_SEC"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_USER_HISTORY_CACHE_LEASE_SEC=$GE_USER_HISTORY_CACHE_LEASE_SEC"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_USER_HISTORY_REFRESH_TIMEOUT_SEC=$GE_USER_HISTORY_REFRESH_TIMEOUT_SEC"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC=$GE_USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC"
     # Below the AppView's 10s abort on getFeedSkeleton calls (confirmed via
     # atproto source, see #291) so a hung downstream call (ES, ranker)
     # surfaces as a logged, metered 504 instead of losing the race against

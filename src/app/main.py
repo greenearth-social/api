@@ -59,7 +59,11 @@ from .lib.request_context import (
     set_endpoint,
     set_request_id,
 )
-from .lib.user_history import FirestoreUserHistoryCache, set_user_history_cache
+from .lib.user_history_cache import (
+    FirestoreUserHistoryCache,
+    drain_user_history_cache_tasks,
+    set_user_history_cache,
+)
 
 from elasticsearch import AsyncElasticsearch
 from starlette.routing import BaseRoute, Match
@@ -164,8 +168,8 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Let in-flight popularity refreshes finish before the clients they
-        # write through are closed.
+        # Let managed background cache work finish before the clients it
+        # writes through are closed.
         set_popularity_cache(None)
         try:
             await app.state.popularity_cache.drain()
@@ -177,6 +181,10 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
         set_user_history_cache(None)
+        try:
+            await drain_user_history_cache_tasks()
+        except Exception:
+            pass
         try:
             await es.close()
         except Exception:

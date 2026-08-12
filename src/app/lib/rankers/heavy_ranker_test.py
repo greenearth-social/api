@@ -8,7 +8,7 @@ import pytest
 
 from ...models import CandidatePost
 from ..embeddings import encode_float32_b64
-from ..user_history import UserHistory, UserHistoryItem
+from ..user_history_cache import UserHistory, UserHistoryItem
 from . import get_ranker
 from . import heavy_ranker as heavy_ranker_module
 from .heavy_ranker import HeavyRanker

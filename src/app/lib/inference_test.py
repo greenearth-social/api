@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from . import inference as inference_module
-from .user_history import UserHistory, UserHistoryItem
+from .user_history_cache import UserHistory, UserHistoryItem
 
 
 class _RecordingCollector:

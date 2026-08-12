@@ -149,13 +149,15 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     monkeypatch,
 ):
     from ..lib import inference as inference_module
-    from ..lib import user_history as user_history_module
+    from ..lib import user_history_cache as user_history_module
     from ..lib.candidates import two_tower as candidate_two_tower_module
     from ..lib.rankers import heavy_ranker as heavy_ranker_module
-    from ..lib.user_history import (
+    from ..lib.user_history_cache import (
         UserHistory,
         UserHistoryCache,
+        UserHistoryCacheEntry,
         UserHistoryItem,
+        drain_user_history_cache_tasks,
         get_user_history_cache,
         set_user_history_cache,
     )
@@ -180,7 +182,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
             self.retrieve_calls = 0
             self.store_calls = 0
 
-        async def retrieve(self, user_did: str) -> UserHistory | None:
+        async def retrieve(self, user_did: str) -> UserHistoryCacheEntry | None:
             assert user_did == test_user_did
             self.retrieve_calls += 1
             return None
@@ -303,6 +305,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
             feed_name="cache-test",
         )
     finally:
+        await drain_user_history_cache_tasks()
         set_user_history_cache(previous_cache)
 
     assert result.uris == [candidate_uri]

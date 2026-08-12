@@ -15,7 +15,7 @@ from ..inference import (
     predict_heavy_ranker_single_user,
 )
 from ..telemetry import timed
-from ..user_history import fetch_user_history_features
+from ..user_history_cache import fetch_user_history_features
 from .base import Ranker, RankerResult
 from .utils import get_rank_predict_results_from_candidates_and_scores
 

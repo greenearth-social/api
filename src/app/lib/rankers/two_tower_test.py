@@ -6,7 +6,7 @@ import pytest
 
 from ...models import CandidatePost
 from .. import inference as inference_module
-from ..user_history import UserHistory, UserHistoryItem
+from ..user_history_cache import UserHistory, UserHistoryItem
 from . import two_tower as two_tower_module
 from .two_tower import TwoTowerRanker
 

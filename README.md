@@ -257,13 +257,13 @@ Deploy to Cloud Run:
 ./scripts/deploy.sh
 
 # Deploy to production
-ENVIRONMENT=prod ./scripts/deploy.sh
+./scripts/deploy.sh --environment prod
 
 # Deploy with custom configuration
-ENVIRONMENT=prod \
-  API_INSTANCES_MIN=2 \
-  API_INSTANCES_MAX=50 \
-  ./scripts/deploy.sh
+./scripts/deploy.sh \
+  --environment prod \
+  --min-instances 2 \
+  --max-instances 50
 ```
 
 The deployment script will:
@@ -277,6 +277,24 @@ The deployment script will:
 
 API deployments do not change Firebase configuration. Deploy Firebase rules,
 indexes, TTL policies, Functions, and Hosting from the frontend repository.
+
+When an API release depends on new Firestore configuration, deploy that
+configuration to the target environment **before** deploying the API revision:
+
+```bash
+cd ../frontend
+./scripts/deploy-firestore.sh stage  # or: ./scripts/deploy-firestore.sh prod
+
+cd ../api
+./scripts/deploy.sh                  # or: ./scripts/deploy.sh --environment prod
+```
+
+This ordering is required for the shared user-history cache. Its documents
+contain base64-encoded embedding arrays and require the
+`user_history_cache.*` indexing exemption from the frontend repository's
+`firestore.indexes.json`. If the API is deployed first, cache writes fail open:
+feed generation continues from Elasticsearch, but the cache cannot populate
+and each request repeats the uncached work.
 
 #### Deployments must be from a clean tree (git sha traceability)
 
@@ -552,6 +570,42 @@ Disable when done (full capture has storage/perf cost):
 ```bash
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --disable
 ```
+
+## User-History Feature Cache
+
+The two-tower generator and heavy ranker share a per-user Firestore document
+(`user_history_cache`) containing the user's recent likes and hydrated post
+features. By default, cache entries have this bounded stale-while-refresh
+lifecycle:
+
+- Through 10 minutes, an entry is fresh and is returned directly.
+- After 10 and before 30 minutes, the stale entry is returned immediately while a
+  managed background task refreshes it from Elasticsearch.
+- At 30 minutes, the entry is a hard miss and the request synchronously rebuilds
+  it rather than serving older recommendation inputs.
+
+By default, stale refreshes use a 30-second transactional Firestore lease, so
+API instances do not duplicate Elasticsearch work. A failed refresh releases
+the lease and sets a default 60-second retry cooldown; the stale value
+remains usable until its configured hard expiry. Cold misses are still fetched
+synchronously because the caller needs a value, but persistence happens in the
+background and is drained during shutdown. Request-path cache reads fail open
+after 500 ms; background writes and lease releases have a separate 5-second
+timeout.
+
+| Variable | Default | What it controls |
+|---|---:|---|
+| `GE_USER_HISTORY_CACHE_TTL_SEC` | 600 | Fresh window before stale-while-refresh begins. |
+| `GE_USER_HISTORY_CACHE_MAX_AGE_SEC` | 1800 | Hard serving cutoff and `expires_at` retention. Values below the fresh TTL are clamped to it. |
+| `GE_USER_HISTORY_CACHE_LEASE_SEC` | 30 | Cross-instance stale-refresh lease. |
+| `GE_USER_HISTORY_REFRESH_TIMEOUT_SEC` | 10 | Elasticsearch budget for a background refresh. |
+| `GE_USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC` | 60 | Quiet period after a failed refresh. |
+
+Lookups record `user_history.cache.age_seconds` and
+`user_history.cache.lookup_count`; background work records `refresh_count` and
+`write_count`, each labelled by outcome. Firestore native TTL uses `expires_at`,
+which is set from the configured maximum serving age (30 minutes by default).
+See `src/app/lib/user_history_cache.py`.
 
 ## Popularity Candidate Cache
 
