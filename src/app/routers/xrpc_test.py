@@ -1327,17 +1327,20 @@ class TestGetFeedSkeletonAuth:
             )
         assert resp.status_code == 200
 
-    def test_unauthenticated_request_uses_empty_did(self):
-        """Without auth header, endpoint should reject the request."""
+    def test_unauthenticated_request_gets_the_logged_out_post(self):
+        """Without an auth header there is no user to personalize for, so the
+        feed explains itself rather than running the pipeline (issue #384)."""
         with self._patch_generators(_make_candidates("p", 2)):
             resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": FEED_URI},
             )
-        assert resp.status_code == 401
+        assert resp.status_code == 200
+        assert resp.json() == {"feed": [{"post": LOGGED_OUT_POST_URI}]}
 
-    def test_invalid_jwt_still_returns_feed(self):
-        """Invalid JWT should be rejected."""
+    def test_invalid_jwt_is_treated_as_logged_out(self):
+        """An unverifiable JWT is no identity at all, so it takes the same path
+        as no JWT — not the authenticated one."""
         from atproto_server.exceptions import TokenInvalidSignatureError
 
         with (
@@ -1353,7 +1356,8 @@ class TestGetFeedSkeletonAuth:
                 params={"feed": FEED_URI},
                 headers={"Authorization": "Bearer bad.jwt.token"},
             )
-        assert resp.status_code == 401
+        assert resp.status_code == 200
+        assert resp.json() == {"feed": [{"post": LOGGED_OUT_POST_URI}]}
 
     def test_authenticated_request_upserts_user(self):
         """Authenticated requests should upsert the user in Firestore."""
@@ -1480,7 +1484,7 @@ class TestGetFeedSkeletonAuth:
                 params={"feed": FEED_URI},
             )
 
-        assert resp.status_code == 401
+        assert resp.status_code == 200
         mock_upsert.assert_not_awaited()
 
     def test_authenticated_request_records_feed_activity(self):
@@ -2832,22 +2836,24 @@ class TestGetFeedSkeletonProbe:
         assert resp.status_code == 200
         snapshot_write.assert_not_awaited()
 
-    def test_wrong_probe_secret_returns_401(self):
-        """Wrong X-Probe-Secret still 401s (no bypass)."""
+    # A request that fails to engage the bypass falls through to ordinary auth,
+    # which for an unauthenticated caller means the logged-out post rather than
+    # a feed generated as the probe user (issue #384). Getting that response is
+    # what proves the bypass didn't engage.
+    def test_wrong_probe_secret_does_not_bypass(self):
         resp = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
             params={"feed": FEED_URI},
             headers={"X-Probe-Secret": "wrong-secret"},
         )
-        assert resp.status_code == 401
+        assert resp.json() == {"feed": [{"post": LOGGED_OUT_POST_URI}]}
 
-    def test_missing_probe_header_returns_401(self):
-        """No header at all still 401s."""
+    def test_missing_probe_header_does_not_bypass(self):
         resp = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
             params={"feed": FEED_URI},
         )
-        assert resp.status_code == 401
+        assert resp.json() == {"feed": [{"post": LOGGED_OUT_POST_URI}]}
 
     def test_probe_secret_env_unset_ignores_header(self, monkeypatch):
         """When GE_PROBE_SECRET is not configured, any header value is ignored."""
@@ -2857,7 +2863,7 @@ class TestGetFeedSkeletonProbe:
             params={"feed": FEED_URI},
             headers={"X-Probe-Secret": self.PROBE_SECRET},
         )
-        assert resp.status_code == 401
+        assert resp.json() == {"feed": [{"post": LOGGED_OUT_POST_URI}]}
 
 
 class TestLoadTestSession:
@@ -2936,13 +2942,15 @@ class TestLoadTestSession:
             )
         assert resp.status_code == 200
 
-    def test_wrong_secret_returns_401(self):
+    # As with the probe: falling through to the logged-out post is what shows
+    # the bypass didn't engage and no session was stood up for LT_DID.
+    def test_wrong_secret_does_not_bypass(self):
         resp = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
             params={"feed": FEED_URI},
             headers=self._headers(secret="nope"),
         )
-        assert resp.status_code == 401
+        assert resp.json() == {"feed": [{"post": LOGGED_OUT_POST_URI}]}
 
     def test_env_unset_ignores_header(self, monkeypatch):
         monkeypatch.delenv("GE_LOAD_TEST_SECRET", raising=False)
@@ -2951,7 +2959,7 @@ class TestLoadTestSession:
             params={"feed": FEED_URI},
             headers=self._headers(),
         )
-        assert resp.status_code == 401
+        assert resp.json() == {"feed": [{"post": LOGGED_OUT_POST_URI}]}
 
     def test_writes_then_deletes_observability_snapshot(self):
         """Load test performs the snapshot write (contrast with the probe, which
@@ -4090,10 +4098,20 @@ class TestGetFeedSkeletonMetrics:
         }
 
     def test_auth_failure_records_failure_count_401(self):
-        with patch(
-            "app.routers.xrpc.verify_auth_header",
-            new_callable=AsyncMock,
-            return_value=None,
+        """Only feeds that opt into logged_out='deny' 401 at all, so this needs one."""
+        from app.routers import xrpc as xrpc_mod
+
+        patched_feeds = {
+            **FEEDS,
+            FEED_RKEY: FEEDS[FEED_RKEY].model_copy(update={"logged_out": "deny"}),
+        }
+        with (
+            patch.object(xrpc_mod, "FEEDS", patched_feeds),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             response = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -4107,6 +4125,20 @@ class TestGetFeedSkeletonMetrics:
             "feed_name": FEED_RKEY,
             "status_code": "401",
         }
+
+    def test_logged_out_render_records_success_not_failure(self):
+        """The explainer is a served feed, not a failed one — logged-out traffic
+        must not read as a failure spike on the dashboards."""
+        response = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": FEED_URI},
+        )
+
+        assert response.status_code == 200
+        assert not [call for call in self.mc.calls if call[0] == "feed.render.failure_count"]
+        success_calls = [call for call in self.mc.calls if call[0] == "feed.render.success_count"]
+        assert len(success_calls) == 1
+        assert success_calls[0][2]["feed_name"] == FEED_RKEY
 
     def test_pipeline_timeout_records_failure_count_504(self, monkeypatch):
         monkeypatch.setenv("GE_FEED_REQUEST_TIMEOUT_SEC", "0.05")
@@ -4495,14 +4527,35 @@ class TestLoggedOut:
         get_user_mock.assert_not_awaited()
         upsert_mock.assert_not_awaited()
 
-    def test_private_feed_still_requires_auth(self):
-        """Development feeds nobody should see stay 401 rather than explaining themselves."""
+    def test_feed_can_opt_into_requiring_auth(self):
+        """No feed in the catalog selects 'deny' today, but the escape hatch has
+        to keep working for one that must not answer without a caller."""
+        from app.routers import xrpc as xrpc_mod
+
+        patched_feeds = {
+            **FEEDS,
+            "unranked-your-feed": FEEDS["unranked-your-feed"].model_copy(
+                update={"logged_out": "deny"}
+            ),
+        }
+        with patch.object(xrpc_mod, "FEEDS", patched_feeds):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+
+        assert resp.status_code == 401
+        assert resp.headers["WWW-Authenticate"] == "Bearer"
+
+    def test_development_feed_explains_itself_by_default(self):
+        """Nothing declares 'deny', so a dev feed takes the default too."""
         resp = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
             params={"feed": FEED_URI},
         )
 
-        assert resp.status_code == 401
+        assert resp.status_code == 200
+        assert resp.json() == {"feed": [{"post": LOGGED_OUT_POST_URI}]}
 
     def test_random_feed_serves_posts_without_auth(self):
         candidates = _make_candidates("did:plc:a", 5, "random_posts")

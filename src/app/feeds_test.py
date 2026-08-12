@@ -125,28 +125,24 @@ class TestFeedsRegistry:
         assert cfg.min_rank_score == pytest.approx(0.425)
         assert cfg.min_mmr_score == pytest.approx(-0.05)
 
-    def test_public_feeds_show_something_when_logged_out(self):
-        """A published feed is visible to logged-out visitors, who would
-        otherwise see it as empty and therefore broken (issue #384)."""
+    def test_every_feed_shows_something_when_logged_out(self):
+        """No feed answers a logged-out visitor with nothing: an empty feed reads
+        as a broken one (issue #384). A feed opts into 401 deliberately or not
+        at all."""
         for feed_name, cfg in FEEDS.items():
-            if not cfg.public:
-                continue
             assert cfg.logged_out in ("explain", "serve"), feed_name
 
-    def test_private_feeds_stay_authenticated_only(self):
-        for feed_name, cfg in FEEDS.items():
-            if cfg.public:
-                continue
-            assert cfg.logged_out == "deny", feed_name
+    def test_random_is_the_only_feed_that_serves_itself_logged_out(self):
+        """Its candidates don't depend on the caller. Every other feed is
+        personalized, so it takes the default and explains instead."""
+        serving = {name for name, cfg in FEEDS.items() if cfg.logged_out == "serve"}
+        assert serving == {"random"}
 
     def test_personalized_feeds_explain_themselves_when_logged_out(self):
-        """These need a user to rank for, so there is nothing to serve without one."""
+        """These need a user to rank for, so there is nothing to serve without one.
+        Neither declares it — this is the default."""
         for feed_name in ("your-feed", "best-of-friends"):
             assert FEEDS[feed_name].logged_out == "explain"
-
-    def test_random_feed_serves_logged_out(self):
-        """Random candidates don't depend on the caller, so no login is needed."""
-        assert FEEDS["random"].logged_out == "serve"
 
     def test_unranked_feeds_have_no_slate_cutoffs(self):
         for feed_name, cfg in FEEDS.items():

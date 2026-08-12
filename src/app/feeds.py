@@ -137,7 +137,6 @@ FEEDS: dict[str, FeedConfig] = {
         avatar="assets/icons/green-earth.png",
         controls=("source_weights", "freshness", "purpose"),
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetfgpr3t2s",
-        logged_out="explain",
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
         # min_rank_score=0.425 maps the old -0.15 floor into the current [0, 1]
@@ -173,7 +172,6 @@ FEEDS: dict[str, FeedConfig] = {
         avatar="assets/icons/best-of-friends.png",
         controls=("freshness", "purpose"),
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetho32pa2g",
-        logged_out="explain",
         # Slate-cutoff starting points — tune from the feed.slate.kept_share and
         # feed.slate.cutoff_count metrics once live (see issue #248). min_rank_score
         # matches your-feed's empirically-calibrated value above; this feed's own

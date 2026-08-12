@@ -14,12 +14,13 @@ FeedControlName = Literal[
 # What a feed does when the AppView calls getFeedSkeleton with no (or an
 # unverifiable) AT Protocol JWT — i.e. someone viewing the feed logged out.
 #
-#   "deny"    — 401. For private/development feeds that nobody should see.
-#   "explain" — serve a single post explaining that the feed needs a login.
-#               For personalized feeds, which have nothing to show without a
-#               user (see issue #384).
+#   "explain" — the default: serve a single post explaining that the feed
+#               needs a login. Right for any personalized feed, which has
+#               nothing to show without a user (see issue #384).
 #   "serve"   — run the normal pipeline anonymously. For feeds whose
 #               candidates don't depend on who is asking.
+#   "deny"    — 401. Nothing in the catalog selects this today; it's here for
+#               a feed that must not respond at all without a caller.
 LoggedOutBehavior = Literal["deny", "explain", "serve"]
 
 
@@ -252,10 +253,10 @@ class FeedConfig(BaseModel):
         description="AT URI of a post to pin at the top of the first page of this feed.",
     )
     logged_out: LoggedOutBehavior = Field(
-        "deny",
-        description="How this feed responds to an unauthenticated request: 401 ('deny'), "
-        "a single explanatory post ('explain'), or the normal pipeline run anonymously "
-        "('serve').",
+        "explain",
+        description="How this feed responds to an unauthenticated request: a single "
+        "explanatory post ('explain', the default), the normal pipeline run anonymously "
+        "('serve'), or 401 ('deny').",
     )
     logged_out_post_uri: str | None = Field(
         None,
