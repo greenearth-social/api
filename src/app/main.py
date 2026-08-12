@@ -168,8 +168,8 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Let managed background cache work finish before the clients it
-        # writes through are closed.
+        # Let in-flight popularity refreshes finish before the clients they
+        # write through are closed.
         set_popularity_cache(None)
         try:
             await app.state.popularity_cache.drain()

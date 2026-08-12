@@ -42,7 +42,7 @@ from .telemetry import timed
 logger = logging.getLogger(__name__)
 
 USER_HISTORY_CACHE_COLLECTION = "user_history_cache"
-USER_HISTORY_CACHE_VERSION = 2
+USER_HISTORY_CACHE_VERSION = 1
 USER_HISTORY_LIMIT = DEFAULT_LIKED_POSTS_LIMIT
 # Cache reads are an optimization inside model calls whose total budgets are
 # only a few seconds. Bound the entire Firestore operation (including SDK
