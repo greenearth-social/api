@@ -91,12 +91,18 @@ SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
 # NOTE: published display names are limited to 24 graphemes. Internal ("debug")
 # feeds are published as "GE <internal_display_name> <git_sha>" (see issue #228),
 # so keep internal_display_name to 13 chars or fewer. feeds_test.py enforces this.
+#
+# NOTE: every private (development) feed sets logged_out="deny" — a feed nobody
+# is meant to see has nothing to say to a logged-out visitor. Public feeds take
+# the "explain" default, or "serve" when they work without a user. feeds_test.py
+# enforces this too.
 FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(
         display_name="Unranked YF",
         description="Development feed — same as green-earth but without ranking.",
         internal_rkey="e2-s",
         internal_display_name="e2 S",
+        logged_out="deny",
         avatar="assets/icons/unranked-your-feed.png",
         preference_source="your-feed",
         gen_request_template=CandidateGenerateRequest.model_construct(
@@ -201,6 +207,7 @@ FEEDS: dict[str, FeedConfig] = {
         "limits enabled, for observing and tuning thresholds (see issue #248).",
         internal_rkey="qr-cp",
         internal_display_name="qr CP",
+        logged_out="deny",
         preference_source="your-feed",
         # Same generator mix as your-feed, so cutoff behavior here previews what
         # real users would see.
@@ -248,6 +255,7 @@ FEEDS: dict[str, FeedConfig] = {
         description="Development feed — followed-users candidates only.",
         internal_rkey="ij-fu",
         internal_display_name="ij FU",
+        logged_out="deny",
         avatar="assets/icons/followed-users.png",
         diversify=False,
         exclude_seen_posts=False,
@@ -265,6 +273,7 @@ FEEDS: dict[str, FeedConfig] = {
         description="Development feed — network-likes candidates only.",
         internal_rkey="kl-nl",
         internal_display_name="kl NL",
+        logged_out="deny",
         avatar="assets/icons/network-likes.png",
         diversify=False,
         exclude_seen_posts=False,
@@ -282,6 +291,7 @@ FEEDS: dict[str, FeedConfig] = {
         description="Development feed — popularity candidates only.",
         internal_rkey="mn-p",
         internal_display_name="mn P",
+        logged_out="deny",
         avatar="assets/icons/popularity.png",
         diversify=False,
         exclude_seen_posts=False,
@@ -299,6 +309,7 @@ FEEDS: dict[str, FeedConfig] = {
         description="Development feed — two-tower candidates only.",
         internal_rkey="op-tt",
         internal_display_name="op TT",
+        logged_out="deny",
         avatar="assets/icons/two-tower.png",
         diversify=False,
         exclude_seen_posts=False,
@@ -316,6 +327,7 @@ FEEDS: dict[str, FeedConfig] = {
         description="Development feed — two-tower candidates for a user with no like history.",
         internal_rkey="tt-eh",
         internal_display_name="tt EH",
+        logged_out="deny",
         avatar="assets/icons/two-tower.png",
         diversify=False,
         exclude_seen_posts=False,
@@ -336,6 +348,7 @@ FEEDS: dict[str, FeedConfig] = {
         public=False,
         internal_rkey="mf-cs",
         internal_display_name="mf CS",
+        logged_out="deny",
         avatar="assets/icons/green-earth.png",
         max_render_share=0.5,
         min_rank_score=0.425,

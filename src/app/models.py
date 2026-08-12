@@ -19,8 +19,8 @@ FeedControlName = Literal[
 #               nothing to show without a user (see issue #384).
 #   "serve"   — run the normal pipeline anonymously. For feeds whose
 #               candidates don't depend on who is asking.
-#   "deny"    — 401. Nothing in the catalog selects this today; it's here for
-#               a feed that must not respond at all without a caller.
+#   "deny"    — 401. For the private development feeds, which nobody is meant
+#               to be looking at in the first place.
 LoggedOutBehavior = Literal["deny", "explain", "serve"]
 
 
