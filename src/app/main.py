@@ -49,7 +49,8 @@ from .lib.followed_users_cache import FollowedUsersCache, set_followed_users_cac
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
 from .lib.perspective import close_perspective_client
-from .lib.metrics import MetricCollector, set_metric_collector
+from .lib import inflight
+from .lib.metrics import MetricCollector, get_metric_collector, set_metric_collector
 from .lib.posthog_client import get_posthog_client, init_posthog_client, set_posthog_client
 from .lib.profiling import install_profiling
 from .lib.request_context import (
@@ -378,6 +379,30 @@ async def request_id_mw(request: Request, call_next):
             reset_endpoint(endpoint_token)
     response.headers["x-request-id"] = rid
     return response
+
+
+# Registered last so it is the outermost middleware: the in-flight window has
+# to enclose everything else on the request path, or the event-loop monitor
+# will see intervals that are only partly covered by a request and discard
+# samples it should have kept.
+@app.middleware("http")
+async def inflight_mw(request: Request, call_next):
+    """Track concurrent in-flight requests for the whole process.
+
+    Gates the event-loop lag monitor (see ``lib/eventloop_monitor.py``): a
+    CPU-throttled idle instance must not contribute samples. ``http.in_flight``
+    is also the per-instance concurrency signal for right-sizing Cloud Run's
+    ``--concurrency``, which Cloud Run's own ``max_request_concurrencies``
+    only reports as a coarse per-minute maximum (issue #389).
+    """
+    count = inflight.begin()
+    collector = get_metric_collector()
+    if collector is not None:
+        collector.record("http.in_flight", count)
+    try:
+        return await call_next(request)
+    finally:
+        inflight.end()
 
 
 app.include_router(candidates.router)

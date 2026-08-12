@@ -2,7 +2,9 @@
 
 import pytest
 from fastapi import Request
+from fastapi.testclient import TestClient
 
+from .lib import inflight
 from .main import _es_connections_per_node, _is_deployed_environment, _resolve_endpoint, app
 
 
@@ -72,3 +74,45 @@ def test_is_deployed_environment_checks_ge_environment_fallback(monkeypatch):
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.setenv("GE_ENVIRONMENT", "prod")
     assert _is_deployed_environment() is True
+
+
+def test_inflight_middleware_tracks_and_releases_requests():
+    """The counter must rise inside the handler and return to zero after."""
+    inflight.reset_for_test()
+    seen: list[int] = []
+
+    @app.get("/_inflight_probe")
+    async def _probe():
+        seen.append(inflight.current())
+        return {"ok": True}
+
+    try:
+        # No context manager: entering it would run the lifespan, which
+        # requires real ES/Firestore configuration this test does not need.
+        assert TestClient(app).get("/_inflight_probe").status_code == 200
+    finally:
+        app.router.routes = [
+            r for r in app.router.routes if getattr(r, "path", None) != "/_inflight_probe"
+        ]
+
+    assert seen == [1]
+    assert inflight.current() == 0
+
+
+def test_inflight_middleware_releases_on_handler_exception():
+    """A failing handler must not leak the process into a permanently-busy state,
+    which would make the event-loop monitor record throttled samples forever."""
+    inflight.reset_for_test()
+
+    @app.get("/_inflight_boom")
+    async def _boom():
+        raise RuntimeError("boom")
+
+    try:
+        TestClient(app, raise_server_exceptions=False).get("/_inflight_boom")
+    finally:
+        app.router.routes = [
+            r for r in app.router.routes if getattr(r, "path", None) != "/_inflight_boom"
+        ]
+
+    assert inflight.current() == 0
