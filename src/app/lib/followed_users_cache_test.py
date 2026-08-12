@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -58,12 +59,56 @@ class FakeDocRef:
             self._store["docs"][self._id] = dict(data)
 
 
+class FakeAggregation:
+    """Stands in for a Firestore count() aggregation query."""
+
+    def __init__(self, store: dict, predicate=None):
+        self._store = store
+        self._predicate = predicate
+
+    async def get(self):
+        docs = self._store["docs"].values()
+        if self._predicate is not None:
+            docs = [d for d in docs if self._predicate(d)]
+        return [[SimpleNamespace(value=len(list(docs)))]]
+
+
+class FakeQuery:
+    def __init__(self, store: dict, predicate):
+        self._store = store
+        self._predicate = predicate
+
+    def count(self) -> FakeAggregation:
+        return FakeAggregation(self._store, self._predicate)
+
+
+def _predicate_for(field_filter):
+    """Evaluate a real FieldFilter against a stored document dict."""
+    field, op, value = field_filter.field_path, field_filter.op_string, field_filter.value
+
+    def check(doc: dict) -> bool:
+        actual = doc.get(field)
+        if op == "==":
+            return actual == value
+        if op == "<":
+            return actual is not None and actual < value
+        raise AssertionError(f"unsupported op in fake: {op}")
+
+    return check
+
+
 class FakeCollection:
     def __init__(self, store: dict):
         self._store = store
 
     def document(self, doc_id: str) -> FakeDocRef:
         return self._store["refs"].setdefault(doc_id, FakeDocRef(self._store, doc_id))
+
+    def count(self) -> FakeAggregation:
+        return FakeAggregation(self._store)
+
+    def where(self, filter=None) -> FakeQuery:  # noqa: A002 - matches the SDK's kwarg
+        return FakeQuery(self._store, _predicate_for(filter))
 
 
 class FakeDb:
@@ -141,6 +186,37 @@ def origin(monkeypatch):
     fetcher = RecordingOrigin(FollowsFetch(dids=["did:plc:a"], complete=True))
     monkeypatch.setattr(cache_module, "fetch_followed_user_dids", fetcher)
     return fetcher
+
+
+class RecordingCollector:
+    def __init__(self):
+        self.records: list[tuple[str, float, dict]] = []
+
+    def record(self, name, value, **attrs):
+        self.records.append((name, value, attrs))
+
+    def values(self, name: str) -> list[float]:
+        return [v for n, v, _ in self.records if n == name]
+
+    def labelled(self, name: str) -> dict[str, float]:
+        """Values for *name* keyed by their ``state`` label."""
+        return {a["state"]: v for n, v, a in self.records if n == name}
+
+
+@pytest.fixture
+def metrics(monkeypatch):
+    collector = RecordingCollector()
+    monkeypatch.setattr(cache_module, "get_metric_collector", lambda: collector)
+    return collector
+
+
+@pytest.fixture(autouse=True)
+def _reset_sweep_clock():
+    # The sweep is rate-limited per process; tests must not inherit each
+    # other's last-sweep timestamp.
+    cache_module.reset_sweep_clock()
+    yield
+    cache_module.reset_sweep_clock()
 
 
 @pytest.fixture(autouse=True)
@@ -494,3 +570,130 @@ class TestGetFollowedDidsCached:
         from .firestore import user_doc_id
 
         assert db.store["refs"][user_doc_id(USER)].read_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Telemetry
+# ---------------------------------------------------------------------------
+
+class TestTelemetry:
+    @pytest.mark.asyncio
+    async def test_age_is_recorded_on_a_fresh_hit_too(self, origin, metrics):
+        # Recording age only when an entry is already stale makes the series
+        # structurally alarming: it would contain nothing but overdue entries,
+        # so the freshness of a healthy population is invisible.
+        db = FakeDb()
+        put(
+            db,
+            USER,
+            follows=["did:plc:a"],
+            complete=True,
+            generated_at=now() - timedelta(seconds=60),
+        )
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+
+        ages = metrics.values("follows_cache.age_seconds")
+        assert len(ages) == 1
+        assert 55 <= ages[0] <= 120
+
+    @pytest.mark.asyncio
+    async def test_refresh_records_how_much_the_follow_set_moved(self, origin, metrics):
+        # Churn per refresh is the only signal that distinguishes a cache that
+        # is confidently complete-but-wrong (jetstream deltas going missing)
+        # from one that is genuinely tracking Bluesky.
+        origin.results = [
+            FollowsFetch(dids=["did:plc:keep", "did:plc:added"], complete=True)
+        ]
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(db, USER, follows=["did:plc:keep", "did:plc:gone"], complete=True, generated_at=old)
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert metrics.values("follows_cache.refresh_added") == [1]
+        assert metrics.values("follows_cache.refresh_removed") == [1]
+
+    @pytest.mark.asyncio
+    async def test_steady_state_refresh_reports_no_churn(self, origin, metrics):
+        origin.results = [FollowsFetch(dids=["did:plc:a"], complete=True)]
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(db, USER, follows=["did:plc:a"], complete=True, generated_at=old)
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert metrics.values("follows_cache.refresh_added") == [0]
+        assert metrics.values("follows_cache.refresh_removed") == [0]
+
+    @pytest.mark.asyncio
+    async def test_population_sweep_counts_users_by_health(self, origin, metrics):
+        # Lookup metrics are request-weighted, so one heavy user stuck
+        # incomplete looks like many users briefly incomplete. This is the
+        # per-user view.
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(db, "did:plc:healthy1", follows=["a"], complete=True, generated_at=now())
+        put(db, "did:plc:healthy2", follows=["a"], complete=True, generated_at=now())
+        put(db, "did:plc:broken", follows=["a"], complete=False, generated_at=now())
+        put(db, "did:plc:overdue", follows=["a"], complete=True, generated_at=old)
+        cache = make_cache(db)
+
+        await cache.get_followed_dids("did:plc:healthy1")
+        await cache.drain()
+
+        assert metrics.labelled("follows_cache.users_rate") == {
+            "total": 4,
+            "incomplete": 1,
+            "stale": 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_sweep_is_deferred_not_awaited_by_the_caller(self, origin, metrics):
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:a"], complete=True, generated_at=now())
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+
+        # Nothing counted yet: the sweep must run after the response, not
+        # inside the request that triggered it.
+        assert metrics.labelled("follows_cache.users_rate") == {}
+        await cache.drain()
+        assert metrics.labelled("follows_cache.users_rate") != {}
+
+    @pytest.mark.asyncio
+    async def test_sweep_is_rate_limited_across_lookups(self, origin, metrics):
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:a"], complete=True, generated_at=now())
+        cache = make_cache(db)
+
+        for _ in range(5):
+            await cache.get_followed_dids(USER)
+            await cache.drain()
+
+        # One aggregation pass per interval, not one per feed request.
+        assert metrics.values("follows_cache.users_rate").count(1.0) <= 3
+        assert len([v for n, v, a in metrics.records
+                    if n == "follows_cache.users_rate" and a["state"] == "total"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_sweep_failure_never_breaks_a_lookup(self, origin, metrics):
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:a"], complete=True, generated_at=now())
+        cache = make_cache(db)
+
+        async def boom():
+            raise RuntimeError("aggregation unavailable")
+
+        monkey = FakeCollection(db.store)
+        monkey.count = lambda: SimpleNamespace(get=boom)  # type: ignore[assignment]
+        db.collection = lambda name: monkey  # type: ignore[assignment]
+
+        assert await cache.get_followed_dids(USER) == ["did:plc:a"]
+        await cache.drain()

@@ -35,10 +35,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Awaitable, Callable
 
-from google.cloud.firestore import AsyncClient, async_transactional  # type: ignore[import-untyped]
+from google.cloud.firestore import (  # type: ignore[import-untyped]
+    AsyncClient,
+    FieldFilter,
+    async_transactional,
+)
 
 from .bsky import FollowedUsersLookupError, FollowsFetch, fetch_followed_user_dids
 from .metrics import get_metric_collector
@@ -67,6 +72,10 @@ MAX_PENDING_ADDS = 500
 # Age at which staleness is loud enough to alert on: refreshes have been
 # failing for long enough that jetstream cannot be the explanation either.
 STALE_ALERT_SECONDS = 86_400  # 24 hours
+
+# Single-flight key for the population sweep. A NUL byte cannot appear in a
+# Firestore document ID, so this can never collide with a user's key.
+_SWEEP_KEY = "\x00sweep"
 
 
 def _int_env(name: str, default: int) -> int:
@@ -104,6 +113,22 @@ def retry_cooldown_seconds() -> int:
     task on every single request.
     """
     return _int_env("GE_FOLLOWS_CACHE_RETRY_COOLDOWN_SEC", 60)
+
+
+def sweep_interval_seconds() -> int:
+    """How often one process samples population health (see ``_sweep``)."""
+    return _int_env("GE_FOLLOWS_CACHE_SWEEP_SEC", 300)
+
+
+# Rate-limits the population sweep per process. Module-level rather than
+# per-instance so it survives a cache being rebuilt in tests and scripts.
+_last_sweep_at: float | None = None
+
+
+def reset_sweep_clock() -> None:
+    """Forget when the last sweep ran (tests)."""
+    global _last_sweep_at
+    _last_sweep_at = None
 
 
 def user_doc_id(user_did: str) -> str:
@@ -162,6 +187,14 @@ class FollowedUsersCache:
         cached *and* the live walk fails — the same signal the generators
         already handle.
         """
+        try:
+            return await self._lookup(user_did)
+        finally:
+            # Deferred deliberately: the sweep is an aggregation over the whole
+            # collection and must never sit on the request path.
+            self._maybe_sweep()
+
+    async def _lookup(self, user_did: str) -> list[str]:
         key = user_doc_id(user_did)
 
         try:
@@ -179,13 +212,17 @@ class FollowedUsersCache:
             return fetch.dids
 
         follows = _merge(entry.follows, entry.pending_adds)
+        # Recorded for every served entry, fresh or not: a series containing
+        # only overdue entries says nothing about how fresh the healthy
+        # population is, and reads as alarming even when nothing is wrong.
+        self._note_age(entry, user_did)
+
         reason = self._staleness(entry)
         if reason is None:
             self._record("hit")
             return follows
 
         self._record(reason)
-        self._note_age(entry, user_did)
         self._spawn(key, self._refresh(key, user_did))
         return follows
 
@@ -355,7 +392,8 @@ class FollowedUsersCache:
                 await self._release(key, failed=True)
                 return
 
-            if not fetch.complete and not await self._may_overwrite(key):
+            previous = await self._read(key)
+            if not fetch.complete and previous is not None and previous.complete:
                 # A partial walk must never shrink a complete entry. Leave it
                 # stale so the next request tries again.
                 logger.info(
@@ -368,6 +406,7 @@ class FollowedUsersCache:
                 await self._release(key, failed=True)
                 return
 
+            self._note_drift(previous, fetch, user_did)
             await self._doc_ref(key).set(self._document(fetch))
             outcome = "success" if fetch.complete else "partial"
             logger.info(
@@ -384,10 +423,95 @@ class FollowedUsersCache:
             if mc := get_metric_collector():
                 mc.record("follows_cache.refresh_count", 1, outcome=outcome)
 
-    async def _may_overwrite(self, key: str) -> bool:
-        """True when the stored entry is absent or itself incomplete."""
-        entry = await self._read(key)
-        return entry is None or not entry.complete
+    def _note_drift(
+        self,
+        previous: "FollowedUsersCacheDocument | None",
+        fetch: FollowsFetch,
+        user_did: str,
+    ) -> None:
+        """Record how far the refreshed set moved from what we were serving.
+
+        This is the only correctness signal in the system. An entry that is
+        confidently ``complete`` but *wrong* — because jetstream deltas were
+        dropped and the TTL had not yet fired — is otherwise indistinguishable
+        from a correct one. In steady state churn per refresh sits near zero;
+        a rising delta at TTL boundaries means the live update path is not
+        doing its job.
+        """
+        if previous is None:
+            return  # Nothing was being served; there is no drift to speak of.
+        served = set(_merge(previous.follows, previous.pending_adds))
+        refreshed = set(fetch.dids)
+        added = len(refreshed - served)
+        removed = len(served - refreshed)
+        if mc := get_metric_collector():
+            mc.record("follows_cache.refresh_added", added)
+            mc.record("follows_cache.refresh_removed", removed)
+        if added or removed:
+            logger.info(
+                "Followed-users refresh for %s moved the set: +%d -%d",
+                user_did,
+                added,
+                removed,
+            )
+
+    def _maybe_sweep(self) -> None:
+        """Schedule a population sweep if one is due.
+
+        Rate-limited per process rather than coordinated across instances:
+        the aggregation is three counts over a small collection, and a handful
+        of instances reporting the same gauge is cheaper than a lease.
+        """
+        global _last_sweep_at
+        now = time.monotonic()
+        if _last_sweep_at is not None and now - _last_sweep_at < sweep_interval_seconds():
+            return
+        # Stamped before spawning so concurrent lookups don't stack sweeps.
+        _last_sweep_at = now
+        self._spawn(_SWEEP_KEY, self._sweep())
+
+    async def _sweep(self) -> None:
+        """Count the cached population by health and report it as gauges.
+
+        Lookup metrics are request-weighted, so one heavy user stuck
+        incomplete is indistinguishable from many users briefly incomplete.
+        These are the per-user counterparts, and they are what answers
+        "is follow state broadly correct, or degraded?".
+        """
+        try:
+            collection = self._db.collection(FOLLOWED_USERS_CACHE_COLLECTION)
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds())
+            total = await self._count(collection.count())
+            incomplete = await self._count(
+                collection.where(filter=FieldFilter("complete", "==", False)).count()
+            )
+            stale = await self._count(
+                collection.where(filter=FieldFilter("generated_at", "<", cutoff)).count()
+            )
+        except Exception:
+            # Observability must never take the feature down with it.
+            logger.warning("Followed-users population sweep failed", exc_info=True)
+            return
+
+        if mc := get_metric_collector():
+            # endpoint/traffic are normally inherited from the request that
+            # spawned the task; pinned here so this gauge is one timeseries
+            # rather than one per endpoint that happened to trigger it.
+            labels = {"endpoint": "followed_users_sweep", "traffic": "internal"}
+            mc.record("follows_cache.users_rate", total, state="total", **labels)
+            mc.record("follows_cache.users_rate", incomplete, state="incomplete", **labels)
+            mc.record("follows_cache.users_rate", stale, state="stale", **labels)
+        logger.info(
+            "Followed-users population: total=%d incomplete=%d stale=%d",
+            total,
+            incomplete,
+            stale,
+        )
+
+    async def _count(self, aggregation) -> int:
+        """Unwrap a Firestore count() aggregation result."""
+        result = await aggregation.get()
+        return int(result[0][0].value)
 
     async def _release(self, key: str, *, failed: bool) -> None:
         """Drop the lease so the next request can retry immediately.
