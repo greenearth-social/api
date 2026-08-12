@@ -234,9 +234,14 @@ async def test_firestore_cache_miss_for_missing_document():
 
 
 @pytest.mark.asyncio
-async def test_firestore_cache_stores_float32_embeddings_with_exact_max_age():
+@pytest.mark.parametrize("release_sha", [None, "abc1234"])
+async def test_firestore_cache_stores_float32_embeddings_with_exact_max_age(
+    monkeypatch,
+    release_sha,
+):
     db, _collection_ref, doc_ref = _mock_firestore_client()
     before = datetime.now(UTC)
+    monkeypatch.setattr(user_history_module, "api_release_sha", lambda: release_sha)
 
     await FirestoreUserHistoryCache(db).store(
         "did:plc:user1",
@@ -262,6 +267,7 @@ async def test_firestore_cache_stores_float32_embeddings_with_exact_max_age():
     assert stored["expires_at"] - stored["fetched_at"] == timedelta(seconds=DEFAULT_MAX_AGE_SECONDS)
     assert stored["refresh_started_at"] is None
     assert stored["refresh_failed_at"] is None
+    assert stored["api_release_sha"] == release_sha
 
 
 def _install_direct_transaction(cache, transaction: MagicMock, monkeypatch) -> None:

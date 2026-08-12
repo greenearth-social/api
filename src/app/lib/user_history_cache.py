@@ -36,6 +36,7 @@ from .embeddings import (
     encode_float32_b64,
 )
 from .metrics import get_metric_collector
+from .release import api_release_sha
 from .request_cache import get_request_cache
 from .telemetry import timed
 
@@ -167,6 +168,7 @@ class _CachedUserHistoryDocument(BaseModel):
     expires_at: datetime
     refresh_started_at: datetime | None = None
     refresh_failed_at: datetime | None = None
+    api_release_sha: str | None = None
     items: list[_CachedUserHistoryItem] = Field(max_length=USER_HISTORY_LIMIT)
 
 
@@ -301,6 +303,7 @@ class FirestoreUserHistoryCache(UserHistoryCache):
             expires_at=fetched_at + timedelta(seconds=max_age_seconds()),
             refresh_started_at=None,
             refresh_failed_at=None,
+            api_release_sha=api_release_sha(),
             items=[
                 _CachedUserHistoryItem(
                     at_uri=item.at_uri,
