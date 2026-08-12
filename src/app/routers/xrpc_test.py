@@ -19,7 +19,17 @@ from ..lib.feed_cache import FeedCache
 from ..lib.feed_context import decode_feed_context
 from ..lib.metrics import MetricCollector, set_metric_collector
 from ..main import app
-from ..models import CandidatePost, FeedCursor, RankedCandidate, RankPredictResult
+from ..models import (
+    CandidateGenerateRequest,
+    CandidatePost,
+    FeedConfig,
+    FeedCursor,
+    GeneratorSpec,
+    RankedCandidate,
+    RankModelSpec,
+    RankPredictRequest,
+    RankPredictResult,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -132,6 +142,188 @@ class FakeMetricCollector:
 
     def record(self, name: str, value: float, **attributes: str) -> None:
         self.calls.append((name, value, dict(attributes)))
+
+
+@pytest.mark.asyncio
+async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
+    monkeypatch,
+):
+    from ..lib import inference as inference_module
+    from ..lib import user_history as user_history_module
+    from ..lib.candidates import two_tower as candidate_two_tower_module
+    from ..lib.rankers import heavy_ranker as heavy_ranker_module
+    from ..lib.user_history import (
+        UserHistory,
+        UserHistoryCache,
+        UserHistoryItem,
+        get_user_history_cache,
+        set_user_history_cache,
+    )
+    from .xrpc import _run_ranking_pipeline
+
+    test_user_did = "did:plc:cache-test-user"
+    history_embedding = [0.25] * 384
+    expected_history = UserHistory(
+        items=[
+            UserHistoryItem(
+                at_uri="at://did:plc:liked/app.bsky.feed.post/1",
+                liked_at="2026-01-01T00:00:00+00:00",
+                embedding=history_embedding,
+                author_did="did:plc:liked",
+                like_count=5,
+            )
+        ]
+    )
+
+    class CountingHistoryCache(UserHistoryCache):
+        def __init__(self) -> None:
+            self.retrieve_calls = 0
+            self.store_calls = 0
+
+        async def retrieve(self, user_did: str) -> UserHistory | None:
+            assert user_did == test_user_did
+            self.retrieve_calls += 1
+            return None
+
+        async def store(self, user_did: str, history: UserHistory) -> None:
+            assert user_did == test_user_did
+            assert history == expected_history
+            self.store_calls += 1
+
+    history_cache = CountingHistoryCache()
+    previous_cache = get_user_history_cache()
+    set_user_history_cache(history_cache)
+
+    candidate_uri = "at://did:plc:candidate/app.bsky.feed.post/1"
+    candidate = CandidatePost(
+        at_uri=candidate_uri,
+        minilm_l12_embedding=encode_float32_b64([0.5, 0.5]),
+        author_did="did:plc:candidate",
+        like_count=10,
+        generator_name="two_tower",
+    )
+    predict_user_tower = AsyncMock(return_value=[[0.1, 0.2]])
+    predict_heavy_ranker = AsyncMock(return_value=[0.9])
+    fetch_recent_likes = AsyncMock(
+        return_value=(
+            ["at://did:plc:liked/app.bsky.feed.post/1"],
+            ["2026-01-01T00:00:00+00:00"],
+        )
+    )
+    fetch_history_metadata = AsyncMock(
+        return_value=[
+            (
+                "at://did:plc:liked/app.bsky.feed.post/1",
+                history_embedding,
+                "did:plc:liked",
+                5,
+            )
+        ]
+    )
+
+    monkeypatch.setattr(
+        candidate_two_tower_module,
+        "get_inference_settings",
+        lambda: ("https://inference.test", "secret"),
+    )
+    monkeypatch.setattr(
+        candidate_two_tower_module,
+        "get_cached_post_tower_uuid",
+        AsyncMock(return_value="post-tower-v1"),
+    )
+    monkeypatch.setattr(
+        candidate_two_tower_module,
+        "knn_search_posts",
+        AsyncMock(return_value=[candidate]),
+    )
+    monkeypatch.setattr(
+        inference_module,
+        "predict_user_tower_single",
+        predict_user_tower,
+    )
+    monkeypatch.setattr(
+        user_history_module,
+        "fetch_recent_liked_post_uris_and_times",
+        fetch_recent_likes,
+    )
+    monkeypatch.setattr(
+        user_history_module,
+        "fetch_post_embeddings_and_metadata",
+        fetch_history_metadata,
+    )
+    monkeypatch.setattr(
+        heavy_ranker_module,
+        "get_inference_settings",
+        lambda: ("https://inference.test", "secret"),
+    )
+    monkeypatch.setattr(
+        heavy_ranker_module,
+        "predict_heavy_ranker_single_user",
+        predict_heavy_ranker,
+    )
+
+    gen_request = CandidateGenerateRequest(
+        generators=[GeneratorSpec(name="two_tower", weight=1.0)],
+        user_did=test_user_did,
+        num_candidates=1,
+        video_only=False,
+        max_age_hours=168,
+        exclude_uris=[],
+        infill=None,
+    )
+    feed_cfg = FeedConfig(
+        display_name="Cache test",
+        description="",
+        public=False,
+        internal_rkey="cache-test",
+        internal_display_name="cache-test",
+        controls=(),
+        preference_source=None,
+        gen_request_template=gen_request,
+        rank_request_template=RankPredictRequest(
+            candidates=[],
+            models=[RankModelSpec(name="heavy_ranker", weight=1.0)],
+            user_did=test_user_did,
+        ),
+        diversify=False,
+        accepts_interactions=True,
+        exclude_seen_posts=True,
+        pinned_post_uri=None,
+        max_render_share=None,
+        min_rank_score=None,
+        min_mmr_score=None,
+        avatar=None,
+    )
+
+    try:
+        result = await _run_ranking_pipeline(
+            feed_cfg,
+            gen_request,
+            object(),
+            feed_name="cache-test",
+        )
+    finally:
+        set_user_history_cache(previous_cache)
+
+    assert result.uris == [candidate_uri]
+    assert history_cache.retrieve_calls == 1
+    assert history_cache.store_calls == 1
+    fetch_recent_likes.assert_awaited_once()
+    fetch_history_metadata.assert_awaited_once()
+    user_tower_call = predict_user_tower.await_args
+    assert user_tower_call is not None
+    assert user_tower_call.args[:2] == (
+        [history_embedding],
+        ["did:plc:liked"],
+    )
+    heavy_ranker_call = predict_heavy_ranker.await_args
+    assert heavy_ranker_call is not None
+    assert heavy_ranker_call.args[:4] == (
+        [history_embedding],
+        ["did:plc:liked"],
+        ["2026-01-01T00:00:00+00:00"],
+        [5],
+    )
 
 
 class InMemoryFeedCache(FeedCache):

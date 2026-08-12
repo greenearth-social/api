@@ -8,14 +8,16 @@ duplicate work inside a feed render.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .elasticsearch import (
     DEFAULT_LIKED_POSTS_LIMIT,
@@ -23,6 +25,7 @@ from .elasticsearch import (
     fetch_recent_liked_post_uris_and_times,
 )
 from .embeddings import (
+    MINILM_L12_EMBEDDING_DIM,
     MINILM_L12_EMBEDDING_KEY,
     decode_float32_b64,
     encode_float32_b64,
@@ -37,6 +40,11 @@ USER_HISTORY_CACHE_COLLECTION = "user_history_cache"
 USER_HISTORY_CACHE_TTL_SECONDS = 600
 USER_HISTORY_CACHE_VERSION = 1
 USER_HISTORY_LIMIT = DEFAULT_LIKED_POSTS_LIMIT
+# Cache work is an optimization inside model calls whose total budgets are only
+# a few seconds. Bound the entire Firestore operation (including SDK retries)
+# so a slow cache fails open with enough time left for Elasticsearch/model work.
+USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS = 0.5
+USER_HISTORY_CACHE_WRITE_TIMEOUT_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -66,11 +74,22 @@ class UserHistory:
 
 
 class _CachedUserHistoryItem(BaseModel):
-    at_uri: str
-    liked_at: str
+    at_uri: str = Field(min_length=1)
+    liked_at: str = Field(min_length=1)
     embedding_b64: str | None
     author_did: str
-    like_count: int
+    like_count: int = Field(ge=0)
+
+    @field_validator("liked_at")
+    @classmethod
+    def validate_liked_at(cls, value: str) -> str:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("liked_at must be an ISO-8601 datetime") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("liked_at must include a timezone")
+        return value
 
 
 class _CachedUserHistoryDocument(BaseModel):
@@ -80,7 +99,7 @@ class _CachedUserHistoryDocument(BaseModel):
     embedding_key: str
     fetched_at: datetime
     expires_at: datetime
-    items: list[_CachedUserHistoryItem]
+    items: list[_CachedUserHistoryItem] = Field(max_length=USER_HISTORY_LIMIT)
 
 
 class UserHistoryCache(ABC):
@@ -108,6 +127,15 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _decode_cached_embedding(value: str) -> list[float]:
+    embedding = decode_float32_b64(value)
+    if len(embedding) != MINILM_L12_EMBEDDING_DIM:
+        raise ValueError(f"cached embedding must contain {MINILM_L12_EMBEDDING_DIM} floats")
+    if not all(math.isfinite(component) for component in embedding):
+        raise ValueError("cached embedding must contain only finite floats")
+    return embedding
+
+
 class FirestoreUserHistoryCache(UserHistoryCache):
     """Firestore-backed cache shared by all API instances."""
 
@@ -129,12 +157,13 @@ class FirestoreUserHistoryCache(UserHistoryCache):
 
         try:
             document = _CachedUserHistoryDocument.model_validate(data)
+            expires_at = _as_utc(document.expires_at)
             if (
                 document.schema_version != USER_HISTORY_CACHE_VERSION
                 or document.user_did != user_did
                 or document.history_limit != USER_HISTORY_LIMIT
                 or document.embedding_key != MINILM_L12_EMBEDDING_KEY
-                or datetime.now(UTC) >= _as_utc(document.expires_at)
+                or datetime.now(UTC) >= expires_at
             ):
                 return None
 
@@ -143,7 +172,7 @@ class FirestoreUserHistoryCache(UserHistoryCache):
                     at_uri=item.at_uri,
                     liked_at=item.liked_at,
                     embedding=(
-                        decode_float32_b64(item.embedding_b64)
+                        _decode_cached_embedding(item.embedding_b64)
                         if item.embedding_b64 is not None
                         else None
                     ),
@@ -251,7 +280,8 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
                     "user_history.cache.lookup.duration_ms",
                     record_metric=True,
                 ):
-                    cached = await cache.retrieve(user_did)
+                    async with asyncio.timeout(USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS):
+                        cached = await cache.retrieve(user_did)
             except Exception:
                 _record_cache_count("user_history.cache.lookup_count", "error")
                 logger.warning(
@@ -273,7 +303,8 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
                     "user_history.cache.write.duration_ms",
                     record_metric=True,
                 ):
-                    await cache.store(user_did, history)
+                    async with asyncio.timeout(USER_HISTORY_CACHE_WRITE_TIMEOUT_SECONDS):
+                        await cache.store(user_did, history)
             except Exception:
                 _record_cache_count("user_history.cache.write_count", "error")
                 logger.warning(

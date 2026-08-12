@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from . import user_history as user_history_module
-from .embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
+from .embeddings import (
+    MINILM_L12_EMBEDDING_DIM,
+    MINILM_L12_EMBEDDING_KEY,
+    encode_float32_b64,
+)
 from .request_cache import request_cache_scope
 from .user_history import (
     USER_HISTORY_CACHE_COLLECTION,
@@ -24,6 +28,8 @@ from .user_history import (
     fetch_user_history_features,
     set_user_history_cache,
 )
+
+VALID_EMBEDDING = [1.0, 2.0, *([0.0] * (MINILM_L12_EMBEDDING_DIM - 2))]
 
 
 @pytest.fixture(autouse=True)
@@ -54,12 +60,12 @@ def _cached_document(
         "history_limit": USER_HISTORY_LIMIT,
         "embedding_key": MINILM_L12_EMBEDDING_KEY,
         "fetched_at": now,
-        "expires_at": expires_at or now + timedelta(minutes=5),
+        "expires_at": expires_at or now + timedelta(seconds=USER_HISTORY_CACHE_TTL_SECONDS),
         "items": [
             {
                 "at_uri": "at://liked/a",
                 "liked_at": "2026-01-01T00:00:00+00:00",
-                "embedding_b64": encode_float32_b64([1.0, 2.0]),
+                "embedding_b64": encode_float32_b64(VALID_EMBEDDING),
                 "author_did": "did:plc:author",
                 "like_count": 7,
             },
@@ -90,7 +96,7 @@ async def test_firestore_cache_hit_decodes_history():
             UserHistoryItem(
                 at_uri="at://liked/a",
                 liked_at="2026-01-01T00:00:00+00:00",
-                embedding=[1.0, 2.0],
+                embedding=VALID_EMBEDDING,
                 author_did="did:plc:author",
                 like_count=7,
             ),
@@ -114,6 +120,20 @@ async def test_firestore_cache_hit_decodes_history():
         lambda data: data.update(expires_at=datetime.now(UTC) - timedelta(seconds=1)),
         lambda data: data.pop("items"),
         lambda data: data["items"][0].update(embedding_b64="not-base64!"),
+        lambda data: data["items"][0].update(embedding_b64="!!!!"),
+        lambda data: data["items"][0].update(
+            embedding_b64=(
+                data["items"][0]["embedding_b64"][:8] + "!" + data["items"][0]["embedding_b64"][8:]
+            )
+        ),
+        lambda data: data["items"][0].update(embedding_b64=encode_float32_b64([1.0, 2.0])),
+        lambda data: data["items"][0].update(
+            embedding_b64=encode_float32_b64(
+                [float("nan"), *([0.0] * (MINILM_L12_EMBEDDING_DIM - 1))]
+            )
+        ),
+        lambda data: data["items"][0].update(liked_at="2026-01-01T00:00:00"),
+        lambda data: data.update(items=[data["items"][0]] * (USER_HISTORY_LIMIT + 1)),
     ],
 )
 async def test_firestore_cache_rejects_incompatible_expired_or_malformed_documents(
@@ -149,7 +169,7 @@ async def test_firestore_cache_stores_float32_embeddings_with_exact_ttl():
                 UserHistoryItem(
                     at_uri="at://liked/a",
                     liked_at="2026-01-01T00:00:00+00:00",
-                    embedding=[1.0, 2.0],
+                    embedding=VALID_EMBEDDING,
                     author_did="did:plc:author",
                     like_count=7,
                 )
@@ -161,7 +181,7 @@ async def test_firestore_cache_stores_float32_embeddings_with_exact_ttl():
     stored = doc_ref.set.await_args.args[0]
     assert stored["schema_version"] == USER_HISTORY_CACHE_VERSION
     assert stored["user_did"] == "did:plc:user1"
-    assert stored["items"][0]["embedding_b64"] == encode_float32_b64([1.0, 2.0])
+    assert stored["items"][0]["embedding_b64"] == encode_float32_b64(VALID_EMBEDDING)
     assert before <= stored["fetched_at"] <= after
     assert stored["expires_at"] - stored["fetched_at"] == timedelta(
         seconds=USER_HISTORY_CACHE_TTL_SECONDS
@@ -192,6 +212,25 @@ class _FakeCache(UserHistoryCache):
         self.store_calls.append((user_did, history))
         if self.store_error is not None:
             raise self.store_error
+        self.value = history
+
+
+class _HangingCache(_FakeCache):
+    def __init__(self, *, hang_retrieve: bool = False, hang_store: bool = False) -> None:
+        super().__init__()
+        self.hang_retrieve = hang_retrieve
+        self.hang_store = hang_store
+
+    async def retrieve(self, user_did: str) -> UserHistory | None:
+        self.retrieve_calls += 1
+        if self.hang_retrieve:
+            await asyncio.Event().wait()
+        return self.value
+
+    async def store(self, user_did: str, history: UserHistory) -> None:
+        self.store_calls.append((user_did, history))
+        if self.hang_store:
+            await asyncio.Event().wait()
         self.value = history
 
 
@@ -320,6 +359,59 @@ async def test_cache_read_and_write_failures_return_fresh_history(monkeypatch):
     assert await fetch_user_history_features(object(), "did:plc:user1") == UserHistory(items=[])
     recent.assert_awaited_once()
     assert len(cache.store_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cache_read_timeout_falls_back_to_elasticsearch(monkeypatch):
+    cache = _HangingCache(hang_retrieve=True)
+    set_user_history_cache(cache)
+    recent = AsyncMock(return_value=([], []))
+    monkeypatch.setattr(
+        user_history_module,
+        "USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        user_history_module,
+        "fetch_recent_liked_post_uris_and_times",
+        recent,
+    )
+
+    history = await asyncio.wait_for(
+        fetch_user_history_features(object(), "did:plc:user1"),
+        timeout=0.1,
+    )
+
+    assert history == UserHistory(items=[])
+    assert cache.retrieve_calls == 1
+    recent.assert_awaited_once()
+    assert cache.store_calls == [("did:plc:user1", history)]
+
+
+@pytest.mark.asyncio
+async def test_cache_write_timeout_returns_fresh_history(monkeypatch):
+    cache = _HangingCache(hang_store=True)
+    set_user_history_cache(cache)
+    recent = AsyncMock(return_value=([], []))
+    monkeypatch.setattr(
+        user_history_module,
+        "USER_HISTORY_CACHE_WRITE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        user_history_module,
+        "fetch_recent_liked_post_uris_and_times",
+        recent,
+    )
+
+    history = await asyncio.wait_for(
+        fetch_user_history_features(object(), "did:plc:user1"),
+        timeout=0.1,
+    )
+
+    assert history == UserHistory(items=[])
+    recent.assert_awaited_once()
+    assert cache.store_calls == [("did:plc:user1", history)]
 
 
 @pytest.mark.asyncio
