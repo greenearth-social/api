@@ -180,7 +180,8 @@ class MetricCollector:
         When recorded on a request path, the metric is automatically tagged
         with an ``endpoint`` label naming the originating API endpoint (e.g.
         ``get_feed_skeleton`` vs ``candidates_generate``) and a ``traffic``
-        label naming the traffic class (``real`` | ``probe`` | ``load_test``).
+        label naming the traffic class (``real`` | ``probe`` | ``load_test`` |
+        ``logged_out``).
         Both are read from ContextVars set on the request path, so every
         callsite gets them for free — including background tasks, which inherit
         the context at spawn time. Explicitly passed attributes win.

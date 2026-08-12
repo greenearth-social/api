@@ -22,6 +22,13 @@ from .models import (
 
 DEFAULT_SOCIAL_RADIUS: int = 3
 
+# The post served, on its own, to logged-out viewers of feeds that need a
+# signed-in user to mean anything (``logged_out="explain"``). A feed with no
+# items reads as a broken feed, so show something that says why (issue #384).
+# The GreenEarth account's "This feed is personalized for you, so you must be
+# logged in to see it."
+LOGGED_OUT_POST_URI: str = "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msw6wzvh7k2k"
+
 # Social-radius preset generator weights for your-feed.
 # Index 3 (balanced) matches the default weights defined in the "your-feed"
 # FeedConfig below — keep them in sync when tuning.
@@ -111,6 +118,8 @@ FEEDS: dict[str, FeedConfig] = {
         diversify=False,
         exclude_seen_posts=False,
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetia5l7y2j",
+        # Random posts don't depend on who's asking, so it works logged out.
+        logged_out="serve",
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[GeneratorSpec(name="random_posts", weight=1.0)],
             infill=None,
@@ -128,6 +137,7 @@ FEEDS: dict[str, FeedConfig] = {
         avatar="assets/icons/green-earth.png",
         controls=("source_weights", "freshness", "purpose"),
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetfgpr3t2s",
+        logged_out="explain",
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
         # min_rank_score=0.425 maps the old -0.15 floor into the current [0, 1]
@@ -163,6 +173,7 @@ FEEDS: dict[str, FeedConfig] = {
         avatar="assets/icons/best-of-friends.png",
         controls=("freshness", "purpose"),
         pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetho32pa2g",
+        logged_out="explain",
         # Slate-cutoff starting points — tune from the feed.slate.kept_share and
         # feed.slate.cutoff_count metrics once live (see issue #248). min_rank_score
         # matches your-feed's empirically-calibrated value above; this feed's own

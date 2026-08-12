@@ -42,6 +42,7 @@ from ..documents import (
 from ..feeds import (
     DEFAULT_SOCIAL_RADIUS,
     FEEDS,
+    LOGGED_OUT_POST_URI,
     SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
     SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,  # noqa: F401 - compatibility export
     canonical_feed_name,
@@ -222,6 +223,13 @@ def _get_hostname() -> str:
 
 def _feed_uri(feed_name: str) -> str:
     return f"at://{_get_service_did()}/app.bsky.feed.generator/{feed_name}"
+
+
+# Stand-in identity for a logged-out caller on a feed that serves anonymously
+# (``logged_out="serve"``). Deliberately not a resolvable ``did:plc``, so it can
+# never collide with a real user: nothing keyed on a user is written for these
+# requests, and this makes any such write obvious if one is ever added.
+ANONYMOUS_DID = "did:ge:anonymous"
 
 
 def dev_session_did(request: Request) -> str | None:
@@ -968,7 +976,7 @@ def _make_feed_context(
     )
 
 
-def _skeleton_items(uris: list[str], feed_context: str) -> list[SkeletonItem]:
+def _skeleton_items(uris: list[str], feed_context: str | None) -> list[SkeletonItem]:
     return [SkeletonItem(post=uri, feed_context=feed_context) for uri in uris]
 
 
@@ -1439,6 +1447,11 @@ async def get_feed_skeleton(
     if is_load_test:
         is_probe = False
 
+    # A logged-out caller has no identity, so nothing that is keyed on a user
+    # (Firestore reads and writes, preferences, feature flags, analytics) runs
+    # for the request — see the guards on ``is_anonymous`` below.
+    is_anonymous = False
+
     if _dev_session_did is not None:
         user_did = _dev_session_did
     elif is_load_test:
@@ -1453,18 +1466,41 @@ async def get_feed_skeleton(
         if not user_did:
             if request.headers.get("Authorization"):
                 logger.warning("Auth header present but verification failed for feed %s", feed_name)
-            else:
-                logger.warning("No auth header present for feed %s", feed_name)
-            raise HTTPException(
-                status_code=401,
-                detail="Authentication required",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+
+            # Bluesky renders these feeds to logged-out visitors too, and an
+            # empty feed reads as a broken one. What we can show depends on
+            # whether the feed needs to know who is asking (issue #384).
+            if feed_cfg.logged_out == "deny":
+                logger.warning("Unauthenticated request for feed %s", feed_name)
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authentication required",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+            if feed_cfg.logged_out == "explain":
+                # Nothing to personalize, so skip the pipeline entirely and say
+                # why the feed is empty. No cursor: this is the whole feed.
+                set_traffic("logged_out")
+                return FeedSkeletonResponse(
+                    feed=[SkeletonItem(post=feed_cfg.logged_out_post_uri or LOGGED_OUT_POST_URI)]
+                )
+
+            is_anonymous = True
+            user_did = ANONYMOUS_DID
 
     # Tag every metric on this request path (incl. background tasks, which
     # inherit this context at spawn time) with its traffic class so test and
     # probe traffic can be filtered out of dashboards.
-    set_traffic("load_test" if is_load_test else "probe" if is_probe else "real")
+    set_traffic(
+        "logged_out"
+        if is_anonymous
+        else "load_test"
+        if is_load_test
+        else "probe"
+        if is_probe
+        else "real"
+    )
 
     # Record authenticated users in Firestore for backend analytics. Runs in
     # the background since this isn't essential for serving.
@@ -1473,7 +1509,10 @@ async def get_feed_skeleton(
         logger.error("Firestore client not initialized")
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
-    _spawn_background(_record_session(request, user_did, feed_name, db, is_load_test=is_load_test))
+    if not is_anonymous:
+        _spawn_background(
+            _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
+        )
 
     uses_network_likes_flag = feed_name in (
         "your-feed",
@@ -1485,6 +1524,9 @@ async def get_feed_skeleton(
         flag_keys.append(NETWORK_LIKES_FLAG)
 
     posthog_client = get_posthog_client()
+    # Flags are evaluated per user, and an anonymous caller isn't one: it would
+    # be a single synthetic identity shared by every logged-out request. Take
+    # the flag defaults instead.
     feature_flags = (
         await asyncio.to_thread(
             evaluate_feature_flags,
@@ -1492,7 +1534,7 @@ async def get_feed_skeleton(
             user_did,
             flag_keys,
         )
-        if posthog_client is not None
+        if posthog_client is not None and not is_anonymous
         else {}
     )
     set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
@@ -1502,11 +1544,12 @@ async def get_feed_skeleton(
     # to no-debug rather than breaking feed serving.
     debug_enabled = False
     user_doc = None
-    try:
-        user_doc = await get_user(db, user_did)
-        debug_enabled = bool(user_doc and user_doc.debug_feeds)
-    except Exception:
-        logger.exception("Failed to read debug flag for user '%s'", user_did)
+    if not is_anonymous:
+        try:
+            user_doc = await get_user(db, user_did)
+            debug_enabled = bool(user_doc and user_doc.debug_feeds)
+        except Exception:
+            logger.exception("Failed to read debug flag for user '%s'", user_did)
 
     # Purpose controls the relative influence of the engaging and constructive
     # rankers only for feeds that declare it. Apply it to a request-local copy;
@@ -1560,6 +1603,23 @@ async def get_feed_skeleton(
 
     feed_cache = _get_feed_cache(request)
 
+    def feed_context_for(request_id: str) -> str | None:
+        """Signed interaction token for this response, or None when anonymous.
+
+        ``sendInteractions`` carries no auth of its own — the token is the only
+        thing tying a reported interaction to a user, and a logged-out request
+        has no user to tie it to. Omitting it drops those interactions.
+        """
+        if is_anonymous:
+            return None
+        return _make_feed_context(user_did, feed_name, request_id, load_test=is_load_test)
+
+    async def generation_exclusions() -> list[str]:
+        """Post URIs to exclude — none for an anonymous caller, who has no history."""
+        if is_anonymous:
+            return []
+        return await _generation_exclusions(db, user_did, feed_cfg)
+
     async with timed(
         logger,
         "feed.render.duration_ms",
@@ -1604,9 +1664,7 @@ async def get_feed_skeleton(
                     _record_similarity_metric(
                         page, scores_by_uri, feed_name, batch=parsed.offset // limit
                     )
-                    feed_context = _make_feed_context(
-                        user_did, feed_name, parsed.id, load_test=is_load_test
-                    )
+                    feed_context = feed_context_for(parsed.id)
                     cached_snapshot = FeedSnapshotDocument(
                         request_id=parsed.id,
                         items=cached_uris,
@@ -1618,7 +1676,7 @@ async def get_feed_skeleton(
                         applied_social_radius=cache_doc.applied_social_radius,
                         items_meta=cache_doc.items_meta,
                     )
-                    if not is_probe:
+                    if not is_probe and not is_anonymous:
                         await _write_feed_snapshot_background(
                             db,
                             user_did,
@@ -1633,7 +1691,7 @@ async def get_feed_skeleton(
 
                 # Offset is at or past the end — regenerate with exclusions.
                 batch = _batch_size(limit)
-                excluded = await _generation_exclusions(db, user_did, feed_cfg)
+                excluded = await generation_exclusions()
                 # Dedup while preserving order; the cached batch and the
                 # seen/discarded posts can overlap.
                 exclude_uris = list(dict.fromkeys(cached_uris + excluded))
@@ -1659,7 +1717,7 @@ async def get_feed_skeleton(
                     debug_enabled=debug_enabled,
                     applied_social_radius=applied_social_radius,
                 )
-                if low_score_uris:
+                if low_score_uris and not is_anonymous:
                     _spawn_background(
                         _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
                     )
@@ -1684,10 +1742,8 @@ async def get_feed_skeleton(
                         _record_similarity_metric(
                             page, scores_by_uri, feed_name, batch=parsed.offset // limit
                         )
-                        feed_context = _make_feed_context(
-                            user_did, feed_name, parsed.id, load_test=is_load_test
-                        )
-                        if not is_probe:
+                        feed_context = feed_context_for(parsed.id)
+                        if not is_probe and not is_anonymous:
                             await _write_feed_snapshot_background(
                                 db,
                                 user_did,
@@ -1710,6 +1766,9 @@ async def get_feed_skeleton(
         # ------------------------------------------------------------------
         reuse_future: Future[FeedSkeletonResponse] | None = None
         if cursor is None and not is_probe:
+            # Logged-out callers all share ANONYMOUS_DID, so concurrent ones
+            # coalesce onto a single pipeline run and get the same page. That's
+            # the point: unauthenticated traffic is the cheapest to send us.
             is_leader, reuse_future = _claim_initial_request(
                 user_did, feed_name, limit, is_load_test
             )
@@ -1719,7 +1778,7 @@ async def get_feed_skeleton(
 
         try:
             batch = _batch_size(limit)
-            exclude_uris = await _generation_exclusions(db, user_did, feed_cfg)
+            exclude_uris = await generation_exclusions()
             gen_request = feed_cfg.gen_request_template.model_copy(
                 update={
                     "user_did": user_did,
@@ -1747,7 +1806,7 @@ async def get_feed_skeleton(
                 debug_enabled=debug_enabled,
                 applied_social_radius=applied_social_radius,
             )
-            if low_score_uris:
+            if low_score_uris and not is_anonymous:
                 _spawn_background(
                     _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
                 )
@@ -1771,7 +1830,7 @@ async def get_feed_skeleton(
                 page, scores_by_uri, feed_name, batch=0, exclude_uri=feed_cfg.pinned_post_uri
             )
 
-            if not is_probe:
+            if not is_probe and not is_anonymous:
                 await _write_feed_snapshot_background(
                     db,
                     user_did,
@@ -1810,9 +1869,7 @@ async def get_feed_skeleton(
                     )
                 next_cursor = FeedCursor(id=request_id, offset=consumed).encode()
 
-            feed_context = _make_feed_context(
-                user_did, feed_name, request_id, load_test=is_load_test
-            )
+            feed_context = feed_context_for(request_id)
             response = FeedSkeletonResponse(
                 feed=_skeleton_items(page, feed_context),
                 cursor=next_cursor,
