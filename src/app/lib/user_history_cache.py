@@ -171,7 +171,13 @@ class _CachedUserHistoryDocument(BaseModel):
 
 
 class UserHistoryCache(ABC):
-    """Backend abstraction for cross-request user-history caching."""
+    """Backend and background-work owner for user-history caching."""
+
+    def __init__(self) -> None:
+        # Keep task and pending-value state on the installed cache instance so
+        # its lifecycle can be managed like the other application caches.
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._pending_histories: dict[str, UserHistory] = {}
 
     @abstractmethod
     async def retrieve(self, user_did: str) -> UserHistoryCacheEntry | None:
@@ -194,6 +200,11 @@ class UserHistoryCache(ABC):
     async def release_refresh(self, user_did: str, *, failed: bool) -> None:
         """Release a stale-refresh lease, recording a failure when requested."""
         return None
+
+    async def drain(self) -> None:
+        """Await in-flight writes and stale refreshes during shutdown/tests."""
+        if self._tasks:
+            await asyncio.gather(*list(self._tasks.values()), return_exceptions=True)
 
 
 def _user_history_cache_key(user_did: str) -> str:
@@ -226,6 +237,7 @@ class FirestoreUserHistoryCache(UserHistoryCache):
     """Firestore-backed cache shared by all API instances."""
 
     def __init__(self, db: AsyncClient) -> None:
+        super().__init__()
         self._db = db
 
     def _document(self, user_did: str):
@@ -358,8 +370,6 @@ class FirestoreUserHistoryCache(UserHistoryCache):
 
 
 _user_history_cache: UserHistoryCache | None = None
-_user_history_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
-_pending_user_histories: dict[tuple[int, str], UserHistory] = {}
 
 
 def set_user_history_cache(cache: UserHistoryCache | None) -> None:
@@ -372,15 +382,11 @@ def get_user_history_cache() -> UserHistoryCache | None:
     return _user_history_cache
 
 
-def _task_key(cache: UserHistoryCache, user_did: str) -> tuple[int, str]:
-    return id(cache), user_did
-
-
 def _pending_user_history(
     cache: UserHistoryCache,
     user_did: str,
 ) -> UserHistory | None:
-    return _pending_user_histories.get(_task_key(cache, user_did))
+    return cache._pending_histories.get(user_did)
 
 
 def _record_cache_count(metric: str, outcome: str) -> None:
@@ -429,18 +435,19 @@ async def _write_user_history(
 
 
 def _register_user_history_task(
-    key: tuple[int, str],
+    cache: UserHistoryCache,
+    user_did: str,
     task: asyncio.Task[None],
     *,
     clears_pending: bool,
 ) -> None:
-    _user_history_tasks[key] = task
+    cache._tasks[user_did] = task
 
     def _finished(completed: asyncio.Task[None]) -> None:
-        if _user_history_tasks.get(key) is completed:
-            _user_history_tasks.pop(key, None)
+        if cache._tasks.get(user_did) is completed:
+            cache._tasks.pop(user_did, None)
             if clears_pending:
-                _pending_user_histories.pop(key, None)
+                cache._pending_histories.pop(user_did, None)
         # Retrieve any unexpected exception so the event loop does not emit a
         # "Task exception was never retrieved" warning. Background cache
         # failures are normally contained by their task body.
@@ -461,13 +468,12 @@ def _schedule_user_history_write(
     they do not repeat Elasticsearch work while Firestore persistence is still
     in flight.
     """
-    key = _task_key(cache, user_did)
-    if key in _user_history_tasks:
+    if user_did in cache._tasks:
         return
 
-    _pending_user_histories[key] = history
+    cache._pending_histories[user_did] = history
     task = asyncio.create_task(_write_user_history(cache, user_did, history))
-    _register_user_history_task(key, task, clears_pending=True)
+    _register_user_history_task(cache, user_did, task, clears_pending=True)
 
 
 async def _release_user_history_refresh(
@@ -523,18 +529,10 @@ async def _refresh_user_history(
 
 def _schedule_user_history_refresh(cache: UserHistoryCache, es, user_did: str) -> None:
     """Start at most one in-process refresh per cache/user pair."""
-    key = _task_key(cache, user_did)
-    if key in _user_history_tasks:
+    if user_did in cache._tasks:
         return
     task = asyncio.create_task(_refresh_user_history(cache, es, user_did))
-    _register_user_history_task(key, task, clears_pending=False)
-
-
-async def drain_user_history_cache_tasks() -> None:
-    """Wait for all in-flight writes and stale refreshes during shutdown/tests."""
-    tasks = list(_user_history_tasks.values())
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    _register_user_history_task(cache, user_did, task, clears_pending=False)
 
 
 async def _fetch_user_history_from_es(es, user_did: str) -> UserHistory:

@@ -25,7 +25,6 @@ from .user_history_cache import (
     UserHistoryCacheEntry,
     UserHistoryItem,
     _user_history_cache_key,
-    drain_user_history_cache_tasks,
     fetch_user_history_features,
     lease_seconds,
     max_age_seconds,
@@ -377,6 +376,7 @@ class _FakeCache(UserHistoryCache):
         claim_result: bool = True,
         claim_error: Exception | None = None,
     ) -> None:
+        super().__init__()
         self.value = _entry(value) if isinstance(value, UserHistory) else value
         self.retrieve_error = retrieve_error
         self.store_error = store_error
@@ -478,7 +478,7 @@ async def test_stale_cache_returns_immediately_and_single_flights_refresh(monkey
     assert await fetch_user_history_features(object(), "did:plc:user1") == stale
     await asyncio.wait_for(refresh_started.wait(), timeout=0.1)
 
-    drain_task = asyncio.create_task(drain_user_history_cache_tasks())
+    drain_task = asyncio.create_task(cache.drain())
     await asyncio.sleep(0)
     assert not drain_task.done()
     assert cache.claim_calls == ["did:plc:user1"]
@@ -501,7 +501,7 @@ async def test_stale_cache_skips_refresh_when_another_instance_holds_lease(monke
     monkeypatch.setattr(user_history_module, "fetch_recent_liked_post_uris_and_times", recent)
 
     assert await fetch_user_history_features(object(), "did:plc:user1") == stale
-    await drain_user_history_cache_tasks()
+    await cache.drain()
 
     assert cache.claim_calls == ["did:plc:user1"]
     recent.assert_not_awaited()
@@ -521,7 +521,7 @@ async def test_stale_refresh_failure_releases_lease_and_keeps_stale_value(monkey
     )
 
     assert await fetch_user_history_features(object(), "did:plc:user1") == stale
-    await drain_user_history_cache_tasks()
+    await cache.drain()
 
     assert cache.store_calls == []
     assert cache.release_calls == [("did:plc:user1", True)]
@@ -540,7 +540,7 @@ async def test_stale_refresh_timeout_releases_lease(monkeypatch):
     monkeypatch.setattr(user_history_module, "fetch_recent_liked_post_uris_and_times", hang)
 
     assert await fetch_user_history_features(object(), "did:plc:user1") == stale
-    await asyncio.wait_for(drain_user_history_cache_tasks(), timeout=0.1)
+    await asyncio.wait_for(cache.drain(), timeout=0.1)
 
     assert cache.store_calls == []
     assert cache.release_calls == [("did:plc:user1", True)]
@@ -557,7 +557,7 @@ async def test_hard_expired_cache_synchronously_fetches_instead_of_serving_stale
     monkeypatch.setattr(user_history_module, "fetch_recent_liked_post_uris_and_times", recent)
 
     result = await fetch_user_history_features(object(), "did:plc:user1")
-    await drain_user_history_cache_tasks()
+    await cache.drain()
 
     assert result == UserHistory(items=[])
     recent.assert_awaited_once()
@@ -585,7 +585,7 @@ async def test_cache_records_hit_miss_and_write_outcomes(monkeypatch):
         AsyncMock(return_value=([], [])),
     )
     await fetch_user_history_features(object(), "did:plc:miss")
-    await drain_user_history_cache_tasks()
+    await cache.drain()
 
     assert collector.records[0][0] == "user_history.cache.age_seconds"
     assert 0 <= collector.records[0][1] < 1
@@ -622,7 +622,7 @@ async def test_cache_miss_fetches_aligns_and_stores_history(monkeypatch):
     )
 
     history = await fetch_user_history_features(object(), "did:plc:user1")
-    await drain_user_history_cache_tasks()
+    await cache.drain()
 
     assert history.items == [
         UserHistoryItem("at://liked/a", "time-a", [1.0], "did:plc:a", 10),
@@ -643,7 +643,7 @@ async def test_empty_history_is_cached(monkeypatch):
 
     first = await fetch_user_history_features(object(), "did:plc:user1")
     second = await fetch_user_history_features(object(), "did:plc:user1")
-    await drain_user_history_cache_tasks()
+    await cache.drain()
 
     assert first == second == UserHistory(items=[])
     assert cache.retrieve_calls == 1
@@ -663,7 +663,7 @@ async def test_cache_read_and_write_failures_return_fresh_history(monkeypatch):
     monkeypatch.setattr(user_history_module, "fetch_recent_liked_post_uris_and_times", recent)
 
     assert await fetch_user_history_features(object(), "did:plc:user1") == UserHistory(items=[])
-    await drain_user_history_cache_tasks()
+    await cache.drain()
     recent.assert_awaited_once()
     assert len(cache.store_calls) == 1
 
@@ -688,7 +688,7 @@ async def test_cache_read_timeout_falls_back_to_elasticsearch(monkeypatch):
         fetch_user_history_features(object(), "did:plc:user1"),
         timeout=0.1,
     )
-    await drain_user_history_cache_tasks()
+    await cache.drain()
 
     assert history == UserHistory(items=[])
     assert cache.retrieve_calls == 1
@@ -716,7 +716,7 @@ async def test_cache_write_timeout_returns_fresh_history(monkeypatch):
         fetch_user_history_features(object(), "did:plc:user1"),
         timeout=0.1,
     )
-    await drain_user_history_cache_tasks()
+    await cache.drain()
 
     assert history == UserHistory(items=[])
     recent.assert_awaited_once()
@@ -756,7 +756,7 @@ async def test_request_cache_collapses_concurrent_history_lookups(monkeypatch):
             fetch_user_history_features(object(), "did:plc:user1"),
             fetch_user_history_features(object(), "did:plc:user1"),
         )
-    await drain_user_history_cache_tasks()
+    await cache.drain()
 
     assert histories == [UserHistory(items=[]), UserHistory(items=[])]
     assert cache.retrieve_calls == 1
@@ -789,7 +789,7 @@ async def test_cache_miss_returns_before_background_write_finishes(monkeypatch):
     )
     await asyncio.wait_for(cache.store_started.wait(), timeout=0.1)
 
-    drain_task = asyncio.create_task(drain_user_history_cache_tasks())
+    drain_task = asyncio.create_task(cache.drain())
     await asyncio.sleep(0)
 
     assert history == UserHistory(items=[])
@@ -798,3 +798,42 @@ async def test_cache_miss_returns_before_background_write_finishes(monkeypatch):
 
     cache.release_store.set()
     await asyncio.wait_for(drain_task, timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_cache_instances_own_and_drain_their_background_tasks(monkeypatch):
+    class _BlockingStoreCache(_FakeCache):
+        def __init__(self) -> None:
+            super().__init__()
+            self.store_started = asyncio.Event()
+            self.release_store = asyncio.Event()
+
+        async def store(self, user_did: str, history: UserHistory) -> None:
+            self.store_calls.append((user_did, history))
+            self.store_started.set()
+            await self.release_store.wait()
+
+    first_cache = _BlockingStoreCache()
+    second_cache = _BlockingStoreCache()
+    monkeypatch.setattr(
+        user_history_module,
+        "fetch_recent_liked_post_uris_and_times",
+        AsyncMock(return_value=([], [])),
+    )
+
+    try:
+        set_user_history_cache(first_cache)
+        await fetch_user_history_features(object(), "did:plc:first")
+        await asyncio.wait_for(first_cache.store_started.wait(), timeout=0.1)
+
+        set_user_history_cache(second_cache)
+        await fetch_user_history_features(object(), "did:plc:second")
+        await asyncio.wait_for(second_cache.store_started.wait(), timeout=0.1)
+
+        first_cache.release_store.set()
+        await asyncio.wait_for(first_cache.drain(), timeout=0.1)
+        assert not second_cache.release_store.is_set()
+    finally:
+        first_cache.release_store.set()
+        second_cache.release_store.set()
+        await asyncio.gather(first_cache.drain(), second_cache.drain())

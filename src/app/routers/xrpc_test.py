@@ -157,7 +157,6 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         UserHistoryCache,
         UserHistoryCacheEntry,
         UserHistoryItem,
-        drain_user_history_cache_tasks,
         get_user_history_cache,
         set_user_history_cache,
     )
@@ -179,6 +178,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
 
     class CountingHistoryCache(UserHistoryCache):
         def __init__(self) -> None:
+            super().__init__()
             self.retrieve_calls = 0
             self.store_calls = 0
 
@@ -305,7 +305,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
             feed_name="cache-test",
         )
     finally:
-        await drain_user_history_cache_tasks()
+        await history_cache.drain()
         set_user_history_cache(previous_cache)
 
     assert result.uris == [candidate_uri]

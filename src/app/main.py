@@ -61,7 +61,6 @@ from .lib.request_context import (
 )
 from .lib.user_history_cache import (
     FirestoreUserHistoryCache,
-    drain_user_history_cache_tasks,
     set_user_history_cache,
 )
 
@@ -157,7 +156,8 @@ async def lifespan(app: FastAPI):
     set_popularity_cache(app.state.popularity_cache)
     app.state.followed_users_cache = FollowedUsersCache(app.state.firestore)
     set_followed_users_cache(app.state.followed_users_cache)
-    set_user_history_cache(FirestoreUserHistoryCache(app.state.firestore))
+    app.state.user_history_cache = FirestoreUserHistoryCache(app.state.firestore)
+    set_user_history_cache(app.state.user_history_cache)
     try:
         init_firebase_auth()
     except Exception:
@@ -182,7 +182,7 @@ async def lifespan(app: FastAPI):
             pass
         set_user_history_cache(None)
         try:
-            await drain_user_history_cache_tasks()
+            await app.state.user_history_cache.drain()
         except Exception:
             pass
         try:
