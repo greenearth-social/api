@@ -682,8 +682,9 @@ def test_patch_preferences_rejects_out_of_range(mock_patch_prefs, client):
         {"following": 0.0, "network_likes": 0.0, "authors_topics": 0.0, "popular": 1.0},
     ],
 )
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
 @patch("app.routers.feed_transparency.patch_user_feed_preferences")
-def test_patch_preferences_accepts_atomic_source_weights(mock_patch_prefs, weight_values, client):
+def test_patch_preferences_accepts_atomic_source_weights(mock_patch_prefs, mock_delete_seen, weight_values, client):
     from ..documents import FeedPreferencesDocument, SourceWeightsDocument
 
     weights = SourceWeightsDocument(**weight_values)
