@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ..main import app
 from ..documents import (
     DiversificationMeta,
     FeedSnapshotDocument,
@@ -17,6 +16,7 @@ from ..documents import (
     ModelScoreMeta,
     PipelineItemMeta,
 )
+from ..main import app
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -51,7 +51,7 @@ def _snapshot_doc(
     diversify: bool = True,
     **overrides,
 ) -> FeedSnapshotDocument:
-    now = generated_at or datetime(2026, 7, 12, 15, 30, tzinfo=timezone.utc)
+    now = generated_at or datetime(2026, 7, 12, 15, 30, tzinfo=UTC)
     meta = items_meta or [
         PipelineItemMeta(
             at_uri="at://did:plc:author/app.bsky.feed.post/post1",
@@ -93,15 +93,19 @@ def test_list_feeds_returns_summaries(mock_query, client):
         _snapshot_doc(
             request_id="req-1",
             api_release_sha="api-sha-1",
-            generated_at=datetime.now(timezone.utc),
+            generated_at=datetime.now(UTC),
             items=["at://a"],
-            items_meta=[PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)],
+            items_meta=[
+                PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)
+            ],
         ),
         _snapshot_doc(
             request_id="req-2",
-            generated_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            generated_at=datetime.now(UTC) - timedelta(minutes=5),
             items=["at://b"],
-            items_meta=[PipelineItemMeta(at_uri="at://b", rank=1, rank_score=1.0, after_rank_position=1)],
+            items_meta=[
+                PipelineItemMeta(at_uri="at://b", rank=1, rank_score=1.0, after_rank_position=1)
+            ],
         ),
     ]
 
@@ -115,16 +119,27 @@ def test_list_feeds_returns_summaries(mock_query, client):
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
-def test_list_feeds_covers_every_feed_not_one_hardcoded_name(mock_query, client):
-    """Snapshots are returned whatever feed produced them.
+def test_list_feeds_queries_last_24_hours_with_100_document_limit(mock_query, client):
+    mock_query.return_value = []
+    earliest_cutoff = datetime.now(UTC) - timedelta(hours=24)
 
-    Each summary carries its own feed_name, so choosing which to surface is the
-    client's call. Filtering server-side would also reintroduce the
-    (feed_name, generated_at) composite index this query no longer needs.
-    """
-    now = datetime.now(timezone.utc)
+    response = client.get("/api/feeds")
+
+    latest_cutoff = datetime.now(UTC) - timedelta(hours=24)
+    assert response.status_code == 200
+    assert mock_query.await_args is not None
+    assert earliest_cutoff <= mock_query.await_args.kwargs["cutoff"] <= latest_cutoff
+    assert mock_query.await_args.kwargs["limit"] == 100
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_returns_public_feeds_without_a_query_filter(mock_query, client):
+    """The broad query is filtered to the public observability pages in memory."""
+    now = datetime.now(UTC)
     mock_query.return_value = [
-        _snapshot_doc(request_id="req-1", generated_at=now, items=["at://a"], feed_name="your-feed"),
+        _snapshot_doc(
+            request_id="req-1", generated_at=now, items=["at://a"], feed_name="your-feed"
+        ),
         _snapshot_doc(
             request_id="req-2",
             generated_at=now - timedelta(minutes=1),
@@ -136,9 +151,38 @@ def test_list_feeds_covers_every_feed_not_one_hardcoded_name(mock_query, client)
     response = client.get("/api/feeds")
 
     assert response.status_code == 200
-    assert [f["feed_name"] for f in response.json()["feeds"]] == ["your-feed", "popularity"]
+    assert [f["feed_name"] for f in response.json()["feeds"]] == ["your-feed"]
     # No feed_name filter reaches the query.
     assert "feed_name" not in mock_query.call_args.kwargs
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_maps_published_rkeys_to_public_feed_pages(mock_query, client):
+    now = datetime.now(UTC)
+    mock_query.return_value = [
+        _snapshot_doc(request_id="req-1", generated_at=now, items=["at://a"], feed_name="a0-yf"),
+        _snapshot_doc(
+            request_id="req-2",
+            generated_at=now - timedelta(minutes=1),
+            items=["at://b"],
+            feed_name="fd-bof",
+        ),
+        _snapshot_doc(
+            request_id="req-3",
+            generated_at=now - timedelta(minutes=2),
+            items=["at://c"],
+            feed_name="67-r",
+        ),
+    ]
+
+    response = client.get("/api/feeds")
+
+    assert response.status_code == 200
+    assert [f["feed_name"] for f in response.json()["feeds"]] == [
+        "your-feed",
+        "best-of-friends",
+        "random",
+    ]
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
@@ -164,7 +208,7 @@ def test_list_feeds_returns_401_without_auth():
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_collapses_identical_snapshots_and_keeps_newest(mock_query, client):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     newer = _snapshot_doc(
         request_id="req-1",
         generated_at=now,
@@ -192,7 +236,7 @@ def test_list_feeds_collapses_identical_snapshots_and_keeps_newest(mock_query, c
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_preserves_same_posts_in_different_order(mock_query, client):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     mock_query.return_value = [
         _snapshot_doc(
             request_id="req-1",
@@ -216,7 +260,7 @@ def test_list_feeds_preserves_same_posts_in_different_order(mock_query, client):
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_preserves_identical_posts_from_different_feeds(mock_query, client):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     mock_query.return_value = [
         _snapshot_doc(
             request_id="req-1",
@@ -242,21 +286,30 @@ def test_list_feeds_preserves_identical_posts_from_different_feeds(mock_query, c
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_newest_first_order(mock_query, client):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     newest = _snapshot_doc(
-        request_id="req-3", generated_at=now,
+        request_id="req-3",
+        generated_at=now,
         items=["at://c"],
-        items_meta=[PipelineItemMeta(at_uri="at://c", rank=1, rank_score=1.0, after_rank_position=1)],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://c", rank=1, rank_score=1.0, after_rank_position=1)
+        ],
     )
     middle = _snapshot_doc(
-        request_id="req-2", generated_at=now - timedelta(minutes=3),
+        request_id="req-2",
+        generated_at=now - timedelta(minutes=3),
         items=["at://b"],
-        items_meta=[PipelineItemMeta(at_uri="at://b", rank=1, rank_score=1.0, after_rank_position=1)],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://b", rank=1, rank_score=1.0, after_rank_position=1)
+        ],
     )
     oldest = _snapshot_doc(
-        request_id="req-1", generated_at=now - timedelta(minutes=6),
+        request_id="req-1",
+        generated_at=now - timedelta(minutes=6),
         items=["at://a"],
-        items_meta=[PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1)
+        ],
     )
     mock_query.return_value = [newest, middle, oldest]
 
@@ -270,9 +323,10 @@ def test_list_feeds_newest_first_order(mock_query, client):
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
 def test_list_feeds_preserves_fully_overlapping_middle_snapshot(mock_query, client):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     newest = _snapshot_doc(
-        request_id="req-3", generated_at=now,
+        request_id="req-3",
+        generated_at=now,
         items=["at://a", "at://b", "at://c"],
         items_meta=[
             PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1),
@@ -281,7 +335,8 @@ def test_list_feeds_preserves_fully_overlapping_middle_snapshot(mock_query, clie
         ],
     )
     middle = _snapshot_doc(
-        request_id="req-2", generated_at=now - timedelta(minutes=3),
+        request_id="req-2",
+        generated_at=now - timedelta(minutes=3),
         items=["at://a", "at://b"],
         items_meta=[
             PipelineItemMeta(at_uri="at://a", rank=1, rank_score=1.0, after_rank_position=1),
@@ -289,9 +344,12 @@ def test_list_feeds_preserves_fully_overlapping_middle_snapshot(mock_query, clie
         ],
     )
     oldest = _snapshot_doc(
-        request_id="req-1", generated_at=now - timedelta(minutes=6),
+        request_id="req-1",
+        generated_at=now - timedelta(minutes=6),
         items=["at://d"],
-        items_meta=[PipelineItemMeta(at_uri="at://d", rank=1, rank_score=1.0, after_rank_position=1)],
+        items_meta=[
+            PipelineItemMeta(at_uri="at://d", rank=1, rank_score=1.0, after_rank_position=1)
+        ],
     )
     mock_query.return_value = [newest, middle, oldest]
 
@@ -322,7 +380,7 @@ def test_get_feed_detail_returns_merged_data(mock_get_snapshot, mock_hydrate, cl
                 "avatar_url": "https://cdn.bsky.app/avatar.jpg",
             },
             "content": "Hello world",
-            "created_at": datetime(2026, 7, 12, 10, 0, tzinfo=timezone.utc),
+            "created_at": datetime(2026, 7, 12, 10, 0, tzinfo=UTC),
             "media": {
                 "image_urls": [],
                 "video_url": None,
@@ -515,7 +573,7 @@ def test_get_feed_detail_multiple_items(mock_get_snapshot, mock_hydrate, client)
 
 
 # ---------------------------------------------------------------------------
-# GET / PUT /api/feeds/preferences
+# GET /api/feeds/preferences and PATCH /api/feeds/preferences/{feed_name}
 # ---------------------------------------------------------------------------
 
 
@@ -530,11 +588,22 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
 
     response = client.get("/api/feeds/preferences")
     assert response.status_code == 200
-    data = response.json()
-    assert data["social_radius"] == 3  # default
-    assert data["freshness"] == 5  # seven-day default
-    assert data["politics"] == 1.0  # default
-    assert data["purpose"] == 0.5  # default
+    assert response.json() == {
+        "feeds": {
+            "random": {"freshness": 5},
+            "your-feed": {
+                "source_weights": {
+                    "following": 0.3,
+                    "network_likes": 0.2,
+                    "authors_topics": 0.25,
+                    "popular": 0.25,
+                },
+                "freshness": 5,
+                "purpose": 0.5,
+            },
+            "best-of-friends": {"freshness": 5, "purpose": 0.5},
+        }
+    }
 
 
 @patch("app.routers.feed_transparency.get_user")
@@ -552,85 +621,129 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
 
     response = client.get("/api/feeds/preferences")
     assert response.status_code == 200
-    data = response.json()
-    assert data["social_radius"] == 0
-    assert data["freshness"] == 3
-    assert data["politics"] == 1.25
-    assert data["purpose"] == 0.65
+    assert response.json()["feeds"] == {
+        "random": {"freshness": 3},
+        "your-feed": {
+            "source_weights": {
+                "following": 1.0,
+                "network_likes": 0.0,
+                "authors_topics": 0.0,
+                "popular": 0.0,
+            },
+            "freshness": 3,
+            "purpose": 0.65,
+        },
+        "best-of-friends": {"freshness": 3, "purpose": 0.65},
+    }
 
 
 @patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
-@patch("app.routers.feed_transparency.set_user_preferences")
-def test_put_preferences_updates_value(mock_set_prefs, mock_delete_seen, client):
-    response = client.put(
-        "/api/feeds/preferences",
-        json={
-            "social_radius": 3,
-            "freshness": 4,
-            "politics": 1.5,
-            "purpose": 0.8,
-        },
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+def test_patch_preferences_updates_only_selected_feed(mock_patch_prefs, mock_delete_seen, client):
+    from ..documents import FeedPreferencesDocument
+
+    mock_patch_prefs.return_value = FeedPreferencesDocument(
+        freshness=4,
+        purpose=0.65,
+    )
+    response = client.patch(
+        "/api/feeds/preferences/best-of-friends",
+        json={"freshness": 4},
     )
     assert response.status_code == 200
-    data = response.json()
-    assert data["social_radius"] == 3
-    assert data["freshness"] == 4
-    assert data["politics"] == 1.5
-    assert data["purpose"] == 0.8
-    mock_set_prefs.assert_awaited_once()
+    assert response.json() == {"freshness": 4, "purpose": 0.65}
+    args = mock_patch_prefs.await_args.args
+    assert args[1:3] == ("did:plc:test-user", "best-of-friends")
+    assert args[3].model_dump(exclude_none=True) == {"freshness": 4}
     mock_delete_seen.assert_awaited_once()
 
 
-@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
-@patch("app.routers.feed_transparency.set_user_preferences")
-def test_put_preferences_rejects_out_of_range(mock_set_prefs, mock_delete_seen, client):
-    response = client.put(
-        "/api/feeds/preferences",
-        json={
-            "social_radius": 10,
-            "freshness": 2,
-            "politics": 1.0,
-            "purpose": 0.5,
-        },
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+def test_patch_preferences_rejects_out_of_range(mock_patch_prefs, client):
+    response = client.patch(
+        "/api/feeds/preferences/random",
+        json={"freshness": 10},
     )
     assert response.status_code == 422
-    mock_delete_seen.assert_not_awaited()
+    mock_patch_prefs.assert_not_awaited()
 
 
-@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
-@patch("app.routers.feed_transparency.set_user_preferences")
-def test_put_preferences_rejects_camel_case_body(mock_set_prefs, mock_delete_seen, client):
-    response = client.put(
-        "/api/feeds/preferences",
-        json={
-            "socialRadius": 3,
-            "freshness": 2,
-            "politics": 1.0,
-            "purpose": 0.5,
+@pytest.mark.parametrize(
+    "weight_values",
+    [
+        {
+            "following": 0.3,
+            "network_likes": 0.2,
+            "authors_topics": 0.25,
+            "popular": 0.25,
         },
+        {"following": 1.0, "network_likes": 0.0, "authors_topics": 0.0, "popular": 0.0},
+        {"following": 0.0, "network_likes": 0.0, "authors_topics": 1.0, "popular": 0.0},
+        {"following": 0.0, "network_likes": 0.0, "authors_topics": 0.0, "popular": 1.0},
+    ],
+)
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+def test_patch_preferences_accepts_atomic_source_weights(mock_patch_prefs, weight_values, client):
+    from ..documents import FeedPreferencesDocument, SourceWeightsDocument
+
+    weights = SourceWeightsDocument(**weight_values)
+    mock_patch_prefs.return_value = FeedPreferencesDocument(source_weights=weights)
+
+    response = client.patch(
+        "/api/feeds/preferences/your-feed",
+        json={"source_weights": weights.model_dump()},
     )
 
-    assert response.status_code == 422
-    mock_set_prefs.assert_not_awaited()
-    mock_delete_seen.assert_not_awaited()
-
-
-@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
-@patch("app.routers.feed_transparency.set_user_preferences")
-def test_put_preferences_creates_user_doc_if_missing(mock_set_prefs, mock_delete_seen, client):
-    response = client.put(
-        "/api/feeds/preferences",
-        json={
-            "social_radius": 1,
-            "freshness": 2,
-            "politics": 1.0,
-            "purpose": 0.5,
-        },
-    )
     assert response.status_code == 200
-    assert response.json()["social_radius"] == 1
-    mock_set_prefs.assert_awaited_once()
-    mock_delete_seen.assert_awaited_once()
+    assert response.json() == {"source_weights": weights.model_dump()}
+    assert mock_patch_prefs.await_args.args[3].source_weights == weights
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        {"following": 0.5, "authors_topics": 0.2},
+        {"following": 0.5, "authors_topics": 0.2, "popular": 0.2},
+        {"following": -0.1, "authors_topics": 0.4, "popular": 0.7},
+        {"following": 0.0, "authors_topics": 1.1, "popular": -0.1},
+    ],
+)
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+def test_patch_preferences_rejects_invalid_source_weights(mock_patch_prefs, weights, client):
+    response = client.patch(
+        "/api/feeds/preferences/your-feed",
+        json={"source_weights": weights},
+    )
+    assert response.status_code == 422
+    mock_patch_prefs.assert_not_awaited()
+
+
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+def test_patch_preferences_rejects_unsupported_control(mock_patch_prefs, client):
+    response = client.patch(
+        "/api/feeds/preferences/random",
+        json={"purpose": 0.8},
+    )
+    assert response.status_code == 422
+    mock_patch_prefs.assert_not_awaited()
+
+
+@pytest.mark.parametrize("body", [{}, {"freshness": None}, {"socialRadius": 3}])
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+def test_patch_preferences_rejects_invalid_body(mock_patch_prefs, body, client):
+    response = client.patch(
+        "/api/feeds/preferences/your-feed",
+        json=body,
+    )
+    assert response.status_code == 422
+    mock_patch_prefs.assert_not_awaited()
+
+
+def test_patch_preferences_rejects_unknown_or_internal_feed(client):
+    assert client.patch("/api/feeds/preferences/nope", json={"freshness": 2}).status_code == 404
+    assert (
+        client.patch("/api/feeds/preferences/cold-start", json={"freshness": 2}).status_code == 404
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -687,12 +800,18 @@ def test_get_feed_detail_preserves_items_seen_in_newer_snapshots(
     doc = _snapshot_doc(
         items_meta=[
             PipelineItemMeta(
-                at_uri=uri1, rank=1, rank_score=0.92, after_rank_position=1,
+                at_uri=uri1,
+                rank=1,
+                rank_score=0.92,
+                after_rank_position=1,
                 generators=[GeneratorMeta(name="two_tower", score=0.85)],
                 model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92)],
             ),
             PipelineItemMeta(
-                at_uri=uri2, rank=2, rank_score=0.88, after_rank_position=2,
+                at_uri=uri2,
+                rank=2,
+                rank_score=0.88,
+                after_rank_position=2,
                 generators=[GeneratorMeta(name="popularity", score=0.80)],
                 model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.88)],
             ),
@@ -766,12 +885,8 @@ def test_get_feed_detail_filters_public_post_and_author_labels(
         **_hydrated(labeled_author, "author.bsky.social"),
     }
     hydrated[safe]["moderation"] = {"post_labels": [], "author_labels": []}
-    hydrated[labeled_post]["moderation"] = {
-        "post_labels": ["graphic-media"], "author_labels": []
-    }
-    hydrated[labeled_author]["moderation"] = {
-        "post_labels": [], "author_labels": ["porn"]
-    }
+    hydrated[labeled_post]["moderation"] = {"post_labels": ["graphic-media"], "author_labels": []}
+    hydrated[labeled_author]["moderation"] = {"post_labels": [], "author_labels": ["porn"]}
     mock_hydrate.return_value = hydrated
 
     response = client.get("/api/feeds/req-abc")
@@ -795,12 +910,18 @@ def test_get_feed_detail_returns_all_when_no_newer_snapshots(
     doc = _snapshot_doc(
         items_meta=[
             PipelineItemMeta(
-                at_uri=uri1, rank=1, rank_score=0.92, after_rank_position=1,
+                at_uri=uri1,
+                rank=1,
+                rank_score=0.92,
+                after_rank_position=1,
                 generators=[GeneratorMeta(name="two_tower", score=0.85)],
                 model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92)],
             ),
             PipelineItemMeta(
-                at_uri=uri2, rank=2, rank_score=0.88, after_rank_position=2,
+                at_uri=uri2,
+                rank=2,
+                rank_score=0.88,
+                after_rank_position=2,
                 generators=[GeneratorMeta(name="popularity", score=0.80)],
                 model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.88)],
             ),
@@ -824,9 +945,7 @@ def test_get_feed_detail_returns_all_when_no_newer_snapshots(
 
 @patch("app.routers.feed_transparency.hydrate_posts")
 @patch("app.routers.feed_transparency.get_feed_snapshot")
-def test_get_feed_detail_diverse_pipeline_metadata(
-    mock_get_snapshot, mock_hydrate, client
-):
+def test_get_feed_detail_diverse_pipeline_metadata(mock_get_snapshot, mock_hydrate, client):
     uri = "at://did:plc:author/app.bsky.feed.post/post1"
     doc = _snapshot_doc(
         items_meta=[
