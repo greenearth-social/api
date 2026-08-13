@@ -59,6 +59,10 @@ from .lib.request_context import (
     set_endpoint,
     set_request_id,
 )
+from .lib.user_history_cache import (
+    FirestoreUserHistoryCache,
+    set_user_history_cache,
+)
 
 from elasticsearch import AsyncElasticsearch
 from starlette.routing import BaseRoute, Match
@@ -152,6 +156,8 @@ async def lifespan(app: FastAPI):
     set_popularity_cache(app.state.popularity_cache)
     app.state.followed_users_cache = FollowedUsersCache(app.state.firestore)
     set_followed_users_cache(app.state.followed_users_cache)
+    app.state.user_history_cache = FirestoreUserHistoryCache(app.state.firestore)
+    set_user_history_cache(app.state.user_history_cache)
     try:
         init_firebase_auth()
     except Exception:
@@ -172,6 +178,11 @@ async def lifespan(app: FastAPI):
         set_followed_users_cache(None)
         try:
             await app.state.followed_users_cache.drain()
+        except Exception:
+            pass
+        set_user_history_cache(None)
+        try:
+            await app.state.user_history_cache.drain()
         except Exception:
             pass
         try:
