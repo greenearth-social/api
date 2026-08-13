@@ -593,14 +593,6 @@ background and is drained during shutdown. Request-path cache reads fail open
 after 500 ms; background writes and lease releases have a separate 5-second
 timeout.
 
-| Variable | Default | What it controls |
-|---|---:|---|
-| `GE_USER_HISTORY_CACHE_TTL_SEC` | 600 | Fresh window before stale-while-refresh begins. |
-| `GE_USER_HISTORY_CACHE_MAX_AGE_SEC` | 1800 | Hard serving cutoff and `expires_at` retention. Values below the fresh TTL are clamped to it. |
-| `GE_USER_HISTORY_CACHE_LEASE_SEC` | 30 | Cross-instance stale-refresh lease. |
-| `GE_USER_HISTORY_REFRESH_TIMEOUT_SEC` | 10 | Elasticsearch budget for a background refresh. |
-| `GE_USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC` | 60 | Quiet period after a failed refresh. |
-
 Lookups record `user_history.cache.age_seconds` and
 `user_history.cache.lookup_count`; background work records `refresh_count` and
 `write_count`, each labelled by outcome. Firestore native TTL uses `expires_at`,

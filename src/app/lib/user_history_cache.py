@@ -12,7 +12,6 @@ import asyncio
 import hashlib
 import logging
 import math
-import os
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -54,52 +53,37 @@ USER_HISTORY_LIMIT = DEFAULT_LIKED_POSTS_LIMIT
 USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS = 0.5
 USER_HISTORY_CACHE_BACKGROUND_TIMEOUT_SECONDS = 5.0
 
+# Age at which cached recommendation history is served stale and refreshed in
+# the background (default 10 minutes).
+USER_HISTORY_CACHE_TTL_SEC = 600
 
-def _int_env(name: str, default: int) -> int:
-    try:
-        value = int(os.environ.get(name, default))
-    except ValueError:
-        logger.warning("Invalid %s; using default %d", name, default)
-        return default
-    if value <= 0:
-        logger.warning("Invalid %s=%d; using default %d", name, value, default)
-        return default
-    return value
+# Hard serving cutoff and Firestore expiration for cached history. Must be at
+# least USER_HISTORY_CACHE_TTL_SEC (default 30 minutes).
+USER_HISTORY_CACHE_MAX_AGE_SEC = 1800
 
+# How long one instance may hold a stale-refresh lease before another retries.
+USER_HISTORY_CACHE_LEASE_SEC = 30
 
-def ttl_seconds() -> int:
-    """Age at which an entry becomes stale and refreshes in the background."""
-    return _int_env("GE_USER_HISTORY_CACHE_TTL_SEC", 600)
+# Budget for rebuilding stale history from Elasticsearch in the background.
+USER_HISTORY_REFRESH_TIMEOUT_SEC = 10
+
+# Quiet period after a failed refresh, preventing a retry on every request.
+USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC = 60
 
 
 def max_age_seconds() -> int:
     """Hard age after which history is rebuilt instead of served stale."""
-    configured = _int_env("GE_USER_HISTORY_CACHE_MAX_AGE_SEC", 1_800)
-    fresh_ttl = ttl_seconds()
+    configured = USER_HISTORY_CACHE_MAX_AGE_SEC
+    fresh_ttl = USER_HISTORY_CACHE_TTL_SEC
     if configured < fresh_ttl:
         logger.warning(
-            "GE_USER_HISTORY_CACHE_MAX_AGE_SEC=%d is below the fresh TTL %d; using %d",
+            "USER_HISTORY_CACHE_MAX_AGE_SEC=%d is below the fresh TTL %d; using %d",
             configured,
             fresh_ttl,
             fresh_ttl,
         )
         return fresh_ttl
     return configured
-
-
-def lease_seconds() -> int:
-    """Longest a stale refresh may hold its cross-instance lease."""
-    return _int_env("GE_USER_HISTORY_CACHE_LEASE_SEC", 30)
-
-
-def refresh_timeout_seconds() -> float:
-    """Budget for rebuilding stale history in the background."""
-    return float(_int_env("GE_USER_HISTORY_REFRESH_TIMEOUT_SEC", 10))
-
-
-def retry_cooldown_seconds() -> int:
-    """Quiet period after a failed refresh before another instance retries."""
-    return _int_env("GE_USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC", 60)
 
 
 @dataclass(frozen=True)
@@ -322,9 +306,9 @@ class FirestoreUserHistoryCache(UserHistoryCache):
     async def claim_refresh(self, user_did: str) -> bool:
         """Transactionally claim the lease for one stale history refresh."""
         ref = self._document(user_did)
-        fresh_ttl = ttl_seconds()
-        lease = lease_seconds()
-        cooldown = retry_cooldown_seconds()
+        fresh_ttl = USER_HISTORY_CACHE_TTL_SEC
+        lease = USER_HISTORY_CACHE_LEASE_SEC
+        cooldown = USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC
 
         async def claim(transaction) -> bool:
             now = datetime.now(UTC)
@@ -504,7 +488,7 @@ async def _refresh_user_history(
     claimed = False
     outcome = "error"
     try:
-        async with asyncio.timeout(refresh_timeout_seconds()):
+        async with asyncio.timeout(USER_HISTORY_REFRESH_TIMEOUT_SEC):
             claimed = await cache.claim_refresh(user_did)
             if not claimed:
                 outcome = "skipped"
@@ -604,7 +588,7 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
                 if cached is not None:
                     age = cached.age_seconds()
                     _record_cache_age(age)
-                    if age <= ttl_seconds():
+                    if age <= USER_HISTORY_CACHE_TTL_SEC:
                         _record_cache_count("user_history.cache.lookup_count", "hit")
                         return cached.history
                     if age < max_age_seconds():
