@@ -6,12 +6,13 @@ These helpers are used by candidate generators and API routers.
 import base64
 import struct
 
-
 MINILM_L12_EMBEDDING_KEY = "all_MiniLM_L12_v2"
 MINILM_L12_EMBEDDING_FIELD = f"embeddings.{MINILM_L12_EMBEDDING_KEY}"
+MINILM_L12_EMBEDDING_DIM = 384
 
 GE_POST_EMBEDDING_KEY = "ge_post_embedding"
 GE_POST_EMBEDDING_FIELD = f"embeddings.{GE_POST_EMBEDDING_KEY}"
+
 
 def encode_float32_b64(vec: list[float]) -> str:
     """Encode a list of floats as little-endian float32 bytes, then base64.
@@ -28,7 +29,7 @@ def encode_float32_b64(vec: list[float]) -> str:
 
 def decode_float32_b64(b64: str) -> list[float]:
     """Decode a base64 float32 little-endian encoded vector to ``list[float]``."""
-    raw = base64.b64decode(b64)
+    raw = base64.b64decode(b64, validate=True)
     if len(raw) % 4 != 0:
         raise ValueError("invalid float32 byte length")
     count = len(raw) // 4

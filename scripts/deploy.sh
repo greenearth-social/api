@@ -42,7 +42,14 @@ GE_POSTHOG_HOST="https://us.i.posthog.com"
 
 # Service configuration
 API_INSTANCES_MIN="1"
-API_INSTANCES_MAX="10"
+# Sized from prod telemetry (issue #389): a CPU-vs-concurrency regression over
+# two load tests puts this 1-vCPU instance's saturation point at ~25 concurrent
+# requests; --concurrency below is set well under that. Cutting concurrency
+# from its previous 80 quarters the per-instance capacity, so the ceiling here
+# is raised to compensate -- CPU-throughput math (~0.34 CPU-s/request) says the
+# already-observed peak (460 req/min) needs only ~4 instances at a sane
+# per-instance utilization target, so 20 leaves several times that headroom.
+API_INSTANCES_MAX="20"
 API_REQUEST_TIMEOUT="60"
 
 # Colors for output
@@ -297,7 +304,12 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --cpu=1"
     deploy_cmd="$deploy_cmd --memory=512Mi"
     deploy_cmd="$deploy_cmd --timeout=$API_REQUEST_TIMEOUT"
-    deploy_cmd="$deploy_cmd --concurrency=80"
+    # See the API_INSTANCES_MAX comment above (issue #389): 80 let far more
+    # requests pile onto this 1-vCPU instance than it could actually run
+    # concurrently, so the autoscaler didn't add instances until CPU was
+    # already saturated. 20 keeps typical per-instance utilization ~75%,
+    # comfortably under the ~25-concurrency point where CPU saturates.
+    deploy_cmd="$deploy_cmd --concurrency=20"
 
     # Tag the service/revision with the git sha so past deployments are
     # identifiable when picking a rollback target (see issue #228).
@@ -510,7 +522,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --two-tower-knn-index IDX  Index for two-tower kNN (default: posts_recent_quality;"
             echo "                             use posts_recent if the quality corpus is not backfilled)"
             echo "  --min-instances N        Minimum instances (default: 1)"
-            echo "  --max-instances N        Maximum instances (default: 10)"
+            echo "  --max-instances N        Maximum instances (default: 20)"
             echo "  --timeout SECONDS        Cloud Run request timeout (default: 60)"
             echo "  --help                   Show this help message"
             exit 0

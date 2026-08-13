@@ -17,9 +17,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...models import CandidatePost, MaxAgeHours
-from ..bsky import FollowedUsersLookupError, get_followed_user_dids
+from ..bsky import FollowedUsersLookupError
 from ..config import fail_fast
 from ..elasticsearch import unwrap_es_response
+from ..followed_users_cache import MAX_FOLLOWED_USERS, get_followed_dids_cached
+from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
 
@@ -30,14 +32,18 @@ logger = logging.getLogger(__name__)
 # Parameters
 # ---------------------------------------------------------------------------
 
-# Maximum number of followed users to use in the query
-MAX_FOLLOWED_USERS = 1_000
+# Maximum number of followed users to use in the query is MAX_FOLLOWED_USERS,
+# imported from followed_users_cache so the fetch cap and the query cap cannot
+# drift apart.
 
 # Minimum number of recent likes to fetch in each page.
 LIKED_POSTS_PAGE_SIZE = 100
 
 # Hard cap on how many like documents to scan while looking for post hits.
 MAX_LIKES_SCANNED = 5_000
+
+# Lookback window for finding the matching posts
+MAX_AGE_HOURS = 168
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +62,8 @@ async def fetch_recent_liked_post_uri_page(
     user_dids: list[str],
     size: int,
     search_after: list[Any] | None = None,
+    max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
+    exclude_uris: list[str] | None = None,
 ) -> LikedPostUriPage:
     """Return one page of recently liked post URIs for the given users."""
     if not user_dids or size <= 0:
@@ -63,9 +71,16 @@ async def fetch_recent_liked_post_uri_page(
 
     query = {
         "bool": {
-            "filter": [{"terms": {"author_did": user_dids}}],
+            "filter": [
+                {"terms": {"author_did": user_dids}},
+                {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}},
+            ],
         }
     }
+    if exclude_uris:
+        query["bool"]["must_not"] = [
+            {"terms": {"subject_uri": exclude_uris}},
+        ]
 
     search_kwargs: dict[str, Any] = {}
     if search_after is not None:
@@ -106,14 +121,12 @@ async def fetch_posts_by_uris(
     generator_name: str | None = None,
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
-    max_age_hours: MaxAgeHours = 168,
+    max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
 ) -> list[CandidatePost]:
     """Fetch posts for the supplied URIs, preserving the requested URI order."""
     if not at_uris:
         return []
 
-    # Freshness applies to candidate post created_at, not the timestamp of the
-    # followed user's like event.
     filters: list[dict] = [
         {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}},
     ]
@@ -130,7 +143,7 @@ async def fetch_posts_by_uris(
     }
 
     resp = await es.search(
-        index="posts",
+        index="posts_recent",
         op="hydrate",
         query=posts_query,
         size=len(at_uris),
@@ -157,15 +170,13 @@ async def network_likes_search(
     generator_name: str | None = None,
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
-    max_age_hours: MaxAgeHours = 168,
+    max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
 ) -> list[CandidatePost]:
     """Fetch posts liked by users followed by user_did."""
 
     try:
-        followed_dids: list[str] = await get_followed_user_dids(
-            user_did,
-            limit=MAX_FOLLOWED_USERS,
-        )
+        async with timed(logger, "follows_lookup", user_did=user_did):
+            followed_dids: list[str] = await get_followed_dids_cached(user_did)
     except FollowedUsersLookupError as exc:
         logger.warning(
             "Skipping network_likes candidate generation for %s after follow "
@@ -192,43 +203,51 @@ async def network_likes_search(
     liked_uri_order = 0
     candidates_by_uri: dict[str, CandidatePost] = {}
 
-    while len(candidates_by_uri) < num_candidates and scanned_likes < MAX_LIKES_SCANNED:
-        remaining_budget = MAX_LIKES_SCANNED - scanned_likes
-        page = await fetch_recent_liked_post_uri_page(
-            es,
-            followed_dids,
-            size=min(page_size, remaining_budget),
-            search_after=search_after,
-        )
+    async with timed(
+        logger,
+        "es_network_likes_search",
+        n_followed=len(followed_dids),
+        num_candidates=num_candidates,
+    ):
+        while len(candidates_by_uri) < num_candidates and scanned_likes < MAX_LIKES_SCANNED:
+            remaining_budget = MAX_LIKES_SCANNED - scanned_likes
+            page = await fetch_recent_liked_post_uri_page(
+                es,
+                followed_dids,
+                size=min(page_size, remaining_budget),
+                search_after=search_after,
+                max_age_hours=max_age_hours,
+                exclude_uris=exclude_uris,
+            )
 
-        if page.hit_count == 0:
-            break
+            if page.hit_count == 0:
+                break
 
-        scanned_likes += page.hit_count
+            scanned_likes += page.hit_count
 
-        new_uris: list[str] = []
-        for uri in page.uris:
-            like_counts[uri] = like_counts.get(uri, 0) + 1
-            last_seen_order[uri] = liked_uri_order
-            liked_uri_order += 1
-            if uri not in queried_uris:
-                queried_uris.add(uri)
-                new_uris.append(uri)
+            new_uris: list[str] = []
+            for uri in page.uris:
+                like_counts[uri] = like_counts.get(uri, 0) + 1
+                last_seen_order[uri] = liked_uri_order
+                liked_uri_order += 1
+                if uri not in queried_uris:
+                    queried_uris.add(uri)
+                    new_uris.append(uri)
 
-        for candidate in await fetch_posts_by_uris(
-            es,
-            new_uris,
-            generator_name=generator_name,
-            video_only=video_only,
-            exclude_uris=exclude_uris,
-            max_age_hours=max_age_hours,
-        ):
-            if candidate.at_uri:
-                candidates_by_uri[candidate.at_uri] = candidate
+            for candidate in await fetch_posts_by_uris(
+                es,
+                new_uris,
+                generator_name=generator_name,
+                video_only=video_only,
+                exclude_uris=exclude_uris,
+                max_age_hours=max_age_hours,
+            ):
+                if candidate.at_uri:
+                    candidates_by_uri[candidate.at_uri] = candidate
 
-        if page.next_search_after is None or page.hit_count < min(page_size, remaining_budget):
-            break
-        search_after = page.next_search_after
+            if page.next_search_after is None or page.hit_count < min(page_size, remaining_budget):
+                break
+            search_after = page.next_search_after
 
     candidates = [
         candidate.model_copy(update={"score": float(like_counts[at_uri])})
@@ -258,7 +277,7 @@ class NetworkLikesCandidateGenerator(CandidateGenerator):
         num_candidates: int = 100,
         video_only: bool = False,
         exclude_uris: list[str] | None = None,
-        max_age_hours: MaxAgeHours = 168,
+        max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
     ) -> CandidateResult:
         candidates = await network_likes_search(
             es,

@@ -126,6 +126,10 @@ gea_<8-char key_id><48-char secret>
 The plaintext key is shown **once** at generation and never stored.
 Authenticate requests by passing the key in the `X-API-Key` header.
 
+Keys also carry an `admin` flag, required to access `/admin/*` endpoints.
+Existing keys default to non-admin. Only issue admin keys to the greenearth
+team.
+
 ### CLI commands
 
 Run all commands from the `api/` directory:
@@ -133,6 +137,9 @@ Run all commands from the `api/` directory:
 ```bash
 # Issue a new key
 pipenv run python scripts/apikeys.py generate alice@example.com
+
+# Issue an admin key (greenearth team only)
+pipenv run python scripts/apikeys.py generate alice@greenearth.social --admin
 
 # List all keys
 pipenv run python scripts/apikeys.py list
@@ -250,13 +257,13 @@ Deploy to Cloud Run:
 ./scripts/deploy.sh
 
 # Deploy to production
-ENVIRONMENT=prod ./scripts/deploy.sh
+./scripts/deploy.sh --environment prod
 
 # Deploy with custom configuration
-ENVIRONMENT=prod \
-  API_INSTANCES_MIN=2 \
-  API_INSTANCES_MAX=50 \
-  ./scripts/deploy.sh
+./scripts/deploy.sh \
+  --environment prod \
+  --min-instances 2 \
+  --max-instances 50
 ```
 
 The deployment script will:
@@ -270,6 +277,24 @@ The deployment script will:
 
 API deployments do not change Firebase configuration. Deploy Firebase rules,
 indexes, TTL policies, Functions, and Hosting from the frontend repository.
+
+When an API release depends on new Firestore configuration, deploy that
+configuration to the target environment **before** deploying the API revision:
+
+```bash
+cd ../frontend
+./scripts/deploy-firestore.sh stage  # or: ./scripts/deploy-firestore.sh prod
+
+cd ../api
+./scripts/deploy.sh                  # or: ./scripts/deploy.sh --environment prod
+```
+
+This ordering is required for the shared user-history cache. Its documents
+contain base64-encoded embedding arrays and require the
+`user_history_cache.*` indexing exemption from the frontend repository's
+`firestore.indexes.json`. If the API is deployed first, cache writes fail open:
+feed generation continues from Elasticsearch, but the cache cannot populate
+and each request repeats the uncached work.
 
 #### Deployments must be from a clean tree (git sha traceability)
 
@@ -340,7 +365,7 @@ Available configuration inputs across `gcp_setup.sh` and `deploy.sh`:
 - `GE_INFERENCE_DOMAIN` - Domain-mapped inference host used when base URL override is not set
 - `GE_ENABLE_INFERENCE_DOMAIN_MAPPING` - Toggle mapped-domain resolution in `deploy.sh` (default: true)
 - `API_INSTANCES_MIN` - Minimum instances (default: 1)
-- `API_INSTANCES_MAX` - Maximum instances (default: 10)
+- `API_INSTANCES_MAX` - Maximum instances (default: 20)
 
 For occasional local inference development while keeping stage/prod defaults:
 
@@ -505,7 +530,7 @@ from the public API.  This is available regardless of whether `debug_feeds` is
 enabled for the account.
 
 ```bash
-# List recent feed loads for your account (within the 15-min cache window)
+# List up to 100 recent feed loads for your account (within the last 24 hours)
 curl http://localhost:8000/api/feeds \
   -H "Authorization: Bearer <firebase-custom-token>"
 
@@ -545,6 +570,111 @@ Disable when done (full capture has storage/perf cost):
 ```bash
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --disable
 ```
+
+## User-History Feature Cache
+
+The two-tower generator and heavy ranker share a per-user Firestore document
+(`user_history_cache`) containing the user's recent likes and hydrated post
+features. Cache entries use this fixed, bounded stale-while-refresh lifecycle:
+
+- Through 10 minutes, an entry is fresh and is returned directly.
+- After 10 and before 30 minutes, the stale entry is returned immediately while a
+  managed background task refreshes it from Elasticsearch.
+- At 30 minutes, the entry is a hard miss and the request synchronously rebuilds
+  it rather than serving older recommendation inputs.
+
+Stale refreshes use a 30-second transactional Firestore lease, so API instances
+do not duplicate Elasticsearch work. A failed refresh releases the lease and
+sets a 60-second retry cooldown; the stale value remains usable until its fixed
+hard expiry. Cold misses are still fetched
+synchronously because the caller needs a value, but persistence happens in the
+background and is drained during shutdown. Request-path cache reads fail open
+after 500 ms; background writes and lease releases have a separate 5-second
+timeout.
+
+Lookups record `user_history.cache.age_seconds` and
+`user_history.cache.lookup_count`; background work records `refresh_count` and
+`write_count`, each labelled by outcome. Firestore native TTL uses `expires_at`,
+which is set to the fixed 30-minute maximum serving age. These policy values are
+code-level constants and intentionally cannot vary by deployment environment;
+changing them requires a code change and a new API deployment. See
+`src/app/lib/user_history_cache.py`.
+
+## Popularity Candidate Cache
+
+Popularity candidates are identical for every user, so the API keeps one shared
+pool of them in Firestore (`popularity_cache`) instead of running its ~1.5s
+Elasticsearch query per request. Requests filter their own exclusions out of the
+pool in memory; only a background refresh touches Elasticsearch, and only one
+instance at a time (a transactional lease on the document). A user request never
+waits on a refresh — a stale pool is served while the new one is built. See
+`src/app/lib/candidates/popularity_cache.py`.
+
+There is one document per (freshness window, `video_only`) combination, created
+on demand — real traffic typically populates two or three of them.
+
+| Variable | Default | What it controls |
+|---|---|---|
+| `GE_POPULARITY_CACHE_POOL_SIZE` | 500 | Candidates per pool. Must stay well above one feed's popularity allocation so heavily-excluded users still fill their slate. |
+| `GE_POPULARITY_CACHE_TTL_SEC` | 300 | How long a pool is served before a refresh is triggered. |
+| `GE_POPULARITY_CACHE_LOCAL_TTL_SEC` | 30 | How long an instance reuses its in-memory copy before re-reading Firestore. |
+| `GE_POPULARITY_CACHE_LEASE_SEC` | 60 | Refresh lease. Must exceed one pool query plus its write. |
+
+**Observability.** Every lookup records
+`candidates.popularity_cache.age_seconds` (plus `lookup_count` /
+`refresh_count`, labelled by outcome). A pool served at 20 minutes or older also
+logs at ERROR — refreshes are failing, and that is the condition worth alerting
+on.
+
+**Firestore.** The `payload` field is exempted from indexing in the frontend
+repo's `firestore.indexes.json`; without that exemption a deployed write of a
+blob this size is rejected. Deploy the exemption before the API release that
+starts writing it.
+
+## Analytics (PostHog)
+
+This service and the frontend write to the **same PostHog project**, so every
+event this service emits is annotated to identify its producer. Annotations are
+applied centrally in `src/app/lib/posthog_client.py` — call sites never set them.
+
+| Property | Value here | Purpose |
+|---|---|---|
+| `surface` | `greenearth_api` | Which producer emitted the event. The frontend stamps `greenearth_web`. |
+| `schema_version` | `1` | Version of *this surface's* event schema; scoped to `surface`, versioned independently of the frontend. |
+
+Conventions:
+
+- **Filter on `surface`** in any insight that should cover one producer rather
+  than both. Event names are not namespaced, so a name collision between the two
+  surfaces is possible and only `surface` separates them.
+- `schema_version` is only meaningful alongside `surface` — the two surfaces'
+  version numbers are unrelated. Bump it when an existing event's properties
+  change shape in a way that would break a saved insight.
+- Annotations are applied *after* caller-supplied properties, so an event
+  property can never overwrite the partition key.
+- `scripts/backfill_posthog.py` stamps the same annotations, so historical
+  API-origin events are not a gap in the partition.
+
+### User identity
+
+`distinct_id` is the user's `did:plc:…` on both surfaces (the frontend's Firebase
+`uid` is that same DID), so a user is one PostHog person across both. Feature
+flags are evaluated on the DID for the same reason. The DID is deliberately the
+key: Bluesky handles are mutable, so keying on the handle would fork a person on
+every rename and detach their history.
+
+The handle is the identifier a *human* reads, and rides along on every event:
+
+| Property | Purpose |
+|---|---|
+| `$set: {username: <handle>}` | Populates the PostHog person display name. `$set`, not `$set_once`, so a rename propagates. |
+| `user_handle` | Event-level copy, so an insight can break down by handle without joining to the person. |
+
+Both are best-effort — when the handle can't be resolved they are omitted rather
+than written as null, so a transient failure never erases a handle PostHog
+already has. `feedLoaded` takes the handle from the live PLC resolution;
+interaction events read it from the Firestore user doc that the same request
+already wrote, avoiding an extra directory round-trip on a background path.
 
 ## Elasticsearch Query Profiling
 

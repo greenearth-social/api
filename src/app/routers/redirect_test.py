@@ -1,9 +1,12 @@
 from unittest.mock import AsyncMock, patch
 
+import pytest
+from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
 from ..documents import RedirectDocument
 from ..main import app
+from ..security import verify_admin_api_key
 
 client = TestClient(app, follow_redirects=False)
 
@@ -227,3 +230,46 @@ def test_admin_delete_redirect_not_found():
     ):
         response = client.delete("/admin/redirects/nonexistent", headers=_auth())
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Admin endpoints require an admin API key
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _non_admin_override():
+    def _raise():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admin API key required"
+        )
+
+    app.dependency_overrides[verify_admin_api_key] = _raise
+    yield
+    app.dependency_overrides.pop(verify_admin_api_key, None)
+
+
+def test_admin_create_redirect_forbidden_for_non_admin_key(_non_admin_override):
+    app.state.firestore = AsyncMock()
+    response = client.post(
+        "/admin/redirects",
+        json={"slug": "x", "url": "https://example.com"},
+        headers=_auth(),
+    )
+    assert response.status_code == 403
+
+
+def test_admin_update_redirect_forbidden_for_non_admin_key(_non_admin_override):
+    app.state.firestore = AsyncMock()
+    response = client.put(
+        "/admin/redirects/bsky-profile",
+        json={"url": "https://example.com"},
+        headers=_auth(),
+    )
+    assert response.status_code == 403
+
+
+def test_admin_delete_redirect_forbidden_for_non_admin_key(_non_admin_override):
+    app.state.firestore = AsyncMock()
+    response = client.delete("/admin/redirects/bsky-profile", headers=_auth())
+    assert response.status_code == 403

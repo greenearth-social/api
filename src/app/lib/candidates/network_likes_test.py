@@ -5,7 +5,6 @@ import pytest
 from .. import bsky as bsky_module
 from ..candidates import network_likes as network_likes_module
 from ..candidates.network_likes import (
-    MAX_FOLLOWED_USERS,
     NetworkLikesCandidateGenerator,
     fetch_posts_by_uris,
     fetch_recent_liked_post_uri_page,
@@ -87,10 +86,25 @@ class FakeEs:
 
         if index == "likes":
             if self.likes_pages:
-                return self.likes_pages.pop(0)
+                response = self.likes_pages.pop(0)
+                query_body = query if isinstance(query, dict) else {}
+                excluded_uris = {
+                    uri
+                    for clause in query_body.get("bool", {}).get("must_not", [])
+                    for uri in clause.get("terms", {}).get("subject_uri", [])
+                }
+                if excluded_uris:
+                    hits = response.get("hits", {}).get("hits", [])
+                    return likes_response([
+                        hit
+                        for hit in hits
+                        if (hit.get("_source") or {}).get("subject_uri")
+                        not in excluded_uris
+                    ])
+                return response
             return likes_response([])
 
-        if index == "posts":
+        if index == "posts_recent":
             assert query is not None
             requested_uris = post_terms_from_query(query)
             return_order = self.posts_return_order or requested_uris
@@ -105,15 +119,14 @@ class FakeEs:
 
 
 def stub_followed_dids(monkeypatch, dids: list[str]):
-    async def fake_get_followed_user_dids(user_did: str, limit: int):
+    async def fake_get_followed_dids(user_did: str):
         assert user_did == "did:plc:user1"
-        assert limit == MAX_FOLLOWED_USERS
         return dids
 
     monkeypatch.setattr(
         network_likes_module,
-        "get_followed_user_dids",
-        fake_get_followed_user_dids,
+        "get_followed_dids_cached",
+        fake_get_followed_dids,
     )
 
 
@@ -133,6 +146,8 @@ class TestFetchRecentLikedPostUriPage:
             ["did:plc:follow1"],
             size=50,
             search_after=["cursor"],
+            max_age_hours=48,
+            exclude_uris=["at://post/seen"],
         )
 
         assert page.uris == ["at://post/1", "at://post/2"]
@@ -143,7 +158,13 @@ class TestFetchRecentLikedPostUriPage:
         assert call["index"] == "likes"
         assert call["query"] == {
             "bool": {
-                "filter": [{"terms": {"author_did": ["did:plc:follow1"]}}],
+                "filter": [
+                    {"terms": {"author_did": ["did:plc:follow1"]}},
+                    {"range": {"created_at": {"gte": "now-48h"}}},
+                ],
+                "must_not": [
+                    {"terms": {"subject_uri": ["at://post/seen"]}},
+                ],
             }
         }
         assert call["size"] == 50
@@ -187,6 +208,7 @@ class TestFetchPostsByUris:
         assert candidates[0].generator_name == "network_likes"
         assert candidates[0].score == 99.0
         assert candidates[0].minilm_l12_embedding is not None
+        assert es.calls[0]["index"] == "posts_recent"
 
     @pytest.mark.asyncio
     async def test_applies_video_filter_in_es_and_exclude_filter_in_python(self):
@@ -269,7 +291,7 @@ class TestNetworkLikesSearch:
         likes_calls = [call for call in es.calls if call["index"] == "likes"]
         assert [call["search_after"] for call in likes_calls] == [None, [10]]
 
-        posts_calls = [call for call in es.calls if call["index"] == "posts"]
+        posts_calls = [call for call in es.calls if call["index"] == "posts_recent"]
         assert post_terms_from_query(posts_calls[0]["query"]) == [
             "at://post/a",
             "at://missing/1",
@@ -278,6 +300,59 @@ class TestNetworkLikesSearch:
             "at://missing/4",
         ]
         assert post_terms_from_query(posts_calls[1]["query"]) == ["at://post/b"]
+
+    @pytest.mark.asyncio
+    async def test_applies_requested_freshness_to_likes_and_posts(self, monkeypatch):
+        stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+        es = FakeEs(
+            likes_pages=[likes_response([like_hit("at://post/a", 1)])],
+            posts_by_uri={"at://post/a": post_hit("at://post/a")},
+        )
+
+        candidates = await network_likes_search(
+            es,
+            "did:plc:user1",
+            num_candidates=1,
+            max_age_hours=48,
+        )
+
+        assert [candidate.at_uri for candidate in candidates] == ["at://post/a"]
+        expected_range = {"range": {"created_at": {"gte": "now-48h"}}}
+        likes_call = next(call for call in es.calls if call["index"] == "likes")
+        posts_call = next(call for call in es.calls if call["index"] == "posts_recent")
+        assert expected_range in likes_call["query"]["bool"]["filter"]
+        assert expected_range in posts_call["query"]["bool"]["filter"]
+
+    @pytest.mark.asyncio
+    async def test_excludes_seen_uris_from_likes_query(self, monkeypatch):
+        stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+        es = FakeEs(
+            likes_pages=[
+                likes_response([
+                    like_hit("at://post/seen", 2),
+                    like_hit("at://post/a", 1),
+                ])
+            ],
+            posts_by_uri={
+                "at://post/seen": post_hit("at://post/seen"),
+                "at://post/a": post_hit("at://post/a"),
+            },
+        )
+
+        candidates = await network_likes_search(
+            es,
+            "did:plc:user1",
+            num_candidates=1,
+            exclude_uris=["at://post/seen"],
+        )
+
+        assert [candidate.at_uri for candidate in candidates] == ["at://post/a"]
+        likes_call = next(call for call in es.calls if call["index"] == "likes")
+        assert likes_call["query"]["bool"]["must_not"] == [
+            {"terms": {"subject_uri": ["at://post/seen"]}},
+        ]
+        posts_call = next(call for call in es.calls if call["index"] == "posts_recent")
+        assert post_terms_from_query(posts_call["query"]) == ["at://post/a"]
 
     @pytest.mark.asyncio
     async def test_respects_hard_likes_scan_cap(self, monkeypatch):
@@ -337,13 +412,13 @@ class TestNetworkLikesSearch:
 
     @pytest.mark.asyncio
     async def test_lookup_error_returns_empty_and_skips_es(self, monkeypatch):
-        async def fake_get_followed_user_dids(user_did: str, limit: int):
+        async def fake_get_followed_dids(user_did: str):
             raise bsky_module.FollowedUsersLookupError("lookup exploded")
 
         monkeypatch.setattr(
             network_likes_module,
-            "get_followed_user_dids",
-            fake_get_followed_user_dids,
+            "get_followed_dids_cached",
+            fake_get_followed_dids,
         )
         es = FakeEs()
 

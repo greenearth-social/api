@@ -58,6 +58,19 @@ class TestFeedConfig:
         uri = "at://did:plc:example/app.bsky.feed.post/abc123"
         assert _minimal_feed_cfg(pinned_post_uri=uri).pinned_post_uri == uri
 
+    def test_logged_out_defaults_to_explain(self):
+        """A new feed is personalized until proven otherwise, so the safe default
+        is to tell a logged-out visitor why it's empty rather than 401."""
+        assert _minimal_feed_cfg().logged_out == "explain"
+
+    def test_logged_out_rejects_an_unknown_behavior(self):
+        with pytest.raises(ValidationError):
+            _minimal_feed_cfg(logged_out="ignore")
+
+    def test_logged_out_post_uri_defaults_to_none(self):
+        """None means the shared feeds.LOGGED_OUT_POST_URI."""
+        assert _minimal_feed_cfg().logged_out_post_uri is None
+
     def test_avatar_defaults_to_none(self):
         assert _minimal_feed_cfg().avatar is None
 

@@ -43,11 +43,14 @@ from .lib.atproto_auth import init_id_resolver
 from .lib.firebase_auth import init_firebase_auth
 from .lib.es_client import SlowQueryLoggingES
 from .lib.eventloop_monitor import start_eventloop_monitor, stop_eventloop_monitor
+from .lib.candidates.popularity_cache import PopularityCache, set_popularity_cache
 from .lib.feed_cache import FirestoreFeedCache
+from .lib.followed_users_cache import FollowedUsersCache, set_followed_users_cache
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
 from .lib.perspective import close_perspective_client
-from .lib.metrics import MetricCollector, set_metric_collector
+from .lib import inflight
+from .lib.metrics import MetricCollector, get_metric_collector, set_metric_collector
 from .lib.posthog_client import get_posthog_client, init_posthog_client, set_posthog_client
 from .lib.profiling import install_profiling
 from .lib.request_context import (
@@ -55,6 +58,10 @@ from .lib.request_context import (
     reset_request_id,
     set_endpoint,
     set_request_id,
+)
+from .lib.user_history_cache import (
+    FirestoreUserHistoryCache,
+    set_user_history_cache,
 )
 
 from elasticsearch import AsyncElasticsearch
@@ -145,6 +152,12 @@ async def lifespan(app: FastAPI):
     app.state.id_resolver = init_id_resolver()
     app.state.firestore = init_firestore_client()
     app.state.feed_cache = FirestoreFeedCache(app.state.firestore)
+    app.state.popularity_cache = PopularityCache(app.state.firestore)
+    set_popularity_cache(app.state.popularity_cache)
+    app.state.followed_users_cache = FollowedUsersCache(app.state.firestore)
+    set_followed_users_cache(app.state.followed_users_cache)
+    app.state.user_history_cache = FirestoreUserHistoryCache(app.state.firestore)
+    set_user_history_cache(app.state.user_history_cache)
     try:
         init_firebase_auth()
     except Exception:
@@ -155,6 +168,23 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Let in-flight popularity refreshes finish before the clients they
+        # write through are closed.
+        set_popularity_cache(None)
+        try:
+            await app.state.popularity_cache.drain()
+        except Exception:
+            pass
+        set_followed_users_cache(None)
+        try:
+            await app.state.followed_users_cache.drain()
+        except Exception:
+            pass
+        set_user_history_cache(None)
+        try:
+            await app.state.user_history_cache.drain()
+        except Exception:
+            pass
         try:
             await es.close()
         except Exception:
@@ -360,6 +390,30 @@ async def request_id_mw(request: Request, call_next):
             reset_endpoint(endpoint_token)
     response.headers["x-request-id"] = rid
     return response
+
+
+# Registered last so it is the outermost middleware: the in-flight window has
+# to enclose everything else on the request path, or the event-loop monitor
+# will see intervals that are only partly covered by a request and discard
+# samples it should have kept.
+@app.middleware("http")
+async def inflight_mw(request: Request, call_next):
+    """Track concurrent in-flight requests for the whole process.
+
+    Gates the event-loop lag monitor (see ``lib/eventloop_monitor.py``): a
+    CPU-throttled idle instance must not contribute samples. ``http.in_flight``
+    is also the per-instance concurrency signal for right-sizing Cloud Run's
+    ``--concurrency``, which Cloud Run's own ``max_request_concurrencies``
+    only reports as a coarse per-minute maximum (issue #389).
+    """
+    count = inflight.begin()
+    collector = get_metric_collector()
+    if collector is not None:
+        collector.record("http.in_flight", count)
+    try:
+        return await call_next(request)
+    finally:
+        inflight.end()
 
 
 app.include_router(candidates.router)

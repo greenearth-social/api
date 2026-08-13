@@ -12,16 +12,51 @@ Convention:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .lib.candidates.base import CandidateResult
 from .models import CandidateGenerateRequest, CandidatePost, RankPredictResult
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
+
+
+class SourceWeightsDocument(BaseModel):
+    """Atomic relative weights for the configurable GreenEarth sources."""
+
+    model_config = {"extra": "forbid"}
+
+    following: float = Field(ge=0.0, le=1.0)
+    # Defaults to zero so three-source documents written before Network Likes
+    # remain readable without a bulk Firestore migration.
+    network_likes: float = Field(default=0.0, ge=0.0, le=1.0)
+    authors_topics: float = Field(ge=0.0, le=1.0)
+    popular: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def weights_sum_to_one(self) -> SourceWeightsDocument:
+        total = self.following + self.network_likes + self.authors_topics + self.popular
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError("source weights must sum to 1.0")
+        return self
+
+
+class FeedPreferencesDocument(BaseModel):
+    """Sparse preference values for one configured feed."""
+
+    model_config = {"extra": "forbid"}
+
+    source_weights: SourceWeightsDocument | None = None
+    # Read-only migration fallback. New preference responses and patches expose
+    # source_weights instead, but existing Firestore documents may still carry
+    # a social-radius preset.
+    social_radius: int | None = Field(default=None, ge=0, le=4)
+    freshness: int | None = Field(default=None, ge=0, le=5)
+    politics: float | None = Field(default=None, ge=0.5, le=1.5)
+    purpose: float | None = Field(default=None, ge=0.2, le=0.8)
 
 
 class UserDocument(BaseModel):
@@ -67,8 +102,7 @@ class UserDocument(BaseModel):
         default=1.0,
         ge=0.5,
         le=1.5,
-        description="Politics multiplier: 0.5-1.5.  "
-        "Applied to political content scores.",
+        description="Politics multiplier: 0.5-1.5.  Applied to political content scores.",
     )
     purpose: float = Field(
         default=0.5,
@@ -76,6 +110,10 @@ class UserDocument(BaseModel):
         le=0.8,
         description="Purpose preference: 0.2=engaging, 0.5=balanced, 0.8=constructive.  "
         "Used to weight engaging vs constructive content.",
+    )
+    feed_preferences: dict[str, FeedPreferencesDocument] = Field(
+        default_factory=dict,
+        description="Per-feed control values keyed by canonical feed name.",
     )
     created_by_load_test: bool = Field(
         default=False,
@@ -94,9 +132,10 @@ class FeedCacheDocument(BaseModel):
 
     items: list[str] = Field(default_factory=list, description="Cached AT URI list")
     expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")
-    items_meta: list["PipelineItemMeta"] = Field(default_factory=list)
-    generator_diagnostics: list["GeneratorDiagnostic"] = Field(default_factory=list)
+    items_meta: list[PipelineItemMeta] = Field(default_factory=list)
+    generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
     applied_social_radius: int | None = None
+    user_did: str | None = None
     feed_name: str | None = None
     generated_at: datetime | None = None
     api_release_sha: str | None = None
@@ -106,6 +145,61 @@ class FeedCacheDocument(BaseModel):
         "collection is keyed by request_id (not user), so this tag is how "
         "scripts/load_test/cleanup.py finds and removes test-created entries.",
     )
+
+
+class FollowedUsersCacheDocument(BaseModel):
+    """Cached Bluesky follow list for one user.
+
+    The document ID is the user's ``user_doc_id``.  Replaces a live
+    ``app.bsky.graph.getFollows`` walk on every feed request (see issue #83).
+
+    Two writers touch this document.  The API owns ``follows`` and rewrites it
+    on refresh; the jetstream ingester only ever appends to ``pending_adds``
+    (via ``ArrayUnion``, so it never reads first) or stamps ``invalidated_at``.
+    That split is what keeps the two writers from clobbering each other.
+    """
+
+    follows: list[str] = Field(
+        default_factory=list,
+        description="Followed DIDs.  Stored uncompressed: ~1000 DIDs is ~40 KB against a "
+        "1 MiB document limit, and array fields index per element so the 7.5 KiB "
+        "index-entry limit is never in play.",
+    )
+    complete: bool = Field(
+        default=False,
+        description="True when the walk that produced 'follows' exhausted the cursor or hit "
+        "the follow cap.  False means it was truncated by an error or an expired "
+        "budget, and the entry is refreshed on the next read however young it is "
+        "— otherwise one Bluesky blip pins a user to a partial follow set for a "
+        "whole TTL.  Defaults False so a legacy or unreadable document is "
+        "refreshed rather than trusted.",
+    )
+    generated_at: datetime | None = Field(
+        default=None, description="When 'follows' was fetched from Bluesky"
+    )
+    pending_adds: list[str] = Field(
+        default_factory=list,
+        description="DIDs followed since the last refresh, appended by jetstream ingest.  "
+        "Merged into 'follows' on read and folded in on refresh.",
+    )
+    invalidated_at: datetime | None = Field(
+        default=None,
+        description="Stamped by jetstream ingest on an unfollow.  Jetstream deletes carry no "
+        "subject DID, so the entry is marked stale and reconciled by the next "
+        "refresh rather than edited in place.",
+    )
+    refresh_started_at: datetime | None = Field(
+        default=None, description="Refresh lease; held across instances, expires on its own"
+    )
+    refresh_failed_at: datetime | None = Field(
+        default=None,
+        description="Last failed refresh.  Imposes a short cooldown so a user whose follows "
+        "cannot be fetched does not spawn a refresh task on every request.",
+    )
+    expires_at: datetime | None = Field(
+        default=None, description="UTC expiration timestamp; drives native Firestore TTL"
+    )
+    api_release_sha: str | None = None
 
 
 class SeenPostsDocument(BaseModel):
@@ -156,6 +250,9 @@ class ApiKeyDocument(BaseModel):
     key_hash: str = Field(..., description="SHA-256(full_key.encode()) as hex")
     email: str = Field(..., description="Owner email address")
     is_active: bool = Field(default=True, description="Whether this API key is valid and usable")
+    is_admin: bool = Field(
+        default=False, description="Whether this key may access /admin/* endpoints"
+    )
     created_at: datetime = Field(default_factory=_utcnow, description="When the key was created")
     last_used_at: datetime = Field(
         default_factory=_utcnow, description="Last time this key was used for an API request"
@@ -296,7 +393,9 @@ class FeedDebugDocument(BaseModel):
     feed_name: str = Field(..., description="Feed rkey that was loaded")
     regenerated: bool = Field(
         default=False,
-        description="True when this capture came from the cursor-regeneration path rather than a fresh load",
+        description=(
+            "True when this capture came from the cursor-regeneration path rather than a fresh load"
+        ),
     )
 
     # Inputs
@@ -334,7 +433,9 @@ class FeedDebugDocument(BaseModel):
     )
     diversification: list[FeedDebugDiversificationEntry] = Field(
         default_factory=list,
-        description="Per-item diversification breakdown in final order (empty when diversify was off)",
+        description=(
+            "Per-item diversification breakdown in final order (empty when diversify was off)"
+        ),
     )
     n_retrieved: int = Field(
         default=0,
@@ -422,7 +523,9 @@ class FeedSnapshotDocument(BaseModel):
     debug tool and is only written for debug-flagged users.
     """
 
-    request_id: str = Field(..., description="Feed-cache key / feedContext id (also the document ID)")
+    request_id: str = Field(
+        ..., description="Feed-cache key / feedContext id (also the document ID)"
+    )
     items: list[str] = Field(default_factory=list, description="AT URIs in final served order")
     feed_name: str
     generated_at: datetime
@@ -436,6 +539,47 @@ class FeedSnapshotDocument(BaseModel):
     items_meta: list[PipelineItemMeta] = Field(default_factory=list)
 
 
+class PopularityCacheDocument(BaseModel):
+    """A shared pool of popularity candidates, cached for every user.
+
+    One document per (freshness window, video_only) combination in the
+    ``popularity_cache`` collection; the document ID is that combination
+    (see ``lib.candidates.popularity_cache.pool_key``).
+
+    ``payload`` holds the whole candidate pool as one opaque blob rather than
+    a structured array — the candidates are only ever read as a unit, and a
+    single compressed field is both smaller than the equivalent Firestore map
+    array and far cheaper to write.  It is excluded from indexing via a
+    ``fieldOverrides`` entry in the frontend repo's ``firestore.indexes.json``
+    (Firestore rejects writes whose index entries exceed 7.5 KiB).
+
+    ``refresh_started_at`` is the cross-instance refresh lease: an instance
+    that wants to regenerate the pool stamps it inside a transaction, so only
+    one of the many API instances serving a stale entry pays for the
+    Elasticsearch query.  It is cleared when the refresh completes.
+    """
+
+    generated_at: datetime | None = Field(
+        default=None,
+        description="When the cached pool was generated; None while only a lease is held",
+    )
+    payload: bytes | None = Field(
+        default=None, description="Serialized candidate pool (see ``payload_format``)"
+    )
+    payload_format: str | None = Field(
+        default=None,
+        description="Encoding of ``payload``. Entries in an unrecognized format are "
+        "treated as a cache miss, so the format string doubles as a schema version.",
+    )
+    count: int = Field(default=0, description="Number of candidates in ``payload``")
+    refresh_started_at: datetime | None = Field(
+        default=None, description="Refresh lease timestamp; None when no refresh is in flight"
+    )
+    api_release_sha: str | None = Field(
+        default=None, description="Git SHA of the API instance that wrote this entry"
+    )
+
+
 class RedirectDocument(BaseModel):
     """A slug → URL mapping stored in the ``redirects`` collection.
 
@@ -444,7 +588,9 @@ class RedirectDocument(BaseModel):
 
     slug: str = Field(..., description="Short identifier (also the document ID)")
     url: str = Field(..., description="Destination https:// URL")
-    description: str | None = Field(default=None, description="Human-readable label for this redirect")
+    description: str | None = Field(
+        default=None, description="Human-readable label for this redirect"
+    )
     created_at: datetime = Field(
         default_factory=_utcnow, description="When this mapping was created"
     )

@@ -1,7 +1,27 @@
 import base64
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+FeedControlName = Literal[
+    "source_weights",
+    "social_radius",
+    "freshness",
+    "politics",
+    "purpose",
+]
+
+# What a feed does when the AppView calls getFeedSkeleton with no (or an
+# unverifiable) AT Protocol JWT — i.e. someone viewing the feed logged out.
+#
+#   "explain" — the default: serve a single post explaining that the feed
+#               needs a login. Right for any personalized feed, which has
+#               nothing to show without a user (see issue #384).
+#   "serve"   — run the normal pipeline anonymously. For feeds whose
+#               candidates don't depend on who is asking.
+#   "deny"    — 401. For the private development feeds, which nobody is meant
+#               to be looking at in the first place.
+LoggedOutBehavior = Literal["deny", "explain", "serve"]
 
 
 class FeedCursor(BaseModel):
@@ -18,9 +38,7 @@ class FeedCursor(BaseModel):
 
     def encode(self) -> str:
         """Serialise to a URL-safe, opaque string."""
-        return base64.urlsafe_b64encode(
-            self.model_dump_json().encode()
-        ).decode()
+        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode()
 
     @classmethod
     def decode(cls, raw: str) -> "FeedCursor":
@@ -38,8 +56,7 @@ class FeedCursor(BaseModel):
 class CandidatePost(BaseModel):
     """A post returned by search or candidate generation."""
 
-    at_uri: str | None = Field(
-        default=None, description="The AT URI of the post (e.g. at://...)")
+    at_uri: str | None = Field(default=None, description="The AT URI of the post (e.g. at://...)")
     content: str | None = Field(default=None, description="The post text content")
     minilm_l12_embedding: str | None = Field(
         default=None, description="Base64-encoded float32 MiniLM L12 embedding (384-d)"
@@ -50,9 +67,7 @@ class CandidatePost(BaseModel):
     generator_name: str | None = Field(
         default=None, description="Name of the candidate generator that produced this post"
     )
-    author_did: str | None = Field(
-        default=None, description="AT Protocol DID of the post author"
-    )
+    author_did: str | None = Field(default=None, description="AT Protocol DID of the post author")
     author_username: str | None = Field(
         default=None,
         description="AT Protocol handle of the post author (resolved from author_did; "
@@ -61,9 +76,7 @@ class CandidatePost(BaseModel):
     contains_images: bool | None = Field(
         default=None, description="Whether the post embeds one or more images"
     )
-    contains_video: bool | None = Field(
-        default=None, description="Whether the post embeds video"
-    )
+    contains_video: bool | None = Field(default=None, description="Whether the post embeds video")
     image_count: int | None = Field(
         default=None, description="Number of images embedded in the post"
     )
@@ -209,6 +222,14 @@ class FeedConfig(BaseModel):
     public: bool = Field(False)
     internal_rkey: str
     internal_display_name: str
+    controls: tuple[FeedControlName, ...] = Field(
+        default_factory=tuple,
+        description="User-configurable controls exposed for this feed, in display order.",
+    )
+    preference_source: str | None = Field(
+        default=None,
+        description="Feed whose stored preferences this pipeline inherits, when different.",
+    )
     gen_request_template: CandidateGenerateRequest
     rank_request_template: RankPredictRequest | None = Field(
         None,
@@ -230,6 +251,17 @@ class FeedConfig(BaseModel):
     pinned_post_uri: str | None = Field(
         None,
         description="AT URI of a post to pin at the top of the first page of this feed.",
+    )
+    logged_out: LoggedOutBehavior = Field(
+        "explain",
+        description="How this feed responds to an unauthenticated request: a single "
+        "explanatory post ('explain', the default), the normal pipeline run anonymously "
+        "('serve'), or 401 ('deny').",
+    )
+    logged_out_post_uri: str | None = Field(
+        None,
+        description="AT URI of the post served on its own to logged-out callers. Only "
+        "read when logged_out is 'explain'; defaults to feeds.LOGGED_OUT_POST_URI.",
     )
     max_render_share: float | None = Field(
         None,
@@ -256,6 +288,7 @@ class FeedConfig(BaseModel):
     )
     avatar: str | None = Field(
         None,
-        description="Path to avatar image relative to repo root (e.g. 'assets/icons/your-feed.png'). "
+        description="Path to avatar image relative to repo root "
+        "(e.g. 'assets/icons/your-feed.png'). "
         "Used by publish_feed.py at publish time; not read at runtime.",
     )

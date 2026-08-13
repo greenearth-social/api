@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from threading import Lock
 from typing import NamedTuple
@@ -37,18 +37,26 @@ from ..documents import (
     FeedSnapshotDocument,
     InteractionDocument,
     PipelineItemMeta,
+    SourceWeightsDocument,
 )
-from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
+from ..feeds import (
+    DEFAULT_SOCIAL_RADIUS,
+    FEEDS,
+    LOGGED_OUT_POST_URI,
+    SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
+    SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,  # noqa: F401 - compatibility export
+    canonical_feed_name,
+)
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
-from ..lib.config import fail_fast, set_fail_fast_for_request
+from ..lib.config import set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
 from ..lib.elasticsearch import fetch_post_embeddings
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
-from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
+from ..lib.feed_preferences import configured_controls, control_value
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     delete_feed_snapshot,
@@ -63,6 +71,7 @@ from ..lib.firestore import (
     upsert_user,
     write_feed_debug,
 )
+from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.metrics import get_metric_collector
 from ..lib.pipeline_context import (
     DegradationEvent,
@@ -72,17 +81,25 @@ from ..lib.pipeline_context import (
     pipeline_context_scope,
 )
 from ..lib.posthog_client import (
-    evaluate_fail_fast_flag,
+    FAIL_FAST_FLAG,
+    NETWORK_LIKES_FLAG,
+    evaluate_feature_flags,
     get_posthog_client,
     track_interaction,
     track_session,
 )
-from ..lib.release import api_release_sha
 from ..lib.rankers import run_predict
+from ..lib.release import api_release_sha
 from ..lib.request_cache import request_cache_scope
 from ..lib.request_context import set_traffic
 from ..lib.telemetry import timed
-from ..models import CandidateGenerateRequest, CandidatePost, FeedConfig, FeedCursor
+from ..models import (
+    CandidateGenerateRequest,
+    CandidatePost,
+    FeedConfig,
+    FeedCursor,
+    GeneratorSpec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +110,7 @@ router = APIRouter(tags=["xrpc"])
 # Configuration
 # ---------------------------------------------------------------------------
 
-FEED_SNAPSHOT_RETENTION_SECONDS = 900  # 15 minutes
+FEED_SNAPSHOT_RETENTION_SECONDS = 24 * 60 * 60  # 24 hours
 INITIAL_REQUEST_REUSE_SECONDS = 5
 
 try:
@@ -206,6 +223,13 @@ def _get_hostname() -> str:
 
 def _feed_uri(feed_name: str) -> str:
     return f"at://{_get_service_did()}/app.bsky.feed.generator/{feed_name}"
+
+
+# Stand-in identity for a logged-out caller on a feed that serves anonymously
+# (``logged_out="serve"``). Deliberately not a resolvable ``did:plc``, so it can
+# never collide with a real user: nothing keyed on a user is written for these
+# requests, and this makes any such write obvious if one is ever added.
+ANONYMOUS_DID = "did:ge:anonymous"
 
 
 def dev_session_did(request: Request) -> str | None:
@@ -423,11 +447,13 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
         logger.exception("Embedding hydration failed; continuing without")
         ctx = current_pipeline_context()
         if ctx is not None:
-            ctx.record(DegradationEvent(
-                stage=DegradationStage.EMBED_HYDRATION,
-                component="fetch_post_embeddings",
-                cause=exc,
-            ))
+            ctx.record(
+                DegradationEvent(
+                    stage=DegradationStage.EMBED_HYDRATION,
+                    component="fetch_post_embeddings",
+                    cause=exc,
+                )
+            )
         return candidates
 
     encoded: dict[str, str] = {}
@@ -469,9 +495,7 @@ def _record_cutoff(feed_name: str, reason: str, uris: list[str]) -> None:
         return
     collector = get_metric_collector()
     if collector:
-        collector.record(
-            "feed.slate.cutoff_count", len(uris), feed_name=feed_name, reason=reason
-        )
+        collector.record("feed.slate.cutoff_count", len(uris), feed_name=feed_name, reason=reason)
     rec = current_recorder()
     if rec is not None:
         rec.record_cutoff(reason, uris)
@@ -575,12 +599,15 @@ async def _run_ranking_pipeline(
                 logger.exception("Ranking stage failed; falling back to unranked ordering")
                 if ctx is not None:
                     component = getattr(exc, "name", type(exc).__name__)
-                    ctx.record(DegradationEvent(
-                        stage=DegradationStage.RANK,
-                        component=component,
-                        cause=exc,
-                    ))
-                    # ctx.record re-raises exc when fail_fast=True, so reaching here means fail_fast=False
+                    ctx.record(
+                        DegradationEvent(
+                            stage=DegradationStage.RANK,
+                            component=component,
+                            cause=exc,
+                        )
+                    )
+                    # ctx.record re-raises when fail_fast=True, so this is the
+                    # fail-open path.
                     ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
                 else:
                     raise
@@ -595,11 +622,7 @@ async def _run_ranking_pipeline(
             # ordered is sorted desc by the combined score, so everything from
             # the first sub-floor candidate on is below the floor.
             cut_idx = next(
-                (
-                    i
-                    for i, c in enumerate(ordered)
-                    if (c.score or 0.0) < feed_cfg.min_rank_score
-                ),
+                (i for i, c in enumerate(ordered) if (c.score or 0.0) < feed_cfg.min_rank_score),
                 len(ordered),
             )
             low_score_uris = [c.at_uri for c in ordered[cut_idx:] if c.at_uri]
@@ -630,9 +653,7 @@ async def _run_ranking_pipeline(
         if feed_cfg.max_render_share is not None:
             max_keep = max(1, math.floor(feed_cfg.max_render_share * n_retrieved))
             if len(final) > max_keep:
-                _record_cutoff(
-                    feed_name, "share", [c.at_uri for c in final[max_keep:] if c.at_uri]
-                )
+                _record_cutoff(feed_name, "share", [c.at_uri for c in final[max_keep:] if c.at_uri])
                 final = final[:max_keep]
 
         final_uris = [c.at_uri for c in final if c.at_uri]
@@ -647,9 +668,7 @@ async def _run_ranking_pipeline(
         if not final_uris and pre_cut_uris:
             # The quality gates rejected everything we retrieved.
             if collector:
-                collector.record(
-                    "feed.slate.empty_after_cutoff_count", 1, feed_name=feed_name
-                )
+                collector.record("feed.slate.empty_after_cutoff_count", 1, feed_name=feed_name)
             if EMPTY_SLATE_FAIL_OPEN:
                 logger.warning(
                     "Slate cutoffs emptied feed '%s' (%d candidates retrieved); failing open",
@@ -668,7 +687,62 @@ async def _run_ranking_pipeline(
             if collector is not None:
                 collector.record("feed.render.degraded_count", 1, feed_name=ctx.feed_name)
 
-        return PipelineResult(final_uris, low_score_uris)
+    return PipelineResult(final_uris, low_score_uris)
+
+
+def _with_purpose_weights(feed_cfg: FeedConfig, purpose: float) -> FeedConfig:
+    """Return a request-local feed config with the user's purpose weights.
+
+    Purpose is the constructive share of the combined rank score. Engaging
+    rankers receive the complementary share. Feed templates are module-level
+    shared objects, so both model copies are required to keep user preferences
+    isolated between requests.
+    """
+    rank_template = feed_cfg.rank_request_template
+    if rank_template is None:
+        return feed_cfg
+
+    engaging_names = {"heavy_ranker", "heavy_ranker_empty_history"}
+    updated = False
+    models = []
+    for model in rank_template.models:
+        if model.name in engaging_names:
+            models.append(model.model_copy(update={"weight": 1.0 - purpose}))
+            updated = True
+        elif model.name == "perspective":
+            models.append(model.model_copy(update={"weight": purpose}))
+            updated = True
+        else:
+            models.append(model)
+
+    if not updated:
+        return feed_cfg
+    return feed_cfg.model_copy(
+        update={"rank_request_template": rank_template.model_copy(update={"models": models})}
+    )
+
+
+def _source_generators(
+    weights: SourceWeightsDocument,
+    *,
+    include_network_likes: bool,
+    fallback_radius: int,
+) -> list[GeneratorSpec]:
+    """Build a request-local candidate mix from an atomic source preference."""
+    configured = [
+        ("followed_users", weights.following),
+        ("two_tower", weights.authors_topics),
+        ("popularity", weights.popular),
+    ]
+    if include_network_likes:
+        configured.append(("network_likes", weights.network_likes))
+    else:
+        total = sum(weight for _, weight in configured)
+        if total <= 0:
+            return SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[fallback_radius]
+        configured = [(name, weight / total) for name, weight in configured]
+
+    return [GeneratorSpec(name=name, weight=weight) for name, weight in configured if weight > 0]
 
 
 async def _run_pipeline_capturing(
@@ -702,7 +776,7 @@ async def _run_pipeline_capturing(
     for now; PostHog per-user flag (issue 279) will pass it in when implemented.
     """
     recorder = FeedDebugRecorder(feed_name=feed_name, regenerated=regenerated)
-    generated_at = datetime.now(timezone.utc)
+    generated_at = datetime.now(UTC)
     ctx = PipelineContext(feed_name=feed_name)
 
     with feed_debug_scope(recorder), pipeline_context_scope(ctx):
@@ -783,10 +857,7 @@ def _snapshot_page(
 ) -> FeedSnapshotDocument:
     """Restrict pipeline metadata to posts actually returned in one page."""
     meta_by_uri = {meta.at_uri: meta for meta in snapshot.items_meta}
-    items_meta = [
-        meta_by_uri.get(uri, PipelineItemMeta(at_uri=uri))
-        for uri in uris
-    ]
+    items_meta = [meta_by_uri.get(uri, PipelineItemMeta(at_uri=uri)) for uri in uris]
     diagnostics = [
         diagnostic.model_copy(
             update={
@@ -862,9 +933,7 @@ def _record_similarity_metric(
     carry a score, since it wasn't organically selected by MMR.
     """
     scores = [
-        scores_by_uri[uri]
-        for uri in page_uris
-        if uri in scores_by_uri and uri != exclude_uri
+        scores_by_uri[uri] for uri in page_uris if uri in scores_by_uri and uri != exclude_uri
     ]
     if not scores:
         return
@@ -907,7 +976,7 @@ def _make_feed_context(
     )
 
 
-def _skeleton_items(uris: list[str], feed_context: str) -> list[SkeletonItem]:
+def _skeleton_items(uris: list[str], feed_context: str | None) -> list[SkeletonItem]:
     return [SkeletonItem(post=uri, feed_context=feed_context) for uri in uris]
 
 
@@ -1000,7 +1069,7 @@ async def _record_session(
         )
         username = None
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     try:
         await upsert_user(db, user_did, username, is_load_test=is_load_test)
@@ -1043,7 +1112,7 @@ async def _resolve_handles(request: Request, dids: set[str]) -> dict[str, str]:
             return None
 
     handles = await asyncio.gather(*(_one(did) for did in did_list))
-    return {did: handle for did, handle in zip(did_list, handles) if handle}
+    return {did: handle for did, handle in zip(did_list, handles, strict=True) if handle}
 
 
 async def _write_feed_snapshot_background(
@@ -1069,7 +1138,13 @@ async def _write_feed_snapshot_background(
     if not snapshot.items:
         return
     try:
-        truncated = await merge_feed_snapshot(db, user_did, request_id, snapshot)
+        truncated = await merge_feed_snapshot(
+            db,
+            user_did,
+            request_id,
+            snapshot,
+            enforce_document_cap=not load_test,
+        )
         if truncated:
             logger.warning(
                 "Feed snapshot reached item limit for user '%s', request '%s'",
@@ -1079,9 +1154,7 @@ async def _write_feed_snapshot_background(
             )
             collector = get_metric_collector()
             if collector is not None:
-                collector.record(
-                    "feed.snapshot.truncated_count", 1, feed_name=snapshot.feed_name
-                )
+                collector.record("feed.snapshot.truncated_count", 1, feed_name=snapshot.feed_name)
         if load_test:
             await delete_feed_snapshot(db, user_did, request_id)
     except Exception:
@@ -1123,7 +1196,7 @@ async def _write_feed_debug(
         logger.exception("Failed to write feed debug record for user '%s'", user_did)
 
 
-async def _record_interactions(db, interactions: list["Interaction"]) -> None:
+async def _record_interactions(db, interactions: list[Interaction]) -> None:
     """Verify each interaction's feedContext and persist the valid ones.
 
     The signed feedContext is the trust anchor: interactions with a missing or
@@ -1140,6 +1213,26 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
     # load-test session's seen posts land in that user's separate load-test
     # bucket instead of polluting their real exclusion data.
     seen_by_user: dict[tuple[str, bool], list[str]] = {}
+
+    # Handles for the PostHog identity properties, memoized so a batch of
+    # interactions from one user costs one Firestore read rather than one per
+    # item. Read from the user doc that _record_session already wrote, rather
+    # than re-resolving against the PLC directory.
+    handles: dict[str, str | None] = {}
+
+    async def _handle_for(user_did: str) -> str | None:
+        if user_did not in handles:
+            try:
+                user = await get_user(db, user_did)
+                handles[user_did] = user.username if user else None
+            except Exception:
+                logger.warning(
+                    "Could not load handle for %s; tracking interaction without it",
+                    user_did,
+                    exc_info=True,
+                )
+                handles[user_did] = None
+        return handles[user_did]
 
     for ix in interactions:
         payload = decode_feed_context(ix.feed_context or "")
@@ -1166,7 +1259,7 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
             event=event,
             feed_name=payload.feed,
             request_id=payload.rid,
-            feed_generated_at=datetime.fromtimestamp(payload.iat, tz=timezone.utc),
+            feed_generated_at=datetime.fromtimestamp(payload.iat, tz=UTC),
             load_test=payload.lt,
         )
         try:
@@ -1185,6 +1278,7 @@ async def _record_interactions(db, interactions: list["Interaction"]) -> None:
                     payload.feed,
                     ix.item,
                     doc.created_at,
+                    username=await _handle_for(payload.did),
                 )
             except Exception:
                 logger.exception(
@@ -1213,12 +1307,7 @@ def _feed_name_for_metrics(feed: object) -> str:
         return "unknown"
     if collection != "app.bsky.feed.generator":
         return "unknown"
-    if rkey in FEEDS:
-        return rkey
-    for name, config in FEEDS.items():
-        if config.internal_rkey == rkey:
-            return name
-    return "unknown"
+    return canonical_feed_name(rkey) or "unknown"
 
 
 def _record_feed_render_metrics(
@@ -1326,13 +1415,7 @@ async def get_feed_skeleton(
         collection = ""
 
     if collection == "app.bsky.feed.generator":
-        if rkey in FEEDS:
-            feed_name = rkey
-        else:
-            for key, cfg in FEEDS.items():
-                if cfg.internal_rkey == rkey:
-                    feed_name = key
-                    break
+        feed_name = canonical_feed_name(rkey)
 
     if feed_name is None:
         raise HTTPException(
@@ -1364,6 +1447,11 @@ async def get_feed_skeleton(
     if is_load_test:
         is_probe = False
 
+    # A logged-out caller has no identity, so nothing that is keyed on a user
+    # (Firestore reads and writes, preferences, feature flags, analytics) runs
+    # for the request — see the guards on ``is_anonymous`` below.
+    is_anonymous = False
+
     if _dev_session_did is not None:
         user_did = _dev_session_did
     elif is_load_test:
@@ -1378,18 +1466,41 @@ async def get_feed_skeleton(
         if not user_did:
             if request.headers.get("Authorization"):
                 logger.warning("Auth header present but verification failed for feed %s", feed_name)
-            else:
-                logger.warning("No auth header present for feed %s", feed_name)
-            raise HTTPException(
-                status_code=401,
-                detail="Authentication required",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+
+            # Bluesky renders these feeds to logged-out visitors too, and an
+            # empty feed reads as a broken one. What we can show depends on
+            # whether the feed needs to know who is asking (issue #384).
+            if feed_cfg.logged_out == "deny":
+                logger.warning("Unauthenticated request for feed %s", feed_name)
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authentication required",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+            if feed_cfg.logged_out == "explain":
+                # Nothing to personalize, so skip the pipeline entirely and say
+                # why the feed is empty. No cursor: this is the whole feed.
+                set_traffic("logged_out")
+                return FeedSkeletonResponse(
+                    feed=[SkeletonItem(post=feed_cfg.logged_out_post_uri or LOGGED_OUT_POST_URI)]
+                )
+
+            is_anonymous = True
+            user_did = ANONYMOUS_DID
 
     # Tag every metric on this request path (incl. background tasks, which
     # inherit this context at spawn time) with its traffic class so test and
     # probe traffic can be filtered out of dashboards.
-    set_traffic("load_test" if is_load_test else "probe" if is_probe else "real")
+    set_traffic(
+        "logged_out"
+        if is_anonymous
+        else "load_test"
+        if is_load_test
+        else "probe"
+        if is_probe
+        else "real"
+    )
 
     # Record authenticated users in Firestore for backend analytics. Runs in
     # the background since this isn't essential for serving.
@@ -1398,51 +1509,116 @@ async def get_feed_skeleton(
         logger.error("Firestore client not initialized")
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
-    _spawn_background(
-        _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
-    )
+    if not is_anonymous:
+        _spawn_background(
+            _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
+        )
 
-    set_fail_fast_for_request(evaluate_fail_fast_flag(get_posthog_client(), user_did))
+    uses_network_likes_flag = feed_name in (
+        "your-feed",
+        "unranked-your-feed",
+        "cutoff-preview",
+    )
+    flag_keys = [FAIL_FAST_FLAG]
+    if uses_network_likes_flag:
+        flag_keys.append(NETWORK_LIKES_FLAG)
+
+    posthog_client = get_posthog_client()
+    # Flags are evaluated per user, and an anonymous caller isn't one: it would
+    # be a single synthetic identity shared by every logged-out request. Take
+    # the flag defaults instead.
+    feature_flags = (
+        await asyncio.to_thread(
+            evaluate_feature_flags,
+            posthog_client,
+            user_did,
+            flag_keys,
+        )
+        if posthog_client is not None and not is_anonymous
+        else {}
+    )
+    set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
     # to no-debug rather than breaking feed serving.
     debug_enabled = False
     user_doc = None
-    try:
-        user_doc = await get_user(db, user_did)
-        debug_enabled = bool(user_doc and user_doc.debug_feeds)
-    except Exception:
-        logger.exception("Failed to read debug flag for user '%s'", user_did)
+    if not is_anonymous:
+        try:
+            user_doc = await get_user(db, user_did)
+            debug_enabled = bool(user_doc and user_doc.debug_feeds)
+        except Exception:
+            logger.exception("Failed to read debug flag for user '%s'", user_did)
 
-    # Social Radius only reallocates the fixed candidate batch among sources;
-    # it never increases the total candidate count or per-request batch cap.
-    # Apply its preference override to personalized-feed generator weights.
-    # Cold-start uses the same source mix as your-feed, but forces the
-    # empty-history two-tower variant.
-    # The override is computed once and threaded through model_copy in both
-    # generation paths so the shared module-level template is never mutated.
+    # Purpose controls the relative influence of the engaging and constructive
+    # rankers only for feeds that declare it. Apply it to a request-local copy;
+    # module-level FEEDS templates must remain immutable.
+    controls = configured_controls(feed_name)
+    if "purpose" in controls:
+        purpose = float(control_value(user_doc, feed_name, "purpose"))
+        feed_cfg = _with_purpose_weights(feed_cfg, purpose)
+
+    # Source weights only reallocate the fixed candidate batch among sources.
+    # GreenEarth's unranked and cutoff-preview variants share the public
+    # GreenEarth preference via preference_source; cold-start intentionally
+    # keeps its static popularity-only mix.
     generators_override: dict = {}
     applied_social_radius: int | None = None
-    if feed_name in ("your-feed", "cold-start"):
-        applied_social_radius = user_doc.social_radius if user_doc is not None else 3
-        preset = SOCIAL_RADIUS_PRESETS.get(applied_social_radius)
-        if preset is not None:
-            if feed_name == "cold-start":
-                preset = [
-                    spec.model_copy(update={"name": "two_tower_empty_history"})
-                    if spec.name == "two_tower"
-                    else spec
-                    for spec in preset
-                ]
-            generators_override = {"generators": preset}
+    if uses_network_likes_flag and "source_weights" in controls:
+        source_weights = control_value(user_doc, feed_name, "source_weights")
+        assert isinstance(source_weights, SourceWeightsDocument)
+        preference_key = FEEDS[feed_name].preference_source or feed_name
+        stored = user_doc.feed_preferences.get(preference_key) if user_doc is not None else None
+        has_custom_weights = stored is not None and stored.source_weights is not None
+        legacy_radius = (
+            stored.social_radius
+            if stored is not None and stored.social_radius is not None
+            else user_doc.social_radius
+            if user_doc is not None
+            else DEFAULT_SOCIAL_RADIUS
+        )
+        if not has_custom_weights:
+            applied_social_radius = legacy_radius
+
+        include_network_likes = (
+            True if posthog_client is None else feature_flags.get(NETWORK_LIKES_FLAG, False)
+        )
+        if include_network_likes or has_custom_weights:
+            generators = _source_generators(
+                source_weights,
+                include_network_likes=include_network_likes,
+                fallback_radius=legacy_radius,
+            )
+        else:
+            generators = SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[legacy_radius]
+        generators_override = {"generators": generators}
 
     freshness_index = (
-        user_doc.freshness if user_doc is not None else DEFAULT_FRESHNESS_INDEX
+        int(control_value(user_doc, feed_name, "freshness"))
+        if "freshness" in controls
+        else DEFAULT_FRESHNESS_INDEX
     )
     max_age_hours = max_age_hours_for_freshness(freshness_index)
 
     feed_cache = _get_feed_cache(request)
+
+    def feed_context_for(request_id: str) -> str | None:
+        """Signed interaction token for this response, or None when anonymous.
+
+        ``sendInteractions`` carries no auth of its own — the token is the only
+        thing tying a reported interaction to a user, and a logged-out request
+        has no user to tie it to. Omitting it drops those interactions.
+        """
+        if is_anonymous:
+            return None
+        return _make_feed_context(user_did, feed_name, request_id, load_test=is_load_test)
+
+    async def generation_exclusions() -> list[str]:
+        """Post URIs to exclude — none for an anonymous caller, who has no history."""
+        if is_anonymous:
+            return []
+        return await _generation_exclusions(db, user_did, feed_cfg)
 
     async with timed(
         logger,
@@ -1456,12 +1632,22 @@ async def get_feed_skeleton(
         if cursor is not None:
             try:
                 parsed = FeedCursor.decode(cursor)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid cursor")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid cursor") from exc
 
             async with timed(logger, "feedcache_retrieve", cache_id=parsed.id):
                 cache_doc = await feed_cache.retrieve_document(parsed.id)
             if cache_doc is not None:
+                if cache_doc.user_did != user_did or cache_doc.feed_name != feed_name:
+                    logger.warning(
+                        "Rejected cursor outside its originating user/feed context",
+                        extra={
+                            "request_id": parsed.id,
+                            "feed_name": feed_name,
+                            "cached_feed_name": cache_doc.feed_name,
+                        },
+                    )
+                    raise HTTPException(status_code=400, detail="Invalid cursor")
                 cached_uris = cache_doc.items
                 if parsed.offset < len(cached_uris):
                     # Serve from the existing cached batch.
@@ -1478,21 +1664,19 @@ async def get_feed_skeleton(
                     _record_similarity_metric(
                         page, scores_by_uri, feed_name, batch=parsed.offset // limit
                     )
-                    feed_context = _make_feed_context(
-                        user_did, feed_name, parsed.id, load_test=is_load_test
-                    )
+                    feed_context = feed_context_for(parsed.id)
                     cached_snapshot = FeedSnapshotDocument(
                         request_id=parsed.id,
                         items=cached_uris,
                         feed_name=cache_doc.feed_name or feed_name,
-                        generated_at=cache_doc.generated_at or datetime.now(timezone.utc),
+                        generated_at=cache_doc.generated_at or datetime.now(UTC),
                         api_release_sha=cache_doc.api_release_sha,
                         expires_at=cache_doc.expires_at,
                         generator_diagnostics=cache_doc.generator_diagnostics,
                         applied_social_radius=cache_doc.applied_social_radius,
                         items_meta=cache_doc.items_meta,
                     )
-                    if not is_probe:
+                    if not is_probe and not is_anonymous:
                         await _write_feed_snapshot_background(
                             db,
                             user_did,
@@ -1507,7 +1691,7 @@ async def get_feed_skeleton(
 
                 # Offset is at or past the end — regenerate with exclusions.
                 batch = _batch_size(limit)
-                excluded = await _generation_exclusions(db, user_did, feed_cfg)
+                excluded = await generation_exclusions()
                 # Dedup while preserving order; the cached batch and the
                 # seen/discarded posts can overlap.
                 exclude_uris = list(dict.fromkeys(cached_uris + excluded))
@@ -1533,7 +1717,7 @@ async def get_feed_skeleton(
                     debug_enabled=debug_enabled,
                     applied_social_radius=applied_social_radius,
                 )
-                if low_score_uris:
+                if low_score_uris and not is_anonymous:
                     _spawn_background(
                         _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
                     )
@@ -1558,10 +1742,8 @@ async def get_feed_skeleton(
                         _record_similarity_metric(
                             page, scores_by_uri, feed_name, batch=parsed.offset // limit
                         )
-                        feed_context = _make_feed_context(
-                            user_did, feed_name, parsed.id, load_test=is_load_test
-                        )
-                        if not is_probe:
+                        feed_context = feed_context_for(parsed.id)
+                        if not is_probe and not is_anonymous:
                             await _write_feed_snapshot_background(
                                 db,
                                 user_did,
@@ -1584,6 +1766,9 @@ async def get_feed_skeleton(
         # ------------------------------------------------------------------
         reuse_future: Future[FeedSkeletonResponse] | None = None
         if cursor is None and not is_probe:
+            # Logged-out callers all share ANONYMOUS_DID, so concurrent ones
+            # coalesce onto a single pipeline run and get the same page. That's
+            # the point: unauthenticated traffic is the cheapest to send us.
             is_leader, reuse_future = _claim_initial_request(
                 user_did, feed_name, limit, is_load_test
             )
@@ -1593,7 +1778,7 @@ async def get_feed_skeleton(
 
         try:
             batch = _batch_size(limit)
-            exclude_uris = await _generation_exclusions(db, user_did, feed_cfg)
+            exclude_uris = await generation_exclusions()
             gen_request = feed_cfg.gen_request_template.model_copy(
                 update={
                     "user_did": user_did,
@@ -1621,7 +1806,7 @@ async def get_feed_skeleton(
                 debug_enabled=debug_enabled,
                 applied_social_radius=applied_social_radius,
             )
-            if low_score_uris:
+            if low_score_uris and not is_anonymous:
                 _spawn_background(
                     _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
                 )
@@ -1645,7 +1830,7 @@ async def get_feed_skeleton(
                 page, scores_by_uri, feed_name, batch=0, exclude_uri=feed_cfg.pinned_post_uri
             )
 
-            if not is_probe:
+            if not is_probe and not is_anonymous:
                 await _write_feed_snapshot_background(
                     db,
                     user_did,
@@ -1662,13 +1847,9 @@ async def get_feed_skeleton(
             # later pages would skip posts.
             next_cursor = None
             if cache_uris:
-                cache_meta_by_uri = {
-                    meta.at_uri: meta for meta in generated_snapshot.items_meta
-                }
+                cache_meta_by_uri = {meta.at_uri: meta for meta in generated_snapshot.items_meta}
                 cache_items_meta = [
-                    cache_meta_by_uri[uri]
-                    for uri in cache_uris
-                    if uri in cache_meta_by_uri
+                    cache_meta_by_uri[uri] for uri in cache_uris if uri in cache_meta_by_uri
                 ]
                 async with timed(logger, "feedcache_store", cache_id=request_id):
                     await feed_cache.store_document(
@@ -1678,19 +1859,17 @@ async def get_feed_skeleton(
                             items_meta=cache_items_meta,
                             generator_diagnostics=generated_snapshot.generator_diagnostics,
                             applied_social_radius=applied_social_radius,
+                            user_did=user_did,
                             feed_name=feed_name,
                             generated_at=generated_snapshot.generated_at,
                             api_release_sha=generated_snapshot.api_release_sha,
-                            expires_at=datetime.now(timezone.utc)
-                            + timedelta(seconds=DEFAULT_TTL_SECONDS),
+                            expires_at=datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS),
                             load_test=is_load_test,
                         ),
                     )
                 next_cursor = FeedCursor(id=request_id, offset=consumed).encode()
 
-            feed_context = _make_feed_context(
-                user_did, feed_name, request_id, load_test=is_load_test
-            )
+            feed_context = feed_context_for(request_id)
             response = FeedSkeletonResponse(
                 feed=_skeleton_items(page, feed_context),
                 cursor=next_cursor,

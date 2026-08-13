@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from ..lib.firestore import create_redirect, delete_redirect, get_redirect, update_redirect
 from ..lib.posthog_client import get_posthog_client, track_redirect
-from ..security import RequireApiKey
+from ..security import RequireAdminApiKey
 
 router = APIRouter(tags=["redirect"])
 
@@ -126,7 +126,7 @@ class RedirectResponse_(BaseModel):
 async def admin_create_redirect(
     body: RedirectCreateRequest,
     request: Request,
-    _key: RequireApiKey,
+    _key: RequireAdminApiKey,
 ) -> RedirectResponse_:
     """Create a new slug → URL mapping."""
     db = getattr(request.app.state, "firestore", None)
@@ -147,7 +147,7 @@ async def admin_update_redirect(
     slug: str,
     body: RedirectUpdateRequest,
     request: Request,
-    _key: RequireApiKey,
+    _key: RequireAdminApiKey,
 ) -> RedirectResponse_:
     """Update the destination URL for an existing slug."""
     db = getattr(request.app.state, "firestore", None)
@@ -166,7 +166,7 @@ async def admin_update_redirect(
 async def admin_delete_redirect(
     slug: str,
     request: Request,
-    _key: RequireApiKey,
+    _key: RequireAdminApiKey,
 ) -> None:
     """Delete a slug → URL mapping."""
     db = getattr(request.app.state, "firestore", None)
