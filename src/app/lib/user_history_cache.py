@@ -53,12 +53,14 @@ USER_HISTORY_LIMIT = DEFAULT_LIKED_POSTS_LIMIT
 USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS = 0.5
 USER_HISTORY_CACHE_BACKGROUND_TIMEOUT_SECONDS = 5.0
 
+# This cache policy is intentionally fixed in code so every API revision uses
+# one consistent set of freshness and retry guarantees across environments.
 # Age at which cached recommendation history is served stale and refreshed in
-# the background (default 10 minutes).
+# the background (10 minutes).
 USER_HISTORY_CACHE_TTL_SEC = 600
 
 # Hard serving cutoff and Firestore expiration for cached history. Must be at
-# least USER_HISTORY_CACHE_TTL_SEC (default 30 minutes).
+# least USER_HISTORY_CACHE_TTL_SEC (30 minutes).
 USER_HISTORY_CACHE_MAX_AGE_SEC = 1800
 
 # How long one instance may hold a stale-refresh lease before another retries.
@@ -73,17 +75,17 @@ USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC = 60
 
 def max_age_seconds() -> int:
     """Hard age after which history is rebuilt instead of served stale."""
-    configured = USER_HISTORY_CACHE_MAX_AGE_SEC
+    max_age = USER_HISTORY_CACHE_MAX_AGE_SEC
     fresh_ttl = USER_HISTORY_CACHE_TTL_SEC
-    if configured < fresh_ttl:
+    if max_age < fresh_ttl:
         logger.warning(
             "USER_HISTORY_CACHE_MAX_AGE_SEC=%d is below the fresh TTL %d; using %d",
-            configured,
+            max_age,
             fresh_ttl,
             fresh_ttl,
         )
         return fresh_ttl
-    return configured
+    return max_age
 
 
 @dataclass(frozen=True)
@@ -172,7 +174,7 @@ class UserHistoryCache(ABC):
 
     @abstractmethod
     async def store(self, user_did: str, history: UserHistory) -> None:
-        """Store a history using the cache's configured retention window."""
+        """Store a history using the cache's fixed retention window."""
         ...
 
     async def claim_refresh(self, user_did: str) -> bool:

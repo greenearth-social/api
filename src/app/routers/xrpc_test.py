@@ -279,6 +279,8 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         public=False,
         internal_rkey="cache-test",
         internal_display_name="cache-test",
+        logged_out="deny",
+        logged_out_post_uri=None,
         controls=(),
         preference_source=None,
         gen_request_template=gen_request,

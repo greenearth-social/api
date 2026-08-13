@@ -17,8 +17,13 @@ from .embeddings import (
 from .request_cache import request_cache_scope
 from .user_history_cache import (
     USER_HISTORY_CACHE_COLLECTION,
+    USER_HISTORY_CACHE_LEASE_SEC,
+    USER_HISTORY_CACHE_MAX_AGE_SEC,
+    USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC,
+    USER_HISTORY_CACHE_TTL_SEC,
     USER_HISTORY_CACHE_VERSION,
     USER_HISTORY_LIMIT,
+    USER_HISTORY_REFRESH_TIMEOUT_SEC,
     FirestoreUserHistoryCache,
     UserHistory,
     UserHistoryCache,
@@ -26,69 +31,32 @@ from .user_history_cache import (
     UserHistoryItem,
     _user_history_cache_key,
     fetch_user_history_features,
-    lease_seconds,
     max_age_seconds,
-    refresh_timeout_seconds,
-    retry_cooldown_seconds,
     set_user_history_cache,
-    ttl_seconds,
 )
 
 VALID_EMBEDDING = [1.0, 2.0, *([0.0] * (MINILM_L12_EMBEDDING_DIM - 2))]
-DEFAULT_TTL_SECONDS = 600
-DEFAULT_MAX_AGE_SECONDS = 1_800
-DEFAULT_LEASE_SECONDS = 30
-DEFAULT_RETRY_COOLDOWN_SECONDS = 60
-USER_HISTORY_CONFIG_ENV_NAMES = (
-    "GE_USER_HISTORY_CACHE_TTL_SEC",
-    "GE_USER_HISTORY_CACHE_MAX_AGE_SEC",
-    "GE_USER_HISTORY_CACHE_LEASE_SEC",
-    "GE_USER_HISTORY_REFRESH_TIMEOUT_SEC",
-    "GE_USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC",
-)
 
 
 @pytest.fixture(autouse=True)
-def clear_shared_cache(monkeypatch):
-    for name in USER_HISTORY_CONFIG_ENV_NAMES:
-        monkeypatch.delenv(name, raising=False)
+def clear_shared_cache():
     set_user_history_cache(None)
     yield
     set_user_history_cache(None)
 
 
-def test_cache_policy_defaults():
-    assert ttl_seconds() == DEFAULT_TTL_SECONDS
-    assert max_age_seconds() == DEFAULT_MAX_AGE_SECONDS
-    assert lease_seconds() == DEFAULT_LEASE_SECONDS
-    assert refresh_timeout_seconds() == 10.0
-    assert retry_cooldown_seconds() == DEFAULT_RETRY_COOLDOWN_SECONDS
-
-
-def test_cache_policy_environment_overrides(monkeypatch):
-    monkeypatch.setenv("GE_USER_HISTORY_CACHE_TTL_SEC", "120")
-    monkeypatch.setenv("GE_USER_HISTORY_CACHE_MAX_AGE_SEC", "900")
-    monkeypatch.setenv("GE_USER_HISTORY_CACHE_LEASE_SEC", "45")
-    monkeypatch.setenv("GE_USER_HISTORY_REFRESH_TIMEOUT_SEC", "20")
-    monkeypatch.setenv("GE_USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC", "75")
-
-    assert ttl_seconds() == 120
-    assert max_age_seconds() == 900
-    assert lease_seconds() == 45
-    assert refresh_timeout_seconds() == 20.0
-    assert retry_cooldown_seconds() == 75
-
-
-@pytest.mark.parametrize("invalid", ["not-an-int", "0", "-1"])
-def test_invalid_cache_policy_environment_uses_default(monkeypatch, invalid):
-    monkeypatch.setenv("GE_USER_HISTORY_CACHE_TTL_SEC", invalid)
-
-    assert ttl_seconds() == DEFAULT_TTL_SECONDS
+def test_cache_policy_constants():
+    assert USER_HISTORY_CACHE_TTL_SEC == 600
+    assert USER_HISTORY_CACHE_MAX_AGE_SEC == 1_800
+    assert USER_HISTORY_CACHE_LEASE_SEC == 30
+    assert USER_HISTORY_REFRESH_TIMEOUT_SEC == 10
+    assert USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC == 60
+    assert max_age_seconds() == USER_HISTORY_CACHE_MAX_AGE_SEC
 
 
 def test_max_age_is_never_shorter_than_fresh_ttl(monkeypatch):
-    monkeypatch.setenv("GE_USER_HISTORY_CACHE_TTL_SEC", "900")
-    monkeypatch.setenv("GE_USER_HISTORY_CACHE_MAX_AGE_SEC", "600")
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_CACHE_TTL_SEC", 900)
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_CACHE_MAX_AGE_SEC", 600)
 
     assert max_age_seconds() == 900
 
@@ -117,7 +85,7 @@ def _cached_document(
         "history_limit": USER_HISTORY_LIMIT,
         "embedding_key": MINILM_L12_EMBEDDING_KEY,
         "fetched_at": fetched_at,
-        "expires_at": expires_at or fetched_at + timedelta(seconds=DEFAULT_MAX_AGE_SECONDS),
+        "expires_at": expires_at or fetched_at + timedelta(seconds=USER_HISTORY_CACHE_MAX_AGE_SEC),
         "refresh_started_at": refresh_started_at,
         "refresh_failed_at": refresh_failed_at,
         "items": [
@@ -173,7 +141,7 @@ async def test_firestore_cache_hit_decodes_history():
 @pytest.mark.asyncio
 async def test_firestore_cache_returns_stale_entry_until_hard_expiry():
     db, _collection_ref, doc_ref = _mock_firestore_client()
-    fetched_at = datetime.now(UTC) - timedelta(seconds=DEFAULT_TTL_SECONDS + 1)
+    fetched_at = datetime.now(UTC) - timedelta(seconds=USER_HISTORY_CACHE_TTL_SEC + 1)
     snapshot = MagicMock(exists=True)
     snapshot.to_dict.return_value = _cached_document(fetched_at=fetched_at)
     doc_ref.get.return_value = snapshot
@@ -181,8 +149,8 @@ async def test_firestore_cache_returns_stale_entry_until_hard_expiry():
     entry = await FirestoreUserHistoryCache(db).retrieve("did:plc:user1")
 
     assert entry is not None
-    assert DEFAULT_TTL_SECONDS < entry.age_seconds()
-    assert entry.age_seconds() < DEFAULT_MAX_AGE_SECONDS
+    assert USER_HISTORY_CACHE_TTL_SEC < entry.age_seconds()
+    assert entry.age_seconds() < USER_HISTORY_CACHE_MAX_AGE_SEC
 
 
 @pytest.mark.asyncio
@@ -264,7 +232,9 @@ async def test_firestore_cache_stores_float32_embeddings_with_exact_max_age(
     assert stored["user_did"] == "did:plc:user1"
     assert stored["items"][0]["embedding_b64"] == encode_float32_b64(VALID_EMBEDDING)
     assert before <= stored["fetched_at"] <= after
-    assert stored["expires_at"] - stored["fetched_at"] == timedelta(seconds=DEFAULT_MAX_AGE_SECONDS)
+    assert stored["expires_at"] - stored["fetched_at"] == timedelta(
+        seconds=USER_HISTORY_CACHE_MAX_AGE_SEC
+    )
     assert stored["refresh_started_at"] is None
     assert stored["refresh_failed_at"] is None
     assert stored["api_release_sha"] == release_sha
@@ -283,7 +253,7 @@ async def test_firestore_cache_claims_stale_refresh_lease_transactionally(monkey
     now = datetime.now(UTC)
     snapshot = MagicMock(exists=True)
     snapshot.to_dict.return_value = _cached_document(
-        fetched_at=now - timedelta(seconds=DEFAULT_TTL_SECONDS + 1)
+        fetched_at=now - timedelta(seconds=USER_HISTORY_CACHE_TTL_SEC + 1)
     )
     doc_ref.get.return_value = snapshot
     transaction = MagicMock()
@@ -305,9 +275,9 @@ async def test_firestore_cache_reclaims_expired_lease_after_cooldown(monkeypatch
     now = datetime.now(UTC)
     snapshot = MagicMock(exists=True)
     snapshot.to_dict.return_value = _cached_document(
-        fetched_at=now - timedelta(seconds=DEFAULT_TTL_SECONDS + 1),
-        refresh_started_at=now - timedelta(seconds=DEFAULT_LEASE_SECONDS + 1),
-        refresh_failed_at=now - timedelta(seconds=DEFAULT_RETRY_COOLDOWN_SECONDS + 1),
+        fetched_at=now - timedelta(seconds=USER_HISTORY_CACHE_TTL_SEC + 1),
+        refresh_started_at=now - timedelta(seconds=USER_HISTORY_CACHE_LEASE_SEC + 1),
+        refresh_failed_at=now - timedelta(seconds=USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC + 1),
     )
     doc_ref.get.return_value = snapshot
     transaction = MagicMock()
@@ -332,12 +302,12 @@ async def test_firestore_cache_skips_refresh_claim(
         document = _cached_document(fetched_at=now)
     elif reason == "live lease":
         document = _cached_document(
-            fetched_at=now - timedelta(seconds=DEFAULT_TTL_SECONDS + 1),
+            fetched_at=now - timedelta(seconds=USER_HISTORY_CACHE_TTL_SEC + 1),
             refresh_started_at=now - timedelta(seconds=1),
         )
     else:
         document = _cached_document(
-            fetched_at=now - timedelta(seconds=DEFAULT_TTL_SECONDS + 1),
+            fetched_at=now - timedelta(seconds=USER_HISTORY_CACHE_TTL_SEC + 1),
             refresh_failed_at=now - timedelta(seconds=1),
         )
     db, _collection_ref, doc_ref = _mock_firestore_client()
@@ -468,7 +438,7 @@ async def test_cache_hit_skips_elasticsearch(monkeypatch):
 @pytest.mark.asyncio
 async def test_stale_cache_returns_immediately_and_single_flights_refresh(monkeypatch):
     stale = UserHistory(items=[UserHistoryItem("at://liked/stale", "2026-01-01T00:00:00Z", [1.0])])
-    cache = _FakeCache(_entry(stale, age_seconds=DEFAULT_TTL_SECONDS + 1))
+    cache = _FakeCache(_entry(stale, age_seconds=USER_HISTORY_CACHE_TTL_SEC + 1))
     set_user_history_cache(cache)
     refresh_started = asyncio.Event()
     release_refresh = asyncio.Event()
@@ -499,7 +469,7 @@ async def test_stale_cache_returns_immediately_and_single_flights_refresh(monkey
 async def test_stale_cache_skips_refresh_when_another_instance_holds_lease(monkeypatch):
     stale = UserHistory(items=[])
     cache = _FakeCache(
-        _entry(stale, age_seconds=DEFAULT_TTL_SECONDS + 1),
+        _entry(stale, age_seconds=USER_HISTORY_CACHE_TTL_SEC + 1),
         claim_result=False,
     )
     set_user_history_cache(cache)
@@ -518,7 +488,7 @@ async def test_stale_cache_skips_refresh_when_another_instance_holds_lease(monke
 @pytest.mark.asyncio
 async def test_stale_refresh_failure_releases_lease_and_keeps_stale_value(monkeypatch):
     stale = UserHistory(items=[])
-    cache = _FakeCache(_entry(stale, age_seconds=DEFAULT_TTL_SECONDS + 1))
+    cache = _FakeCache(_entry(stale, age_seconds=USER_HISTORY_CACHE_TTL_SEC + 1))
     set_user_history_cache(cache)
     monkeypatch.setattr(
         user_history_module,
@@ -536,13 +506,13 @@ async def test_stale_refresh_failure_releases_lease_and_keeps_stale_value(monkey
 @pytest.mark.asyncio
 async def test_stale_refresh_timeout_releases_lease(monkeypatch):
     stale = UserHistory(items=[])
-    cache = _FakeCache(_entry(stale, age_seconds=DEFAULT_TTL_SECONDS + 1))
+    cache = _FakeCache(_entry(stale, age_seconds=USER_HISTORY_CACHE_TTL_SEC + 1))
     set_user_history_cache(cache)
 
     async def hang(*_args, **_kwargs):
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(user_history_module, "refresh_timeout_seconds", lambda: 0.01)
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_REFRESH_TIMEOUT_SEC", 0.01)
     monkeypatch.setattr(user_history_module, "fetch_recent_liked_post_uris_and_times", hang)
 
     assert await fetch_user_history_features(object(), "did:plc:user1") == stale
@@ -557,7 +527,7 @@ async def test_hard_expired_cache_synchronously_fetches_instead_of_serving_stale
     expired = UserHistory(
         items=[UserHistoryItem("at://liked/expired", "2026-01-01T00:00:00Z", [1.0])]
     )
-    cache = _FakeCache(_entry(expired, age_seconds=DEFAULT_MAX_AGE_SECONDS + 1))
+    cache = _FakeCache(_entry(expired, age_seconds=USER_HISTORY_CACHE_MAX_AGE_SEC + 1))
     set_user_history_cache(cache)
     recent = AsyncMock(return_value=([], []))
     monkeypatch.setattr(user_history_module, "fetch_recent_liked_post_uris_and_times", recent)

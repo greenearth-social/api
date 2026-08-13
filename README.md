@@ -575,8 +575,7 @@ pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --di
 
 The two-tower generator and heavy ranker share a per-user Firestore document
 (`user_history_cache`) containing the user's recent likes and hydrated post
-features. By default, cache entries have this bounded stale-while-refresh
-lifecycle:
+features. Cache entries use this fixed, bounded stale-while-refresh lifecycle:
 
 - Through 10 minutes, an entry is fresh and is returned directly.
 - After 10 and before 30 minutes, the stale entry is returned immediately while a
@@ -584,10 +583,10 @@ lifecycle:
 - At 30 minutes, the entry is a hard miss and the request synchronously rebuilds
   it rather than serving older recommendation inputs.
 
-By default, stale refreshes use a 30-second transactional Firestore lease, so
-API instances do not duplicate Elasticsearch work. A failed refresh releases
-the lease and sets a default 60-second retry cooldown; the stale value
-remains usable until its configured hard expiry. Cold misses are still fetched
+Stale refreshes use a 30-second transactional Firestore lease, so API instances
+do not duplicate Elasticsearch work. A failed refresh releases the lease and
+sets a 60-second retry cooldown; the stale value remains usable until its fixed
+hard expiry. Cold misses are still fetched
 synchronously because the caller needs a value, but persistence happens in the
 background and is drained during shutdown. Request-path cache reads fail open
 after 500 ms; background writes and lease releases have a separate 5-second
@@ -596,8 +595,10 @@ timeout.
 Lookups record `user_history.cache.age_seconds` and
 `user_history.cache.lookup_count`; background work records `refresh_count` and
 `write_count`, each labelled by outcome. Firestore native TTL uses `expires_at`,
-which is set from the configured maximum serving age (30 minutes by default).
-See `src/app/lib/user_history_cache.py`.
+which is set to the fixed 30-minute maximum serving age. These policy values are
+code-level constants and intentionally cannot vary by deployment environment;
+changing them requires a code change and a new API deployment. See
+`src/app/lib/user_history_cache.py`.
 
 ## Popularity Candidate Cache
 
