@@ -501,7 +501,7 @@ async def delete_most_recent_seen_bucket(db: AsyncClient, user_did: str) -> None
     settings changes within the same day are safe because the document is already
     gone after the first call.
     """
-    bucket_id = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    bucket_id = datetime.now(UTC).strftime("%Y-%m-%d")
     ref = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
