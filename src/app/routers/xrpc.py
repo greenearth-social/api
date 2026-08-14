@@ -441,10 +441,14 @@ async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candi
                 timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
             )
     except Exception as exc:
-        # If the refetch fails, MMR falls back to author-only similarity
-        # and the two-tower ranker has its own refetch path. Don't fail
-        # the request over a hydration hiccup.
-        logger.exception("Embedding hydration failed; continuing without")
+        if isinstance(exc, TimeoutError):
+            logger.warning(
+                "Embedding hydration timed out after %.1fs; continuing without",
+                _EMBED_HYDRATION_TIMEOUT_SEC,
+            )
+        else:
+            logger.exception("Embedding hydration failed; continuing without")
+
         ctx = current_pipeline_context()
         if ctx is not None:
             ctx.record(
