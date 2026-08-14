@@ -142,6 +142,24 @@ class TestLikedPostScanSize:
         )
 
 
+class TestSizingAtTheRealAllocation:
+    """Prod feeds split num_candidates=30 across generators by weight, so
+    network_likes is asked for 3-6 — never the 30 of its debug feed. Sizing the
+    floors for 30 made every real request scan and hydrate ~10x what it needed
+    (see #416); these pin the numbers the real path actually gets."""
+
+    def test_scan_and_hydrate_are_sized_for_three_to_six_candidates(self):
+        assert [liked_post_scan_size(c) for c in (3, 6)] == [200, 200]
+        assert [hydrated_uri_limit(c) for c in (3, 6)] == [50, 60]
+
+    def test_hydrate_covers_the_measured_yield_with_headroom(self):
+        # Measured in prod: candidates.network_likes.hydrate_hit_share ~= 0.40.
+        measured_hit_share = 0.40
+        for num_candidates in (3, 6):
+            expected = hydrated_uri_limit(num_candidates) * measured_hit_share
+            assert expected >= num_candidates * 3
+
+
 class TestHydratedUriLimit:
     def test_scales_with_num_candidates_between_floor_and_cap(self):
         assert hydrated_uri_limit(1) == network_likes_module.MIN_HYDRATED_URIS

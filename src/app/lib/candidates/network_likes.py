@@ -37,21 +37,31 @@ logger = logging.getLogger(__name__)
 # imported from followed_users_cache so the fetch cap and the query cap cannot
 # drift apart.
 
-# Likes scanned per requested candidate. Only a minority of recent likes point
-# at a post that survives hydration, so the single scan overfetches heavily.
+# Sizing is against the allocation this generator actually receives: prod feeds
+# request 30 candidates total and split them by weight, leaving network_likes
+# with 3-6 (the num_candidates=30 in its debug feed is a single-generator
+# budget, not the real path). Floors sized for 30 bound every real request
+# instead of only unusual ones, which is what made #390 a p50 regression.
+
+# Likes scanned per requested candidate. Prod measures ~0.40 of hydrated URIs
+# coming back as posts and roughly half the scanned likes deduplicating away,
+# so ~5 likes per candidate is the working yield; 20 is 4x that headroom.
 LIKES_OVERFETCH_FACTOR = 20
 
-# Floor on the single likes scan, so small candidate requests still see enough
-# likes to survive index skew without a second round trip.
-MIN_LIKES_SCANNED = 1_000
+# Floor on the single likes scan. Matches what the old paging loop consumed in
+# total for a typical request (~2 pages of 100), so index skew is absorbed
+# without reintroducing the round trips.
+MIN_LIKES_SCANNED = 200
 
 # Hard cap on how many like documents to scan while looking for post hits.
 MAX_LIKES_SCANNED = 5_000
 
 # Hydrated docs carry embeddings, so the hydrate query is bounded more tightly
 # than the likes scan: only the best-ranked URIs from the scan are hydrated.
+# At the measured 0.40 hit share the floor still yields ~20 posts for a 3-6
+# candidate allocation.
 HYDRATE_OVERFETCH_FACTOR = 10
-MIN_HYDRATED_URIS = 300
+MIN_HYDRATED_URIS = 50
 MAX_HYDRATED_URIS = 1_000
 
 # Lookback window for finding the matching posts
