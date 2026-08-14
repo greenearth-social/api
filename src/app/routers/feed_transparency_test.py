@@ -637,8 +637,9 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
     }
 
 
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
 @patch("app.routers.feed_transparency.patch_user_feed_preferences")
-def test_patch_preferences_updates_only_selected_feed(mock_patch_prefs, client):
+def test_patch_preferences_updates_only_selected_feed(mock_patch_prefs, mock_delete_seen, client):
     from ..documents import FeedPreferencesDocument
 
     mock_patch_prefs.return_value = FeedPreferencesDocument(
@@ -654,6 +655,7 @@ def test_patch_preferences_updates_only_selected_feed(mock_patch_prefs, client):
     args = mock_patch_prefs.await_args.args
     assert args[1:3] == ("did:plc:test-user", "best-of-friends")
     assert args[3].model_dump(exclude_none=True) == {"freshness": 4}
+    mock_delete_seen.assert_awaited_once()
 
 
 @patch("app.routers.feed_transparency.patch_user_feed_preferences")
@@ -680,8 +682,9 @@ def test_patch_preferences_rejects_out_of_range(mock_patch_prefs, client):
         {"following": 0.0, "network_likes": 0.0, "authors_topics": 0.0, "popular": 1.0},
     ],
 )
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
 @patch("app.routers.feed_transparency.patch_user_feed_preferences")
-def test_patch_preferences_accepts_atomic_source_weights(mock_patch_prefs, weight_values, client):
+def test_patch_preferences_accepts_atomic_source_weights(mock_patch_prefs, mock_delete_seen, weight_values, client):
     from ..documents import FeedPreferencesDocument, SourceWeightsDocument
 
     weights = SourceWeightsDocument(**weight_values)

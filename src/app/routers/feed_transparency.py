@@ -18,6 +18,7 @@ from ..feeds import FEEDS, canonical_feed_name
 from ..lib.feed_preferences import resolve_feed_preferences
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import (
+    delete_most_recent_seen_bucket,
     get_feed_snapshot,
     get_recent_feed_snapshots,
     get_user,
@@ -243,7 +244,11 @@ async def patch_preferences(
     body: FeedPreferences,
     user_doc_id: FirebaseUser,
 ) -> FeedPreferences:
-    """Update only the supplied controls for one configured public feed."""
+    """Update only the supplied controls for one configured public feed.
+
+    Also clears today's seen-posts bucket so the user sees fresh candidates
+    after adjusting their feed controls. The delete is idempotent.
+    """
     feed = FEEDS.get(feed_name)
     if feed is None or not feed.public or not feed.controls:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown feed")
@@ -275,6 +280,7 @@ async def patch_preferences(
         feed_name,
         patch,
     )
+    await delete_most_recent_seen_bucket(db, user_did)
     return FeedPreferences.model_validate(updated.model_dump(exclude_none=True))
 
 
