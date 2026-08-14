@@ -150,6 +150,16 @@ async def run_generate(
                     generator_name=spec.name,
                     is_infill="false",
                 )
+                # Share of the requested allocation actually returned, so a
+                # generator that quietly under-fills for some users is visible
+                # without reading the feed slate.
+                returned = sum(len(result.candidates) for result in results)
+                mc.record(
+                    "candidates.generate.fill_share",
+                    min(returned / count, 1.0),
+                    generator_name=spec.name,
+                    is_infill="false",
+                )
             return [
                 result.model_copy(
                     update={"status": "empty", "reason": result.reason or "no_candidates"}
