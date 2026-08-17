@@ -81,6 +81,7 @@ from ..lib.pipeline_context import (
     pipeline_context_scope,
 )
 from ..lib.posthog_client import (
+    EXPANDED_CANDIDATE_BATCH_FLAG,
     FAIL_FAST_FLAG,
     NETWORK_LIKES_FLAG,
     evaluate_feature_flags,
@@ -899,12 +900,13 @@ def _snapshot_page(
 # ---------------------------------------------------------------------------
 
 BATCH_MULTIPLIER = 5  # how many pages of results to fetch for each cursor session
-MAX_BATCH_SIZE = 100  # minimum number of results to fetch for each cursor session
+MAX_BATCH_SIZE = 100  # default maximum number of results per cursor session
+EXPANDED_MAX_BATCH_SIZE = 200
 
 
-def _batch_size(limit: int) -> int:
+def _batch_size(limit: int, max_batch_size: int = MAX_BATCH_SIZE) -> int:
     """How many candidates to pre-generate for a new cursor session."""
-    return min(limit * BATCH_MULTIPLIER, MAX_BATCH_SIZE)
+    return min(limit * BATCH_MULTIPLIER, max_batch_size)
 
 
 def _get_feed_cache(request: Request) -> FeedCache:
@@ -1529,14 +1531,14 @@ async def get_feed_skeleton(
             _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
         )
 
-    uses_network_likes_flag = feed_name in (
+    uses_your_feed_flags = feed_name in (
         "your-feed",
         "unranked-your-feed",
         "cutoff-preview",
     )
     flag_keys = [FAIL_FAST_FLAG]
-    if uses_network_likes_flag:
-        flag_keys.append(NETWORK_LIKES_FLAG)
+    if uses_your_feed_flags:
+        flag_keys.extend([NETWORK_LIKES_FLAG, EXPANDED_CANDIDATE_BATCH_FLAG])
 
     posthog_client = get_posthog_client()
     # Flags are evaluated per user, and an anonymous caller isn't one: it would
@@ -1553,6 +1555,12 @@ async def get_feed_skeleton(
         else {}
     )
     set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
+    max_batch_size = (
+        EXPANDED_MAX_BATCH_SIZE
+        if uses_your_feed_flags
+        and feature_flags.get(EXPANDED_CANDIDATE_BATCH_FLAG, False)
+        else MAX_BATCH_SIZE
+    )
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
@@ -1580,7 +1588,7 @@ async def get_feed_skeleton(
     # keeps its static popularity-only mix.
     generators_override: dict = {}
     applied_social_radius: int | None = None
-    if uses_network_likes_flag and "source_weights" in controls:
+    if uses_your_feed_flags and "source_weights" in controls:
         source_weights = control_value(user_doc, feed_name, "source_weights")
         assert isinstance(source_weights, SourceWeightsDocument)
         preference_key = FEEDS[feed_name].preference_source or feed_name
@@ -1705,7 +1713,7 @@ async def get_feed_skeleton(
                     )
 
                 # Offset is at or past the end — regenerate with exclusions.
-                batch = _batch_size(limit)
+                batch = _batch_size(limit, max_batch_size)
                 excluded = await generation_exclusions()
                 # Dedup while preserving order; the cached batch and the
                 # seen/discarded posts can overlap.
@@ -1792,7 +1800,7 @@ async def get_feed_skeleton(
                 return reused.model_copy(deep=True)
 
         try:
-            batch = _batch_size(limit)
+            batch = _batch_size(limit, max_batch_size)
             exclude_uris = await generation_exclusions()
             gen_request = feed_cfg.gen_request_template.model_copy(
                 update={
