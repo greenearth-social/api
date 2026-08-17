@@ -1531,13 +1531,13 @@ async def get_feed_skeleton(
             _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
         )
 
-    uses_your_feed_flags = feed_name in (
+    uses_network_likes_flag = feed_name in (
         "your-feed",
         "unranked-your-feed",
         "cutoff-preview",
     )
     flag_keys = [FAIL_FAST_FLAG, EXPANDED_CANDIDATE_BATCH_FLAG]
-    if uses_your_feed_flags:
+    if uses_network_likes_flag:
         flag_keys.append(NETWORK_LIKES_FLAG)
 
     posthog_client = get_posthog_client()
