@@ -1587,7 +1587,7 @@ async def get_feed_skeleton(
     # keeps its static popularity-only mix.
     generators_override: dict = {}
     applied_social_radius: int | None = None
-    if uses_your_feed_flags and "source_weights" in controls:
+    if uses_network_likes_flag and "source_weights" in controls:
         source_weights = control_value(user_doc, feed_name, "source_weights")
         assert isinstance(source_weights, SourceWeightsDocument)
         preference_key = FEEDS[feed_name].preference_source or feed_name
