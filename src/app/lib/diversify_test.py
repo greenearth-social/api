@@ -5,7 +5,14 @@ import math
 import pytest
 
 from ..models import CandidatePost
-from .diversify import AUTHOR_WEIGHT, BETA, DECAY_TAU, _cosine_similarity, mmr_rerank
+from .diversify import (
+    AUTHOR_WEIGHT,
+    BETA,
+    DECAY_TAU,
+    _cosine_similarity,
+    _pairwise_cosine_similarities,
+    mmr_rerank,
+)
 from .embeddings import encode_float32_b64
 from .feed_debug import FeedDebugRecorder, feed_debug_scope
 
@@ -149,6 +156,19 @@ def test_cosine_zero_vector_a_returns_zero():
 
 def test_cosine_zero_vector_b_returns_zero():
     assert _cosine_similarity([1.0, 0.0], [0.0, 0.0]) == 0.0
+
+
+def test_pairwise_cosine_matrix_matches_scalar_implementation():
+    vecs = [[3.0, 4.0], [4.0, 3.0], [0.0, 0.0], None]
+
+    result = _pairwise_cosine_similarities(vecs)
+
+    for i, vec_i in enumerate(vecs):
+        for j, vec_j in enumerate(vecs):
+            expected = 0.0
+            if vec_i is not None and vec_j is not None:
+                expected = _cosine_similarity(vec_i, vec_j)
+            assert result[i, j] == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------------
