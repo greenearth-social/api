@@ -294,6 +294,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         accepts_interactions=True,
         exclude_seen_posts=True,
         pinned_post_uri=None,
+        pinned_post_content=None,
         max_render_share=None,
         min_rank_score=None,
         min_mmr_score=None,
@@ -4323,6 +4324,41 @@ class TestGetFeedSkeletonMetrics:
         success_calls = [call for call in self.mc.calls if call[0] == "feed.render.success_count"]
         assert len(success_calls) == 1
         assert success_calls[0][2]["feed_name"] == FEED_RKEY
+
+    def test_degraded_render_records_primary_stage_and_component(self):
+        candidates = _make_candidates("p", 3, with_embedding=True)
+
+        with (
+            _patch_unranked_your_feed_generators(candidates),
+            patch(
+                "app.routers.xrpc.run_predict",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("inference down"),
+            ),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value="did:plc:user",
+            ),
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        assert response.status_code == 200
+        degraded_calls = [call for call in self.mc.calls if call[0] == "feed.render.degraded_count"]
+        assert degraded_calls == [
+            (
+                "feed.render.degraded_count",
+                1,
+                {
+                    "feed_name": RANKED_FEED_RKEY,
+                    "stage": "rank",
+                    "component": "RuntimeError",
+                },
+            )
+        ]
 
     def test_unknown_feed_records_failure_count_400(self):
         response = client.get(

@@ -12,6 +12,8 @@ the codebase (e.g.  the ``publish_feed.py`` script) can import it without
 pulling in FastAPI.
 """
 
+import os
+
 from .models import (
     CandidateGenerateRequest,
     FeedConfig,
@@ -28,6 +30,14 @@ DEFAULT_SOCIAL_RADIUS: int = 3
 # The GreenEarth account's "This feed is personalized for you, so you must be
 # logged in to see it."
 LOGGED_OUT_POST_URI: str = "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msw6wzvh7k2k"
+
+
+def _pinned_post_uri(feed_name: str, fallback: str) -> str:
+    """Resolve a deployment-managed pin while retaining a local/dev fallback."""
+    env_name = f"GE_PINNED_POST_{feed_name.upper().replace('-', '_')}_URI"
+    configured = os.environ.get(env_name, "").strip()
+    return configured or fallback
+
 
 # Social-radius preset generator weights for your-feed.
 # Index 3 (balanced) matches the default weights defined in the "your-feed"
@@ -123,7 +133,15 @@ FEEDS: dict[str, FeedConfig] = {
         controls=("freshness",),
         diversify=False,
         exclude_seen_posts=False,
-        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetia5l7y2j",
+        pinned_post_uri=_pinned_post_uri(
+            "random",
+            "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetia5l7y2j",
+        ),
+        pinned_post_content=(
+            "Click [SETTINGS](https://app.greenearth.social/#/settings/random) to personalize "
+            "your feed.\n\nA random slice of the ATProto universe. Still applies your moderation "
+            "settings. Part of the GreenEarth Family."
+        ),
         # Random posts don't depend on who's asking, so it works logged out.
         logged_out="serve",
         gen_request_template=CandidateGenerateRequest.model_construct(
@@ -142,7 +160,14 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="a0 YF",
         avatar="assets/icons/green-earth.png",
         controls=("source_weights", "freshness", "purpose"),
-        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetfgpr3t2s",
+        pinned_post_uri=_pinned_post_uri(
+            "your-feed",
+            "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetfgpr3t2s",
+        ),
+        pinned_post_content=(
+            "Click [SETTINGS](https://app.greenearth.social/#/settings/your-feed) to personalize "
+            "your Green Earth feed.\n\nA controllable feed designed for constructive conversation."
+        ),
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
         # min_rank_score=0.425 maps the old -0.15 floor into the current [0, 1]
@@ -177,7 +202,15 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="fd BOF",
         avatar="assets/icons/best-of-friends.png",
         controls=("freshness", "purpose"),
-        pinned_post_uri="at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetho32pa2g",
+        pinned_post_uri=_pinned_post_uri(
+            "best-of-friends",
+            "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetho32pa2g",
+        ),
+        pinned_post_content=(
+            "Click [SETTINGS](https://app.greenearth.social/#/settings/best-of-friends) to "
+            "personalize your feed.\n\nThe best posts from your mutuals and people you follow. "
+            "Part of the GreenEarth Family."
+        ),
         # Slate-cutoff starting points — tune from the feed.slate.kept_share and
         # feed.slate.cutoff_count metrics once live (see issue #248). min_rank_score
         # matches your-feed's empirically-calibrated value above; this feed's own

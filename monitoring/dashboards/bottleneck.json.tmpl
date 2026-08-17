@@ -117,9 +117,9 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "degraded % of renders",
+                "legendTemplate": "degraded stage=${metric.labels.stage} component=${metric.labels.component}",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "100 * (sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.degraded_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)) / clamp_min((sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.success_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)) + (sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)), 0.0001)"
+                  "prometheusQuery": "100 * sum by (stage, component)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.degraded_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) / on() group_left clamp_min((sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.success_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)) + (sum(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.render.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])) or vector(0)), 0.0001)"
                 }
               },
               {

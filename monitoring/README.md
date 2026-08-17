@@ -102,6 +102,7 @@ Read a regression off the dashboard as a decision table.
 | `rank.model.duration_ms` ↑ with `inference.predict.duration_ms` ↑ | **inference-service capacity** | row 2 gap chart |
 | `rank.model.duration_ms` ↑ with `inference.predict.duration_ms` flat | **api-side queuing to inference** | row 2 gap chart + row 3 client charts |
 | `perspective` duration ↑ with 429s | **external rate limit** | row 2 |
+| `feed.render.degraded_count` ↑ | Group by `stage` and `component` to identify the primary soft-failed dependency without changing the degraded-render total | row 1 |
 | `es.query.duration − took` gap ↑ on every `op`, `took` flat, `eventloop.lag_ms` flat, CPU well below 100%; `es.client.in_flight` pinned at the pool cap | **ES client connection-pool starvation** (client-side queuing per dependency, not loop-wide) | row 4 gap chart + row 3 lag/CPU + row 3 in-flight chart |
 | Any dependency's client-side duration ↑ with its server-side signal flat; that client's `in_flight` pinned at its cap | **client-side queuing for that dependency** (any pooled client or capped parallel workflow) | row 3 in-flight chart, paired with the matching row-2/row-4 backend series |
 | Connection-class failures (`status_code=connection` / `error=connection`) spike on ≥2 dependencies at once; backend `took` / server latencies flat | **process-wide client/transport pathology** (event-loop or fd bookkeeping, e.g. uvloop fd race) | row 3 dependency-failure chart |

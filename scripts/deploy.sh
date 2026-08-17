@@ -35,6 +35,14 @@ GE_INFERENCE_BASE_URL=""
 # records so we can identify exactly what code is live (see issue #228).
 GIT_SHA=""
 
+# Resolved by sync_pinned_posts before the Cloud Run revision is created.
+GE_PINNED_POST_YOUR_FEED_URI=""
+GE_PINNED_POST_BEST_OF_FRIENDS_URI=""
+GE_PINNED_POST_RANDOM_URI=""
+GE_PINNED_POST_CONFIG_SHA=""
+DEPLOYED_PINNED_POST_CONFIG_SHA=""
+FORCE_SYNC_PINNED_POSTS=false
+
 # PostHog configuration. Each environment is a separate PostHog project (separate
 # API key, provisioned via scripts/gcp_setup.sh), but all projects live on the same
 # PostHog Cloud host, so the host is a constant here rather than a per-env secret.
@@ -278,6 +286,10 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=4"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_RANK_MODEL_TIMEOUT_SEC=2.5"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_EMBED_HYDRATION_TIMEOUT_SEC=1.5"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_YOUR_FEED_URI=$GE_PINNED_POST_YOUR_FEED_URI"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_BEST_OF_FRIENDS_URI=$GE_PINNED_POST_BEST_OF_FRIENDS_URI"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_RANDOM_URI=$GE_PINNED_POST_RANDOM_URI"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_CONFIG_SHA=$GE_PINNED_POST_CONFIG_SHA"
     # Below the AppView's 10s abort on getFeedSkeleton calls (confirmed via
     # atproto source, see #291) so a hung downstream call (ES, ranker)
     # surfaces as a logged, metered 504 instead of losing the race against
@@ -384,6 +396,107 @@ resolve_generator_did() {
     echo "did:web:$service_host"
 }
 
+sync_pinned_posts() {
+    local bsky_handle="caterpie-internal.bsky.social"
+    local bsky_secret="bsky-app-password-caterpie"
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        bsky_handle="greenearth-social.bsky.social"
+        bsky_secret="bsky-app-password-prod"
+    fi
+
+    local bsky_password
+    bsky_password=$(gcloud secrets versions access latest \
+        --secret="$bsky_secret" --project="$PROJECT_ID" 2>/dev/null)
+    if [ -z "$bsky_password" ]; then
+        log_error "Could not fetch the pinned-post app password from '$bsky_secret'"
+        log_error "Refusing to deploy a revision whose managed pin URIs are unresolved."
+        exit 1
+    fi
+
+    log_info "Publishing/reusing managed feed pins → $bsky_handle..."
+    GE_PINNED_POST_YOUR_FEED_URI=""
+    GE_PINNED_POST_BEST_OF_FRIENDS_URI=""
+    GE_PINNED_POST_RANDOM_URI=""
+    local pin_output
+    if ! pin_output=$(pipenv run python scripts/manage_pinned_posts.py \
+        --handle "$bsky_handle" \
+        --app-password "$bsky_password" \
+        --format tsv); then
+        log_error "Managed pinned-post sync failed; Cloud Run was not changed."
+        exit 1
+    fi
+
+    local feed_name
+    local post_uri
+    while IFS=$'\t' read -r feed_name post_uri; do
+        case "$feed_name" in
+            your-feed) GE_PINNED_POST_YOUR_FEED_URI="$post_uri" ;;
+            best-of-friends) GE_PINNED_POST_BEST_OF_FRIENDS_URI="$post_uri" ;;
+            random) GE_PINNED_POST_RANDOM_URI="$post_uri" ;;
+        esac
+    done <<< "$pin_output"
+
+    if [ -z "$GE_PINNED_POST_YOUR_FEED_URI" ] \
+        || [ -z "$GE_PINNED_POST_BEST_OF_FRIENDS_URI" ] \
+        || [ -z "$GE_PINNED_POST_RANDOM_URI" ]; then
+        log_error "Pinned-post sync did not return all three public feed URIs."
+        exit 1
+    fi
+    log_info "Managed feed pins are ready."
+}
+
+load_deployed_pinned_post_state() {
+    local service_json
+    if ! service_json=$(gcloud run services describe "greenearth-api-$ENVIRONMENT" \
+        --region="$REGION" --project="$PROJECT_ID" --format=json 2>/dev/null); then
+        return 1
+    fi
+
+    local pin_state
+    if ! pin_state=$(pipenv run python scripts/manage_pinned_posts.py \
+        --extract-deployed-state <<< "$service_json"); then
+        return 1
+    fi
+
+    local env_name
+    local env_value
+    while IFS=$'\t' read -r env_name env_value; do
+        case "$env_name" in
+            GE_PINNED_POST_CONFIG_SHA) DEPLOYED_PINNED_POST_CONFIG_SHA="$env_value" ;;
+            GE_PINNED_POST_YOUR_FEED_URI) GE_PINNED_POST_YOUR_FEED_URI="$env_value" ;;
+            GE_PINNED_POST_BEST_OF_FRIENDS_URI) GE_PINNED_POST_BEST_OF_FRIENDS_URI="$env_value" ;;
+            GE_PINNED_POST_RANDOM_URI) GE_PINNED_POST_RANDOM_URI="$env_value" ;;
+        esac
+    done <<< "$pin_state"
+}
+
+prepare_pinned_posts() {
+    GE_PINNED_POST_CONFIG_SHA=$(pipenv run python scripts/manage_pinned_posts.py --config-sha)
+    if [ -z "$GE_PINNED_POST_CONFIG_SHA" ]; then
+        log_error "Could not calculate the managed pinned-post configuration fingerprint."
+        exit 1
+    fi
+
+    load_deployed_pinned_post_state || true
+    if [ "$FORCE_SYNC_PINNED_POSTS" = false ] \
+        && [ "$DEPLOYED_PINNED_POST_CONFIG_SHA" = "$GE_PINNED_POST_CONFIG_SHA" ] \
+        && [ -n "$GE_PINNED_POST_YOUR_FEED_URI" ] \
+        && [ -n "$GE_PINNED_POST_BEST_OF_FRIENDS_URI" ] \
+        && [ -n "$GE_PINNED_POST_RANDOM_URI" ]; then
+        log_info "Managed pin configuration is unchanged; reusing deployed URIs."
+        return 0
+    fi
+
+    if [ "$FORCE_SYNC_PINNED_POSTS" = true ]; then
+        log_info "Managed pin sync forced by --sync-pinned-posts."
+    elif [ -z "$DEPLOYED_PINNED_POST_CONFIG_SHA" ]; then
+        log_info "No deployed managed-pin state found; an initial sync is required."
+    else
+        log_info "Managed pin configuration changed; publishing/reusing the new records."
+    fi
+    sync_pinned_posts
+}
+
 _sync_feeds_to_account() {
     local account_label="$1"
     local bsky_handle="$2"
@@ -427,8 +540,8 @@ sync_feeds() {
 
     if [ "$ENVIRONMENT" = "prod" ]; then
         # Prod: two-pass sync
-        #   Pass 1 — public feeds → GreenEarth account (original names, "| GreenEarth" descriptions)
-        #   Pass 2 — internal feeds → Caterpie account (obfuscated names, "Built by Caterpie")
+        #   Pass 1 — public feeds → GreenEarth account (original names)
+        #   Pass 2 — internal feeds → Caterpie account (obfuscated names)
         _sync_feeds_to_account \
             "GreenEarth" \
             "greenearth-social.bsky.social" \
@@ -470,6 +583,7 @@ main() {
 
     get_elasticsearch_internal_lb_ip
     generate_requirements
+    prepare_pinned_posts
     deploy_api_service
     sync_feeds
 
@@ -511,6 +625,10 @@ while [[ $# -gt 0 ]]; do
             API_REQUEST_TIMEOUT="$2"
             shift 2
             ;;
+        --sync-pinned-posts)
+            FORCE_SYNC_PINNED_POSTS=true
+            shift
+            ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -524,6 +642,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --min-instances N        Minimum instances (default: 1)"
             echo "  --max-instances N        Maximum instances (default: 20)"
             echo "  --timeout SECONDS        Cloud Run request timeout (default: 60)"
+            echo "  --sync-pinned-posts      Force Bluesky pin verification/publication"
             echo "  --help                   Show this help message"
             exit 0
             ;;

@@ -470,7 +470,11 @@ def _resolve_feed_publish_params(
     """
     is_greenearth = normalized_env == "prod" and feed_cfg.public
     if is_greenearth:
-        return rkey, feed_cfg.display_name, f"{feed_cfg.description}\nBuilt by GreenEarth (https://www.greenearth.social)."
+        return (
+            rkey,
+            feed_cfg.display_name,
+            f"{feed_cfg.description}\nBuilt by Green Earth (https://www.greenearth.social).",
+        )
     published_rkey = feed_cfg.internal_rkey
     base_display_name = feed_cfg.internal_display_name
     if normalized_env in ("dev", "stage"):
@@ -501,6 +505,12 @@ def sync_feeds(
 
     *git_sha*, when provided, is stamped onto internal (debug) feed records so
     testers can identify the deployed code behind a feed.
+
+    Existing public-feed descriptions are deliberately preserved. Their
+    description migrations are separate, explicit operations so an ordinary
+    API deployment cannot overwrite account-managed copy or reapply a one-time
+    migration. Internal debug descriptions remain deployment-owned because
+    they carry the deployed git sha.
     """
     feed_items = list(FEEDS.items())
     if visibility == "public":
@@ -521,6 +531,10 @@ def sync_feeds(
 
         existing_records = _list_records(client, pds, access_jwt, repo_did)
         existing_rkeys = {r["uri"].split("/")[-1] for r in existing_records}
+        existing_by_rkey = {
+            record["uri"].split("/")[-1]: record.get("value", {})
+            for record in existing_records
+        }
 
         from datetime import datetime, timezone
 
@@ -539,6 +553,19 @@ def sync_feeds(
                 "acceptsInteractions": True,
                 "createdAt": datetime.now(timezone.utc).isoformat(),
             }
+            existing_value = (
+                existing_by_rkey.get(published_rkey) if feed_cfg.public else None
+            )
+            if isinstance(existing_value, dict):
+                existing_description = existing_value.get("description")
+                if isinstance(existing_description, str):
+                    record["description"] = existing_description
+                    # Facet byte offsets are coupled to the description.
+                    # Preserve them only with their corresponding text.
+                    if "descriptionFacets" in existing_value:
+                        record["descriptionFacets"] = existing_value[
+                            "descriptionFacets"
+                        ]
             if avatar_blob is not None:
                 record["avatar"] = avatar_blob
             _put_record(client, pds, access_jwt, repo_did, published_rkey, record)

@@ -734,6 +734,56 @@ class TestSyncFeeds:
 
     @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
+    def test_preserves_existing_description_and_facets(
+        self, MockClient, mock_upload_blob
+    ):
+        """Routine sync must not overwrite separately managed description copy."""
+        client = MagicMock()
+        MockClient.return_value.__enter__ = MagicMock(return_value=client)
+        MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+        existing_description = (
+            "Account-managed copy.\n"
+            "Built by Green Earth (https://www.greenearth.social)."
+        )
+        existing_facets = [{"index": {"byteStart": 0, "byteEnd": 7}, "features": []}]
+        existing = {
+            "uri": f"at://{REPO_DID}/app.bsky.feed.generator/best-of-friends",
+            "value": {
+                "$type": "app.bsky.feed.generator",
+                "description": existing_description,
+                "descriptionFacets": existing_facets,
+            },
+        }
+        public_count = sum(feed.public for feed in FEEDS.values())
+        client.post.side_effect = [
+            _mock_response(200, SESSION_RESPONSE),
+            *[_mock_response(200, {"cid": "bafyabc"}) for _ in range(public_count)],
+        ]
+        client.get.return_value = _mock_response(200, {"records": [existing]})
+
+        sync_feeds(
+            handle=HANDLE,
+            password=PASSWORD,
+            generator_did=GENERATOR_DID,
+            environment="prod",
+            visibility="public",
+            pds=PDS,
+        )
+
+        published_records = [
+            call.kwargs["json"]
+            for call in client.post.call_args_list
+            if call.args[0].endswith("com.atproto.repo.putRecord")
+        ]
+        best_of_friends = next(
+            item for item in published_records if item["rkey"] == "best-of-friends"
+        )
+        assert best_of_friends["record"]["description"] == existing_description
+        assert best_of_friends["record"]["descriptionFacets"] == existing_facets
+
+    @patch("publish_feed._upload_blob", return_value=None)
+    @patch("publish_feed.httpx.Client")
     def test_internal_only_does_not_delete_public_feed_caterpie_records(self, MockClient, mock_upload_blob, capsys):
         """A prod --internal-only sync must not delete public feeds' Caterpie
         records that were published by an earlier stage (unfiltered) deployment."""
@@ -790,7 +840,8 @@ class TestResolveFeedPublishParams:
         rkey, name, desc = _resolve_feed_publish_params("best-of-friends", feed, "prod")
         assert rkey == "best-of-friends"
         assert name == feed.display_name
-        assert "GreenEarth" in desc
+        assert "Built by Green Earth (https://www.greenearth.social)." in desc
+        assert "Built by GreenEarth" not in desc
 
     def test_prod_internal_uses_caterpie_path(self):
         feed = self._internal_feed()
