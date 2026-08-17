@@ -4040,8 +4040,8 @@ class TestSourceWeightsOverride:
             "did:plc:testuser",
             [
                 "fail-fast-feed",
-                "network-likes-in-your-feed",
                 "expanded-candidate-batch",
+                "network-likes-in-your-feed",
             ],
         )
 
@@ -4117,8 +4117,8 @@ class TestSourceWeightsOverride:
             "did:plc:testuser",
             [
                 "fail-fast-feed",
-                "network-likes-in-your-feed",
                 "expanded-candidate-batch",
+                "network-likes-in-your-feed",
             ],
         )
 
@@ -4663,7 +4663,7 @@ class TestPosthogTracking:
 
 
 class TestExpandedCandidateBatchFeatureFlag:
-    """The treatment raises the cap only for the Your Feed family."""
+    """The treatment raises the cap for every authenticated feed."""
 
     @pytest.fixture(autouse=True)
     def _mock_authenticated_user(self):
@@ -4740,7 +4740,7 @@ class TestExpandedCandidateBatchFeatureFlag:
         assert response.status_code == 200
         assert pipeline.call_args.args[1].num_candidates == 200
 
-    def test_flag_is_not_requested_for_other_feeds(self):
+    def test_flag_controls_candidate_batch_for_other_feeds(self):
         from .xrpc import PipelineResult
 
         pipeline = AsyncMock(return_value=PipelineResult([], []))
@@ -4765,9 +4765,9 @@ class TestExpandedCandidateBatchFeatureFlag:
         evaluate_flags.assert_called_once_with(
             posthog_client,
             "did:plc:testuser",
-            ["fail-fast-feed"],
+            ["fail-fast-feed", "expanded-candidate-batch"],
         )
-        assert pipeline.call_args.args[1].num_candidates == 100
+        assert pipeline.call_args.args[1].num_candidates == 200
 
 
 class TestFailFastFeatureFlag:

@@ -1536,9 +1536,9 @@ async def get_feed_skeleton(
         "unranked-your-feed",
         "cutoff-preview",
     )
-    flag_keys = [FAIL_FAST_FLAG]
+    flag_keys = [FAIL_FAST_FLAG, EXPANDED_CANDIDATE_BATCH_FLAG]
     if uses_your_feed_flags:
-        flag_keys.extend([NETWORK_LIKES_FLAG, EXPANDED_CANDIDATE_BATCH_FLAG])
+        flag_keys.append(NETWORK_LIKES_FLAG)
 
     posthog_client = get_posthog_client()
     # Flags are evaluated per user, and an anonymous caller isn't one: it would
@@ -1557,8 +1557,7 @@ async def get_feed_skeleton(
     set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
     max_batch_size = (
         EXPANDED_MAX_BATCH_SIZE
-        if uses_your_feed_flags
-        and feature_flags.get(EXPANDED_CANDIDATE_BATCH_FLAG, False)
+        if feature_flags.get(EXPANDED_CANDIDATE_BATCH_FLAG, False)
         else MAX_BATCH_SIZE
     )
 
