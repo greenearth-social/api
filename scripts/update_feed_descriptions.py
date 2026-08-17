@@ -67,13 +67,14 @@ class UpdateSummary:
 
 def replace_legacy_attribution(description: str) -> tuple[str, str]:
     """Return the migrated text and ``updated``/``current``/``not_found``."""
-    migrated = description
-    for legacy in LEGACY_ATTRIBUTIONS:
-        migrated = migrated.replace(legacy, NEW_ATTRIBUTION)
-    if migrated != description:
-        return migrated, "updated"
+    # The current copy intentionally contains one of the legacy attribution
+    # strings. Recognize the complete current value before looking for a legacy
+    # substring so the migration remains idempotent and never nests its prefix.
     if NEW_ATTRIBUTION in description:
         return description, "current"
+    for legacy in LEGACY_ATTRIBUTIONS:
+        if legacy in description:
+            return description.replace(legacy, NEW_ATTRIBUTION), "updated"
     return description, "not_found"
 
 
