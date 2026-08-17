@@ -25,7 +25,7 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 
-_metric_collector: "MetricCollector | None" = None
+_metric_collector: MetricCollector | None = None
 
 # ---------------------------------------------------------------------------
 # Histogram bucket boundaries
@@ -46,35 +46,125 @@ _metric_collector: "MetricCollector | None" = None
 # Request/stage/dependency latency. Dense to 250ms through 3s (the serving
 # range), coarsening beyond the 10s probe ceiling.
 LATENCY_MS_BOUNDARIES: tuple[float, ...] = (
-    1, 2, 5, 10, 20, 35, 50, 75, 100, 150, 200, 300, 400, 500, 650, 800,
-    1000, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3500, 4000, 4500,
-    5000, 6000, 7500, 10000, 15000,
+    1,
+    2,
+    5,
+    10,
+    20,
+    35,
+    50,
+    75,
+    100,
+    150,
+    200,
+    300,
+    400,
+    500,
+    650,
+    800,
+    1000,
+    1250,
+    1500,
+    1750,
+    2000,
+    2250,
+    2500,
+    2750,
+    3000,
+    3500,
+    4000,
+    4500,
+    5000,
+    6000,
+    7500,
+    10000,
+    15000,
 )
 
 # Signals that are near zero when healthy and only interesting once they are
 # not: event-loop lag, connection-pool wait, connect time. Sub-millisecond
 # resolution at the bottom, saturation coverage at the top.
 FAST_MS_BOUNDARIES: tuple[float, ...] = (
-    0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 25, 50, 75, 100, 150, 250, 500,
-    1000, 2500, 5000,
+    0.1,
+    0.25,
+    0.5,
+    1,
+    2,
+    3,
+    5,
+    7.5,
+    10,
+    15,
+    25,
+    50,
+    75,
+    100,
+    150,
+    250,
+    500,
+    1000,
+    2500,
+    5000,
+)
+
+# Event-loop stalls can exceed the old 5s ceiling during a saturated load-test
+# burst. Preserve the near-zero resolution while adding enough tail coverage
+# to measure, rather than censor, a badly wedged instance.
+EVENTLOOP_LAG_MS_BOUNDARIES: tuple[float, ...] = FAST_MS_BOUNDARIES + (
+    7500,
+    10000,
+    15000,
+    30000,
+    60000,
 )
 
 # Small-integer counts: in-flight requests against a pool cap, slate sizes.
 # Distinguishing 1 from 4 matters -- that is the difference between an idle
 # pool and one about to queue.
 CONCURRENCY_BOUNDARIES: tuple[float, ...] = (
-    1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 60, 75, 90, 100,
-    125, 150, 200,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    8,
+    10,
+    12,
+    15,
+    20,
+    25,
+    30,
+    40,
+    50,
+    60,
+    75,
+    90,
+    100,
+    125,
+    150,
+    200,
 )
 
 # Fractions in [0, 1]: retrieved/kept share, mean similarity score.
 RATIO_BOUNDARIES: tuple[float, ...] = (
-    0.01, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0,
+    0.01,
+    0.05,
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.7,
+    0.8,
+    0.9,
+    0.95,
+    0.99,
+    1.0,
 )
 
-_NEAR_ZERO_MS_METRICS = frozenset(
-    {"eventloop.lag_ms", "client.pool.wait_ms", "client.connect.duration_ms"}
-)
+_NEAR_ZERO_MS_METRICS = frozenset({"client.pool.wait_ms", "client.connect.duration_ms"})
 
 
 def histogram_boundaries(name: str) -> tuple[float, ...] | None:
@@ -83,6 +173,8 @@ def histogram_boundaries(name: str) -> tuple[float, ...] | None:
     Matching is by metric-name suffix so new metrics in an existing family
     are covered without touching this function.
     """
+    if name == "eventloop.lag_ms":
+        return EVENTLOOP_LAG_MS_BOUNDARIES
     if name.endswith("in_flight") or name.endswith("_size"):
         return CONCURRENCY_BOUNDARIES
     if name.endswith("_share") or name.endswith("_score"):
@@ -94,12 +186,12 @@ def histogram_boundaries(name: str) -> tuple[float, ...] | None:
     return None
 
 
-def set_metric_collector(collector: "MetricCollector | None") -> None:
+def set_metric_collector(collector: MetricCollector | None) -> None:
     global _metric_collector
     _metric_collector = collector
 
 
-def get_metric_collector() -> "MetricCollector | None":
+def get_metric_collector() -> MetricCollector | None:
     return _metric_collector
 
 
@@ -120,6 +212,7 @@ class MetricCollector:
             from opentelemetry.exporter.cloud_monitoring import (
                 CloudMonitoringMetricsExporter,
             )
+
             exporter = CloudMonitoringMetricsExporter(
                 prefix="custom.googleapis.com/greenearth-api",
                 # Cloud Run scales this service to multiple concurrent
@@ -150,7 +243,7 @@ class MetricCollector:
         reader: Any,
         service_name: str,
         env: str,
-    ) -> "MetricCollector":
+    ) -> MetricCollector:
         instance = cls.__new__(cls)
         instance._init(reader, service_name, env)
         return instance

@@ -252,6 +252,11 @@ class FeedConfig(BaseModel):
         None,
         description="AT URI of a post to pin at the top of the first page of this feed.",
     )
+    pinned_post_content: str | None = Field(
+        None,
+        description="Repository-managed pinned-post text. Markdown-style links are converted "
+        "to Bluesky rich-text facets by scripts/manage_pinned_posts.py during deployment.",
+    )
     logged_out: LoggedOutBehavior = Field(
         "explain",
         description="How this feed responds to an unauthenticated request: a single "

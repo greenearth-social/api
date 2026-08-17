@@ -1,10 +1,12 @@
 import pytest
+from manage_post import parse_content  # pyright: ignore[reportMissingImports]
 
 from app.feeds import (
     DEFAULT_SOCIAL_RADIUS,
     FEEDS,
     SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
     SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
+    _pinned_post_uri,
     canonical_feed_name,
 )
 
@@ -37,6 +39,40 @@ GIT_SHA_SUFFIX_LEN = len(" ") + 7  # " " + 7-char short git sha
 
 
 class TestFeedsRegistry:
+    def test_public_feed_pins_are_repository_managed(self):
+        expected_text = {
+            "your-feed": (
+                "Click SETTINGS to personalize your Green Earth feed.\n\n"
+                "A controllable feed designed for constructive conversation."
+            ),
+            "best-of-friends": (
+                "Click SETTINGS to personalize your feed.\n\n"
+                "The best posts from your mutuals and people you follow. "
+                "Part of the GreenEarth Family."
+            ),
+            "random": (
+                "Click SETTINGS to personalize your feed.\n\n"
+                "A random slice of the ATProto universe. Still applies your moderation "
+                "settings. Part of the GreenEarth Family."
+            ),
+        }
+        for feed_name, text in expected_text.items():
+            content = FEEDS[feed_name].pinned_post_content
+            assert content is not None
+            segments = parse_content(content)
+            assert "".join(segment["text"] for segment in segments) == text
+            links = [segment["url"] for segment in segments if segment["type"] == "link"]
+            assert links == [f"https://app.greenearth.social/#/settings/{feed_name}"]
+            assert len(text) <= 300
+
+    def test_pinned_post_environment_override(self, monkeypatch):
+        monkeypatch.setenv("GE_PINNED_POST_YOUR_FEED_URI", "at://managed")
+        assert _pinned_post_uri("your-feed", "at://fallback") == "at://managed"
+
+    def test_blank_pinned_post_environment_override_uses_fallback(self, monkeypatch):
+        monkeypatch.setenv("GE_PINNED_POST_YOUR_FEED_URI", "")
+        assert _pinned_post_uri("your-feed", "at://fallback") == "at://fallback"
+
     def test_social_radius_splits_everyone_weight_evenly(self):
         for presets in (
             SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,

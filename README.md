@@ -274,6 +274,7 @@ The deployment script will:
 - Build the container using Google Cloud buildpacks
 - Deploy to Cloud Run with proper environment variables and secrets
 - Stamp the deployed git sha onto the revision and the debug feed records
+- Preserve existing public feed descriptions while syncing other generator metadata
 
 API deployments do not change Firebase configuration. Deploy Firebase rules,
 indexes, TTL policies, Functions, and Hosting from the frontend repository.
@@ -516,6 +517,74 @@ Other useful `publish_feed.py` flags:
 - `--generator-did` — override `GE_FEED_GENERATOR_DID`
 - `--pds` — use a different PDS (default: `https://bsky.social`)
 
+#### One-time public feed-description migration
+
+Public feed descriptions are account-managed copy. Routine deployments preserve
+their current `description` and `descriptionFacets`; they do not append or
+recompose the attribution line. Use the dedicated migration script when that
+copy intentionally changes.
+
+The current migration replaces only either legacy attribution:
+
+```text
+Built by GreenEarth (www.greenearth.social).
+Built by GreenEarth (https://www.greenearth.social).
+```
+
+with:
+
+```text
+Built by Green Earth (https://www.greenearth.social).
+```
+
+Everything else in each existing description is retained. The script is
+idempotent, will not append the new text when no legacy attribution is present,
+and exits non-zero if a targeted record is missing or needs manual attention.
+It reads the appropriate Bluesky app password from GCP Secret Manager unless
+`GE_BSKY_APP_PASSWORD` or `--app-password` is supplied.
+
+Preview and then apply it once in each environment:
+
+```bash
+pipenv run python scripts/update_feed_descriptions.py --environment stage --dry-run
+pipenv run python scripts/update_feed_descriptions.py --environment stage
+
+pipenv run python scripts/update_feed_descriptions.py --environment prod --dry-run
+pipenv run python scripts/update_feed_descriptions.py --environment prod
+```
+
+Stage targets the public feed configurations published under their Caterpie
+rkeys; production targets `your-feed`, `best-of-friends`, and `random` on the
+GreenEarth account. Records with description facets are deliberately left for
+manual review because changing text would invalidate their byte offsets.
+
+Public feed pins are managed from the `pinned_post_content` entries in
+`src/app/feeds.py`. Their SETTINGS links use markdown syntax, which
+`scripts/manage_pinned_posts.py` converts into Bluesky rich-text facets.
+
+The deployment lifecycle is deliberately change-aware:
+
+- The script fingerprints the three configured messages and its managed-post
+  schema version. The fingerprint and resolved URIs are stored on the Cloud Run
+  revision as `GE_PINNED_POST_CONFIG_SHA` and `GE_PINNED_POST_<FEED>_URI`.
+- If the fingerprint matches the currently deployed revision, `deploy.sh`
+  reuses its URIs without logging into Bluesky.
+- A changed message/link, a missing deployed state, or an intentional schema
+  version bump runs the authenticated sync. It scans the publisher's post
+  records for an exact text-and-link match; an existing match is reused, while
+  changed content is published as a normal TID-keyed Bluesky post with a new URI.
+- `./scripts/deploy.sh --sync-pinned-posts` forces an authenticated verification
+  when recovering from a deleted record. It still does not create a
+  duplicate when an exact matching post already exists.
+- Previous managed posts are retained because an older Cloud Run revision or
+  rollback may still reference them. A required pin-sync failure stops deployment
+  before Cloud Run is changed.
+
+Production publishes pins under `greenearth-social.bsky.social`; stage/dev uses
+`caterpie-internal.bsky.social`. Feed generator metadata is synchronized later
+in the same deployment, but existing public descriptions are preserved. Managed
+pinned-post publication remains part of the deployment lifecycle described above.
+
 #### 6. View the feed in Bluesky
 
 Open [bsky.app](https://bsky.app), log in as the dev account, and navigate to
@@ -756,6 +825,8 @@ greenearth/api/
 │   ├── gcp_setup.sh               # GCP environment setup
 │   ├── apikeys.py                 # API key management
 │   ├── feed_debug.py              # CLI debug tool
+│   ├── manage_pinned_posts.py     # Change-aware public feed pin publication
+│   ├── update_feed_descriptions.py # One-time public description migration
 │   └── publish_feed.py            # Publish/update feed generator records
 ├── .gcloudignore                  # Files to exclude from deployment
 ├── .python-version

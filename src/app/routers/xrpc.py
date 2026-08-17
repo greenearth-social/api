@@ -684,13 +684,6 @@ async def _run_ranking_pipeline(
         if rec is not None:
             rec.record_final_order(final_uris)
 
-        # Emit once per render. When fail_fast=True, exceptions propagate before
-        # reaching here, so the metric is only emitted for soft-failed (degraded)
-        # renders — not for hard failures.
-        if ctx is not None and ctx.degradations and not ctx.fail_fast:
-            if collector is not None:
-                collector.record("feed.render.degraded_count", 1, feed_name=ctx.feed_name)
-
     return PipelineResult(final_uris, low_score_uris)
 
 
@@ -787,6 +780,24 @@ async def _run_pipeline_capturing(
         pipeline_result = await _run_ranking_pipeline(
             feed_cfg, gen_request, request.app.state.es, feed_name=feed_name
         )
+
+    # Emit once only after the pipeline has returned successfully. A render can
+    # accumulate several degradation events, so attribute it to the first
+    # failure: this preserves the counter's "degraded renders" meaning (and its
+    # ratio denominator) while making the primary stage/component actionable.
+    # Later events remain in the PipelineContext for debug capture. Early-return
+    # fallbacks (for example, every generator yielding no candidates) still pass
+    # through here, unlike an emitter at the bottom of _run_ranking_pipeline.
+    if ctx.degradations and not ctx.fail_fast:
+        if collector := get_metric_collector():
+            primary = ctx.degradations[0]
+            collector.record(
+                "feed.render.degraded_count",
+                1,
+                feed_name=ctx.feed_name,
+                stage=primary.stage.value,
+                component=primary.component,
+            )
 
     expires_at = generated_at + timedelta(seconds=FEED_SNAPSHOT_RETENTION_SECONDS)
     snapshot = recorder.build_pipeline_metadata(

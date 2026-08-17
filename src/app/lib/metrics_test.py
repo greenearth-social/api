@@ -4,20 +4,20 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
     InMemoryMetricReader,
-    MetricExportResult,
 )
 
 from .metrics import MetricCollector, get_metric_collector, set_metric_collector
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_collector(service_name: str = "test-svc", env: str = "test") -> tuple[MetricCollector, InMemoryMetricReader]:
+
+def _make_collector(
+    service_name: str = "test-svc", env: str = "test"
+) -> tuple[MetricCollector, InMemoryMetricReader]:
     reader = InMemoryMetricReader()
     collector = MetricCollector._from_reader(reader, service_name=service_name, env=env)
     return collector, reader
@@ -42,6 +42,7 @@ def _collect_names_from_data(data) -> set[str]:
 # Instrument type inference
 # ---------------------------------------------------------------------------
 
+
 def test_counter_inferred_for_count_suffix():
     collector, reader = _make_collector()
     collector.record("requests_count", 5)
@@ -52,6 +53,7 @@ def test_counter_inferred_for_count_suffix():
             for metric in sm.metrics:
                 if metric.name == "requests_count":
                     from opentelemetry.sdk.metrics._internal.point import Sum
+
                     assert isinstance(metric.data, Sum)
                     found = True
     assert found, "requests_count not found in exported metrics"
@@ -67,6 +69,7 @@ def test_gauge_inferred_for_rate_suffix():
             for metric in sm.metrics:
                 if metric.name == "throughput_rate":
                     from opentelemetry.sdk.metrics._internal.point import Gauge
+
                     assert isinstance(metric.data, Gauge)
                     found = True
     assert found, "throughput_rate not found in exported metrics"
@@ -82,6 +85,7 @@ def test_histogram_inferred_for_ms_suffix():
             for metric in sm.metrics:
                 if metric.name == "feed.render.duration_ms":
                     from opentelemetry.sdk.metrics._internal.point import Histogram
+
                     assert isinstance(metric.data, Histogram)
                     found = True
     assert found, "feed.render.duration_ms not found in exported metrics"
@@ -97,6 +101,7 @@ def test_histogram_inferred_for_arbitrary_name():
 # ---------------------------------------------------------------------------
 # Attributes (labels)
 # ---------------------------------------------------------------------------
+
 
 def test_attributes_attached_to_histogram():
     collector, reader = _make_collector()
@@ -191,6 +196,7 @@ def test_explicit_traffic_attribute_wins():
 # Lazy instrument reuse
 # ---------------------------------------------------------------------------
 
+
 def test_same_instrument_reused_across_calls():
     collector, reader = _make_collector()
     collector.record("feed.render.duration_ms", 10.0)
@@ -201,6 +207,7 @@ def test_same_instrument_reused_across_calls():
             for metric in sm.metrics:
                 if metric.name == "feed.render.duration_ms":
                     from opentelemetry.sdk.metrics._internal.point import Histogram
+
                     assert isinstance(metric.data, Histogram)
                     # Both values should be in the same histogram
                     dp = metric.data.data_points[0]
@@ -210,6 +217,7 @@ def test_same_instrument_reused_across_calls():
 # ---------------------------------------------------------------------------
 # GCP exporter construction
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("env", ["stage", "prod"])
 def test_gcp_exporter_uses_unique_identifier(env):
@@ -234,6 +242,7 @@ def test_gcp_exporter_uses_unique_identifier(env):
 # Local/dev (non-deployed environment)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_local_env_records_without_exporting(capsys):
     """Local/dev should record metrics without printing a resource_metrics blob."""
@@ -255,6 +264,7 @@ async def test_local_env_records_without_exporting(capsys):
 # Module-level singleton
 # ---------------------------------------------------------------------------
 
+
 def test_set_and_get_metric_collector():
     collector, _ = _make_collector()
     set_metric_collector(collector)
@@ -266,6 +276,7 @@ def test_set_and_get_metric_collector():
 # ---------------------------------------------------------------------------
 # Shutdown
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_shutdown_does_not_raise():
@@ -284,6 +295,7 @@ async def test_shutdown_does_not_raise():
 
 from .metrics import (  # noqa: E402
     CONCURRENCY_BOUNDARIES,
+    EVENTLOOP_LAG_MS_BOUNDARIES,
     FAST_MS_BOUNDARIES,
     LATENCY_MS_BOUNDARIES,
     RATIO_BOUNDARIES,
@@ -308,10 +320,14 @@ class TestHistogramBoundaries:
 
     @pytest.mark.parametrize(
         "name",
-        ["eventloop.lag_ms", "client.pool.wait_ms", "client.connect.duration_ms"],
+        ["client.pool.wait_ms", "client.connect.duration_ms"],
     )
     def test_near_zero_metrics(self, name):
         assert histogram_boundaries(name) == FAST_MS_BOUNDARIES
+
+    def test_eventloop_lag_has_extended_tail_coverage(self):
+        assert histogram_boundaries("eventloop.lag_ms") == EVENTLOOP_LAG_MS_BOUNDARIES
+        assert EVENTLOOP_LAG_MS_BOUNDARIES[-1] == 60_000
 
     @pytest.mark.parametrize(
         "name", ["client.in_flight", "es.client.in_flight", "feed.slate.exclusion_size"]
@@ -337,6 +353,7 @@ class TestHistogramBoundaries:
         for bounds in (
             LATENCY_MS_BOUNDARIES,
             FAST_MS_BOUNDARIES,
+            EVENTLOOP_LAG_MS_BOUNDARIES,
             CONCURRENCY_BOUNDARIES,
             RATIO_BOUNDARIES,
         ):
@@ -348,7 +365,7 @@ class TestHistogramBoundaries:
         these values. A threshold that is itself a boundary makes the
         percentile estimate exact where it matters — at the threshold."""
         assert 2500 in LATENCY_MS_BOUNDARIES  # feed.render p95
-        assert 100 in FAST_MS_BOUNDARIES  # eventloop.lag_ms p95
+        assert 100 in EVENTLOOP_LAG_MS_BOUNDARIES  # eventloop.lag_ms p95
         assert 10 in FAST_MS_BOUNDARIES  # client.pool.wait_ms p95
         assert 100 in CONCURRENCY_BOUNDARIES  # pool caps
 

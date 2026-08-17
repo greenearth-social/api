@@ -58,6 +58,13 @@ class TestFeedConfig:
         uri = "at://did:plc:example/app.bsky.feed.post/abc123"
         assert _minimal_feed_cfg(pinned_post_uri=uri).pinned_post_uri == uri
 
+    def test_pinned_post_content_defaults_to_none(self):
+        assert _minimal_feed_cfg().pinned_post_content is None
+
+    def test_pinned_post_content_can_be_set(self):
+        content = "Click [SETTINGS](https://example.com) to personalize."
+        assert _minimal_feed_cfg(pinned_post_content=content).pinned_post_content == content
+
     def test_logged_out_defaults_to_explain(self):
         """A new feed is personalized until proven otherwise, so the safe default
         is to tell a logged-out visitor why it's empty rather than 401."""
