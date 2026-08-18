@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "069d2f28d8135dcc8d32a47b64cb6a73cc195cceec0701b2107b61fbe6df0693"
+            "sha256": "bfc1115f8af0ce15b7b9a06ff3fbb7d37147eb1c6344a0347e868a6c869a5a75"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -517,12 +517,12 @@
         },
         "elasticsearch": {
             "hashes": [
-                "sha256:1d78fdfba97a903ec35a5eb5808a74e33392b7c620bd5f742d465a3a26c27d75",
-                "sha256:71ab71c3d1b20fd88c2922fb82c3277cce7ea03c160686e7b9368b265c2b4cac"
+                "sha256:010e04f44fd161428f0ab7f94b93a533d3dcc3285d02c9df509b4e0127916420",
+                "sha256:c37576ba04d04200a05012db99bc99024000ae15b9ebdd683966aa8a0e6cd1c4"
             ],
             "index": "pypi",
             "markers": "python_version >= '3.10'",
-            "version": "==9.4.1"
+            "version": "==9.5.0"
         },
         "fastapi": {
             "hashes": [
@@ -959,11 +959,11 @@
         },
         "idna": {
             "hashes": [
-                "sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2",
-                "sha256:ffb385a7e039654cef1ab9ef32c6fafe283c0c0467bba1d9029738ce4a14a848"
+                "sha256:5e0811a4383b21dc5838069f801c4fb62113b7447663d2530d2bd6e77b49bf15",
+                "sha256:815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4"
             ],
             "markers": "python_version >= '3.9'",
-            "version": "==3.18"
+            "version": "==3.19"
         },
         "libipld": {
             "hashes": [
