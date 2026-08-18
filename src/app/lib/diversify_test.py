@@ -9,7 +9,6 @@ from .diversify import (
     AUTHOR_WEIGHT,
     BETA,
     DECAY_TAU,
-    _cosine_similarity,
     _pairwise_cosine_similarities,
     mmr_rerank,
 )
