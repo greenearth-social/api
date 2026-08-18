@@ -142,16 +142,6 @@ def mmr_rerank(candidates: list[CandidatePost]) -> list[tuple[CandidatePost, flo
     return [(candidates[i], score) for i, score in zip(selected, pick_scores, strict=True)]
 
 
-def _calculate_content_sim(
-    vec_a: list[float] | None,
-    vec_b: list[float] | None,
-) -> float:
-    if AUTHOR_WEIGHT < 1.0 and vec_a is not None and vec_b is not None:
-        return _cosine_similarity(vec_a, vec_b)
-    else:
-        return 0.0
-
-
 def _pairwise_cosine_similarities(vecs: list[list[float] | None]) -> np.ndarray:
     """Return a dense cosine-similarity matrix for decoded embeddings.
 
