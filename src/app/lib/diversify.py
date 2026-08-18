@@ -146,7 +146,7 @@ def _pairwise_cosine_similarities(vecs: list[list[float] | None]) -> np.ndarray:
     """Return a dense cosine-similarity matrix for decoded embeddings.
 
     Missing, invalid, and zero-length embeddings have zero similarity, matching
-    ``_calculate_content_sim``. Production MiniLM embeddings are uniformly
+    original ``_calculate_content_sim`` fn. Production MiniLM embeddings are uniformly
     384-dimensional.
     """
     n = len(vecs)
