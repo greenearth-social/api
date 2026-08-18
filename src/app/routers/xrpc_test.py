@@ -2274,6 +2274,42 @@ class TestSlateCutoffs:
         # MMR-cut posts are not discarded — they may fit a future slate.
         discarded.assert_not_awaited()
 
+    def test_mmr_metrics_record_input_size_and_duration(self, monkeypatch):
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+        from ..lib.metrics import MetricCollector, set_metric_collector
+
+        monkeypatch.setattr(FEEDS["your-feed"], "diversify", True)
+        candidates = _make_candidates("p", 4, with_embedding=True)
+        reader = InMemoryMetricReader()
+        set_metric_collector(MetricCollector._from_reader(reader, service_name="t", env="test"))
+        try:
+            self._get_feed(candidates, self._rank_result([0.8, 0.7, 0.6, 0.5]))
+
+            metrics = {}
+            metrics_data = reader.get_metrics_data()
+            assert metrics_data is not None
+            for rm in metrics_data.resource_metrics:
+                for sm in rm.scope_metrics:
+                    for metric in sm.metrics:
+                        metrics[metric.name] = metric
+
+            input_size = metrics["feed.mmr.input_size"]
+            (input_point,) = input_size.data.data_points
+            assert input_point.count == 1
+            assert input_point.sum == 4
+            assert input_point.attributes["feed_name"] == "your-feed"
+            assert input_point.attributes["traffic"] == "real"
+
+            duration = metrics["feed.mmr.duration_ms"]
+            (duration_point,) = duration.data.data_points
+            assert duration_point.count == 1
+            assert duration_point.sum >= 0
+            assert duration_point.attributes["feed_name"] == "your-feed"
+            assert duration_point.attributes["traffic"] == "real"
+        finally:
+            set_metric_collector(None)
+
     def test_fail_open_serves_precut_slate_when_everything_cut(self, monkeypatch):
         """If the gates reject everything retrieved, the pre-cutoff slate is served."""
         monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)

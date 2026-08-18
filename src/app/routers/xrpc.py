@@ -637,7 +637,16 @@ async def _run_ranking_pipeline(
             rec.record_order_after_rank([c.at_uri for c in ordered if c.at_uri])
 
         if feed_cfg.diversify:
-            picks = mmr_rerank(ordered)
+            if collector:
+                collector.record("feed.mmr.input_size", len(ordered), feed_name=feed_name)
+            async with timed(
+                logger,
+                "feed.mmr.duration_ms",
+                record_metric=True,
+                metric_attrs={"feed_name": feed_name},
+                n_candidates=len(ordered),
+            ):
+                picks = mmr_rerank(ordered)
             final = [c for c, _ in picks]
             if feed_cfg.min_mmr_score is not None:
                 # Pick scores are not monotone (penalties decay with position),

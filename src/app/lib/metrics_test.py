@@ -308,6 +308,7 @@ class TestHistogramBoundaries:
         "name",
         [
             "feed.render.duration_ms",
+            "feed.mmr.duration_ms",
             "candidates.generate.duration_ms",
             "rank.model.duration_ms",
             "perspective.score.duration_ms",
@@ -330,7 +331,13 @@ class TestHistogramBoundaries:
         assert EVENTLOOP_LAG_MS_BOUNDARIES[-1] == 60_000
 
     @pytest.mark.parametrize(
-        "name", ["client.in_flight", "es.client.in_flight", "feed.slate.exclusion_size"]
+        "name",
+        [
+            "client.in_flight",
+            "es.client.in_flight",
+            "feed.slate.exclusion_size",
+            "feed.mmr.input_size",
+        ],
     )
     def test_concurrency_metrics(self, name):
         assert histogram_boundaries(name) == CONCURRENCY_BOUNDARIES
