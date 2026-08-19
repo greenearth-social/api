@@ -816,6 +816,21 @@ class TestGetFeedSkeleton:
             ).json()
         assert len(data["feed"]) == 30
 
+    @pytest.mark.parametrize(
+        ("limit", "max_batch_size", "expected"),
+        (
+            (10, 100, 50),
+            (20, 200, 100),
+            (30, 100, 100),
+            (30, 200, 150),
+            (50, 200, 200),
+        ),
+    )
+    def test_candidate_batch_size(self, limit, max_batch_size, expected):
+        from .xrpc import _batch_size
+
+        assert _batch_size(limit, max_batch_size) == expected
+
     # --- de-duplication ---
 
     def test_deduplicates_by_at_uri(self):
@@ -4059,7 +4074,11 @@ class TestSourceWeightsOverride:
         mock_feature_flags.assert_called_once_with(
             mock_get_posthog_client.return_value,
             "did:plc:testuser",
-            ["fail-fast-feed", "network-likes-in-your-feed"],
+            [
+                "fail-fast-feed",
+                "expanded-candidate-batch",
+                "network-likes-in-your-feed",
+            ],
         )
 
     @pytest.mark.parametrize(
@@ -4132,7 +4151,11 @@ class TestSourceWeightsOverride:
         mock_feature_flags.assert_called_once_with(
             mock_get_posthog_client.return_value,
             "did:plc:testuser",
-            ["fail-fast-feed", "network-likes-in-your-feed"],
+            [
+                "fail-fast-feed",
+                "expanded-candidate-batch",
+                "network-likes-in-your-feed",
+            ],
         )
 
     @patch(
@@ -4673,6 +4696,114 @@ class TestPosthogTracking:
                 assert call_kwargs.args[2] == "interactionLike"
                 assert call_kwargs.args[3] == "your-feed"
                 assert call_kwargs.args[4] == "at://did/post/1"
+
+
+class TestExpandedCandidateBatchFeatureFlag:
+    """The treatment raises the cap for every authenticated feed."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_authenticated_user(self):
+        with patch(
+            "app.routers.xrpc.verify_auth_header",
+            new_callable=AsyncMock,
+            return_value="did:plc:testuser",
+        ):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore(self):
+        with (
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock),
+            patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            yield
+
+    @pytest.mark.parametrize(("enabled", "expected"), ((False, 100), (True, 200)))
+    def test_flag_controls_initial_candidate_batch(self, enabled, expected):
+        from .xrpc import PipelineResult
+
+        pipeline = AsyncMock(return_value=PipelineResult([], []))
+        flags = {
+            "fail-fast-feed": False,
+            "network-likes-in-your-feed": False,
+            "expanded-candidate-batch": enabled,
+        }
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.evaluate_feature_flags", return_value=flags),
+            patch("app.routers.xrpc._run_ranking_pipeline", pipeline),
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": 50},
+            )
+
+        assert response.status_code == 200
+        assert pipeline.call_args.args[1].num_candidates == expected
+
+    def test_flag_controls_cursor_regeneration_batch(self):
+        from .xrpc import PipelineResult
+
+        cache_id = "expanded-batch-regeneration"
+        app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
+            items=["at://cached/1"],
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            user_did="did:plc:testuser",
+            feed_name=RANKED_FEED_RKEY,
+        )
+        cursor = FeedCursor(id=cache_id, offset=1).encode()
+        pipeline = AsyncMock(return_value=PipelineResult([], []))
+        flags = {
+            "fail-fast-feed": False,
+            "network-likes-in-your-feed": False,
+            "expanded-candidate-batch": True,
+        }
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.evaluate_feature_flags", return_value=flags),
+            patch("app.routers.xrpc._run_ranking_pipeline", pipeline),
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={
+                    "feed": RANKED_FEED_URI,
+                    "limit": 50,
+                    "cursor": cursor,
+                },
+            )
+
+        assert response.status_code == 200
+        assert pipeline.call_args.args[1].num_candidates == 200
+
+    def test_flag_controls_candidate_batch_for_other_feeds(self):
+        from .xrpc import PipelineResult
+
+        pipeline = AsyncMock(return_value=PipelineResult([], []))
+        evaluate_flags = MagicMock(
+            return_value={
+                "fail-fast-feed": False,
+                "expanded-candidate-batch": True,
+            }
+        )
+        posthog_client = MagicMock()
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=posthog_client),
+            patch("app.routers.xrpc.evaluate_feature_flags", evaluate_flags),
+            patch("app.routers.xrpc._run_ranking_pipeline", pipeline),
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": BEST_OF_FRIENDS_FEED_URI, "limit": 50},
+            )
+
+        assert response.status_code == 200
+        evaluate_flags.assert_called_once_with(
+            posthog_client,
+            "did:plc:testuser",
+            ["fail-fast-feed", "expanded-candidate-batch"],
+        )
+        assert pipeline.call_args.args[1].num_candidates == 200
 
 
 class TestFailFastFeatureFlag:
