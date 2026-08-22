@@ -6,13 +6,11 @@ import asyncio
 import logging
 import os
 import time
-from urllib.parse import urlsplit
 
 import aiohttp
 
 from ..models import CandidatePost
 from .client_metrics import aiohttp_trace_config
-from .http_client import get_http_client
 from .pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from .telemetry import timed
 
@@ -49,12 +47,6 @@ def _perspective_url() -> str:
     host = os.environ.get("GE_PERSPECTIVE_HOST", _PERSPECTIVE_HOST_DEFAULT)
     return f"{host}/v1alpha1/comments:analyze"
 
-
-def _perspective_host_label() -> str:
-    """Host label for the `client.in_flight` metric, matching the httpx
-    transport's host-label semantics (InFlightTransport uses
-    `request.url.host`)."""
-    return urlsplit(_perspective_url()).hostname or "unknown"
 
 
 class PerspectiveLanguageNotSupportedError(Exception):
@@ -230,19 +222,19 @@ class PerspectiveClient:
         session = self._get_session()
         timeout = aiohttp.ClientTimeout(total=_SCORE_TIMEOUT_SECONDS)
 
-        # `client.in_flight` is the saturation signal for this session: the
-        # connector is unbounded (limit=0/limit_per_host=0, see
-        # _get_session), so `client.pool.wait_ms` can structurally never
-        # fire here -- there's no pool cap to queue behind. This counter
-        # tracks concurrent score() calls instead. Increment/record happen
-        # inside the try so the `finally` decrement always runs, even if
-        # `collector.record` itself raises.
+        # `perspective.score.in_flight` tracks concurrent score() calls.
+        # Recorded under its own metric rather than `client.in_flight` so the
+        # shared-httpx pool-saturation chart stays unambiguous: the connector
+        # here is unbounded (limit=0/limit_per_host=0, see _get_session) and
+        # `client.pool.wait_ms` can structurally never fire. Increment/record
+        # happen inside the try so the `finally` decrement always runs, even
+        # if `collector.record` itself raises.
         self._in_flight += 1
         try:
             collector = get_metric_collector()
             if collector is not None:
                 collector.record(
-                    "client.in_flight", self._in_flight, host=_perspective_host_label()
+                    "perspective.score.in_flight", self._in_flight
                 )
 
             for attempt in range(_SCORE_ATTEMPTS):

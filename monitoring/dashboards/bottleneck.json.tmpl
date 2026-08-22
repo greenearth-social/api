@@ -167,7 +167,7 @@
         "width": 4,
         "height": 8,
         "widget": {
-          "title": "Candidate generation latency by generator",
+          "title": "Candidate generation latency and failures per minute",
           "xyChart": {
             "dataSets": [
               {
@@ -177,11 +177,23 @@
                 "timeSeriesQuery": {
                   "prometheusQuery": "histogram_quantile(0.95, sum by (le, generator_name)(rate({__name__=\"custom.googleapis.com/greenearth-api/candidates.generate.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
                 }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y2",
+                "legendTemplate": "failures/min generator=${metric.labels.generator_name} outcome=${metric.labels.outcome}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "60 * sum by (generator_name, outcome)(rate({__name__=\"custom.googleapis.com/greenearth-api/candidates.generate.failure_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m]))"
+                }
               }
             ],
             "thresholds": [],
             "yAxis": {
               "label": "ms",
+              "scale": "LINEAR"
+            },
+            "y2Axis": {
+              "label": "failures / min",
               "scale": "LINEAR"
             },
             "chartOptions": {
@@ -298,6 +310,14 @@
           "title": "Event-loop scheduling lag per instance",
           "xyChart": {
             "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 fleet-wide",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/eventloop.lag_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\"}[5m])))"
+                }
+              },
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
@@ -496,7 +516,7 @@
         "width": 6,
         "height": 8,
         "widget": {
-          "title": "Concurrent outbound requests in flight vs pool cap",
+          "title": "Concurrent outbound requests in flight — httpx / ES capped at 100",
           "xyChart": {
             "dataSets": [
               {
@@ -519,7 +539,7 @@
             "thresholds": [
               {
                 "value": 100,
-                "label": "connection pool cap (100)",
+                "label": "httpx / ES pool cap (100)",
                 "targetAxis": "Y1"
               }
             ],
