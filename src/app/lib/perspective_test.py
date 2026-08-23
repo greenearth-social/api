@@ -342,10 +342,10 @@ class TestPerspectiveClientScore:
 
     @pytest.mark.asyncio
     async def test_score_records_in_flight_and_resets_after_completion(self, monkeypatch):
-        """client.in_flight is the saturation signal for Perspective's
-        unbounded connector: two concurrent score() calls against a blocked
-        session record samples [1, 2]; a later, non-overlapping call
-        records 1 again -- the counter doesn't leak across calls."""
+        """perspective.score.in_flight tracks concurrent score() calls:
+        two concurrent score() calls against a blocked session record
+        samples [1, 2]; a later, non-overlapping call records 1 again --
+        the counter doesn't leak across calls."""
         import asyncio
 
         from .perspective import PerspectiveClient
@@ -358,9 +358,6 @@ class TestPerspectiveClientScore:
         session = MagicMock()
         session.post = MagicMock(return_value=_BlockingResponseCM(release, response))
 
-        # Pin the host: the label is derived from GE_PERSPECTIVE_HOST, which is
-        # set to a stub in the local dev environment, so asserting the
-        # production hostname would make this test environment-dependent.
         env = {
             "GE_PERSPECTIVE_API_KEY": "test-key",
             "GE_PERSPECTIVE_HOST": "https://perspective.test",
@@ -378,10 +375,10 @@ class TestPerspectiveClientScore:
             await asyncio.gather(t1, t2)
 
             concurrent_samples = [
-                (v, a) for n, v, a in collector.records if n == "client.in_flight"
+                (v, a) for n, v, a in collector.records if n == "perspective.score.in_flight"
             ]
             assert sorted(v for v, _ in concurrent_samples) == [1, 2]
-            assert all(a == {"host": "perspective.test"} for _, a in concurrent_samples)
+            assert all(a == {} for _, a in concurrent_samples)
 
             # A later, non-overlapping call starts from a reset counter.
             release2 = asyncio.Event()
@@ -389,7 +386,7 @@ class TestPerspectiveClientScore:
             session.post = MagicMock(return_value=_BlockingResponseCM(release2, response))
             await client.score("again")
 
-        later_samples = [v for n, v, _ in collector.records if n == "client.in_flight"]
+        later_samples = [v for n, v, _ in collector.records if n == "perspective.score.in_flight"]
         assert later_samples[-1] == 1
 
 
