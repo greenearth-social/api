@@ -102,7 +102,9 @@ revision_env_var() {
         | awk -F'\t' -v name="$var_name" '$1 == name { print $2; exit }'
 }
 
-# Ready revisions, newest first, as "name<TAB>git-sha<TAB>created".
+# Ready revisions, newest first, as "name|git-sha|created". Pipe-separated
+# rather than tab-separated because bash collapses runs of whitespace delimiters:
+# an unlabelled revision would otherwise shift its timestamp into the sha field.
 ready_revisions() {
     gcloud run revisions list \
         --service="$(service_name)" \
@@ -110,7 +112,7 @@ ready_revisions() {
         --project="$PROJECT_ID" \
         --filter="status.conditions.type=Ready AND status.conditions.status=True" \
         --sort-by="~metadata.creationTimestamp" \
-        --format="value(metadata.name,metadata.labels.git-sha,metadata.creationTimestamp)"
+        --format="value[separator='|'](metadata.name,metadata.labels.git-sha,metadata.creationTimestamp)"
 }
 
 list_revisions() {
@@ -121,7 +123,7 @@ list_revisions() {
     echo ""
     printf "    %-34s %-10s %s\n" "REVISION" "GIT SHA" "CREATED"
 
-    while IFS=$'\t' read -r revision sha created; do
+    while IFS='|' read -r revision sha created; do
         [ -z "$revision" ] && continue
         local marker="  "
         if [ "$revision" = "$serving" ]; then
@@ -146,7 +148,7 @@ resolve_previous_revision() {
     local serving_sha="$2"
     local seen_serving=false
 
-    while IFS=$'\t' read -r revision sha _created; do
+    while IFS='|' read -r revision sha _created; do
         [ -z "$revision" ] && continue
 
         if [ "$revision" = "$serving" ]; then
@@ -181,7 +183,7 @@ resolve_target_revision() {
 
     # Not a revision name — try it as a git sha, taking the newest Ready match.
     local match
-    match="$(ready_revisions | awk -F'\t' -v sha="$requested" '$2 == sha { print $1; exit }')"
+    match="$(ready_revisions | awk -F'[|]' -v sha="$requested" '$2 == sha { print $1; exit }')"
 
     if [ -n "$match" ]; then
         echo "$match"
