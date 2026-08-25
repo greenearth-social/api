@@ -130,6 +130,10 @@ class AcceptedFeedSlateDocument(BaseModel):
 
     request_id: str
     expires_at: datetime
+    claimed_at: datetime | None = Field(
+        default=None,
+        description="When the first request in the accepted feed load claimed this slate.",
+    )
 
 
 class FeedCacheDocument(BaseModel):

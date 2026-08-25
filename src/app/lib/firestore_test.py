@@ -561,7 +561,7 @@ async def test_accept_feed_preview_commits_settings_cache_pointer_and_seen_delet
 
 
 @pytest.mark.asyncio
-async def test_claim_accepted_feed_slate_is_one_time_and_rejects_expired_pointer():
+async def test_claim_accepted_feed_slate_reuses_one_load_then_consumes_pointer():
     db = MagicMock()
     transaction = MagicMock()
     db.transaction.return_value = transaction
@@ -580,8 +580,17 @@ async def test_claim_accepted_feed_slate_is_one_time_and_rejects_expired_pointer
             _mock_doc_snapshot(
                 True,
                 {
-                    "request_id": "expired-id",
-                    "expires_at": datetime.now(UTC) - timedelta(seconds=1),
+                    "request_id": "accepted-id",
+                    "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+                    "claimed_at": datetime.now(UTC),
+                },
+            ),
+            _mock_doc_snapshot(
+                True,
+                {
+                    "request_id": "accepted-id",
+                    "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+                    "claimed_at": datetime.now(UTC) - timedelta(seconds=6),
                 },
             ),
         ]
@@ -589,9 +598,14 @@ async def test_claim_accepted_feed_slate_is_one_time_and_rejects_expired_pointer
 
     with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
         assert await claim_accepted_feed_slate(db, USER_DID, "your-feed") == "accepted-id"
+        assert await claim_accepted_feed_slate(db, USER_DID, "your-feed") == "accepted-id"
         assert await claim_accepted_feed_slate(db, USER_DID, "your-feed") is None
 
-    assert transaction.delete.call_count == 2
+    transaction.set.assert_called_once()
+    assert transaction.set.call_args.args[0] is ref
+    assert "claimed_at" in transaction.set.call_args.args[1]
+    assert transaction.set.call_args.kwargs == {"merge": True}
+    transaction.delete.assert_called_once_with(ref)
 
 
 # ---------------------------------------------------------------------------

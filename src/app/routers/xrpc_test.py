@@ -761,6 +761,12 @@ class TestGetFeedSkeleton:
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
                 params={"feed": FEED_URI, "limit": 2},
             ).json()
+            refreshed = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                # A different limit avoids the process-local overlap cache and
+                # represents a distinct initial Bluesky refresh.
+                params={"feed": FEED_URI, "limit": 3},
+            ).json()
 
         second = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -768,12 +774,14 @@ class TestGetFeedSkeleton:
         ).json()
 
         assert [item["post"] for item in first["feed"]] == uris[:2]
+        assert [item["post"] for item in refreshed["feed"]] == uris[:3]
         assert [item["post"] for item in second["feed"]] == uris[2:4]
-        claim.assert_awaited_once()
+        assert claim.await_count == 2
         claim_call = claim.await_args
         assert claim_call is not None
         assert claim_call.args[1:] == ("did:plc:testuser", FEED_RKEY)
-        write_snapshot.assert_awaited_once()
+        assert claim_call.kwargs == {"claim_grace_seconds": 5}
+        assert write_snapshot.await_count == 2
         pipeline.assert_not_awaited()
 
     def test_accepted_ranked_slate_keeps_the_pinned_post_outside_its_order(self):

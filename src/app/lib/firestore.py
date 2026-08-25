@@ -416,7 +416,7 @@ async def accept_feed_preview(
             AcceptedFeedSlateDocument(
                 request_id=request_id,
                 expires_at=accepted_until,
-            ).model_dump(),
+            ).model_dump(exclude_none=True),
         )
         transaction.delete(seen_ref)
         return updated, accepted_until
@@ -428,8 +428,16 @@ async def claim_accepted_feed_slate(
     db: AsyncClient,
     user_did: str,
     feed_name: str,
+    *,
+    claim_grace_seconds: int = 5,
 ) -> str | None:
-    """Claim and remove the one-time accepted slate pointer for a feed."""
+    """Claim the accepted slate for one feed load.
+
+    An unclaimed pointer may wait until ``expires_at``. The first request marks
+    it claimed; parallel requests within a short grace period receive the same
+    slate, while a later initial request consumes the pointer and generates a
+    normal fresh feed. Cursor pages use the accepted cache directly.
+    """
 
     ref = (
         db.collection(USERS_COLLECTION)
@@ -450,12 +458,25 @@ async def claim_accepted_feed_slate(
         except Exception:
             transaction.delete(ref)
             return None
+
+        now = datetime.now(UTC)
         expires_at = accepted.expires_at
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=UTC)
-        transaction.delete(ref)
-        if expires_at <= datetime.now(UTC):
+        if expires_at <= now:
+            transaction.delete(ref)
             return None
+
+        claimed_at = accepted.claimed_at
+        if claimed_at is not None:
+            if claimed_at.tzinfo is None:
+                claimed_at = claimed_at.replace(tzinfo=UTC)
+            if (now - claimed_at).total_seconds() <= claim_grace_seconds:
+                return accepted.request_id
+            transaction.delete(ref)
+            return None
+
+        transaction.set(ref, {"claimed_at": now}, merge=True)
         return accepted.request_id
 
     return await _claim(transaction)

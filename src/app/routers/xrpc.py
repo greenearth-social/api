@@ -1981,7 +1981,12 @@ async def get_feed_skeleton(
         try:
             if cursor is None and not is_probe and not is_anonymous and not is_load_test:
                 try:
-                    accepted_request_id = await claim_accepted_feed_slate(db, user_did, feed_name)
+                    accepted_request_id = await claim_accepted_feed_slate(
+                        db,
+                        user_did,
+                        feed_name,
+                        claim_grace_seconds=INITIAL_REQUEST_REUSE_SECONDS,
+                    )
                 except Exception:
                     logger.exception(
                         "Failed to claim accepted feed slate for user '%s' feed '%s'",
