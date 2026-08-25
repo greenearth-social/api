@@ -310,7 +310,8 @@ Each deploy stamps its short git sha in three places:
   which revision is live.
 - **Cloud Run label `git-sha=<sha>`** — tags the service/revision so past
   deployments are identifiable when picking a rollback target
-  (`gcloud run revisions list --format='value(metadata.name,metadata.labels.git-sha)'`).
+  (`./scripts/rollback.sh --list`; see
+  [Rolling back a deployment](#rolling-back-a-deployment)).
 - **Debug feed display names + descriptions** — every internal ("debug") feed
   record is published as e.g. `GE e2 S e9f07f5`, with `Built by Caterpie · e9f07f5`
   in the description. The public prod GreenEarth feeds are left unstamped.
@@ -318,6 +319,55 @@ Each deploy stamps its short git sha in three places:
 **Reporting a bug against a feed?** Open the debug feed in Bluesky and copy the
 trailing sha from its name (e.g. `e9f07f5`) into the report — it pins the bug to
 the exact deployed code. You can also read the live sha off `GET /health`.
+
+#### Rolling back a deployment
+
+`deploy.sh` builds from source, so the repo never names an image tag — the
+durable record of a past deployment is its **Cloud Run revision**, which pins
+both the built image digest and the env/secret configuration it ran with.
+Rolling back re-points traffic at an older revision. No rebuild, no waiting on a
+build, and no risk of an old git sha resolving different dependencies.
+
+```bash
+./scripts/rollback.sh --environment prod --list   # see candidates + git shas
+./scripts/rollback.sh --environment prod          # back to the previous deploy
+./scripts/rollback.sh --environment prod --to 7176a35   # or a specific target
+```
+
+`--to` accepts a revision name or a git sha. With no `--to`, the target is the
+newest Ready revision older than the one serving, with a different git sha. The
+script prompts for confirmation (`--yes` skips it, `--dry-run` shows the exact
+`gcloud` command without running it), then verifies the rollback landed by
+polling `GET /health` until it reports the target's sha.
+
+Rollbacks are manual by design. Cloud Run's own health-check behavior is
+untouched — a revision that never becomes Ready never receives traffic.
+
+**Getting back out:** a rollback pins traffic to a named revision, taking
+`LATEST` out of the traffic split. `deploy.sh` resets traffic to `LATEST` after
+every successful deploy, so deploying the fix is all it takes — there is no
+separate "un-rollback" step. (Because the reset runs only on success, a failed
+build leaves traffic safely on the rolled-back revision.)
+
+**Two deploy side effects are not rolled back**, both harmless:
+
+- Pinned posts and feed generator records published by the newer deploy stay
+  live. This is deliberate — old records are retained precisely so rolled-back
+  revisions keep working (see the public feed pin lifecycle below).
+- Debug feed display names keep showing the newer sha until the next deploy.
+
+**When to rebuild from git instead.** Revision rollback restores the old
+`GE_ELASTICSEARCH_URL` along with everything else. If the Elasticsearch internal
+LB IP has moved since that revision was deployed, the restored address is dead —
+`rollback.sh` warns about this when it can reach the cluster. It is also the
+fallback when the revision you want has been garbage-collected. In both cases:
+
+```bash
+git checkout <sha> && ./scripts/deploy.sh --environment prod
+```
+
+Elasticsearch itself rolls back separately; see the
+[ingex index README](../ingex/index/README.md).
 
 Inference endpoint resolution order during deploy:
 
@@ -822,6 +872,7 @@ greenearth/api/
 │           └── health.py           # GET /health
 ├── scripts/
 │   ├── deploy.sh                  # Cloud Run deployment
+│   ├── rollback.sh                # Roll traffic back to a previous revision
 │   ├── gcp_setup.sh               # GCP environment setup
 │   ├── apikeys.py                 # API key management
 │   ├── feed_debug.py              # CLI debug tool
