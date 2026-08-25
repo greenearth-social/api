@@ -9,6 +9,7 @@ import pytest
 from google.cloud.firestore import ArrayUnion
 
 from ..documents import (
+    FeedCacheDocument,
     FeedDebugDocument,
     FeedPreferencesDocument,
     FeedSnapshotDocument,
@@ -26,6 +27,8 @@ from ..lib.firestore import (
     SEEN_POSTS_COLLECTION,
     USERS_COLLECTION,
     _merge_feed_snapshots,
+    accept_feed_preview,
+    claim_accepted_feed_slate,
     delete_feed_snapshot,
     get_feed_activity,
     get_feed_debug,
@@ -483,6 +486,112 @@ async def test_patch_user_feed_preferences_materializes_in_transaction():
     assert written["feed_preferences"] == {"best-of-friends": {"freshness": 2, "purpose": 0.65}}
     assert written["created_by_load_test"] is False
     assert transaction.set.call_args.kwargs == {"merge": True}
+
+
+@pytest.mark.asyncio
+async def test_accept_feed_preview_commits_settings_cache_pointer_and_seen_delete():
+    now = datetime.now(UTC)
+    uri = "at://did:plc:author/app.bsky.feed.post/accepted"
+    db = MagicMock()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    users_collection = MagicMock()
+    cache_collection = MagicMock()
+    db.collection.side_effect = lambda name: (
+        users_collection if name == USERS_COLLECTION else cache_collection
+    )
+    user_ref = MagicMock()
+    cache_ref = MagicMock()
+    accepted_ref = MagicMock()
+    seen_ref = MagicMock()
+    users_collection.document.return_value = user_ref
+    cache_collection.document.return_value = cache_ref
+    accepted_collection = MagicMock()
+    accepted_collection.document.return_value = accepted_ref
+    seen_collection = MagicMock()
+    seen_collection.document.return_value = seen_ref
+    user_ref.collection.side_effect = lambda name: (
+        accepted_collection if name == "accepted_feed_slates" else seen_collection
+    )
+    cache_ref.get = AsyncMock(
+        return_value=_mock_doc_snapshot(
+            True,
+            FeedCacheDocument(
+                items=[uri, "at://filtered"],
+                items_meta=[PipelineItemMeta(at_uri=uri), PipelineItemMeta(at_uri="at://filtered")],
+                user_did=USER_DID,
+                feed_name="your-feed",
+                generated_at=now,
+                expires_at=now + timedelta(minutes=5),
+                mode="preview",
+                preference_patch=FeedPreferencesDocument(freshness=2),
+            ).model_dump(),
+        )
+    )
+    user_ref.get = AsyncMock(
+        return_value=_mock_doc_snapshot(
+            True,
+            {"user_did": USER_DID, "freshness": 5, "purpose": 0.5},
+        )
+    )
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        result = await accept_feed_preview(
+            db,
+            USER_DID,
+            "your-feed",
+            "preview-id",
+            FeedPreferencesDocument(freshness=2),
+            [uri],
+            ttl_seconds=600,
+        )
+
+    assert result is not None
+    updated, accepted_until = result
+    assert updated.freshness == 2
+    assert accepted_until > now
+    cache_write = next(call for call in transaction.set.call_args_list if call.args[0] is cache_ref)
+    assert cache_write.args[1]["mode"] == "accepted"
+    assert cache_write.args[1]["items"] == [uri]
+    pointer_write = next(
+        call for call in transaction.set.call_args_list if call.args[0] is accepted_ref
+    )
+    assert pointer_write.args[1]["request_id"] == "preview-id"
+    transaction.delete.assert_called_once_with(seen_ref)
+
+
+@pytest.mark.asyncio
+async def test_claim_accepted_feed_slate_is_one_time_and_rejects_expired_pointer():
+    db = MagicMock()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    ref = MagicMock()
+    accepted_collection = db.collection.return_value.document.return_value.collection
+    accepted_collection.return_value.document.return_value = ref
+    ref.get = AsyncMock(
+        side_effect=[
+            _mock_doc_snapshot(
+                True,
+                {
+                    "request_id": "accepted-id",
+                    "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+                },
+            ),
+            _mock_doc_snapshot(
+                True,
+                {
+                    "request_id": "expired-id",
+                    "expires_at": datetime.now(UTC) - timedelta(seconds=1),
+                },
+            ),
+        ]
+    )
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        assert await claim_accepted_feed_slate(db, USER_DID, "your-feed") == "accepted-id"
+        assert await claim_accepted_feed_slate(db, USER_DID, "your-feed") is None
+
+    assert transaction.delete.call_count == 2
 
 
 # ---------------------------------------------------------------------------

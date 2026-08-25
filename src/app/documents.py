@@ -13,6 +13,7 @@ Convention:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -124,6 +125,13 @@ class UserDocument(BaseModel):
     )
 
 
+class AcceptedFeedSlateDocument(BaseModel):
+    """One-time pointer to a Settings slate accepted for the next feed load."""
+
+    request_id: str
+    expires_at: datetime
+
+
 class FeedCacheDocument(BaseModel):
     """Cached feed result set used by cursor pagination.
 
@@ -139,6 +147,14 @@ class FeedCacheDocument(BaseModel):
     feed_name: str | None = None
     generated_at: datetime | None = None
     api_release_sha: str | None = None
+    mode: Literal["served", "preview", "accepted"] = Field(
+        default="served",
+        description="Whether this cache entry is served, hypothetical, or accepted for serving.",
+    )
+    preference_patch: FeedPreferencesDocument | None = Field(
+        default=None,
+        description="Sparse draft used to generate a settings preview.",
+    )
     load_test: bool = Field(
         default=False,
         description="True when this cache entry was created by a load-test session. The cache "

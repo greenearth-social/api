@@ -20,7 +20,9 @@ from google.cloud.firestore import (  # type: ignore[import-untyped]
 )
 
 from ..documents import (
+    AcceptedFeedSlateDocument,
     FeedActivityDocument,
+    FeedCacheDocument,
     FeedDebugDocument,
     FeedPreferencesDocument,
     FeedSnapshotDocument,
@@ -28,6 +30,7 @@ from ..documents import (
     RedirectDocument,
     UserDocument,
 )
+from .feed_cache import FEED_CACHE_COLLECTION
 from .feed_preferences import preference_source, resolve_feed_preferences
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,7 @@ SEEN_POSTS_COLLECTION = "seen_posts"
 DISCARDED_POSTS_COLLECTION = "discarded_posts"
 FEED_DEBUG_COLLECTION = "feed_debug"
 FEED_SNAPSHOTS_COLLECTION = "feed_snapshots"
+ACCEPTED_FEED_SLATES_COLLECTION = "accepted_feed_slates"
 MAX_FEED_SNAPSHOT_ITEMS = 500
 MAX_FEED_SNAPSHOT_DOCUMENTS = 100
 FIRESTORE_WRITE_BATCH_LIMIT = 500
@@ -306,6 +310,155 @@ async def patch_user_feed_preferences(
         return updated
 
     return await _patch(transaction)
+
+
+async def accept_feed_preview(
+    db: AsyncClient,
+    user_did: str,
+    feed_name: str,
+    request_id: str,
+    preference_patch: FeedPreferencesDocument,
+    displayed_item_uris: list[str],
+    *,
+    ttl_seconds: int,
+) -> tuple[FeedPreferencesDocument, datetime] | None:
+    """Atomically persist settings and stage their preview for the next feed load.
+
+    ``None`` means the cache entry stopped being acceptable before the
+    transaction committed (expired, wrong owner/feed/provenance, or changed).
+    """
+
+    user_ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    cache_ref = db.collection(FEED_CACHE_COLLECTION).document(request_id)
+    accepted_ref = user_ref.collection(ACCEPTED_FEED_SLATES_COLLECTION).document(feed_name)
+    seen_ref = user_ref.collection(SEEN_POSTS_COLLECTION).document(
+        datetime.now(UTC).strftime("%Y-%m-%d")
+    )
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _accept(transaction) -> tuple[FeedPreferencesDocument, datetime] | None:
+        cache_snapshot = await cache_ref.get(transaction=transaction)
+        if not cache_snapshot.exists:
+            return None
+        cache_data = cache_snapshot.to_dict()
+        if cache_data is None:
+            return None
+        try:
+            cache_doc = FeedCacheDocument.model_validate(cache_data)
+        except Exception:
+            return None
+
+        now = datetime.now(UTC)
+        cache_expires_at = cache_doc.expires_at
+        if cache_expires_at.tzinfo is None:
+            cache_expires_at = cache_expires_at.replace(tzinfo=UTC)
+        cached_patch = (
+            cache_doc.preference_patch.model_dump(exclude_none=True)
+            if cache_doc.preference_patch is not None
+            else None
+        )
+        requested_patch = preference_patch.model_dump(exclude_none=True)
+        if (
+            cache_doc.mode != "preview"
+            or cache_doc.user_did != user_did
+            or cache_doc.feed_name != feed_name
+            or cache_expires_at <= now
+            or cached_patch != requested_patch
+        ):
+            return None
+
+        cursor = 0
+        for at_uri in displayed_item_uris:
+            try:
+                cursor = cache_doc.items.index(at_uri, cursor) + 1
+            except ValueError:
+                return None
+        if len(displayed_item_uris) != len(set(displayed_item_uris)):
+            return None
+
+        user_snapshot = await user_ref.get(transaction=transaction)
+        user_data = user_snapshot.to_dict() if user_snapshot.exists else None
+        user = UserDocument.model_validate(user_data) if user_data is not None else None
+        resolved = resolve_feed_preferences(user, feed_name)
+        values = resolved.model_dump(exclude_none=True)
+        values.update(requested_patch)
+        updated = FeedPreferencesDocument.model_validate(values)
+
+        accepted_until = now + timedelta(seconds=ttl_seconds)
+        meta_by_uri = {meta.at_uri: meta for meta in cache_doc.items_meta}
+        accepted_cache = cache_doc.model_copy(
+            update={
+                "items": displayed_item_uris,
+                "items_meta": [
+                    meta_by_uri[at_uri] for at_uri in displayed_item_uris if at_uri in meta_by_uri
+                ],
+                "expires_at": accepted_until,
+                "mode": "accepted",
+            }
+        )
+
+        transaction.set(
+            user_ref,
+            {
+                "user_did": user_did,
+                "feed_preferences": {
+                    preference_source(feed_name): updated.model_dump(exclude_none=True),
+                },
+                "created_by_load_test": False,
+                "updated_at": now,
+            },
+            merge=True,
+        )
+        transaction.set(cache_ref, accepted_cache.model_dump())
+        transaction.set(
+            accepted_ref,
+            AcceptedFeedSlateDocument(
+                request_id=request_id,
+                expires_at=accepted_until,
+            ).model_dump(),
+        )
+        transaction.delete(seen_ref)
+        return updated, accepted_until
+
+    return await _accept(transaction)
+
+
+async def claim_accepted_feed_slate(
+    db: AsyncClient,
+    user_did: str,
+    feed_name: str,
+) -> str | None:
+    """Claim and remove the one-time accepted slate pointer for a feed."""
+
+    ref = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(ACCEPTED_FEED_SLATES_COLLECTION)
+        .document(feed_name)
+    )
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _claim(transaction) -> str | None:
+        snapshot = await ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return None
+        data = snapshot.to_dict()
+        try:
+            accepted = AcceptedFeedSlateDocument.model_validate(data)
+        except Exception:
+            transaction.delete(ref)
+            return None
+        expires_at = accepted.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        transaction.delete(ref)
+        if expires_at <= datetime.now(UTC):
+            return None
+        return accepted.request_id
+
+    return await _claim(transaction)
 
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from ..documents import (
     FeedCacheDocument,
+    FeedPreferencesDocument,
     FeedSnapshotDocument,
     InteractionDocument,
     PipelineItemMeta,
@@ -56,9 +57,10 @@ from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
-from ..lib.feed_preferences import configured_controls, control_value
+from ..lib.feed_preferences import configured_controls, control_value, resolve_feed_preferences
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
+    claim_accepted_feed_slate,
     delete_feed_snapshot,
     get_recent_discarded_uris,
     get_recent_seen_uris,
@@ -1019,7 +1021,13 @@ def _spawn_background(coro) -> asyncio.Task:
     return task
 
 
-async def _generation_exclusions(db, user_did: str, feed_cfg: FeedConfig) -> list[str]:
+async def _generation_exclusions(
+    db,
+    user_did: str,
+    feed_cfg: FeedConfig,
+    *,
+    include_seen: bool = True,
+) -> list[str]:
     """Fetch post URIs to exclude from candidate generation, de-duped.
 
     Combines the user's recently-seen posts (for feeds with
@@ -1030,7 +1038,7 @@ async def _generation_exclusions(db, user_did: str, feed_cfg: FeedConfig) -> lis
     """
 
     async def _seen() -> list[str]:
-        if not feed_cfg.exclude_seen_posts:
+        if not include_seen or not feed_cfg.exclude_seen_posts:
             return []
         try:
             return await get_recent_seen_uris(db, user_did)
@@ -1049,6 +1057,165 @@ async def _generation_exclusions(db, user_did: str, feed_cfg: FeedConfig) -> lis
 
     seen_uris, discarded_uris = await asyncio.gather(_seen(), _discarded())
     return list(dict.fromkeys(seen_uris + discarded_uris))
+
+
+async def generate_feed_preview(
+    request: Request,
+    user_did: str,
+    feed_name: str,
+    preference_patch: FeedPreferencesDocument,
+) -> FeedSnapshotDocument:
+    """Generate and cache a settings preview without mutating user/feed history.
+
+    Preview generation deliberately skips seen-post exclusions so a proposed
+    slate has enough overlap with the current one to make rank movement useful.
+    Discarded low-quality posts remain excluded, and every other runtime choice
+    (feature flags, controls, ranking, diversification and cutoffs) mirrors a
+    normal initial feed request.
+    """
+    db = getattr(request.app.state, "firestore", None)
+    if db is None:
+        logger.error("Firestore client not initialized")
+        raise HTTPException(status_code=500, detail="Firestore unavailable")
+
+    feed_cfg = FEEDS[feed_name]
+    user_doc = await get_user(db, user_did)
+    resolved = resolve_feed_preferences(user_doc, feed_name)
+    effective_data = resolved.model_dump(exclude_none=True)
+    effective_data.update(preference_patch.model_dump(exclude_unset=True, exclude_none=True))
+    effective = FeedPreferencesDocument.model_validate(effective_data)
+
+    uses_network_likes_flag = feed_name in (
+        "your-feed",
+        "unranked-your-feed",
+        "cutoff-preview",
+    )
+    flag_keys = [FAIL_FAST_FLAG, EXPANDED_CANDIDATE_BATCH_FLAG]
+    if uses_network_likes_flag:
+        flag_keys.append(NETWORK_LIKES_FLAG)
+
+    posthog_client = get_posthog_client()
+    feature_flags = (
+        await asyncio.to_thread(
+            evaluate_feature_flags,
+            posthog_client,
+            user_did,
+            flag_keys,
+        )
+        if posthog_client is not None
+        else {}
+    )
+    set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
+    max_batch_size = (
+        EXPANDED_MAX_BATCH_SIZE
+        if feature_flags.get(EXPANDED_CANDIDATE_BATCH_FLAG, False)
+        else MAX_BATCH_SIZE
+    )
+
+    controls = configured_controls(feed_name)
+    if "purpose" in controls:
+        assert effective.purpose is not None
+        feed_cfg = _with_purpose_weights(feed_cfg, effective.purpose)
+
+    generators_override: dict = {}
+    applied_social_radius: int | None = None
+    if uses_network_likes_flag and "source_weights" in controls:
+        source_weights = effective.source_weights
+        assert source_weights is not None
+        preference_key = FEEDS[feed_name].preference_source or feed_name
+        stored = user_doc.feed_preferences.get(preference_key) if user_doc is not None else None
+        has_custom_weights = "source_weights" in preference_patch.model_fields_set or (
+            stored is not None and stored.source_weights is not None
+        )
+        legacy_radius = (
+            stored.social_radius
+            if stored is not None and stored.social_radius is not None
+            else user_doc.social_radius
+            if user_doc is not None
+            else DEFAULT_SOCIAL_RADIUS
+        )
+        if not has_custom_weights:
+            applied_social_radius = legacy_radius
+
+        include_network_likes = (
+            True if posthog_client is None else feature_flags.get(NETWORK_LIKES_FLAG, False)
+        )
+        if include_network_likes or has_custom_weights:
+            generators = _source_generators(
+                source_weights,
+                include_network_likes=include_network_likes,
+                fallback_radius=legacy_radius,
+            )
+        else:
+            generators = SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[legacy_radius]
+        generators_override = {"generators": generators}
+
+    freshness_index = (
+        int(effective.freshness)
+        if "freshness" in controls and effective.freshness is not None
+        else DEFAULT_FRESHNESS_INDEX
+    )
+    exclude_uris = await _generation_exclusions(
+        db,
+        user_did,
+        feed_cfg,
+        include_seen=False,
+    )
+    gen_request = feed_cfg.gen_request_template.model_copy(
+        update={
+            "user_did": user_did,
+            # A preview is inspectable page by page, so retain the complete
+            # initial ranked batch instead of sizing generation around only
+            # the first visible page.
+            "num_candidates": max_batch_size,
+            "exclude_uris": exclude_uris,
+            "max_age_hours": max_age_hours_for_freshness(freshness_index),
+            **generators_override,
+        }
+    )
+
+    request_id = uuid.uuid4().hex
+    snapshot, _low_score_uris = await _run_pipeline_capturing_with_timeout(
+        request,
+        db,
+        feed_cfg,
+        gen_request,
+        feed_name=feed_name,
+        user_did=user_did,
+        request_id=request_id,
+        regenerated=False,
+        debug_enabled=False,
+        applied_social_radius=applied_social_radius,
+    )
+
+    cached_uris = snapshot.items
+    meta_by_uri = {meta.at_uri: meta for meta in snapshot.items_meta}
+    cached_meta = [meta_by_uri[uri] for uri in cached_uris if uri in meta_by_uri]
+    expires_at = datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS)
+    preview_snapshot = snapshot.model_copy(
+        update={
+            "items": cached_uris,
+            "items_meta": cached_meta,
+            "expires_at": expires_at,
+        }
+    )
+    await _get_feed_cache(request).store_document(
+        request_id,
+        FeedCacheDocument(
+            items=cached_uris,
+            items_meta=cached_meta,
+            generator_diagnostics=snapshot.generator_diagnostics,
+            applied_social_radius=applied_social_radius,
+            user_did=user_did,
+            feed_name=feed_name,
+            generated_at=snapshot.generated_at,
+            api_release_sha=snapshot.api_release_sha,
+            expires_at=expires_at,
+            mode="preview",
+            preference_patch=preference_patch,
+        ),
+    )
+    return preview_snapshot
 
 
 async def _record_discarded(
@@ -1669,7 +1836,11 @@ async def get_feed_skeleton(
             async with timed(logger, "feedcache_retrieve", cache_id=parsed.id):
                 cache_doc = await feed_cache.retrieve_document(parsed.id)
             if cache_doc is not None:
-                if cache_doc.user_did != user_did or cache_doc.feed_name != feed_name:
+                if (
+                    cache_doc.user_did != user_did
+                    or cache_doc.feed_name != feed_name
+                    or cache_doc.mode == "preview"
+                ):
                     logger.warning(
                         "Rejected cursor outside its originating user/feed context",
                         extra={
@@ -1808,6 +1979,85 @@ async def get_feed_skeleton(
                 return reused.model_copy(deep=True)
 
         try:
+            if cursor is None and not is_probe and not is_anonymous and not is_load_test:
+                try:
+                    accepted_request_id = await claim_accepted_feed_slate(db, user_did, feed_name)
+                except Exception:
+                    logger.exception(
+                        "Failed to claim accepted feed slate for user '%s' feed '%s'",
+                        user_did,
+                        feed_name,
+                    )
+                    accepted_request_id = None
+                if accepted_request_id is not None:
+                    accepted_cache = await feed_cache.retrieve_document(accepted_request_id)
+                    if (
+                        accepted_cache is not None
+                        and accepted_cache.mode == "accepted"
+                        and accepted_cache.user_did == user_did
+                        and accepted_cache.feed_name == feed_name
+                    ):
+                        accepted_uris = accepted_cache.items
+                        if feed_cfg.pinned_post_uri:
+                            generated_page = accepted_uris[: max(0, limit - 1)]
+                            page = [feed_cfg.pinned_post_uri, *generated_page]
+                            consumed = len(generated_page)
+                        else:
+                            generated_page = accepted_uris[:limit]
+                            page = generated_page
+                            consumed = len(generated_page)
+
+                        scores_by_uri = _similarity_scores_from_items_meta(
+                            accepted_cache.items_meta
+                        )
+                        _record_similarity_metric(
+                            page,
+                            scores_by_uri,
+                            feed_name,
+                            batch=0,
+                            exclude_uri=feed_cfg.pinned_post_uri,
+                        )
+                        accepted_snapshot = FeedSnapshotDocument(
+                            request_id=accepted_request_id,
+                            items=accepted_uris,
+                            feed_name=feed_name,
+                            generated_at=accepted_cache.generated_at or datetime.now(UTC),
+                            api_release_sha=accepted_cache.api_release_sha,
+                            expires_at=accepted_cache.expires_at,
+                            generator_diagnostics=accepted_cache.generator_diagnostics,
+                            applied_social_radius=accepted_cache.applied_social_radius,
+                            items_meta=accepted_cache.items_meta,
+                        )
+                        await _write_feed_snapshot_background(
+                            db,
+                            user_did,
+                            accepted_request_id,
+                            _snapshot_page(accepted_snapshot, generated_page),
+                            load_test=False,
+                        )
+                        next_cursor = (
+                            FeedCursor(id=accepted_request_id, offset=consumed).encode()
+                            if accepted_uris
+                            else None
+                        )
+                        response = FeedSkeletonResponse(
+                            feed=_skeleton_items(
+                                page,
+                                feed_context_for(accepted_request_id),
+                            ),
+                            cursor=next_cursor,
+                        )
+                        if reuse_future is not None:
+                            _complete_initial_request(
+                                user_did,
+                                feed_name,
+                                limit,
+                                is_load_test,
+                                reuse_future,
+                                response=response.model_copy(deep=True),
+                            )
+                        return response
+
             batch = _batch_size(limit, max_batch_size)
             exclude_uris = await generation_exclusions()
             gen_request = feed_cfg.gen_request_template.model_copy(

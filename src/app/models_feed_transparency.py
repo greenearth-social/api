@@ -106,6 +106,13 @@ class FeedDetailResponse(BaseModel):
     unavailable_count: int = 0
 
 
+class FeedPreviewResponse(BaseModel):
+    request_id: str
+    feed_name: str
+    generated_at: datetime
+    expires_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # GET /api/feeds/preferences and PATCH /api/feeds/preferences/{feed_name}
 # ---------------------------------------------------------------------------
@@ -134,6 +141,19 @@ class FeedPreferences(BaseModel):
     freshness: int | None = Field(default=None, ge=0, le=5)
     politics: float | None = Field(default=None, ge=0.5, le=1.5)
     purpose: float | None = Field(default=None, ge=0.2, le=0.8)
+
+
+class AcceptFeedPreviewRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    preferences: FeedPreferences
+    displayed_item_uris: list[str] = Field(max_length=200)
+
+
+class AcceptedFeedPreviewResponse(BaseModel):
+    request_id: str
+    preferences: FeedPreferences
+    accepted_until: datetime
 
 
 class PreferencesResponse(BaseModel):

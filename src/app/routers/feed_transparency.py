@@ -15,9 +15,11 @@ from google.cloud.firestore import AsyncClient
 
 from ..documents import FeedPreferencesDocument, FeedSnapshotDocument, PipelineItemMeta
 from ..feeds import FEEDS, canonical_feed_name
+from ..lib.feed_cache import DEFAULT_TTL_SECONDS
 from ..lib.feed_preferences import resolve_feed_preferences
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import (
+    accept_feed_preview,
     delete_most_recent_seen_bucket,
     get_feed_snapshot,
     get_recent_feed_snapshots,
@@ -25,7 +27,10 @@ from ..lib.firestore import (
     patch_user_feed_preferences,
 )
 from ..lib.post_hydration import hydrate_posts
+from ..lib.request_context import set_traffic
 from ..models_feed_transparency import (
+    AcceptedFeedPreviewResponse,
+    AcceptFeedPreviewRequest,
     AuthorView,
     DiversificationView,
     EngagementView,
@@ -33,6 +38,7 @@ from ..models_feed_transparency import (
     FeedItemView,
     FeedListResponse,
     FeedPreferences,
+    FeedPreviewResponse,
     FeedSummary,
     GeneratorDiagnosticView,
     GeneratorView,
@@ -40,6 +46,7 @@ from ..models_feed_transparency import (
     ModelScoreView,
     PreferencesResponse,
 )
+from .xrpc import generate_feed_preview
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +289,198 @@ async def patch_preferences(
     )
     await delete_most_recent_seen_bucket(db, user_did)
     return FeedPreferences.model_validate(updated.model_dump(exclude_none=True))
+
+
+@router.post("/{feed_name}/preview", response_model=FeedPreviewResponse)
+async def create_feed_preview(
+    request: Request,
+    feed_name: str,
+    body: FeedPreferences,
+    user_doc_id: FirebaseUser,
+) -> FeedPreviewResponse:
+    """Generate a hypothetical feed from unsaved settings and cache it briefly."""
+    feed = FEEDS.get(feed_name)
+    if feed is None or not feed.public or not feed.controls:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown feed")
+
+    supplied = body.model_fields_set
+    if any(getattr(body, control) is None for control in supplied):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Control values cannot be null",
+        )
+    unsupported = supplied.difference(feed.controls)
+    if unsupported:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported controls for {feed_name}: {', '.join(sorted(unsupported))}",
+        )
+
+    set_traffic("preview")
+    patch = FeedPreferencesDocument.model_validate(body.model_dump(exclude_none=True))
+    snapshot = await generate_feed_preview(
+        request,
+        f"did:plc:{user_doc_id}",
+        feed_name,
+        patch,
+    )
+    return FeedPreviewResponse(
+        request_id=snapshot.request_id,
+        feed_name=feed_name,
+        generated_at=snapshot.generated_at,
+        expires_at=snapshot.expires_at,
+    )
+
+
+@router.get("/previews/{request_id}", response_model=FeedDetailResponse)
+async def get_feed_preview(
+    request: Request,
+    request_id: str,
+    user_doc_id: FirebaseUser,
+) -> FeedDetailResponse:
+    """Hydrate an owned, unexpired settings-preview cache entry."""
+    cache = getattr(request.app.state, "feed_cache", None)
+    if cache is None:
+        raise HTTPException(status_code=500, detail="Feed cache unavailable")
+
+    cache_doc = await cache.retrieve_document(request_id)
+    user_did = f"did:plc:{user_doc_id}"
+    if (
+        cache_doc is None
+        or cache_doc.mode != "preview"
+        or cache_doc.user_did != user_did
+        or cache_doc.feed_name is None
+        or cache_doc.generated_at is None
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feed preview not found")
+
+    snapshot = FeedSnapshotDocument(
+        request_id=request_id,
+        items=cache_doc.items,
+        feed_name=cache_doc.feed_name,
+        generated_at=cache_doc.generated_at,
+        api_release_sha=cache_doc.api_release_sha,
+        expires_at=cache_doc.expires_at,
+        generator_diagnostics=cache_doc.generator_diagnostics,
+        applied_social_radius=cache_doc.applied_social_radius,
+        items_meta=cache_doc.items_meta,
+    )
+    db: AsyncClient = request.app.state.firestore
+    hydrated = await hydrate_posts(db, snapshot.items)
+    items, publicly_filtered_count, unavailable_count = _build_items(snapshot, hydrated)
+    return FeedDetailResponse(
+        request_id=request_id,
+        generated_at=snapshot.generated_at,
+        api_release_sha=snapshot.api_release_sha,
+        items=items,
+        stored_item_count=len(snapshot.items),
+        displayed_item_count=len(items),
+        publicly_filtered_count=publicly_filtered_count,
+        unavailable_count=unavailable_count,
+    )
+
+
+@router.post(
+    "/{feed_name}/previews/{request_id}/accept",
+    response_model=AcceptedFeedPreviewResponse,
+    response_model_exclude_none=True,
+)
+async def accept_preview(
+    request: Request,
+    feed_name: str,
+    request_id: str,
+    body: AcceptFeedPreviewRequest,
+    user_doc_id: FirebaseUser,
+) -> AcceptedFeedPreviewResponse:
+    """Persist a preview's settings and stage its visible slate for one feed session."""
+
+    feed = FEEDS.get(feed_name)
+    if feed is None or not feed.public or not feed.controls:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown feed")
+
+    supplied = body.preferences.model_fields_set
+    if not supplied:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="At least one control is required",
+        )
+    if any(getattr(body.preferences, control) is None for control in supplied):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Control values cannot be null",
+        )
+    unsupported = supplied.difference(feed.controls)
+    if unsupported:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported controls for {feed_name}: {', '.join(sorted(unsupported))}",
+        )
+
+    cache = getattr(request.app.state, "feed_cache", None)
+    if cache is None:
+        raise HTTPException(status_code=500, detail="Feed cache unavailable")
+
+    user_did = f"did:plc:{user_doc_id}"
+    cache_doc = await cache.retrieve_document(request_id)
+    if (
+        cache_doc is None
+        or cache_doc.mode != "preview"
+        or cache_doc.user_did != user_did
+        or cache_doc.feed_name != feed_name
+        or cache_doc.generated_at is None
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feed preview not found")
+
+    patch = FeedPreferencesDocument.model_validate(body.preferences.model_dump(exclude_none=True))
+    cached_patch = (
+        cache_doc.preference_patch.model_dump(exclude_none=True)
+        if cache_doc.preference_patch is not None
+        else None
+    )
+    if cached_patch != patch.model_dump(exclude_none=True):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Feed preview does not match these settings",
+        )
+
+    snapshot = FeedSnapshotDocument(
+        request_id=request_id,
+        items=cache_doc.items,
+        feed_name=feed_name,
+        generated_at=cache_doc.generated_at,
+        api_release_sha=cache_doc.api_release_sha,
+        expires_at=cache_doc.expires_at,
+        generator_diagnostics=cache_doc.generator_diagnostics,
+        applied_social_radius=cache_doc.applied_social_radius,
+        items_meta=cache_doc.items_meta,
+    )
+    db: AsyncClient = request.app.state.firestore
+    hydrated = await hydrate_posts(db, snapshot.items)
+    visible_items, _, _ = _build_items(snapshot, hydrated)
+    visible_uris = [item.at_uri for item in visible_items]
+    if body.displayed_item_uris != visible_uris:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Feed preview contents changed; generate it again",
+        )
+
+    accepted = await accept_feed_preview(
+        db,
+        user_did,
+        feed_name,
+        request_id,
+        patch,
+        visible_uris,
+        ttl_seconds=DEFAULT_TTL_SECONDS,
+    )
+    if accepted is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feed preview not found")
+    preferences, accepted_until = accepted
+    return AcceptedFeedPreviewResponse(
+        request_id=request_id,
+        preferences=FeedPreferences.model_validate(preferences.model_dump(exclude_none=True)),
+        accepted_until=accepted_until,
+    )
 
 
 @router.get("/{request_id}", response_model=FeedDetailResponse)

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from ..documents import (
     DiversificationMeta,
+    FeedCacheDocument,
+    FeedPreferencesDocument,
     FeedSnapshotDocument,
     GeneratorMeta,
     ModelScoreMeta,
@@ -366,6 +368,206 @@ def test_list_feeds_preserves_fully_overlapping_middle_snapshot(mock_query, clie
 # ---------------------------------------------------------------------------
 
 
+@patch("app.routers.feed_transparency.generate_feed_preview", new_callable=AsyncMock)
+def test_create_feed_preview_accepts_unsaved_preferences(mock_generate, client):
+    snapshot = _snapshot_doc(request_id="preview-1")
+    mock_generate.return_value = snapshot
+
+    response = client.post(
+        "/api/feeds/your-feed/preview",
+        json={"freshness": 2, "purpose": 0.65},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["request_id"] == "preview-1"
+    mock_generate.assert_awaited_once()
+    assert mock_generate.await_args.args[1:3] == ("did:plc:test-user", "your-feed")
+    patch_doc = mock_generate.await_args.args[3]
+    assert patch_doc.freshness == 2
+    assert patch_doc.purpose == 0.65
+
+
+@patch("app.routers.feed_transparency.generate_feed_preview", new_callable=AsyncMock)
+def test_create_feed_preview_accepts_empty_baseline_patch(mock_generate, client):
+    mock_generate.return_value = _snapshot_doc(request_id="preview-baseline")
+
+    response = client.post("/api/feeds/random/preview", json={})
+
+    assert response.status_code == 200
+    assert mock_generate.await_args.args[3].model_dump(exclude_none=True) == {}
+
+
+@pytest.mark.parametrize(
+    ("feed_name", "body", "expected_status"),
+    [
+        ("unknown", {}, 404),
+        ("random", {"purpose": 0.65}, 422),
+        ("your-feed", {"freshness": None}, 422),
+    ],
+)
+def test_create_feed_preview_validates_feed_controls(client, feed_name, body, expected_status):
+    response = client.post(f"/api/feeds/{feed_name}/preview", json=body)
+
+    assert response.status_code == expected_status
+
+
+@patch("app.routers.feed_transparency.hydrate_posts", new_callable=AsyncMock)
+def test_get_feed_preview_reads_owned_preview_cache(mock_hydrate, client):
+    snapshot = _snapshot_doc(request_id="preview-1")
+    cache = MagicMock()
+    cache.retrieve_document = AsyncMock(
+        return_value=FeedCacheDocument(
+            items=snapshot.items,
+            items_meta=snapshot.items_meta,
+            generator_diagnostics=snapshot.generator_diagnostics,
+            user_did="did:plc:test-user",
+            feed_name="your-feed",
+            generated_at=snapshot.generated_at,
+            api_release_sha=snapshot.api_release_sha,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            mode="preview",
+        )
+    )
+    app.state.feed_cache = cache
+    uri = snapshot.items[0]
+    mock_hydrate.return_value = {
+        uri: {
+            "author": {"handle": "alice.test", "display_name": "Alice", "avatar_url": None},
+            "content": "Preview post",
+            "created_at": datetime.now(UTC),
+            "media": {},
+            "engagement": {},
+        }
+    }
+
+    response = client.get("/api/feeds/previews/preview-1")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["content"] == "Preview post"
+
+
+def test_get_feed_preview_hides_wrong_owner(client):
+    cache = MagicMock()
+    cache.retrieve_document = AsyncMock(
+        return_value=FeedCacheDocument(
+            items=[],
+            user_did="did:plc:someone-else",
+            feed_name="your-feed",
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            mode="preview",
+        )
+    )
+    app.state.feed_cache = cache
+
+    response = client.get("/api/feeds/previews/private-preview")
+
+    assert response.status_code == 404
+
+
+def test_get_feed_preview_hides_served_cache_entries(client):
+    cache = MagicMock()
+    cache.retrieve_document = AsyncMock(
+        return_value=FeedCacheDocument(
+            items=[],
+            user_did="did:plc:test-user",
+            feed_name="your-feed",
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+    )
+    app.state.feed_cache = cache
+
+    response = client.get("/api/feeds/previews/served-request")
+
+    assert response.status_code == 404
+
+
+@patch("app.routers.feed_transparency.accept_feed_preview", new_callable=AsyncMock)
+@patch("app.routers.feed_transparency.hydrate_posts", new_callable=AsyncMock)
+def test_accept_preview_persists_the_exact_visible_slate(mock_hydrate, mock_accept, client):
+    snapshot = _snapshot_doc(request_id="preview-accept")
+    uri = snapshot.items[0]
+    app.state.feed_cache = MagicMock(
+        retrieve_document=AsyncMock(
+            return_value=FeedCacheDocument(
+                items=snapshot.items,
+                items_meta=snapshot.items_meta,
+                user_did="did:plc:test-user",
+                feed_name="your-feed",
+                generated_at=snapshot.generated_at,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                mode="preview",
+                preference_patch=FeedPreferencesDocument(freshness=2),
+            )
+        )
+    )
+    mock_hydrate.return_value = {
+        uri: {
+            "author": {"handle": "alice.test", "display_name": "Alice"},
+            "content": "Visible preview post",
+            "created_at": datetime.now(UTC),
+        }
+    }
+    accepted_until = datetime.now(UTC) + timedelta(minutes=10)
+    mock_accept.return_value = (
+        FeedPreferencesDocument(freshness=2, purpose=0.5),
+        accepted_until,
+    )
+
+    response = client.post(
+        "/api/feeds/your-feed/previews/preview-accept/accept",
+        json={"preferences": {"freshness": 2}, "displayed_item_uris": [uri]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["request_id"] == "preview-accept"
+    assert response.json()["preferences"] == {"freshness": 2, "purpose": 0.5}
+    mock_accept.assert_awaited_once()
+    assert mock_accept.await_args.args[1:6] == (
+        "did:plc:test-user",
+        "your-feed",
+        "preview-accept",
+        FeedPreferencesDocument(freshness=2),
+        [uri],
+    )
+
+
+@patch("app.routers.feed_transparency.accept_feed_preview", new_callable=AsyncMock)
+@patch("app.routers.feed_transparency.hydrate_posts", new_callable=AsyncMock)
+def test_accept_preview_rejects_changed_visible_order(mock_hydrate, mock_accept, client):
+    snapshot = _snapshot_doc(request_id="preview-changed")
+    uri = snapshot.items[0]
+    app.state.feed_cache = MagicMock(
+        retrieve_document=AsyncMock(
+            return_value=FeedCacheDocument(
+                items=snapshot.items,
+                items_meta=snapshot.items_meta,
+                user_did="did:plc:test-user",
+                feed_name="your-feed",
+                generated_at=snapshot.generated_at,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                mode="preview",
+                preference_patch=FeedPreferencesDocument(freshness=2),
+            )
+        )
+    )
+    mock_hydrate.return_value = {
+        uri: {
+            "author": {"handle": "alice.test", "display_name": "Alice"},
+            "content": "Visible preview post",
+        }
+    }
+
+    response = client.post(
+        "/api/feeds/your-feed/previews/preview-changed/accept",
+        json={"preferences": {"freshness": 2}, "displayed_item_uris": []},
+    )
+
+    assert response.status_code == 409
+    mock_accept.assert_not_awaited()
+
+
 @patch("app.routers.feed_transparency.hydrate_posts")
 @patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_returns_merged_data(mock_get_snapshot, mock_hydrate, client):
@@ -684,7 +886,9 @@ def test_patch_preferences_rejects_out_of_range(mock_patch_prefs, client):
 )
 @patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
 @patch("app.routers.feed_transparency.patch_user_feed_preferences")
-def test_patch_preferences_accepts_atomic_source_weights(mock_patch_prefs, mock_delete_seen, weight_values, client):
+def test_patch_preferences_accepts_atomic_source_weights(
+    mock_patch_prefs, mock_delete_seen, weight_values, client
+):
     from ..documents import FeedPreferencesDocument, SourceWeightsDocument
 
     weights = SourceWeightsDocument(**weight_values)
