@@ -111,7 +111,7 @@ def test_sync_publishes_all_three_public_feed_pins(MockClient):
         for index in range(3)
     ]
 
-    posts = sync_pinned_posts("greenearth-social.bsky.social", "password")
+    posts = sync_pinned_posts("greenearth.social", "password")
 
     assert set(posts) == {"your-feed", "best-of-friends", "random"}
     assert client.com.atproto.repo.list_records.call_count == 1

@@ -173,7 +173,7 @@ FEEDS: dict[str, FeedConfig] = {
         ),
         pinned_post_content=(
             "Click [SETTINGS](https://app.greenearth.social/#/settings/your-feed) to personalize "
-            "your MySky feed.\n\nA controllable feed designed for constructive conversation."
+            "your MySky feed.\n\nA feed you control, designed for constructive conversation."
         ),
         survey_post_uri=_survey_post_uri(
             "your-feed",

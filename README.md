@@ -580,7 +580,7 @@ The deployment lifecycle is deliberately change-aware:
   rollback may still reference them. A required pin-sync failure stops deployment
   before Cloud Run is changed.
 
-Production publishes pins under `greenearth-social.bsky.social`; stage/dev uses
+Production publishes pins under `greenearth.social`; stage/dev uses
 `caterpie-internal.bsky.social`. Feed generator metadata is synchronized later
 in the same deployment, but existing public descriptions are preserved. Managed
 pinned-post publication remains part of the deployment lifecycle described above.

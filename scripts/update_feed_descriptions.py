@@ -43,7 +43,7 @@ class EnvironmentTarget:
 
 ENVIRONMENT_TARGETS = {
     "prod": EnvironmentTarget(
-        handle="greenearth-social.bsky.social",
+        handle="greenearth.social",
         secret="bsky-app-password-prod",
     ),
     "stage": EnvironmentTarget(

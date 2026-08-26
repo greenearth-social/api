@@ -14,7 +14,7 @@ from update_feed_descriptions import (
 )
 
 PDS = "https://pds.example.com"
-HANDLE = "greenearth-social.bsky.social"
+HANDLE = "greenearth.social"
 PASSWORD = "password"
 REPO_DID = "did:plc:publisher"
 ACCESS_JWT = "jwt"
