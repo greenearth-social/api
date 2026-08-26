@@ -161,7 +161,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "your-feed": FeedConfig(
         display_name="MySky by GreenEarth",
-        description="A feed you control, designed for constructive conversation.",
+        description="A controllable feed designed for constructive conversation.",
         public=True,
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
