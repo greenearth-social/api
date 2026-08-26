@@ -147,7 +147,7 @@ FEEDS: dict[str, FeedConfig] = {
         pinned_post_content=(
             "Click [SETTINGS](https://app.greenearth.social/#/settings/random) to personalize "
             "your feed.\n\nA random slice of the ATProto universe. Still applies your moderation "
-            "settings. Part of the MySky by GreenEarth Family."
+            "settings. Part of the GreenEarth Family."
         ),
         # Random posts don't depend on who's asking, so it works logged out.
         logged_out="serve",
@@ -173,7 +173,7 @@ FEEDS: dict[str, FeedConfig] = {
         ),
         pinned_post_content=(
             "Click [SETTINGS](https://app.greenearth.social/#/settings/your-feed) to personalize "
-            "your MySky by GreenEarth feed.\n\nA controllable feed designed for constructive conversation."
+            "your MySky feed.\n\nA controllable feed designed for constructive conversation."
         ),
         survey_post_uri=_survey_post_uri(
             "your-feed",
@@ -225,7 +225,7 @@ FEEDS: dict[str, FeedConfig] = {
         pinned_post_content=(
             "Click [SETTINGS](https://app.greenearth.social/#/settings/best-of-friends) to "
             "personalize your feed.\n\nThe best posts from your mutuals and people you follow. "
-            "Part of the MySky by GreenEarth Family."
+            "Part of the GreenEarth Family."
         ),
         # Slate-cutoff starting points — tune from the feed.slate.kept_share and
         # feed.slate.cutoff_count metrics once live (see issue #248). min_rank_score
@@ -392,7 +392,7 @@ FEEDS: dict[str, FeedConfig] = {
     "cold-start": FeedConfig(
         display_name="Cold Start",
         description=(
-            "Main MySky by GreenEarth feed for a user with no like history and no followed accounts."
+            "Main MySky feed by GreenEarth for a user with no like history and no followed accounts."
         ),
         public=False,
         internal_rkey="mf-cs",
