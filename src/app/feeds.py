@@ -39,6 +39,13 @@ def _pinned_post_uri(feed_name: str, fallback: str) -> str:
     return configured or fallback
 
 
+def _survey_post_uri(feed_name: str, fallback: str) -> str:
+    """Resolve the survey post URI for a feed from the environment, or fall back to the hardcoded URI."""
+    env_name = f"GE_SURVEY_POST_{feed_name.upper().replace('-', '_')}_URI"
+    configured = os.environ.get(env_name, "").strip()
+    return configured or fallback
+
+
 # Social-radius preset generator weights for your-feed.
 # Index 3 (balanced) matches the default weights defined in the "your-feed"
 # FeedConfig below — keep them in sync when tuning.
@@ -167,6 +174,15 @@ FEEDS: dict[str, FeedConfig] = {
         pinned_post_content=(
             "Click [SETTINGS](https://app.greenearth.social/#/settings/your-feed) to personalize "
             "your Green Earth feed.\n\nA controllable feed designed for constructive conversation."
+        ),
+        survey_post_uri=_survey_post_uri(
+            "your-feed",
+            "at://did:plc:66mudnfk2p4olwpaskmrw2vq/app.bsky.feed.post/3mtxartxzwx2s",
+        ),
+        survey_post_content=(
+            "🦋 Enjoying MySky? Or not? 🦋\n"
+            "[Sign up here](https://calendly.com/jonathanstray/bluesky-algorithms-talk) "
+            "for a paid user interview, $15 to help us build the open social web."
         ),
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
