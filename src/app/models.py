@@ -257,6 +257,16 @@ class FeedConfig(BaseModel):
         description="Repository-managed pinned-post text. Markdown-style links are converted "
         "to Bluesky rich-text facets by scripts/manage_pinned_posts.py during deployment.",
     )
+    survey_post_uri: str | None = Field(
+        None,
+        description="AT URI of a post to inject at position 6 of the first page for users "
+        "who have loaded the feed at least 3 times and have not seen it in the past 7 days.",
+    )
+    survey_post_content: str | None = Field(
+        None,
+        description="Survey post text used to identify the post (for reference only; not "
+        "rendered by the API at runtime).",
+    )
     logged_out: LoggedOutBehavior = Field(
         "explain",
         description="How this feed responds to an unauthenticated request: a single "

@@ -15,6 +15,7 @@ from google.cloud.firestore import (  # type: ignore[import-untyped]
     ArrayUnion,
     AsyncClient,
     FieldFilter,
+    Increment,
     Query,
     async_transactional,
 )
@@ -333,13 +334,14 @@ async def get_feed_activity(
 
 
 async def upsert_feed_activity(
-    db: AsyncClient, user_did: str, feed_name: str
+    db: AsyncClient, user_did: str, feed_name: str, *, is_initial_load: bool = True
 ) -> FeedActivityDocument:
     """Record that a user loaded a feed.
 
     On first visit creates the document with both timestamps set to now.
     On subsequent visits updates only ``last_seen_at``; ``first_seen_at`` is
-    never overwritten.
+    never overwritten.  When ``is_initial_load`` is True (no pagination cursor),
+    ``load_count`` is also incremented so survey-post eligibility can be checked.
     """
     ref = (
         db.collection(USERS_COLLECTION)
@@ -358,17 +360,29 @@ async def upsert_feed_activity(
                 "Firestore feed_activity document exists but to_dict() returned "
                 f"None for {user_did}/{feed_name}"
             )
-        await ref.update({"last_seen_at": now})
+        update: dict = {"last_seen_at": now}
+        if is_initial_load:
+            update["load_count"] = Increment(1)
+        await ref.update(update)
         data["last_seen_at"] = now
+        if is_initial_load:
+            data["load_count"] = (data.get("load_count") or 0) + 1
         return FeedActivityDocument.model_validate(data)
 
     activity = FeedActivityDocument(
         feed_name=feed_name,
         first_seen_at=now,
         last_seen_at=now,
+        load_count=1 if is_initial_load else 0,
     )
     await ref.set(activity.model_dump())
     return activity
+
+
+async def update_survey_post_seen(db: AsyncClient, user_did: str) -> None:
+    """Stamp when the user last received an interactionSeen event for the survey post."""
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    await ref.update({"survey_post_last_seen_at": datetime.now(UTC)})
 
 
 # ---------------------------------------------------------------------------
