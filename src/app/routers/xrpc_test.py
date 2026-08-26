@@ -295,6 +295,8 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         exclude_seen_posts=True,
         pinned_post_uri=None,
         pinned_post_content=None,
+        survey_post_uri=None,
+        survey_post_content=None,
         max_render_share=None,
         min_rank_score=None,
         min_mmr_score=None,
