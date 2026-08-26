@@ -400,7 +400,7 @@ sync_pinned_posts() {
     local bsky_handle="caterpie-internal.bsky.social"
     local bsky_secret="bsky-app-password-caterpie"
     if [ "$ENVIRONMENT" = "prod" ]; then
-        bsky_handle="greenearth-social.bsky.social"
+        bsky_handle="greenearth.social"
         bsky_secret="bsky-app-password-prod"
     fi
 
@@ -544,7 +544,7 @@ sync_feeds() {
         #   Pass 2 — internal feeds → Caterpie account (obfuscated names)
         _sync_feeds_to_account \
             "GreenEarth" \
-            "greenearth-social.bsky.social" \
+            "greenearth.social" \
             "bsky-app-password-prod" \
             "$generator_did" \
             "--public-only"
