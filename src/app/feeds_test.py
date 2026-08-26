@@ -42,18 +42,18 @@ class TestFeedsRegistry:
     def test_public_feed_pins_are_repository_managed(self):
         expected_text = {
             "your-feed": (
-                "Click SETTINGS to personalize your Green Earth feed.\n\n"
+                "Click SETTINGS to personalize your MySky by GreenEarth feed.\n\n"
                 "A controllable feed designed for constructive conversation."
             ),
             "best-of-friends": (
                 "Click SETTINGS to personalize your feed.\n\n"
                 "The best posts from your mutuals and people you follow. "
-                "Part of the GreenEarth Family."
+                "Part of the MySky by GreenEarth Family."
             ),
             "random": (
                 "Click SETTINGS to personalize your feed.\n\n"
                 "A random slice of the ATProto universe. Still applies your moderation "
-                "settings. Part of the GreenEarth Family."
+                "settings. Part of the MySky by GreenEarth Family."
             ),
         }
         for feed_name, text in expected_text.items():
