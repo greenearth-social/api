@@ -161,7 +161,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "your-feed": FeedConfig(
         display_name="MySky by GreenEarth",
-        description="A controllable feed designed for constructive conversation.",
+        description="A feed you control, designed for constructive conversation.",
         public=True,
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
@@ -173,7 +173,7 @@ FEEDS: dict[str, FeedConfig] = {
         ),
         pinned_post_content=(
             "Click [SETTINGS](https://app.greenearth.social/#/settings/your-feed) to personalize "
-            "your MySky feed.\n\nA controllable feed designed for constructive conversation."
+            "your MySky feed.\n\nA feed you control, designed for constructive conversation."
         ),
         survey_post_uri=_survey_post_uri(
             "your-feed",

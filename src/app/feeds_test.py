@@ -43,7 +43,7 @@ class TestFeedsRegistry:
         expected_text = {
             "your-feed": (
                 "Click SETTINGS to personalize your MySky feed.\n\n"
-                "A controllable feed designed for constructive conversation."
+                "A feed you control, designed for constructive conversation."
             ),
             "best-of-friends": (
                 "Click SETTINGS to personalize your feed.\n\n"
