@@ -42,7 +42,7 @@ class TestFeedsRegistry:
     def test_public_feed_pins_are_repository_managed(self):
         expected_text = {
             "your-feed": (
-                "Click SETTINGS to personalize your Green Earth feed.\n\n"
+                "Click SETTINGS to personalize your MySky feed.\n\n"
                 "A controllable feed designed for constructive conversation."
             ),
             "best-of-friends": (
