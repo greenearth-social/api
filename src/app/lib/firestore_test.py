@@ -549,7 +549,7 @@ async def test_accept_feed_preview_commits_settings_cache_pointer_and_seen_delet
     assert result is not None
     updated, accepted_until = result
     assert updated.freshness == 2
-    assert accepted_until > now
+    assert accepted_until is None
     cache_write = next(call for call in transaction.set.call_args_list if call.args[0] is cache_ref)
     assert cache_write.args[1]["mode"] == "accepted"
     assert cache_write.args[1]["items"] == [uri]
@@ -557,31 +557,53 @@ async def test_accept_feed_preview_commits_settings_cache_pointer_and_seen_delet
         call for call in transaction.set.call_args_list if call.args[0] is accepted_ref
     )
     assert pointer_write.args[1]["request_id"] == "preview-id"
+    assert pointer_write.args[1]["slate"]["items"] == [uri]
+    assert pointer_write.args[1]["slate"]["mode"] == "accepted"
+    assert "expires_at" not in pointer_write.args[1]
     transaction.delete.assert_called_once_with(seen_ref)
 
 
 @pytest.mark.asyncio
 async def test_claim_accepted_feed_slate_reuses_one_load_then_consumes_pointer():
+    now = datetime.now(UTC)
+    slate = FeedCacheDocument(
+        items=["at://accepted/one", "at://accepted/two"],
+        user_did=USER_DID,
+        feed_name="your-feed",
+        generated_at=now - timedelta(hours=1),
+        expires_at=now - timedelta(minutes=30),
+        mode="accepted",
+    )
     db = MagicMock()
     transaction = MagicMock()
     db.transaction.return_value = transaction
+    users_collection = MagicMock()
+    cache_collection = MagicMock()
+    db.collection.side_effect = lambda name: (
+        users_collection if name == USERS_COLLECTION else cache_collection
+    )
+    user_ref = MagicMock()
     ref = MagicMock()
-    accepted_collection = db.collection.return_value.document.return_value.collection
-    accepted_collection.return_value.document.return_value = ref
+    cache_ref = MagicMock()
+    users_collection.document.return_value = user_ref
+    accepted_collection = MagicMock()
+    user_ref.collection.return_value = accepted_collection
+    accepted_collection.document.return_value = ref
+    cache_collection.document.return_value = cache_ref
     ref.get = AsyncMock(
         side_effect=[
             _mock_doc_snapshot(
                 True,
                 {
                     "request_id": "accepted-id",
-                    "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+                    "slate": slate.model_dump(),
                 },
             ),
             _mock_doc_snapshot(
                 True,
                 {
                     "request_id": "accepted-id",
-                    "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+                    "slate": slate.model_dump(),
                     "claimed_at": datetime.now(UTC),
                 },
             ),
@@ -589,7 +611,7 @@ async def test_claim_accepted_feed_slate_reuses_one_load_then_consumes_pointer()
                 True,
                 {
                     "request_id": "accepted-id",
-                    "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+                    "slate": slate.model_dump(),
                     "claimed_at": datetime.now(UTC) - timedelta(seconds=6),
                 },
             ),
@@ -601,11 +623,61 @@ async def test_claim_accepted_feed_slate_reuses_one_load_then_consumes_pointer()
         assert await claim_accepted_feed_slate(db, USER_DID, "your-feed") == "accepted-id"
         assert await claim_accepted_feed_slate(db, USER_DID, "your-feed") is None
 
-    transaction.set.assert_called_once()
-    assert transaction.set.call_args.args[0] is ref
-    assert "claimed_at" in transaction.set.call_args.args[1]
-    assert transaction.set.call_args.kwargs == {"merge": True}
+    assert transaction.set.call_count == 2
+    cache_write = next(call for call in transaction.set.call_args_list if call.args[0] is cache_ref)
+    assert cache_write.args[1]["generated_at"] > now
+    assert cache_write.args[1]["expires_at"] > now + timedelta(minutes=9)
+    claim_write = next(call for call in transaction.set.call_args_list if call.args[0] is ref)
+    assert "claimed_at" in claim_write.args[1]
+    assert claim_write.kwargs == {"merge": True}
     transaction.delete.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
+async def test_claim_accepted_feed_slate_supports_live_legacy_pointer():
+    now = datetime.now(UTC)
+    db = MagicMock()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    users_collection = MagicMock()
+    cache_collection = MagicMock()
+    db.collection.side_effect = lambda name: (
+        users_collection if name == USERS_COLLECTION else cache_collection
+    )
+    user_ref = MagicMock()
+    accepted_ref = MagicMock()
+    cache_ref = MagicMock()
+    users_collection.document.return_value = user_ref
+    accepted_collection = MagicMock()
+    user_ref.collection.return_value = accepted_collection
+    accepted_collection.document.return_value = accepted_ref
+    cache_collection.document.return_value = cache_ref
+    accepted_ref.get = AsyncMock(
+        return_value=_mock_doc_snapshot(
+            True,
+            {"request_id": "legacy-id", "expires_at": now + timedelta(minutes=5)},
+        )
+    )
+    cache_ref.get = AsyncMock(
+        return_value=_mock_doc_snapshot(
+            True,
+            FeedCacheDocument(
+                items=["at://legacy/one"],
+                user_did=USER_DID,
+                feed_name="your-feed",
+                generated_at=now,
+                expires_at=now + timedelta(minutes=5),
+                mode="accepted",
+            ).model_dump(),
+        )
+    )
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        result = await claim_accepted_feed_slate(db, USER_DID, "your-feed")
+
+    assert result == "legacy-id"
+    cache_ref.get.assert_awaited_once_with(transaction=transaction)
+    assert any(call.args[0] is cache_ref for call in transaction.set.call_args_list)
 
 
 # ---------------------------------------------------------------------------

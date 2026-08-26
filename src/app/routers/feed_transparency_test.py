@@ -509,10 +509,9 @@ def test_accept_preview_persists_the_exact_visible_slate(mock_hydrate, mock_acce
             "created_at": datetime.now(UTC),
         }
     }
-    accepted_until = datetime.now(UTC) + timedelta(minutes=10)
     mock_accept.return_value = (
         FeedPreferencesDocument(freshness=2, purpose=0.5),
-        accepted_until,
+        None,
     )
 
     response = client.post(
@@ -523,6 +522,7 @@ def test_accept_preview_persists_the_exact_visible_slate(mock_hydrate, mock_acce
     assert response.status_code == 200
     assert response.json()["request_id"] == "preview-accept"
     assert response.json()["preferences"] == {"freshness": 2, "purpose": 0.5}
+    assert response.json().get("accepted_until") is None
     mock_accept.assert_awaited_once()
     assert mock_accept.await_args.args[1:6] == (
         "did:plc:test-user",

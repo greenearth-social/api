@@ -125,17 +125,6 @@ class UserDocument(BaseModel):
     )
 
 
-class AcceptedFeedSlateDocument(BaseModel):
-    """One-time pointer to a Settings slate accepted for the next feed load."""
-
-    request_id: str
-    expires_at: datetime
-    claimed_at: datetime | None = Field(
-        default=None,
-        description="When the first request in the accepted feed load claimed this slate.",
-    )
-
-
 class FeedCacheDocument(BaseModel):
     """Cached feed result set used by cursor pagination.
 
@@ -164,6 +153,24 @@ class FeedCacheDocument(BaseModel):
         description="True when this cache entry was created by a load-test session. The cache "
         "collection is keyed by request_id (not user), so this tag is how "
         "scripts/load_test/cleanup.py finds and removes test-created entries.",
+    )
+
+
+class AcceptedFeedSlateDocument(BaseModel):
+    """Durable Settings slate waiting for one Bluesky feed load."""
+
+    request_id: str
+    slate: FeedCacheDocument | None = Field(
+        default=None,
+        description="Complete accepted slate, retained until its first feed load.",
+    )
+    expires_at: datetime | None = Field(
+        default=None,
+        description="Legacy pending-pointer expiration; new handoffs do not expire.",
+    )
+    claimed_at: datetime | None = Field(
+        default=None,
+        description="When the first request in the accepted feed load claimed this slate.",
     )
 
 

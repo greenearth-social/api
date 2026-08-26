@@ -153,7 +153,7 @@ class AcceptFeedPreviewRequest(BaseModel):
 class AcceptedFeedPreviewResponse(BaseModel):
     request_id: str
     preferences: FeedPreferences
-    accepted_until: datetime
+    accepted_until: datetime | None = None
 
 
 class PreferencesResponse(BaseModel):

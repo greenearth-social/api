@@ -1986,6 +1986,7 @@ async def get_feed_skeleton(
                         user_did,
                         feed_name,
                         claim_grace_seconds=INITIAL_REQUEST_REUSE_SECONDS,
+                        cache_ttl_seconds=DEFAULT_TTL_SECONDS,
                     )
                 except Exception:
                     logger.exception(

@@ -780,7 +780,10 @@ class TestGetFeedSkeleton:
         claim_call = claim.await_args
         assert claim_call is not None
         assert claim_call.args[1:] == ("did:plc:testuser", FEED_RKEY)
-        assert claim_call.kwargs == {"claim_grace_seconds": 5}
+        assert claim_call.kwargs == {
+            "claim_grace_seconds": 5,
+            "cache_ttl_seconds": 600,
+        }
         assert write_snapshot.await_count == 2
         pipeline.assert_not_awaited()
 
