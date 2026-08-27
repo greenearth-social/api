@@ -1,7 +1,8 @@
+import asyncio
 import base64
 import importlib.util
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +29,17 @@ class TestFeedUri:
     def test_full_uri_passes_through(self):
         uri = "at://did:web:other/app.bsky.feed.generator/custom"
         assert feed_view.feed_uri(uri, "did:web:test") == uri
+
+    def test_mysky_alias_maps_to_stable_feed_id(self):
+        assert feed_view.canonical_cli_feed("mysky") == "your-feed"
+        assert feed_view.canonical_cli_feed("MySky") == "your-feed"
+
+    def test_full_uri_is_not_normalized(self):
+        uri = "at://did:web:other/app.bsky.feed.generator/mysky"
+        assert feed_view.canonical_cli_feed(uri) == uri
+
+    def test_display_name_keeps_label_and_canonical_id(self):
+        assert feed_view.feed_display_name("your-feed") == "MySky (your-feed)"
 
 
 class TestRequestIdFromFeedContext:
@@ -57,10 +69,45 @@ class TestRequestIdFromFeedContext:
         assert feed_view.request_id_from_feed_context(token) is None
 
 
+class TestWaitForPipelineMeta:
+    def test_waits_until_snapshot_is_readable(self, monkeypatch):
+        calls = 0
+
+        async def load(_user_did, _request_id):
+            nonlocal calls
+            calls += 1
+            return {"items": {}} if calls == 3 else None
+
+        monkeypatch.setattr(feed_view, "load_pipeline_meta", load)
+
+        result = asyncio.run(
+            feed_view.wait_for_pipeline_meta(
+                "did:plc:test", "request-1", timeout=1, interval=0
+            )
+        )
+
+        assert result == {"items": {}}
+        assert calls == 3
+
+    def test_returns_none_after_timeout(self, monkeypatch):
+        async def load(_user_did, _request_id):
+            return None
+
+        monkeypatch.setattr(feed_view, "load_pipeline_meta", load)
+
+        result = asyncio.run(
+            feed_view.wait_for_pipeline_meta(
+                "did:plc:test", "request-1", timeout=0, interval=0
+            )
+        )
+
+        assert result is None
+
+
 class TestParseCreatedAt:
     def test_parses_z_suffix(self):
         dt = feed_view._parse_created_at("2026-07-21T16:18:15Z")
-        assert dt == datetime(2026, 7, 21, 16, 18, 15, tzinfo=timezone.utc)
+        assert dt == datetime(2026, 7, 21, 16, 18, 15, tzinfo=UTC)
 
     def test_none_returns_none(self):
         assert feed_view._parse_created_at(None) is None
@@ -140,6 +187,10 @@ class TestBuildParser:
         assert args.limit == 20
         assert args.pages == 1
         assert args.no_pipeline is False
+
+    def test_mysky_alias_is_accepted_for_normalization(self):
+        args = feed_view.build_parser().parse_args(["mysky"])
+        assert feed_view.canonical_cli_feed(args.feed) == "your-feed"
 
     def test_feed_and_flags(self):
         args = feed_view.build_parser().parse_args(
