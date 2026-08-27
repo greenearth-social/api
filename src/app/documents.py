@@ -115,6 +115,11 @@ class UserDocument(BaseModel):
         default_factory=dict,
         description="Per-feed control values keyed by canonical feed name.",
     )
+    survey_post_last_seen_at: datetime | None = Field(
+        default=None,
+        description="When the user last received an interactionSeen event for the survey post. "
+        "Used to enforce the once-per-week throttle.",
+    )
     created_by_load_test: bool = Field(
         default=False,
         description="True when this document was created by a load-test session and no real "
@@ -236,6 +241,10 @@ class FeedActivityDocument(BaseModel):
     )
     last_seen_at: datetime = Field(
         default_factory=_utcnow, description="Most recent time the user loaded this feed"
+    )
+    load_count: int = Field(
+        default=0,
+        description="Number of initial (no-cursor) feed loads recorded for this feed.",
     )
 
 

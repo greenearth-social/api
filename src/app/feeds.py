@@ -39,6 +39,13 @@ def _pinned_post_uri(feed_name: str, fallback: str) -> str:
     return configured or fallback
 
 
+def _survey_post_uri(feed_name: str, fallback: str) -> str:
+    """Resolve the survey post URI for a feed from the environment, or fall back to the hardcoded URI."""
+    env_name = f"GE_SURVEY_POST_{feed_name.upper().replace('-', '_')}_URI"
+    configured = os.environ.get(env_name, "").strip()
+    return configured or fallback
+
+
 # Social-radius preset generator weights for your-feed.
 # Index 3 (balanced) matches the default weights defined in the "your-feed"
 # FeedConfig below — keep them in sync when tuning.
@@ -109,7 +116,7 @@ SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
 FEEDS: dict[str, FeedConfig] = {
     "unranked-your-feed": FeedConfig(
         display_name="Unranked YF",
-        description="Development feed — same as green-earth but without ranking.",
+        description="Development feed — same as mysky but without ranking.",
         internal_rkey="e2-s",
         internal_display_name="e2 S",
         logged_out="deny",
@@ -153,8 +160,8 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
     "your-feed": FeedConfig(
-        display_name="GreenEarth",
-        description="Posts ranked and personalized just for you.",
+        display_name="MySky by GreenEarth",
+        description="A feed you control, designed for constructive conversation.",
         public=True,
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
@@ -166,7 +173,16 @@ FEEDS: dict[str, FeedConfig] = {
         ),
         pinned_post_content=(
             "Click [SETTINGS](https://app.greenearth.social/#/settings/your-feed) to personalize "
-            "your Green Earth feed.\n\nA controllable feed designed for constructive conversation."
+            "your MySky feed.\n\nA feed you control, designed for constructive conversation."
+        ),
+        survey_post_uri=_survey_post_uri(
+            "your-feed",
+            "at://did:plc:66mudnfk2p4olwpaskmrw2vq/app.bsky.feed.post/3mtxartxzwx2s",
+        ),
+        survey_post_content=(
+            "🦋 Enjoying MySky? Or not? 🦋\n"
+            "[Sign up here](https://calendly.com/jonathanstray/bluesky-algorithms-talk) "
+            "for a paid user interview, $15 to help us build the open social web."
         ),
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
@@ -376,7 +392,7 @@ FEEDS: dict[str, FeedConfig] = {
     "cold-start": FeedConfig(
         display_name="Cold Start",
         description=(
-            "Main Green Earth feed for a user with no like history and no followed accounts."
+            "Main MySky feed by GreenEarth for a user with no like history and no followed accounts."
         ),
         public=False,
         internal_rkey="mf-cs",

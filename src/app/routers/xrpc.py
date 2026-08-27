@@ -60,6 +60,7 @@ from ..lib.feed_preferences import configured_controls, control_value
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     delete_feed_snapshot,
+    get_feed_activity,
     get_recent_discarded_uris,
     get_recent_seen_uris,
     get_user,
@@ -67,6 +68,7 @@ from ..lib.firestore import (
     record_discarded_posts,
     record_interaction,
     record_seen_posts,
+    update_survey_post_seen,
     upsert_feed_activity,
     upsert_user,
     write_feed_debug,
@@ -113,6 +115,9 @@ router = APIRouter(tags=["xrpc"])
 
 FEED_SNAPSHOT_RETENTION_SECONDS = 24 * 60 * 60  # 24 hours
 INITIAL_REQUEST_REUSE_SECONDS = 5
+SURVEY_POST_POSITION = 6  # 1-indexed position in the first page where the survey post appears
+SURVEY_POST_MIN_VISITS = 3  # minimum initial loads before the survey is shown
+SURVEY_POST_COOLDOWN_DAYS = 7  # days between survey showings (triggered by interactionSeen)
 
 try:
     _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
@@ -1066,7 +1071,13 @@ async def _record_discarded(
 
 
 async def _record_session(
-    request: Request, user_did: str, feed_name: str, db, *, is_load_test: bool = False
+    request: Request,
+    user_did: str,
+    feed_name: str,
+    db,
+    *,
+    is_load_test: bool = False,
+    is_initial_load: bool = True,
 ) -> None:
     """Resolve the caller's handle and upsert user + feed-activity docs.
 
@@ -1079,6 +1090,10 @@ async def _record_session(
     ``upsert_user``), and both feed-activity recording and PostHog tracking are
     skipped: activity data feeds user selection for future tests, and test
     traffic must never inflate real analytics.
+
+    ``is_initial_load`` is False for cursor-based (paginated) requests; only
+    initial loads increment the feed-activity load counter used for survey
+    post eligibility.
     """
     # Handle resolution goes over the network to the PLC directory, so it fails
     # for reasons that have nothing to do with this user existing — a directory
@@ -1106,7 +1121,7 @@ async def _record_session(
         return
 
     try:
-        await upsert_feed_activity(db, user_did, feed_name)
+        await upsert_feed_activity(db, user_did, feed_name, is_initial_load=is_initial_load)
     except Exception:
         logger.exception(
             "Failed to record feed activity for user '%s', feed '%s'", user_did, feed_name
@@ -1278,6 +1293,21 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
             and feed_cfg.exclude_seen_posts
         ):
             seen_by_user.setdefault((payload.did, payload.lt), []).append(ix.item)
+
+        if (
+            event == "interactionSeen"
+            and ix.item
+            and feed_cfg is not None
+            and feed_cfg.survey_post_uri
+            and ix.item == feed_cfg.survey_post_uri
+            and not payload.lt
+        ):
+            try:
+                await update_survey_post_seen(db, payload.did)
+            except Exception:
+                logger.exception(
+                    "Failed to update survey_post_last_seen_at for user '%s'", payload.did
+                )
 
         doc = InteractionDocument(
             user_did=payload.did,
@@ -1537,7 +1567,14 @@ async def get_feed_skeleton(
 
     if not is_anonymous:
         _spawn_background(
-            _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
+            _record_session(
+                request,
+                user_did,
+                feed_name,
+                db,
+                is_load_test=is_load_test,
+                is_initial_load=cursor is None,
+            )
         )
 
     uses_network_likes_flag = feed_name in (
@@ -1843,18 +1880,38 @@ async def get_feed_skeleton(
                 )
             all_uris = generated_snapshot.items
 
-            # Pinned posts are a Bluesky presentation concern and are deliberately
-            # excluded from observability snapshots and source diagnostics.
+            # Survey post: eligible for users who loaded the feed at least 3 times
+            # and haven't seen it in the past 7 days (tracked via interactionSeen).
+            show_survey = False
+            if feed_cfg.survey_post_uri and not is_anonymous and not is_probe and not is_load_test:
+                try:
+                    feed_activity_doc = await get_feed_activity(db, user_did, feed_name)
+                except Exception:
+                    logger.exception("Failed to read feed activity for user '%s'", user_did)
+                    feed_activity_doc = None
+                if feed_activity_doc is not None and feed_activity_doc.load_count >= SURVEY_POST_MIN_VISITS:  # noqa: E501
+                    cutoff = datetime.now(UTC) - timedelta(days=SURVEY_POST_COOLDOWN_DAYS)
+                    last_seen = user_doc.survey_post_last_seen_at if user_doc else None
+                    show_survey = last_seen is None or last_seen < cutoff
+
+            # Pinned and survey posts are Bluesky presentation concerns and are
+            # deliberately excluded from observability snapshots and source diagnostics.
+            survey_uri = feed_cfg.survey_post_uri if show_survey else None
+            n_injected = (1 if feed_cfg.pinned_post_uri else 0) + (1 if survey_uri else 0)
             if feed_cfg.pinned_post_uri:
                 cache_uris = [uri for uri in all_uris if uri != feed_cfg.pinned_post_uri]
-                generated_page = cache_uris[: max(0, limit - 1)]
-                page = [feed_cfg.pinned_post_uri, *generated_page]
+                generated_page = cache_uris[: max(0, limit - n_injected)]
+                page: list[str] = [feed_cfg.pinned_post_uri, *generated_page]
                 consumed = len(generated_page)
             else:
                 cache_uris = all_uris
-                generated_page = all_uris[:limit]
-                page = generated_page
+                generated_page = all_uris[: max(0, limit - n_injected)]
+                page = list(generated_page)
                 consumed = len(generated_page)
+
+            if survey_uri:
+                insert_idx = min(SURVEY_POST_POSITION - 1, len(page))
+                page = [*page[:insert_idx], survey_uri, *page[insert_idx:]]
 
             scores_by_uri = _similarity_scores_from_items_meta(generated_snapshot.items_meta)
             _record_similarity_metric(
