@@ -282,7 +282,7 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
     assert gen_request.num_candidates == expected_candidates
     exclusions.assert_awaited_once()
     assert exclusions.await_args is not None
-    assert exclusions.await_args.kwargs == {}
+    assert exclusions.await_args.kwargs == {"include_seen": False}
     assert len(result.items) == 35
     stored = cache._docs[result.request_id]
     assert stored.mode == "preview"
@@ -318,6 +318,15 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
                 popular=0.0,
             ),
             "network_likes",
+        ),
+        (
+            SourceWeightsDocument(
+                following=0.0,
+                network_likes=0.0,
+                authors_topics=1.0,
+                popular=0.0,
+            ),
+            "two_tower",
         ),
     ],
 )

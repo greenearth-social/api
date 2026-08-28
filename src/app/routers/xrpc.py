@@ -1175,8 +1175,13 @@ async def generate_feed_preview(
 ) -> FeedSnapshotDocument:
     """Generate and cache a settings preview without mutating user/feed history.
 
-    The same settings-controlled inputs and exclusions as a fresh served feed
-    are used so the preview is an accurate representation of MySky.
+    The same settings-controlled inputs as a fresh served feed are used. Seen
+    posts deliberately remain eligible: seen history is account-wide, so
+    applying it here lets activity in another feed exhaust a narrow source
+    before the user can inspect the new settings. Previously-discarded
+    low-quality posts remain excluded. Preview/MySky parity is provided by the
+    accepted-slate handoff, which serves this exact organic sequence on the next
+    fresh load.
     """
     db = getattr(request.app.state, "firestore", None)
     if db is None:
@@ -1220,7 +1225,12 @@ async def generate_feed_preview(
         ),
         preference_patch=preference_patch,
     )
-    exclude_uris = await _generation_exclusions(db, user_did, configured.feed_cfg)
+    exclude_uris = await _generation_exclusions(
+        db,
+        user_did,
+        configured.feed_cfg,
+        include_seen=False,
+    )
     gen_request = configured.feed_cfg.gen_request_template.model_copy(
         update={
             "user_did": user_did,

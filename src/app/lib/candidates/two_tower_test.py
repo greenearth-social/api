@@ -188,6 +188,48 @@ class TestTwoTowerCandidateGenerator:
         assert result.reason == "no_user_like_history"
 
     @pytest.mark.asyncio
+    async def test_generate_explains_when_history_excludes_all_matches(self, generator):
+        es = object()
+        user_embedding = [0.5, 0.6]
+        candidate = CandidatePost(
+            at_uri="at://post/seen",
+            content="seen",
+            score=0.9,
+            generator_name=TWO_TOWER_GENERATOR_NAME,
+        )
+
+        with (
+            patch(GET_INFERENCE_SETTINGS, return_value=INFERENCE_SETTINGS),
+            patch(
+                GET_CACHED_POST_TOWER_UUID,
+                new_callable=AsyncMock,
+                return_value="post-tower-uuid",
+            ),
+            patch(
+                COMPUTE_USER_EMBEDDING,
+                new_callable=AsyncMock,
+                return_value=user_embedding,
+            ),
+            patch(
+                KNN_SEARCH_POSTS,
+                new_callable=AsyncMock,
+                side_effect=[[], [candidate]],
+            ) as knn_search,
+        ):
+            result = await generator.generate(
+                es,
+                "did:plc:user1",
+                exclude_uris=["at://post/seen"],
+            )
+
+        assert knn_search.await_count == 2
+        assert knn_search.await_args_list[0].kwargs["exclude_uris"] == ["at://post/seen"]
+        assert knn_search.await_args_list[1].args[2] == 1
+        assert knn_search.await_args_list[1].kwargs["exclude_uris"] is None
+        assert result.candidates == []
+        assert result.reason == "history_exclusions"
+
+    @pytest.mark.asyncio
     async def test_generate_uses_default_options(self, generator):
         es = object()
         user_embedding = [0.5, 0.6]
@@ -227,6 +269,7 @@ class TestTwoTowerCandidateGenerator:
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == []
+        assert result.reason == "no_recent_authors_topics_posts"
 
     @pytest.mark.asyncio
     async def test_generate_passes_max_age_hours_through_unclamped(self, generator):
