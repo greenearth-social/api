@@ -93,6 +93,7 @@ class FeedItemView(BaseModel):
     media: MediaView | None = None
     engagement: EngagementView | None = None
     post_url: str | None = None
+    is_partial: bool = False
 
 
 class FeedDetailResponse(BaseModel):
@@ -104,6 +105,8 @@ class FeedDetailResponse(BaseModel):
     displayed_item_count: int = 0
     publicly_filtered_count: int = 0
     unavailable_count: int = 0
+    partial_item_count: int = 0
+    generator_diagnostics: list[GeneratorDiagnosticView] = Field(default_factory=list)
 
 
 class FeedPreviewResponse(BaseModel):

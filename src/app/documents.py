@@ -148,6 +148,10 @@ class FeedCacheDocument(BaseModel):
         default=None,
         description="Sparse draft used to generate a settings preview.",
     )
+    preference_fingerprint: str | None = Field(
+        default=None,
+        description="Deterministic fingerprint of the effective generation preferences.",
+    )
     load_test: bool = Field(
         default=False,
         description="True when this cache entry was created by a load-test session. The cache "

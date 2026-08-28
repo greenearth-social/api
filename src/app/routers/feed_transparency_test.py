@@ -14,6 +14,7 @@ from ..documents import (
     FeedCacheDocument,
     FeedPreferencesDocument,
     FeedSnapshotDocument,
+    GeneratorDiagnostic,
     GeneratorMeta,
     ModelScoreMeta,
     PipelineItemMeta,
@@ -387,6 +388,30 @@ def test_create_feed_preview_accepts_unsaved_preferences(mock_generate, client):
     assert patch_doc.purpose == 0.65
 
 
+@pytest.mark.parametrize(
+    "source_weights",
+    [
+        {"following": 1, "network_likes": 0, "authors_topics": 0, "popular": 0},
+        {"following": 0, "network_likes": 1, "authors_topics": 0, "popular": 0},
+    ],
+)
+@patch("app.routers.feed_transparency.generate_feed_preview", new_callable=AsyncMock)
+def test_create_feed_preview_preserves_100_percent_source_weights(
+    mock_generate, client, source_weights
+):
+    mock_generate.return_value = _snapshot_doc(request_id="preview-100")
+
+    response = client.post(
+        "/api/feeds/your-feed/preview",
+        json={"source_weights": source_weights},
+    )
+
+    assert response.status_code == 200
+    patch_doc = mock_generate.await_args.args[3]
+    assert patch_doc.source_weights is not None
+    assert patch_doc.source_weights.model_dump() == source_weights
+
+
 @patch("app.routers.feed_transparency.generate_feed_preview", new_callable=AsyncMock)
 def test_create_feed_preview_accepts_empty_baseline_patch(mock_generate, client):
     mock_generate.return_value = _snapshot_doc(request_id="preview-baseline")
@@ -444,6 +469,65 @@ def test_get_feed_preview_reads_owned_preview_cache(mock_hydrate, client):
 
     assert response.status_code == 200
     assert response.json()["items"][0]["content"] == "Preview post"
+
+
+@patch("app.routers.feed_transparency.hydrate_posts", new_callable=AsyncMock)
+def test_get_feed_preview_preserves_ranked_items_when_hydration_is_unavailable(
+    mock_hydrate, client
+):
+    uris = [
+        "at://did:plc:first/app.bsky.feed.post/one",
+        "at://did:plc:second/app.bsky.feed.post/two",
+    ]
+    snapshot = _snapshot_doc(
+        request_id="preview-partial",
+        items=uris,
+        items_meta=[
+            PipelineItemMeta(
+                at_uri=uri,
+                rank=index,
+                generators=[GeneratorMeta(name="followed_users", score=0.8)],
+            )
+            for index, uri in enumerate(uris, start=1)
+        ],
+        generator_diagnostics=[
+            GeneratorDiagnostic(
+                name="followed_users",
+                weight=1.0,
+                requested_count=100,
+                returned_count=2,
+                contributed_count=2,
+            )
+        ],
+    )
+    app.state.feed_cache = MagicMock(
+        retrieve_document=AsyncMock(
+            return_value=FeedCacheDocument(
+                items=snapshot.items,
+                items_meta=snapshot.items_meta,
+                generator_diagnostics=snapshot.generator_diagnostics,
+                user_did="did:plc:test-user",
+                feed_name="your-feed",
+                generated_at=snapshot.generated_at,
+                expires_at=datetime.now(UTC) + timedelta(minutes=10),
+                mode="preview",
+            )
+        )
+    )
+    mock_hydrate.return_value = {}
+
+    response = client.get("/api/feeds/previews/preview-partial")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["at_uri"] for item in data["items"]] == uris
+    assert all(item["is_partial"] for item in data["items"])
+    assert data["items"][0]["post_url"].endswith("/profile/did:plc:first/post/one")
+    assert data["stored_item_count"] == 2
+    assert data["displayed_item_count"] == 2
+    assert data["unavailable_count"] == 2
+    assert data["partial_item_count"] == 2
+    assert data["generator_diagnostics"][0]["name"] == "followed_users"
 
 
 def test_get_feed_preview_hides_wrong_owner(client):
@@ -880,6 +964,7 @@ def test_patch_preferences_rejects_out_of_range(mock_patch_prefs, client):
             "popular": 0.25,
         },
         {"following": 1.0, "network_likes": 0.0, "authors_topics": 0.0, "popular": 0.0},
+        {"following": 0.0, "network_likes": 1.0, "authors_topics": 0.0, "popular": 0.0},
         {"following": 0.0, "network_likes": 0.0, "authors_topics": 1.0, "popular": 0.0},
         {"following": 0.0, "network_likes": 0.0, "authors_topics": 0.0, "popular": 1.0},
     ],

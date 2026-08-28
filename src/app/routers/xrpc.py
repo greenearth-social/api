@@ -14,7 +14,9 @@ See: https://docs.bsky.app/docs/starter-templates/custom-feeds
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
+import json
 import logging
 import math
 import os
@@ -39,6 +41,7 @@ from ..documents import (
     InteractionDocument,
     PipelineItemMeta,
     SourceWeightsDocument,
+    UserDocument,
 )
 from ..feeds import (
     DEFAULT_SOCIAL_RADIUS,
@@ -57,7 +60,7 @@ from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
-from ..lib.feed_preferences import configured_controls, control_value, resolve_feed_preferences
+from ..lib.feed_preferences import configured_controls, resolve_feed_preferences
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     claim_accepted_feed_slate,
@@ -754,6 +757,103 @@ def _source_generators(
     return [GeneratorSpec(name=name, weight=weight) for name, weight in configured if weight > 0]
 
 
+@dataclass(frozen=True)
+class _ConfiguredGeneration:
+    feed_cfg: FeedConfig
+    effective_preferences: FeedPreferencesDocument
+    generators_override: dict[str, list[GeneratorSpec]]
+    max_age_hours: int
+    applied_social_radius: int | None
+    preference_fingerprint: str
+
+
+def _configured_generation(
+    feed_name: str,
+    user_doc: UserDocument | None,
+    *,
+    network_likes_enabled: bool,
+    preference_patch: FeedPreferencesDocument | None = None,
+) -> _ConfiguredGeneration:
+    """Resolve every settings-controlled input shared by serving and Preview."""
+    feed_cfg = FEEDS[feed_name]
+    effective = resolve_feed_preferences(user_doc, feed_name)
+    if preference_patch is not None:
+        effective_data = effective.model_dump(exclude_none=True)
+        effective_data.update(preference_patch.model_dump(exclude_unset=True, exclude_none=True))
+        effective = FeedPreferencesDocument.model_validate(effective_data)
+
+    controls = configured_controls(feed_name)
+    if "purpose" in controls:
+        assert effective.purpose is not None
+        feed_cfg = _with_purpose_weights(feed_cfg, effective.purpose)
+
+    generators_override: dict[str, list[GeneratorSpec]] = {}
+    applied_social_radius: int | None = None
+    uses_network_likes = feed_name in (
+        "your-feed",
+        "unranked-your-feed",
+        "cutoff-preview",
+    )
+    if uses_network_likes and "source_weights" in controls:
+        source_weights = effective.source_weights
+        assert source_weights is not None
+        preference_key = FEEDS[feed_name].preference_source or feed_name
+        stored = user_doc.feed_preferences.get(preference_key) if user_doc is not None else None
+        has_custom_weights = (
+            preference_patch is not None and "source_weights" in preference_patch.model_fields_set
+        ) or (stored is not None and stored.source_weights is not None)
+        legacy_radius = (
+            stored.social_radius
+            if stored is not None and stored.social_radius is not None
+            else user_doc.social_radius
+            if user_doc is not None
+            else DEFAULT_SOCIAL_RADIUS
+        )
+        if not has_custom_weights:
+            applied_social_radius = legacy_radius
+
+        if network_likes_enabled or has_custom_weights:
+            generators = _source_generators(
+                source_weights,
+                # The rollout flag controls legacy/default mixes only. Once a
+                # user has explicitly saved source weights, dropping their
+                # Network Likes allocation would make MySky disagree with the
+                # Settings UI (100% would even fall back to a legacy preset).
+                include_network_likes=network_likes_enabled or has_custom_weights,
+                fallback_radius=legacy_radius,
+            )
+        else:
+            generators = SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[legacy_radius]
+        generators_override = {"generators": generators}
+
+    freshness_index = (
+        int(effective.freshness)
+        if "freshness" in controls and effective.freshness is not None
+        else DEFAULT_FRESHNESS_INDEX
+    )
+    max_age_hours = max_age_hours_for_freshness(freshness_index)
+    realized_generators = generators_override.get(
+        "generators", feed_cfg.gen_request_template.generators
+    )
+    fingerprint_payload = {
+        "feed_name": feed_name,
+        "preferences": effective.model_dump(include=set(controls), exclude_none=True),
+        "generators": [generator.model_dump(mode="json") for generator in realized_generators],
+        "max_age_hours": max_age_hours,
+    }
+    preference_fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return _ConfiguredGeneration(
+        feed_cfg=feed_cfg,
+        effective_preferences=effective,
+        generators_override=generators_override,
+        max_age_hours=max_age_hours,
+        applied_social_radius=applied_social_radius,
+        preference_fingerprint=preference_fingerprint,
+    )
+
+
 async def _run_pipeline_capturing(
     request: Request,
     db,
@@ -1067,23 +1167,15 @@ async def generate_feed_preview(
 ) -> FeedSnapshotDocument:
     """Generate and cache a settings preview without mutating user/feed history.
 
-    Preview generation deliberately skips seen-post exclusions so a proposed
-    slate has enough overlap with the current one to make rank movement useful.
-    Discarded low-quality posts remain excluded, and every other runtime choice
-    (feature flags, controls, ranking, diversification and cutoffs) mirrors a
-    normal initial feed request.
+    The same settings-controlled inputs and exclusions as a fresh served feed
+    are used so the preview is an accurate representation of MySky.
     """
     db = getattr(request.app.state, "firestore", None)
     if db is None:
         logger.error("Firestore client not initialized")
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
-    feed_cfg = FEEDS[feed_name]
     user_doc = await get_user(db, user_did)
-    resolved = resolve_feed_preferences(user_doc, feed_name)
-    effective_data = resolved.model_dump(exclude_none=True)
-    effective_data.update(preference_patch.model_dump(exclude_unset=True, exclude_none=True))
-    effective = FeedPreferencesDocument.model_validate(effective_data)
 
     uses_network_likes_flag = feed_name in (
         "your-feed",
@@ -1112,56 +1204,16 @@ async def generate_feed_preview(
         else MAX_BATCH_SIZE
     )
 
-    controls = configured_controls(feed_name)
-    if "purpose" in controls:
-        assert effective.purpose is not None
-        feed_cfg = _with_purpose_weights(feed_cfg, effective.purpose)
-
-    generators_override: dict = {}
-    applied_social_radius: int | None = None
-    if uses_network_likes_flag and "source_weights" in controls:
-        source_weights = effective.source_weights
-        assert source_weights is not None
-        preference_key = FEEDS[feed_name].preference_source or feed_name
-        stored = user_doc.feed_preferences.get(preference_key) if user_doc is not None else None
-        has_custom_weights = "source_weights" in preference_patch.model_fields_set or (
-            stored is not None and stored.source_weights is not None
-        )
-        legacy_radius = (
-            stored.social_radius
-            if stored is not None and stored.social_radius is not None
-            else user_doc.social_radius
-            if user_doc is not None
-            else DEFAULT_SOCIAL_RADIUS
-        )
-        if not has_custom_weights:
-            applied_social_radius = legacy_radius
-
-        include_network_likes = (
+    configured = _configured_generation(
+        feed_name,
+        user_doc,
+        network_likes_enabled=(
             True if posthog_client is None else feature_flags.get(NETWORK_LIKES_FLAG, False)
-        )
-        if include_network_likes or has_custom_weights:
-            generators = _source_generators(
-                source_weights,
-                include_network_likes=include_network_likes,
-                fallback_radius=legacy_radius,
-            )
-        else:
-            generators = SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[legacy_radius]
-        generators_override = {"generators": generators}
-
-    freshness_index = (
-        int(effective.freshness)
-        if "freshness" in controls and effective.freshness is not None
-        else DEFAULT_FRESHNESS_INDEX
+        ),
+        preference_patch=preference_patch,
     )
-    exclude_uris = await _generation_exclusions(
-        db,
-        user_did,
-        feed_cfg,
-        include_seen=False,
-    )
-    gen_request = feed_cfg.gen_request_template.model_copy(
+    exclude_uris = await _generation_exclusions(db, user_did, configured.feed_cfg)
+    gen_request = configured.feed_cfg.gen_request_template.model_copy(
         update={
             "user_did": user_did,
             # A preview is inspectable page by page, so retain the complete
@@ -1169,8 +1221,8 @@ async def generate_feed_preview(
             # the first visible page.
             "num_candidates": max_batch_size,
             "exclude_uris": exclude_uris,
-            "max_age_hours": max_age_hours_for_freshness(freshness_index),
-            **generators_override,
+            "max_age_hours": configured.max_age_hours,
+            **configured.generators_override,
         }
     )
 
@@ -1178,14 +1230,14 @@ async def generate_feed_preview(
     snapshot, _low_score_uris = await _run_pipeline_capturing_with_timeout(
         request,
         db,
-        feed_cfg,
+        configured.feed_cfg,
         gen_request,
         feed_name=feed_name,
         user_did=user_did,
         request_id=request_id,
         regenerated=False,
         debug_enabled=False,
-        applied_social_radius=applied_social_radius,
+        applied_social_radius=configured.applied_social_radius,
     )
 
     cached_uris = snapshot.items
@@ -1205,7 +1257,7 @@ async def generate_feed_preview(
             items=cached_uris,
             items_meta=cached_meta,
             generator_diagnostics=snapshot.generator_diagnostics,
-            applied_social_radius=applied_social_radius,
+            applied_social_radius=configured.applied_social_radius,
             user_did=user_did,
             feed_name=feed_name,
             generated_at=snapshot.generated_at,
@@ -1213,7 +1265,25 @@ async def generate_feed_preview(
             expires_at=expires_at,
             mode="preview",
             preference_patch=preference_patch,
+            preference_fingerprint=configured.preference_fingerprint,
         ),
+    )
+    logger.info(
+        "Generated settings preview",
+        extra={
+            "request_id": request_id,
+            "feed_name": feed_name,
+            "preference_fingerprint": configured.preference_fingerprint,
+            "source_weights": (
+                configured.effective_preferences.source_weights.model_dump()
+                if configured.effective_preferences.source_weights is not None
+                else None
+            ),
+            "stored_item_count": len(cached_uris),
+            "generator_diagnostics": [
+                diagnostic.model_dump() for diagnostic in snapshot.generator_diagnostics
+            ],
+        },
     )
     return preview_snapshot
 
@@ -1742,62 +1812,27 @@ async def get_feed_skeleton(
     # to no-debug rather than breaking feed serving.
     debug_enabled = False
     user_doc = None
+    preferences_read_succeeded = is_anonymous
     if not is_anonymous:
         try:
             user_doc = await get_user(db, user_did)
+            preferences_read_succeeded = True
             debug_enabled = bool(user_doc and user_doc.debug_feeds)
         except Exception:
             logger.exception("Failed to read debug flag for user '%s'", user_did)
 
-    # Purpose controls the relative influence of the engaging and constructive
-    # rankers only for feeds that declare it. Apply it to a request-local copy;
-    # module-level FEEDS templates must remain immutable.
-    controls = configured_controls(feed_name)
-    if "purpose" in controls:
-        purpose = float(control_value(user_doc, feed_name, "purpose"))
-        feed_cfg = _with_purpose_weights(feed_cfg, purpose)
-
-    # Source weights only reallocate the fixed candidate batch among sources.
-    # GreenEarth's unranked and cutoff-preview variants share the public
-    # GreenEarth preference via preference_source; cold-start intentionally
-    # keeps its static popularity-only mix.
-    generators_override: dict = {}
-    applied_social_radius: int | None = None
-    if uses_network_likes_flag and "source_weights" in controls:
-        source_weights = control_value(user_doc, feed_name, "source_weights")
-        assert isinstance(source_weights, SourceWeightsDocument)
-        preference_key = FEEDS[feed_name].preference_source or feed_name
-        stored = user_doc.feed_preferences.get(preference_key) if user_doc is not None else None
-        has_custom_weights = stored is not None and stored.source_weights is not None
-        legacy_radius = (
-            stored.social_radius
-            if stored is not None and stored.social_radius is not None
-            else user_doc.social_radius
-            if user_doc is not None
-            else DEFAULT_SOCIAL_RADIUS
-        )
-        if not has_custom_weights:
-            applied_social_radius = legacy_radius
-
-        include_network_likes = (
+    configured = _configured_generation(
+        feed_name,
+        user_doc,
+        network_likes_enabled=(
             True if posthog_client is None else feature_flags.get(NETWORK_LIKES_FLAG, False)
-        )
-        if include_network_likes or has_custom_weights:
-            generators = _source_generators(
-                source_weights,
-                include_network_likes=include_network_likes,
-                fallback_radius=legacy_radius,
-            )
-        else:
-            generators = SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[legacy_radius]
-        generators_override = {"generators": generators}
-
-    freshness_index = (
-        int(control_value(user_doc, feed_name, "freshness"))
-        if "freshness" in controls
-        else DEFAULT_FRESHNESS_INDEX
+        ),
     )
-    max_age_hours = max_age_hours_for_freshness(freshness_index)
+    feed_cfg = configured.feed_cfg
+    generators_override = configured.generators_override
+    applied_social_radius = configured.applied_social_radius
+    max_age_hours = configured.max_age_hours
+    preference_fingerprint = configured.preference_fingerprint
 
     feed_cache = _get_feed_cache(request)
 
@@ -1851,6 +1886,118 @@ async def get_feed_skeleton(
                     )
                     raise HTTPException(status_code=400, detail="Invalid cursor")
                 cached_uris = cache_doc.items
+                if (
+                    preferences_read_succeeded
+                    and cache_doc.preference_fingerprint != preference_fingerprint
+                ):
+                    # The user changed generation settings while Bluesky was
+                    # paging through this cursor. Start a new cache session
+                    # immediately, retaining only already-delivered URIs as
+                    # exclusions so the new slate cannot repeat them.
+                    batch = _batch_size(limit, max_batch_size)
+                    delivered_uris = cached_uris[: min(parsed.offset, len(cached_uris))]
+                    excluded = await generation_exclusions()
+                    exclude_uris = list(dict.fromkeys([*delivered_uris, *excluded]))
+                    replacement_request_id = uuid.uuid4().hex
+                    gen_request = feed_cfg.gen_request_template.model_copy(
+                        update={
+                            "user_did": user_did,
+                            "num_candidates": batch,
+                            "exclude_uris": exclude_uris,
+                            "max_age_hours": max_age_hours,
+                            **generators_override,
+                        }
+                    )
+                    generated_snapshot, low_score_uris = await _run_pipeline_capturing_with_timeout(
+                        request,
+                        db,
+                        feed_cfg,
+                        gen_request,
+                        feed_name=feed_name,
+                        user_did=user_did,
+                        request_id=replacement_request_id,
+                        regenerated=True,
+                        debug_enabled=debug_enabled,
+                        applied_social_radius=applied_social_radius,
+                    )
+                    if low_score_uris and not is_anonymous:
+                        _spawn_background(
+                            _record_discarded(
+                                db,
+                                user_did,
+                                low_score_uris,
+                                load_test=is_load_test,
+                            )
+                        )
+                    replacement_uris = generated_snapshot.items
+                    page = replacement_uris[:limit]
+                    next_cursor: str | None = None
+                    if replacement_uris:
+                        meta_by_uri = {meta.at_uri: meta for meta in generated_snapshot.items_meta}
+                        replacement_meta = [
+                            meta_by_uri[uri] for uri in replacement_uris if uri in meta_by_uri
+                        ]
+                        await feed_cache.store_document(
+                            replacement_request_id,
+                            FeedCacheDocument(
+                                items=replacement_uris,
+                                items_meta=replacement_meta,
+                                generator_diagnostics=generated_snapshot.generator_diagnostics,
+                                applied_social_radius=applied_social_radius,
+                                user_did=user_did,
+                                feed_name=feed_name,
+                                generated_at=generated_snapshot.generated_at,
+                                api_release_sha=generated_snapshot.api_release_sha,
+                                expires_at=datetime.now(UTC)
+                                + timedelta(seconds=DEFAULT_TTL_SECONDS),
+                                preference_fingerprint=preference_fingerprint,
+                                load_test=is_load_test,
+                            ),
+                        )
+                        next_cursor = FeedCursor(
+                            id=replacement_request_id,
+                            offset=len(page),
+                        ).encode()
+
+                    if collector := get_metric_collector():
+                        collector.record(
+                            "feed.cache.preference_regeneration_count",
+                            1,
+                            feed_name=feed_name,
+                        )
+                    logger.info(
+                        "Regenerated feed cursor after preference change",
+                        extra={
+                            "request_id": replacement_request_id,
+                            "replaced_request_id": parsed.id,
+                            "feed_name": feed_name,
+                            "delivered_item_count": len(delivered_uris),
+                            "stored_item_count": len(replacement_uris),
+                            "preference_fingerprint": preference_fingerprint,
+                        },
+                    )
+                    _record_similarity_metric(
+                        page,
+                        _similarity_scores_from_items_meta(generated_snapshot.items_meta),
+                        feed_name,
+                        batch=parsed.offset // limit,
+                    )
+                    if not is_probe and not is_anonymous:
+                        await _write_feed_snapshot_background(
+                            db,
+                            user_did,
+                            replacement_request_id,
+                            _snapshot_page(generated_snapshot, page),
+                            load_test=is_load_test,
+                        )
+                    return FeedSkeletonResponse(
+                        feed=_skeleton_items(
+                            page,
+                            feed_context_for(replacement_request_id),
+                        ),
+                        cursor=next_cursor,
+                    )
+
                 if parsed.offset < len(cached_uris):
                     # Serve from the existing cached batch.
                     page = cached_uris[parsed.offset : parsed.offset + limit]
@@ -2151,6 +2298,7 @@ async def get_feed_skeleton(
                             generated_at=generated_snapshot.generated_at,
                             api_release_sha=generated_snapshot.api_release_sha,
                             expires_at=datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS),
+                            preference_fingerprint=preference_fingerprint,
                             load_test=is_load_test,
                         ),
                     )

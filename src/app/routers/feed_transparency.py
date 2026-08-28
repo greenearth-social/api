@@ -26,6 +26,7 @@ from ..lib.firestore import (
     get_user,
     patch_user_feed_preferences,
 )
+from ..lib.metrics import get_metric_collector
 from ..lib.post_hydration import hydrate_posts
 from ..lib.request_context import set_traffic
 from ..models_feed_transparency import (
@@ -100,7 +101,9 @@ def _has_usable_hydration(hydrated_post: dict) -> bool:
 def _build_items(
     snapshot: FeedSnapshotDocument,
     hydrated: dict[str, dict],
-) -> tuple[list[FeedItemView], int, int]:
+    *,
+    include_unavailable: bool = False,
+) -> tuple[list[FeedItemView], int, int, int]:
     """Build ``FeedItemView`` list from a ``FeedSnapshotDocument`` + hydrated post data.
 
     ``PipelineItemMeta`` is already per-URI with all pipeline fields joined, so no
@@ -109,6 +112,7 @@ def _build_items(
     items: list[FeedItemView] = []
     publicly_filtered_count = 0
     unavailable_count = 0
+    partial_item_count = 0
     meta_by_uri = {meta.at_uri: meta for meta in snapshot.items_meta}
     for at_uri in snapshot.items:
         meta = meta_by_uri.get(at_uri, PipelineItemMeta(at_uri=at_uri))
@@ -120,6 +124,33 @@ def _build_items(
         # recurring blank observability row.
         if not _has_usable_hydration(hyd):
             unavailable_count += 1
+            if include_unavailable:
+                partial_item_count += 1
+                items.append(
+                    FeedItemView(
+                        at_uri=meta.at_uri,
+                        rank=meta.rank,
+                        rank_score=meta.rank_score,
+                        after_rank_position=meta.after_rank_position,
+                        generators=[
+                            GeneratorView(name=g.name, score=g.score) for g in meta.generators
+                        ],
+                        model_scores=[
+                            ModelScoreView(name=s.name, weight=s.weight, score=s.score)
+                            for s in meta.model_scores
+                        ],
+                        diversification=DiversificationView(
+                            relevance=meta.diversification.relevance,
+                            score=meta.diversification.score,
+                            author_penalty=meta.diversification.author_penalty,
+                            content_penalty=meta.diversification.content_penalty,
+                        )
+                        if meta.diversification
+                        else None,
+                        post_url=_at_uri_to_bsky_url(meta.at_uri),
+                        is_partial=True,
+                    )
+                )
             continue
         if _is_publicly_filtered(hyd):
             publicly_filtered_count += 1
@@ -159,7 +190,7 @@ def _build_items(
                 post_url=_at_uri_to_bsky_url(meta.at_uri, author.get("handle")),
             )
         )
-    return items, publicly_filtered_count, unavailable_count
+    return items, publicly_filtered_count, unavailable_count, partial_item_count
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +398,53 @@ async def get_feed_preview(
     )
     db: AsyncClient = request.app.state.firestore
     hydrated = await hydrate_posts(db, snapshot.items)
-    items, publicly_filtered_count, unavailable_count = _build_items(snapshot, hydrated)
+    items, publicly_filtered_count, unavailable_count, partial_item_count = _build_items(
+        snapshot,
+        hydrated,
+        include_unavailable=True,
+    )
+    diagnostics = [
+        GeneratorDiagnosticView(**diagnostic.model_dump())
+        for diagnostic in snapshot.generator_diagnostics
+    ]
+    logger.info(
+        "Hydrated settings preview",
+        extra={
+            "request_id": request_id,
+            "feed_name": snapshot.feed_name,
+            "stored_item_count": len(snapshot.items),
+            "displayed_item_count": len(items),
+            "partial_item_count": partial_item_count,
+            "unavailable_count": unavailable_count,
+            "generator_diagnostics": [diagnostic.model_dump() for diagnostic in diagnostics],
+        },
+    )
+    if collector := get_metric_collector():
+        collector.record(
+            "feed.preview.partial_hydration_count",
+            partial_item_count,
+            feed_name=snapshot.feed_name,
+        )
+        failed_generator = any(
+            diagnostic.status in {"error", "timeout", "not_configured", "not_run"}
+            for diagnostic in snapshot.generator_diagnostics
+            if diagnostic.weight > 0
+        )
+        outcome = (
+            "partial_hydration"
+            if partial_item_count
+            else "generator_failure"
+            if not items and failed_generator
+            else "empty"
+            if not items
+            else "success"
+        )
+        collector.record(
+            "feed.preview.outcome_count",
+            1,
+            feed_name=snapshot.feed_name,
+            outcome=outcome,
+        )
     return FeedDetailResponse(
         request_id=request_id,
         generated_at=snapshot.generated_at,
@@ -377,6 +454,8 @@ async def get_feed_preview(
         displayed_item_count=len(items),
         publicly_filtered_count=publicly_filtered_count,
         unavailable_count=unavailable_count,
+        partial_item_count=partial_item_count,
+        generator_diagnostics=diagnostics,
     )
 
 
@@ -456,7 +535,7 @@ async def accept_preview(
     )
     db: AsyncClient = request.app.state.firestore
     hydrated = await hydrate_posts(db, snapshot.items)
-    visible_items, _, _ = _build_items(snapshot, hydrated)
+    visible_items, _, _, _ = _build_items(snapshot, hydrated)
     visible_uris = [item.at_uri for item in visible_items]
     if body.displayed_item_uris != visible_uris:
         raise HTTPException(
@@ -500,7 +579,9 @@ async def get_feed_detail(
         )
 
     hydrated = await hydrate_posts(db, snapshot.items)
-    items, publicly_filtered_count, unavailable_count = _build_items(snapshot, hydrated)
+    items, publicly_filtered_count, unavailable_count, partial_item_count = _build_items(
+        snapshot, hydrated
+    )
 
     return FeedDetailResponse(
         request_id=request_id,
@@ -511,4 +592,9 @@ async def get_feed_detail(
         displayed_item_count=len(items),
         publicly_filtered_count=publicly_filtered_count,
         unavailable_count=unavailable_count,
+        partial_item_count=partial_item_count,
+        generator_diagnostics=[
+            GeneratorDiagnosticView(**diagnostic.model_dump())
+            for diagnostic in snapshot.generator_diagnostics
+        ],
     )
