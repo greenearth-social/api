@@ -203,8 +203,7 @@ class FeedDebugRecorder:
                 content_penalty=content_penalty,
                 similarity_score=similarity_score,
             )
-            for at_uri, relevance, score, author_penalty, content_penalty, similarity_score
-            in self.diversification
+            for at_uri, relevance, score, author_penalty, content_penalty, similarity_score in self.diversification
         ]
 
         return FeedDebugDocument(
@@ -267,8 +266,7 @@ class FeedDebugRecorder:
         gens_by_uri: dict[str, list[GeneratorMeta]] = {}
         for result in self.generator_outputs:
             finite_scores = [
-                c.score for c in result.candidates
-                if c.score is not None and math.isfinite(c.score)
+                c.score for c in result.candidates if c.score is not None and math.isfinite(c.score)
             ]
             lo = min(finite_scores) if finite_scores else None
             hi = max(finite_scores) if finite_scores else None
@@ -285,20 +283,33 @@ class FeedDebugRecorder:
         requested_by_name: dict[str, int] = {}
         if self.generate_request:
             from .candidates.generate import allocate_counts
+
             counts = allocate_counts(
                 self.generate_request.generators,
                 self.generate_request.num_candidates,
             )
             requested_by_name = {
-                spec.name: count
-                for spec, count in zip(self.generate_request.generators, counts)
+                spec.name: count for spec, count in zip(self.generate_request.generators, counts)
             }
 
         diagnostics: list[GeneratorDiagnostic] = []
         specs = self.generate_request.generators if self.generate_request else []
+        downstream_empty_reason: str | None = None
+        if self.generator_outputs and not self.final_order:
+            returned_any = any(output.candidates for output in self.generator_outputs)
+            if returned_any:
+                if self.ranker_model is not None and self.ranking is None:
+                    downstream_empty_reason = "missing_candidate_embeddings"
+                elif self.ranking is not None and not self.order_after_rank:
+                    downstream_empty_reason = "ranking_removed_all"
+                elif self.cutoff_uris:
+                    downstream_empty_reason = "quality_filters_removed_all"
+                else:
+                    downstream_empty_reason = "pipeline_removed_all"
         for spec in specs:
             staged = [
-                output for output in self.generator_outputs
+                output
+                for output in self.generator_outputs
                 if output.generator_name == spec.name and output.mode != "primary"
             ]
             if staged:
@@ -324,7 +335,8 @@ class FeedDebugRecorder:
                     remaining = max(0, remaining - len(returned_uris))
                 continue
             matching = [
-                output for output in self.generator_outputs
+                output
+                for output in self.generator_outputs
                 if output.generator_name == spec.name and output.mode == "primary"
             ]
             returned_uris = {
@@ -335,9 +347,15 @@ class FeedDebugRecorder:
             }
             output = matching[-1] if matching else None
             contributed = sum(
-                1 for uri in self.final_order
+                1
+                for uri in self.final_order
                 if any(g.name == spec.name for g in gens_by_uri.get(uri, []))
             )
+            status = output.status if output else "error"
+            reason = output.reason if output else "missing_generator_result"
+            if returned_uris and contributed == 0 and downstream_empty_reason is not None:
+                status = "empty"
+                reason = downstream_empty_reason
             diagnostics.append(
                 GeneratorDiagnostic(
                     name=spec.name,
@@ -345,8 +363,8 @@ class FeedDebugRecorder:
                     requested_count=requested_by_name.get(spec.name, 0),
                     returned_count=len(returned_uris),
                     contributed_count=contributed,
-                    status=output.status if output else "error",
-                    reason=output.reason if output else "missing_generator_result",
+                    status=status,
+                    reason=reason,
                 )
             )
 
@@ -369,9 +387,14 @@ class FeedDebugRecorder:
 
         # Per-URI diversification.
         div_by_uri: dict[str, DiversificationMeta] = {}
-        for at_uri, relevance, score, author_penalty, content_penalty, similarity_score in (
-            self.diversification
-        ):
+        for (
+            at_uri,
+            relevance,
+            score,
+            author_penalty,
+            content_penalty,
+            similarity_score,
+        ) in self.diversification:
             div_by_uri[at_uri] = DiversificationMeta(
                 relevance=relevance,
                 score=score,

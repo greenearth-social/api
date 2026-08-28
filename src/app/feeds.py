@@ -24,6 +24,20 @@ from .models import (
 
 DEFAULT_SOCIAL_RADIUS: int = 3
 
+# Your Feed's 100% Following mode and Best of Friends deliberately share these
+# objects and thresholds. Treat them as one followed-users pipeline so tuning
+# ranking or cutoffs cannot make the two UI choices drift apart.
+FOLLOWED_USERS_ONLY_GENERATORS = [GeneratorSpec(name="followed_users", weight=1.0)]
+PERSONALIZED_MAX_RENDER_SHARE = 0.5
+PERSONALIZED_MIN_RANK_SCORE = 0.425
+PERSONALIZED_MIN_MMR_SCORE = -0.05
+PERSONALIZED_RANK_REQUEST_TEMPLATE = RankPredictRequest.model_construct(
+    models=[
+        RankModelSpec(name="heavy_ranker", weight=1.0),
+        RankModelSpec(name="perspective", weight=1.0),
+    ],
+)
+
 # The post served, on its own, to logged-out viewers of feeds that need a
 # signed-in user to mean anything (``logged_out="explain"``). A feed with no
 # items reads as a broken feed, so show something that says why (issue #384).
@@ -44,7 +58,7 @@ def _pinned_post_uri(feed_name: str, fallback: str) -> str:
 # FeedConfig below — keep them in sync when tuning.
 SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
     0: [  # Friends — only from people you follow
-        GeneratorSpec(name="followed_users", weight=1.00),
+        *FOLLOWED_USERS_ONLY_GENERATORS,
     ],
     1: [  # Closer
         GeneratorSpec(name="followed_users", weight=0.70),
@@ -177,9 +191,9 @@ FEEDS: dict[str, FeedConfig] = {
         # leaving max_render_share as the dominant lever on render volume.
         # See "cutoff-preview" below for the live preview of this feed's pipeline
         # with the same thresholds.
-        max_render_share=0.5,
-        min_rank_score=0.425,
-        min_mmr_score=-0.05,
+        max_render_share=PERSONALIZED_MAX_RENDER_SHARE,
+        min_rank_score=PERSONALIZED_MIN_RANK_SCORE,
+        min_mmr_score=PERSONALIZED_MIN_MMR_SCORE,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
@@ -187,12 +201,7 @@ FEEDS: dict[str, FeedConfig] = {
             video_only=False,
             exclude_uris=[],
         ),
-        rank_request_template=RankPredictRequest.model_construct(
-            models=[
-                RankModelSpec(name="heavy_ranker", weight=1.0),
-                RankModelSpec(name="perspective", weight=1.0),
-            ],
-        ),
+        rank_request_template=PERSONALIZED_RANK_REQUEST_TEMPLATE,
     ),
     "best-of-friends": FeedConfig(
         display_name="Best of Friends",
@@ -217,22 +226,17 @@ FEEDS: dict[str, FeedConfig] = {
         # score distribution (followed_users-only, no two_tower/popularity mix)
         # wasn't separately sampled, so treat it as a starting point to revisit
         # once its own metrics are live.
-        max_render_share=0.5,
-        min_rank_score=0.425,
-        min_mmr_score=-0.05,
+        max_render_share=PERSONALIZED_MAX_RENDER_SHARE,
+        min_rank_score=PERSONALIZED_MIN_RANK_SCORE,
+        min_mmr_score=PERSONALIZED_MIN_MMR_SCORE,
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=[GeneratorSpec(name="followed_users", weight=1.0)],
+            generators=FOLLOWED_USERS_ONLY_GENERATORS,
             infill=None,
             num_candidates=30,
             video_only=False,
             exclude_uris=[],
         ),
-        rank_request_template=RankPredictRequest.model_construct(
-            models=[
-                RankModelSpec(name="heavy_ranker", weight=1.0),
-                RankModelSpec(name="perspective", weight=1.0),
-            ],
-        ),
+        rank_request_template=PERSONALIZED_RANK_REQUEST_TEMPLATE,
     ),
     "cutoff-preview": FeedConfig(
         display_name="Cutoff Preview",

@@ -148,6 +148,10 @@ class FeedCacheDocument(BaseModel):
         default=None,
         description="Sparse draft used to generate a settings preview.",
     )
+    effective_preferences: FeedPreferencesDocument | None = Field(
+        default=None,
+        description="Fully resolved settings used to generate a settings preview.",
+    )
     preference_fingerprint: str | None = Field(
         default=None,
         description="Deterministic fingerprint of the effective generation preferences.",

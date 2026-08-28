@@ -26,6 +26,7 @@ from ..documents import (
     FeedDebugDocument,
     FeedPreferencesDocument,
     FeedSnapshotDocument,
+    GeneratorDiagnostic,
     InteractionDocument,
     RedirectDocument,
     UserDocument,
@@ -284,6 +285,7 @@ async def patch_user_feed_preferences(
 ) -> FeedPreferencesDocument:
     """Atomically patch and materialize one feed without replacing siblings."""
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    accepted_ref = ref.collection(ACCEPTED_FEED_SLATES_COLLECTION).document(feed_name)
     transaction = db.transaction()
 
     @async_transactional
@@ -307,9 +309,32 @@ async def patch_user_feed_preferences(
             },
             merge=True,
         )
+        # Any accepted handoff represents the settings that existed before
+        # this write. Removing it in the same transaction closes the race where
+        # an older Preview finishes accepting while a newer save is in flight.
+        transaction.delete(accepted_ref)
         return updated
 
     return await _patch(transaction)
+
+
+class StaleFeedPreviewError(Exception):
+    """The user's persisted settings no longer match a generated preview."""
+
+
+def _accepted_preview_diagnostics(
+    cache_doc: FeedCacheDocument,
+    displayed_item_uris: list[str],
+) -> list[GeneratorDiagnostic]:
+    """Retain why a ranked Preview became an accepted empty slate."""
+    if displayed_item_uris or not cache_doc.items:
+        return cache_doc.generator_diagnostics
+    return [
+        diagnostic.model_copy(update={"status": "empty", "reason": "hydration_removed_all"})
+        if diagnostic.contributed_count > 0
+        else diagnostic
+        for diagnostic in cache_doc.generator_diagnostics
+    ]
 
 
 async def accept_feed_preview(
@@ -322,18 +347,16 @@ async def accept_feed_preview(
     *,
     ttl_seconds: int,
 ) -> tuple[FeedPreferencesDocument, datetime | None] | None:
-    """Atomically persist settings and stage their preview for the next feed load.
+    """Atomically stage a saved settings preview for the next feed load.
 
     ``None`` means the cache entry stopped being acceptable before the
     transaction committed (expired, wrong owner/feed/provenance, or changed).
+    ``StaleFeedPreviewError`` means a newer settings save superseded the preview.
     """
 
     user_ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     cache_ref = db.collection(FEED_CACHE_COLLECTION).document(request_id)
     accepted_ref = user_ref.collection(ACCEPTED_FEED_SLATES_COLLECTION).document(feed_name)
-    seen_ref = user_ref.collection(SEEN_POSTS_COLLECTION).document(
-        datetime.now(UTC).strftime("%Y-%m-%d")
-    )
     transaction = db.transaction()
 
     @async_transactional
@@ -380,10 +403,12 @@ async def accept_feed_preview(
         user_snapshot = await user_ref.get(transaction=transaction)
         user_data = user_snapshot.to_dict() if user_snapshot.exists else None
         user = UserDocument.model_validate(user_data) if user_data is not None else None
-        resolved = resolve_feed_preferences(user, feed_name)
-        values = resolved.model_dump(exclude_none=True)
-        values.update(requested_patch)
-        updated = FeedPreferencesDocument.model_validate(values)
+        current = resolve_feed_preferences(user, feed_name)
+        expected = cache_doc.effective_preferences
+        if expected is None or current.model_dump(exclude_none=True) != expected.model_dump(
+            exclude_none=True
+        ):
+            raise StaleFeedPreviewError
 
         accepted_until = now + timedelta(seconds=ttl_seconds)
         meta_by_uri = {meta.at_uri: meta for meta in cache_doc.items_meta}
@@ -393,23 +418,14 @@ async def accept_feed_preview(
                 "items_meta": [
                     meta_by_uri[at_uri] for at_uri in displayed_item_uris if at_uri in meta_by_uri
                 ],
+                "generator_diagnostics": _accepted_preview_diagnostics(
+                    cache_doc, displayed_item_uris
+                ),
                 "expires_at": accepted_until,
                 "mode": "accepted",
             }
         )
 
-        transaction.set(
-            user_ref,
-            {
-                "user_did": user_did,
-                "feed_preferences": {
-                    preference_source(feed_name): updated.model_dump(exclude_none=True),
-                },
-                "created_by_load_test": False,
-                "updated_at": now,
-            },
-            merge=True,
-        )
         transaction.set(cache_ref, accepted_cache.model_dump())
         transaction.set(
             accepted_ref,
@@ -418,8 +434,7 @@ async def accept_feed_preview(
                 slate=accepted_cache,
             ).model_dump(exclude_none=True),
         )
-        transaction.delete(seen_ref)
-        return updated, None
+        return current, None
 
     return await _accept(transaction)
 
@@ -888,11 +903,9 @@ async def merge_feed_snapshot(
     """Atomically create or extend a feed-session snapshot.
 
     Returns ``True`` when the merged session exceeded the item safety limit and
-    was truncated. Empty batches are ignored.
+    was truncated. Empty initial batches remain observable; empty later batches
+    merge diagnostics without erasing posts already served in the session.
     """
-    if not doc.items:
-        return False
-
     if len(doc.items) > MAX_FEED_SNAPSHOT_ITEMS:
         included_items = doc.items[:MAX_FEED_SNAPSHOT_ITEMS]
         included = set(included_items)

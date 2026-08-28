@@ -20,6 +20,7 @@ from ..documents import (
     PipelineItemMeta,
 )
 from ..main import app
+from ..lib.firestore import StaleFeedPreviewError
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -235,6 +236,29 @@ def test_list_feeds_collapses_identical_snapshots_and_keeps_newest(mock_query, c
     response = client.get("/api/feeds")
     data = response.json()
     assert [feed["request_id"] for feed in data["feeds"]] == ["req-1"]
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_keeps_only_the_newest_repeated_empty_refresh(mock_query, client):
+    now = datetime.now(UTC)
+    mock_query.return_value = [
+        _snapshot_doc(
+            request_id="empty-new",
+            generated_at=now,
+            items=[],
+            items_meta=[],
+        ),
+        _snapshot_doc(
+            request_id="empty-old",
+            generated_at=now - timedelta(minutes=5),
+            items=[],
+            items_meta=[],
+        ),
+    ]
+
+    response = client.get("/api/feeds")
+
+    assert [feed["request_id"] for feed in response.json()["feeds"]] == ["empty-new"]
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
@@ -568,8 +592,7 @@ def test_get_feed_preview_hides_served_cache_entries(client):
 
 
 @patch("app.routers.feed_transparency.accept_feed_preview", new_callable=AsyncMock)
-@patch("app.routers.feed_transparency.hydrate_posts", new_callable=AsyncMock)
-def test_accept_preview_persists_the_exact_visible_slate(mock_hydrate, mock_accept, client):
+def test_accept_preview_persists_the_exact_visible_slate(mock_accept, client):
     snapshot = _snapshot_doc(request_id="preview-accept")
     uri = snapshot.items[0]
     app.state.feed_cache = MagicMock(
@@ -586,13 +609,6 @@ def test_accept_preview_persists_the_exact_visible_slate(mock_hydrate, mock_acce
             )
         )
     )
-    mock_hydrate.return_value = {
-        uri: {
-            "author": {"handle": "alice.test", "display_name": "Alice"},
-            "content": "Visible preview post",
-            "created_at": datetime.now(UTC),
-        }
-    }
     mock_accept.return_value = (
         FeedPreferencesDocument(freshness=2, purpose=0.5),
         None,
@@ -618,10 +634,8 @@ def test_accept_preview_persists_the_exact_visible_slate(mock_hydrate, mock_acce
 
 
 @patch("app.routers.feed_transparency.accept_feed_preview", new_callable=AsyncMock)
-@patch("app.routers.feed_transparency.hydrate_posts", new_callable=AsyncMock)
-def test_accept_preview_rejects_changed_visible_order(mock_hydrate, mock_accept, client):
+def test_accept_preview_can_stage_a_genuinely_empty_visible_slate(mock_accept, client):
     snapshot = _snapshot_doc(request_id="preview-changed")
-    uri = snapshot.items[0]
     app.state.feed_cache = MagicMock(
         retrieve_document=AsyncMock(
             return_value=FeedCacheDocument(
@@ -636,20 +650,264 @@ def test_accept_preview_rejects_changed_visible_order(mock_hydrate, mock_accept,
             )
         )
     )
-    mock_hydrate.return_value = {
-        uri: {
-            "author": {"handle": "alice.test", "display_name": "Alice"},
-            "content": "Visible preview post",
-        }
-    }
+    mock_accept.return_value = (FeedPreferencesDocument(freshness=2, purpose=0.5), None)
 
     response = client.post(
         "/api/feeds/your-feed/previews/preview-changed/accept",
         json={"preferences": {"freshness": 2}, "displayed_item_uris": []},
     )
 
+    assert response.status_code == 200
+    assert mock_accept.await_args.args[5] == []
+
+
+@patch(
+    "app.routers.feed_transparency.accept_feed_preview",
+    new_callable=AsyncMock,
+    side_effect=StaleFeedPreviewError,
+)
+def test_accept_preview_maps_stale_preferences_to_conflict(mock_accept, client):
+    snapshot = _snapshot_doc(request_id="preview-stale")
+    app.state.feed_cache = MagicMock(
+        retrieve_document=AsyncMock(
+            return_value=FeedCacheDocument(
+                items=snapshot.items,
+                items_meta=snapshot.items_meta,
+                user_did="did:plc:test-user",
+                feed_name="your-feed",
+                generated_at=snapshot.generated_at,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                mode="preview",
+                preference_patch=FeedPreferencesDocument(freshness=2),
+            )
+        )
+    )
+
+    response = client.post(
+        "/api/feeds/your-feed/previews/preview-stale/accept",
+        json={"preferences": {"freshness": 2}, "displayed_item_uris": snapshot.items},
+    )
+
     assert response.status_code == 409
-    mock_accept.assert_not_awaited()
+    assert "Settings changed" in response.json()["detail"]
+    mock_accept.assert_awaited_once()
+
+
+def test_saved_preview_acceptance_mysky_and_waist_share_one_organic_slate(client, monkeypatch):
+    """Exercise the public lifecycle without devctl's synthetic feed path."""
+    from ..documents import SourceWeightsDocument, UserDocument
+    from .xrpc import _clear_initial_request_cache
+
+    request_id = "lifecycle-preview-request"
+    organic_uris = [
+        "at://did:plc:author/app.bsky.feed.post/one",
+        "at://did:plc:author/app.bsky.feed.post/two",
+    ]
+    preferences = FeedPreferencesDocument(
+        source_weights=SourceWeightsDocument(
+            following=1.0,
+            network_likes=0.0,
+            authors_topics=0.0,
+            popular=0.0,
+        ),
+        freshness=3,
+        purpose=0.65,
+    )
+    generated_at = datetime.now(UTC)
+    preview_snapshot = FeedSnapshotDocument(
+        request_id=request_id,
+        items=organic_uris,
+        feed_name="your-feed",
+        generated_at=generated_at,
+        expires_at=generated_at + timedelta(minutes=10),
+        items_meta=[
+            PipelineItemMeta(
+                at_uri=uri,
+                generators=[GeneratorMeta(name="followed_users", score=1.0)],
+            )
+            for uri in organic_uris
+        ],
+        generator_diagnostics=[
+            GeneratorDiagnostic(
+                name="followed_users",
+                weight=1.0,
+                requested_count=30,
+                returned_count=2,
+                contributed_count=2,
+            )
+        ],
+    )
+    cache_docs: dict[str, FeedCacheDocument] = {}
+    waist_snapshots: dict[str, FeedSnapshotDocument] = {}
+    cache = MagicMock()
+    cache.retrieve_document = AsyncMock(side_effect=lambda key: cache_docs.get(key))
+
+    async def generate_preview(_request, user_did, feed_name, patch_doc):
+        assert patch_doc == preferences
+        cache_docs[request_id] = FeedCacheDocument(
+            items=organic_uris,
+            items_meta=preview_snapshot.items_meta,
+            generator_diagnostics=preview_snapshot.generator_diagnostics,
+            user_did=user_did,
+            feed_name=feed_name,
+            generated_at=generated_at,
+            expires_at=generated_at + timedelta(minutes=10),
+            mode="preview",
+            preference_patch=patch_doc,
+            effective_preferences=preferences,
+            preference_fingerprint="lifecycle-fingerprint",
+        )
+        return preview_snapshot
+
+    async def accept_preview(_db, _did, _feed, accepted_id, _patch, displayed, **_kwargs):
+        cached = cache_docs[accepted_id]
+        cache_docs[accepted_id] = cached.model_copy(update={"items": displayed, "mode": "accepted"})
+        return preferences, None
+
+    async def write_snapshot(_db, _did, written_id, snapshot, **_kwargs):
+        waist_snapshots[written_id] = snapshot
+
+    async def hydrate(_db, uris):
+        return {
+            uri: {
+                "author": {
+                    "handle": "author.test",
+                    "display_name": "Author",
+                    "avatar_url": None,
+                },
+                "content": uri,
+                "created_at": generated_at,
+                "media": {},
+                "engagement": {},
+            }
+            for uri in uris
+        }
+
+    app.state.feed_cache = cache
+    monkeypatch.setenv("GE_FEED_CONTEXT_SECRET", "lifecycle-secret")
+    _clear_initial_request_cache()
+    user = UserDocument(
+        user_did="did:plc:test-user",
+        feed_preferences={"your-feed": preferences},
+    )
+
+    with (
+        patch(
+            "app.routers.feed_transparency.patch_user_feed_preferences",
+            new_callable=AsyncMock,
+            return_value=preferences,
+        ),
+        patch(
+            "app.routers.feed_transparency.delete_most_recent_seen_bucket",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "app.routers.feed_transparency.generate_feed_preview",
+            new_callable=AsyncMock,
+            side_effect=generate_preview,
+        ),
+        patch(
+            "app.routers.feed_transparency.accept_feed_preview",
+            new_callable=AsyncMock,
+            side_effect=accept_preview,
+        ),
+        patch(
+            "app.routers.feed_transparency.hydrate_posts",
+            new_callable=AsyncMock,
+            side_effect=hydrate,
+        ),
+        patch(
+            "app.routers.xrpc.verify_auth_header",
+            new_callable=AsyncMock,
+            return_value="did:plc:test-user",
+        ),
+        patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
+        patch(
+            "app.routers.xrpc.claim_accepted_feed_slate",
+            new_callable=AsyncMock,
+            return_value=request_id,
+        ),
+        patch(
+            "app.routers.xrpc._write_feed_snapshot_background",
+            new_callable=AsyncMock,
+            side_effect=write_snapshot,
+        ),
+        patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock),
+        patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock),
+        patch("app.routers.xrpc.get_posthog_client", return_value=None),
+        patch(
+            "app.routers.feed_transparency.get_recent_feed_snapshots",
+            new_callable=AsyncMock,
+            side_effect=lambda *_args, **_kwargs: list(waist_snapshots.values()),
+        ),
+        patch(
+            "app.routers.feed_transparency.get_feed_snapshot",
+            new_callable=AsyncMock,
+            side_effect=lambda _db, _did, rid: waist_snapshots.get(rid),
+        ),
+    ):
+        saved = client.patch(
+            "/api/feeds/preferences/your-feed",
+            json={
+                "source_weights": {
+                    "following": 1.0,
+                    "network_likes": 0.0,
+                    "authors_topics": 0.0,
+                    "popular": 0.0,
+                },
+                "freshness": 3,
+                "purpose": 0.65,
+            },
+        )
+        created = client.post(
+            "/api/feeds/your-feed/preview",
+            json={
+                "source_weights": {
+                    "following": 1.0,
+                    "network_likes": 0.0,
+                    "authors_topics": 0.0,
+                    "popular": 0.0,
+                },
+                "freshness": 3,
+                "purpose": 0.65,
+            },
+        )
+        hydrated_preview = client.get(f"/api/feeds/previews/{request_id}")
+        accepted = client.post(
+            f"/api/feeds/your-feed/previews/{request_id}/accept",
+            json={
+                "preferences": {
+                    "source_weights": {
+                        "following": 1.0,
+                        "network_likes": 0.0,
+                        "authors_topics": 0.0,
+                        "popular": 0.0,
+                    },
+                    "freshness": 3,
+                    "purpose": 0.65,
+                },
+                "displayed_item_uris": organic_uris,
+            },
+        )
+        mysky = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={
+                "feed": "at://did:web:api-stage.greenearth.social/app.bsky.feed.generator/your-feed",
+                "limit": 10,
+            },
+        )
+        waist_list = client.get("/api/feeds")
+        waist_detail = client.get(f"/api/feeds/{request_id}")
+
+    assert saved.status_code == 200
+    assert created.json()["request_id"] == request_id
+    assert [item["at_uri"] for item in hydrated_preview.json()["items"]] == organic_uris
+    assert accepted.json()["request_id"] == request_id
+    served = [item["post"] for item in mysky.json()["feed"]]
+    assert served[1:] == organic_uris  # MySky's configured pin remains presentation-only.
+    assert waist_list.json()["feeds"][0]["request_id"] == request_id
+    assert waist_detail.json()["request_id"] == request_id
+    assert [item["at_uri"] for item in waist_detail.json()["items"]] == organic_uris
 
 
 @patch("app.routers.feed_transparency.hydrate_posts")

@@ -88,6 +88,7 @@ def hydrated_uri_limit(num_candidates: int) -> int:
 # Query helper
 # ---------------------------------------------------------------------------
 
+
 async def fetch_recent_liked_post_uris(
     es,
     user_dids: list[str],
@@ -173,11 +174,7 @@ async def fetch_posts_by_uris(
         if candidate.at_uri and candidate.at_uri not in exclude_set:
             candidates_by_uri[candidate.at_uri] = candidate
 
-    return [
-        candidates_by_uri[at_uri]
-        for at_uri in at_uris
-        if at_uri in candidates_by_uri
-    ]
+    return [candidates_by_uri[at_uri] for at_uri in at_uris if at_uri in candidates_by_uri]
 
 
 def _record_scan_telemetry(
@@ -224,23 +221,44 @@ async def network_likes_search(
     max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
 ) -> list[CandidatePost]:
     """Fetch posts liked by users followed by user_did."""
+    candidates, _ = await _network_likes_search_with_reason(
+        es,
+        user_did,
+        num_candidates,
+        generator_name=generator_name,
+        video_only=video_only,
+        exclude_uris=exclude_uris,
+        max_age_hours=max_age_hours,
+    )
+    return candidates
+
+
+async def _network_likes_search_with_reason(
+    es,
+    user_did: str,
+    num_candidates: int,
+    generator_name: str | None = None,
+    video_only: bool = False,
+    exclude_uris: list[str] | None = None,
+    max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
+) -> tuple[list[CandidatePost], str | None]:
+    """Fetch network-liked posts and retain a bounded empty-result explanation."""
 
     try:
         async with timed(logger, "follows_lookup", user_did=user_did):
             followed_dids: list[str] = await get_followed_dids_cached(user_did)
     except FollowedUsersLookupError as exc:
         logger.warning(
-            "Skipping network_likes candidate generation for %s after follow "
-            "lookup failed: %s",
+            "Skipping network_likes candidate generation for %s after follow lookup failed: %s",
             user_did,
             exc,
         )
         if fail_fast():
             raise
-        return []
+        return [], "follow_lookup_failed"
 
     if not followed_dids:
-        return []
+        return [], "no_followed_users"
 
     scan_size = liked_post_scan_size(num_candidates)
     like_counts: dict[str, int] = {}
@@ -261,6 +279,21 @@ async def network_likes_search(
             exclude_uris=exclude_uris,
         )
 
+        if not liked_uris:
+            if exclude_uris:
+                try:
+                    unexcluded = await fetch_recent_liked_post_uris(
+                        es,
+                        followed_dids,
+                        size=1,
+                        max_age_hours=max_age_hours,
+                    )
+                    if unexcluded:
+                        return [], "history_exclusions"
+                except Exception:
+                    logger.warning("Failed to classify empty network-likes history exclusions")
+            return [], "no_recent_network_likes"
+
         for order, uri in enumerate(liked_uris):
             like_counts[uri] = like_counts.get(uri, 0) + 1
             last_seen_order[uri] = order
@@ -270,7 +303,7 @@ async def network_likes_search(
         ranked_uris = sorted(
             like_counts,
             key=lambda uri: (-like_counts[uri], last_seen_order[uri]),
-        )[:hydrated_uri_limit(num_candidates)]
+        )[: hydrated_uri_limit(num_candidates)]
 
         hydrated = await fetch_posts_by_uris(
             es,
@@ -296,7 +329,8 @@ async def network_likes_search(
         for candidate in hydrated
         if candidate.at_uri in like_counts
     ]
-    return candidates[:num_candidates]
+    candidates = candidates[:num_candidates]
+    return candidates, None if candidates else "liked_posts_unavailable"
 
 
 class NetworkLikesCandidateGenerator(CandidateGenerator):
@@ -315,7 +349,7 @@ class NetworkLikesCandidateGenerator(CandidateGenerator):
         exclude_uris: list[str] | None = None,
         max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
     ) -> CandidateResult:
-        candidates = await network_likes_search(
+        candidates, reason = await _network_likes_search_with_reason(
             es,
             user_did,
             num_candidates,
@@ -328,4 +362,4 @@ class NetworkLikesCandidateGenerator(CandidateGenerator):
         if not candidates:
             logger.info("No liked posts found for followed users of user %s", user_did)
 
-        return CandidateResult(generator_name=self.name, candidates=candidates)
+        return CandidateResult(generator_name=self.name, candidates=candidates, reason=reason)

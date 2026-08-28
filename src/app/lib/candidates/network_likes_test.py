@@ -76,15 +76,17 @@ class FakeEs:
         search_after=None,
         **kwargs,
     ):
-        self.calls.append({
-            "index": index,
-            "query": query,
-            "size": size,
-            "sort": sort,
-            "_source": _source,
-            "search_after": search_after,
-            "kwargs": kwargs,
-        })
+        self.calls.append(
+            {
+                "index": index,
+                "query": query,
+                "size": size,
+                "sort": sort,
+                "_source": _source,
+                "search_after": search_after,
+                "kwargs": kwargs,
+            }
+        )
 
         if index == "likes":
             if self.likes is None:
@@ -177,11 +179,15 @@ class TestHydratedUriLimit:
 class TestFetchRecentLikedPostUris:
     @pytest.mark.asyncio
     async def test_returns_uris_in_like_recency_order(self):
-        es = FakeEs(likes=likes_response([
-            like_hit("at://post/1", 3),
-            like_hit(None, 2),
-            like_hit("at://post/2", 1),
-        ]))
+        es = FakeEs(
+            likes=likes_response(
+                [
+                    like_hit("at://post/1", 3),
+                    like_hit(None, 2),
+                    like_hit("at://post/2", 1),
+                ]
+            )
+        )
 
         uris = await fetch_recent_liked_post_uris(
             es,
@@ -286,14 +292,16 @@ class TestNetworkLikesSearch:
     ):
         stub_followed_dids(monkeypatch, ["did:plc:follow1", "did:plc:follow2"])
         es = FakeEs(
-            likes=likes_response([
-                like_hit("at://post/a", 60),
-                like_hit("at://missing/1", 50),
-                like_hit("at://missing/2", 40),
-                like_hit("at://post/a", 30),
-                like_hit("at://missing/3", 20),
-                like_hit("at://post/b", 10),
-            ]),
+            likes=likes_response(
+                [
+                    like_hit("at://post/a", 60),
+                    like_hit("at://missing/1", 50),
+                    like_hit("at://missing/2", 40),
+                    like_hit("at://post/a", 30),
+                    like_hit("at://missing/3", 20),
+                    like_hit("at://post/b", 10),
+                ]
+            ),
             posts_by_uri={
                 "at://post/a": post_hit("at://post/a"),
                 "at://post/b": post_hit("at://post/b"),
@@ -334,13 +342,15 @@ class TestNetworkLikesSearch:
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         monkeypatch.setattr(network_likes_module, "MAX_HYDRATED_URIS", 2)
         es = FakeEs(
-            likes=likes_response([
-                like_hit("at://post/cold", 5),
-                like_hit("at://post/hot", 4),
-                like_hit("at://post/hot", 3),
-                like_hit("at://post/warm", 2),
-                like_hit("at://post/warm", 1),
-            ]),
+            likes=likes_response(
+                [
+                    like_hit("at://post/cold", 5),
+                    like_hit("at://post/hot", 4),
+                    like_hit("at://post/hot", 3),
+                    like_hit("at://post/warm", 2),
+                    like_hit("at://post/warm", 1),
+                ]
+            ),
             posts_by_uri={
                 "at://post/hot": post_hit("at://post/hot"),
                 "at://post/warm": post_hit("at://post/warm"),
@@ -386,10 +396,12 @@ class TestNetworkLikesSearch:
     async def test_excludes_seen_uris_from_likes_query(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs(
-            likes=likes_response([
-                like_hit("at://post/seen", 2),
-                like_hit("at://post/a", 1),
-            ]),
+            likes=likes_response(
+                [
+                    like_hit("at://post/seen", 2),
+                    like_hit("at://post/a", 1),
+                ]
+            ),
             posts_by_uri={
                 "at://post/seen": post_hit("at://post/seen"),
                 "at://post/a": post_hit("at://post/a"),
@@ -415,12 +427,16 @@ class TestNetworkLikesSearch:
     async def test_respects_hard_likes_scan_cap(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         monkeypatch.setattr(network_likes_module, "MAX_LIKES_SCANNED", 4)
-        es = FakeEs(likes=likes_response([
-            like_hit("at://missing/1", 4),
-            like_hit("at://missing/2", 3),
-            like_hit("at://missing/3", 2),
-            like_hit("at://missing/4", 1),
-        ]))
+        es = FakeEs(
+            likes=likes_response(
+                [
+                    like_hit("at://missing/1", 4),
+                    like_hit("at://missing/2", 3),
+                    like_hit("at://missing/3", 2),
+                    like_hit("at://missing/4", 1),
+                ]
+            )
+        )
 
         candidates = await network_likes_search(es, "did:plc:user1", num_candidates=2)
 
@@ -433,12 +449,14 @@ class TestNetworkLikesSearch:
     async def test_equal_like_counts_tie_break_by_last_seen_recency(self, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs(
-            likes=likes_response([
-                like_hit("at://post/a", 4),
-                like_hit("at://post/b", 3),
-                like_hit("at://post/b", 2),
-                like_hit("at://post/a", 1),
-            ]),
+            likes=likes_response(
+                [
+                    like_hit("at://post/a", 4),
+                    like_hit("at://post/b", 3),
+                    like_hit("at://post/b", 2),
+                    like_hit("at://post/a", 1),
+                ]
+            ),
             posts_by_uri={
                 "at://post/a": post_hit("at://post/a"),
                 "at://post/b": post_hit("at://post/b"),
@@ -512,11 +530,13 @@ class TestNetworkLikesTelemetry:
     ):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs(
-            likes=likes_response([
-                like_hit("at://post/a", 3),
-                like_hit("at://missing/1", 2),
-                like_hit("at://missing/2", 1),
-            ]),
+            likes=likes_response(
+                [
+                    like_hit("at://post/a", 3),
+                    like_hit("at://missing/1", 2),
+                    like_hit("at://missing/2", 1),
+                ]
+            ),
             posts_by_uri={"at://post/a": post_hit("at://post/a")},
         )
 
@@ -532,10 +552,12 @@ class TestNetworkLikesTelemetry:
         monkeypatch.setattr(network_likes_module, "MIN_LIKES_SCANNED", 2)
         monkeypatch.setattr(network_likes_module, "MAX_LIKES_SCANNED", 2)
         es = FakeEs(
-            likes=likes_response([
-                like_hit("at://post/a", 2),
-                like_hit("at://post/b", 1),
-            ]),
+            likes=likes_response(
+                [
+                    like_hit("at://post/a", 2),
+                    like_hit("at://post/b", 1),
+                ]
+            ),
             posts_by_uri={"at://post/a": post_hit("at://post/a")},
         )
 
@@ -548,10 +570,12 @@ class TestNetworkLikesTelemetry:
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         monkeypatch.setattr(network_likes_module, "MAX_HYDRATED_URIS", 1)
         es = FakeEs(
-            likes=likes_response([
-                like_hit("at://post/a", 2),
-                like_hit("at://post/b", 1),
-            ]),
+            likes=likes_response(
+                [
+                    like_hit("at://post/a", 2),
+                    like_hit("at://post/b", 1),
+                ]
+            ),
             posts_by_uri={"at://post/a": post_hit("at://post/a")},
         )
 
@@ -582,10 +606,12 @@ class TestNetworkLikesCandidateGenerator:
     async def test_generate(self, generator, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs(
-            likes=likes_response([
-                like_hit("at://post/a", 2),
-                like_hit("at://post/a", 1),
-            ]),
+            likes=likes_response(
+                [
+                    like_hit("at://post/a", 2),
+                    like_hit("at://post/a", 1),
+                ]
+            ),
             posts_by_uri={"at://post/a": post_hit("at://post/a")},
         )
 
@@ -596,3 +622,22 @@ class TestNetworkLikesCandidateGenerator:
         assert result.candidates[0].at_uri == "at://post/a"
         assert result.candidates[0].score == 2.0
         assert result.candidates[0].generator_name == "network_likes"
+
+    @pytest.mark.asyncio
+    async def test_generate_explains_no_recent_likes(self, generator, monkeypatch):
+        stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+
+        result = await generator.generate(FakeEs(), "did:plc:user1", num_candidates=10)
+
+        assert result.candidates == []
+        assert result.reason == "no_recent_network_likes"
+
+    @pytest.mark.asyncio
+    async def test_generate_explains_liked_posts_missing_from_corpus(self, generator, monkeypatch):
+        stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+        es = FakeEs(likes=likes_response([like_hit("at://missing", 1)]))
+
+        result = await generator.generate(es, "did:plc:user1", num_candidates=10)
+
+        assert result.candidates == []
+        assert result.reason == "liked_posts_unavailable"

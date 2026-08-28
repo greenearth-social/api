@@ -46,6 +46,7 @@ from ..documents import (
 from ..feeds import (
     DEFAULT_SOCIAL_RADIUS,
     FEEDS,
+    FOLLOWED_USERS_ONLY_GENERATORS,
     LOGGED_OUT_POST_URI,
     SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
     SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,  # noqa: F401 - compatibility export
@@ -741,6 +742,13 @@ def _source_generators(
     fallback_radius: int,
 ) -> list[GeneratorSpec]:
     """Build a request-local candidate mix from an atomic source preference."""
+    if (
+        weights.following == 1.0
+        and weights.network_likes == 0.0
+        and weights.authors_topics == 0.0
+        and weights.popular == 0.0
+    ):
+        return FOLLOWED_USERS_ONLY_GENERATORS
     configured = [
         ("followed_users", weights.following),
         ("two_tower", weights.authors_topics),
@@ -1265,10 +1273,12 @@ async def generate_feed_preview(
             expires_at=expires_at,
             mode="preview",
             preference_patch=preference_patch,
+            effective_preferences=configured.effective_preferences,
             preference_fingerprint=configured.preference_fingerprint,
         ),
     )
-    logger.info(
+    log_preview = logger.warning if not cached_uris else logger.info
+    log_preview(
         "Generated settings preview",
         extra={
             "request_id": request_id,
@@ -1398,9 +1408,18 @@ async def _write_feed_snapshot_background(
     delete-after keeps it out of the UI without a provenance field the
     transparency reader would have to filter on.
     """
-    if not snapshot.items:
-        return
     try:
+        if not snapshot.items:
+            logger.warning(
+                "Persisting empty feed snapshot",
+                extra={
+                    "request_id": request_id,
+                    "feed_name": snapshot.feed_name,
+                    "generator_diagnostics": [
+                        diagnostic.model_dump() for diagnostic in snapshot.generator_diagnostics
+                    ],
+                },
+            )
         truncated = await merge_feed_snapshot(
             db,
             user_did,
@@ -2104,6 +2123,18 @@ async def get_feed_skeleton(
                             feed=_skeleton_items(page, feed_context),
                             cursor=next_cursor,
                         )
+
+                if not new_uris and not is_probe and not is_anonymous:
+                    # A cursor session can legitimately exhaust its selected
+                    # source. Merge that outcome into the existing session's
+                    # diagnostics without replacing posts already served.
+                    await _write_feed_snapshot_background(
+                        db,
+                        user_did,
+                        parsed.id,
+                        _snapshot_page(generated_snapshot, []),
+                        load_test=is_load_test,
+                    )
 
                 # Append failed or nothing new — end of feed.
                 return FeedSkeletonResponse(feed=[])

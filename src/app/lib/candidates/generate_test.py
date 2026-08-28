@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -36,8 +37,13 @@ class _HangingGenerator(CandidateGenerator):
         return self._name
 
     async def generate(
-        self, es, user_did, num_candidates=100, video_only=False,
-        exclude_uris=None, max_age_hours=168,
+        self,
+        es,
+        user_did,
+        num_candidates=100,
+        video_only=False,
+        exclude_uris=None,
+        max_age_hours=168,
     ):
         await asyncio.sleep(9999)
         raise AssertionError("unreachable")
@@ -53,8 +59,13 @@ class _FailingGenerator(CandidateGenerator):
         return self._name
 
     async def generate(
-        self, es, user_did, num_candidates=100, video_only=False,
-        exclude_uris=None, max_age_hours=168,
+        self,
+        es,
+        user_did,
+        num_candidates=100,
+        video_only=False,
+        exclude_uris=None,
+        max_age_hours=168,
     ):
         raise self._exc
 
@@ -68,8 +79,13 @@ class _EmptyGenerator(CandidateGenerator):
         return self._name
 
     async def generate(
-        self, es, user_did, num_candidates=100, video_only=False,
-        exclude_uris=None, max_age_hours=168,
+        self,
+        es,
+        user_did,
+        num_candidates=100,
+        video_only=False,
+        exclude_uris=None,
+        max_age_hours=168,
     ):
         return CandidateResult(generator_name=self.name, candidates=[])
 
@@ -85,8 +101,13 @@ class _StaticGenerator(CandidateGenerator):
         return self._name
 
     async def generate(
-        self, es, user_did, num_candidates=100, video_only=False,
-        exclude_uris=None, max_age_hours=168,
+        self,
+        es,
+        user_did,
+        num_candidates=100,
+        video_only=False,
+        exclude_uris=None,
+        max_age_hours=168,
     ):
         self.calls.append(
             {
@@ -112,13 +133,20 @@ class _FailThenReturnGenerator(CandidateGenerator):
         return self._name
 
     async def generate(
-        self, es, user_did, num_candidates=100, video_only=False,
-        exclude_uris=None, max_age_hours=168,
+        self,
+        es,
+        user_did,
+        num_candidates=100,
+        video_only=False,
+        exclude_uris=None,
+        max_age_hours=168,
     ):
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("primary failed")
-        return CandidateResult(generator_name=self.name, candidates=self._candidates[:num_candidates])
+        return CandidateResult(
+            generator_name=self.name, candidates=self._candidates[:num_candidates]
+        )
 
 
 class FakeMetricCollector:
@@ -207,11 +235,11 @@ class TestGeneratorTimeout:
                 await run_generate(_make_request("slow_generator"), es=None)
 
         timeout_warnings = [
-            r for r in caplog.records
-            if "timed out" in r.message and r.levelno == logging.WARNING
+            r for r in caplog.records if "timed out" in r.message and r.levelno == logging.WARNING
         ]
         error_logs = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.levelno >= logging.ERROR and "slow_generator" in r.message
         ]
         assert len(timeout_warnings) == 1
@@ -334,12 +362,36 @@ class TestGeneratorTimeout:
 
 class TestInfillGeneratorTimeout:
     @pytest.mark.asyncio
+    async def test_empty_selected_source_does_not_run_fallback_without_infill(self, monkeypatch):
+        selected = _EmptyGenerator("network_likes")
+        fallback = _StaticGenerator("popular", [_candidate("at://fallback", "popular")])
+        get_generator = MagicMock(
+            side_effect=lambda name: {
+                "network_likes": selected,
+                "popular": fallback,
+            }.get(name)
+        )
+        monkeypatch.setattr(generate_module, "get_generator", get_generator)
+
+        result = await run_generate(
+            _make_request("network_likes", num_candidates=5, infill=None),
+            es=None,
+        )
+
+        assert result.candidates == []
+        get_generator.assert_called_once_with("network_likes")
+        assert fallback.calls == []
+
+    @pytest.mark.asyncio
     async def test_infill_timeout_swallow_returns_empty_and_records_metric(self, monkeypatch):
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
-        _stub_generators(monkeypatch, {
-            "random": _EmptyGenerator("random"),
-            "popular": _HangingGenerator("popular"),
-        })
+        _stub_generators(
+            monkeypatch,
+            {
+                "random": _EmptyGenerator("random"),
+                "popular": _HangingGenerator("popular"),
+            },
+        )
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
@@ -361,14 +413,19 @@ class TestInfillGeneratorTimeout:
         }
 
     @pytest.mark.asyncio
-    async def test_infill_timeout_no_swallow_raises_generator_error_with_is_infill(self, monkeypatch):
+    async def test_infill_timeout_no_swallow_raises_generator_error_with_is_infill(
+        self, monkeypatch
+    ):
         set_fail_fast_for_request(True)
         # No PipelineContext → hard fail
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
-        _stub_generators(monkeypatch, {
-            "random": _EmptyGenerator("random"),
-            "popular": _HangingGenerator("popular"),
-        })
+        _stub_generators(
+            monkeypatch,
+            {
+                "random": _EmptyGenerator("random"),
+                "popular": _HangingGenerator("popular"),
+            },
+        )
 
         with pytest.raises(GeneratorError) as exc_info:
             await run_generate(
@@ -384,10 +441,13 @@ class TestInfillGeneratorTimeout:
         set_fail_fast_for_request(True)
         # No PipelineContext → hard fail
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
-        _stub_generators(monkeypatch, {
-            "random": _EmptyGenerator("random"),
-            "popular": _HangingGenerator("popular"),
-        })
+        _stub_generators(
+            monkeypatch,
+            {
+                "random": _EmptyGenerator("random"),
+                "popular": _HangingGenerator("popular"),
+            },
+        )
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
@@ -405,10 +465,13 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_exception_records_error_outcome(self, monkeypatch):
-        _stub_generators(monkeypatch, {
-            "random": _EmptyGenerator("random"),
-            "popular": _FailingGenerator(RuntimeError("db down"), name="popular"),
-        })
+        _stub_generators(
+            monkeypatch,
+            {
+                "random": _EmptyGenerator("random"),
+                "popular": _FailingGenerator(RuntimeError("db down"), name="popular"),
+            },
+        )
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
@@ -431,10 +494,13 @@ class TestInfillGeneratorTimeout:
 
     @pytest.mark.asyncio
     async def test_infill_success_records_success_count_metric(self, monkeypatch):
-        _stub_generators(monkeypatch, {
-            "random": _EmptyGenerator("random"),
-            "popular": _EmptyGenerator("popular"),
-        })
+        _stub_generators(
+            monkeypatch,
+            {
+                "random": _EmptyGenerator("random"),
+                "popular": _EmptyGenerator("popular"),
+            },
+        )
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
@@ -613,6 +679,7 @@ class TestWithPipelineContext:
     @pytest.mark.asyncio
     async def test_infill_failure_records_degradation(self, monkeypatch):
         """Infill generator failure should also be tracked."""
+
         def _get(name: str):
             if name == "followed_users":
                 return _make_success(name)

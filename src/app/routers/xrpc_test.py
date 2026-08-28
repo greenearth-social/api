@@ -352,6 +352,49 @@ def test_configured_generation_preserves_exact_single_source_weights(
     assert configured.preference_fingerprint
 
 
+def test_100_percent_following_and_best_of_friends_share_pipeline_configuration():
+    from .xrpc import _configured_generation
+
+    shared = FeedPreferencesDocument(freshness=3, purpose=0.65)
+    user = UserDocument(
+        user_did="did:plc:testuser",
+        feed_preferences={
+            "your-feed": shared.model_copy(
+                update={
+                    "source_weights": SourceWeightsDocument(
+                        following=1.0,
+                        network_likes=0.0,
+                        authors_topics=0.0,
+                        popular=0.0,
+                    )
+                }
+            ),
+            "best-of-friends": shared,
+        },
+    )
+
+    following = _configured_generation(
+        "your-feed",
+        user,
+        network_likes_enabled=True,
+    )
+    friends = _configured_generation(
+        "best-of-friends",
+        user,
+        network_likes_enabled=True,
+    )
+
+    assert (
+        following.generators_override["generators"]
+        == friends.feed_cfg.gen_request_template.generators
+    )
+    assert following.max_age_hours == friends.max_age_hours
+    assert following.feed_cfg.max_render_share == friends.feed_cfg.max_render_share
+    assert following.feed_cfg.min_rank_score == friends.feed_cfg.min_rank_score
+    assert following.feed_cfg.min_mmr_score == friends.feed_cfg.min_mmr_score
+    assert following.feed_cfg.rank_request_template == friends.feed_cfg.rank_request_template
+
+
 @pytest.mark.asyncio
 async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     monkeypatch,
@@ -1608,6 +1651,55 @@ class TestFeedSkeletonCursor:
             ).json()
 
         assert third["feed"] == []
+
+    def test_empty_cursor_regeneration_merges_snapshot_diagnostics(self):
+        from .xrpc import _configured_generation
+
+        cache_id = "empty-later-page"
+        app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
+            items=["at://already/served"],
+            items_meta=[PipelineItemMeta(at_uri="at://already/served")],
+            user_did="did:plc:testuser",
+            feed_name=FEED_RKEY,
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            preference_fingerprint=_configured_generation(
+                FEED_RKEY,
+                None,
+                network_likes_enabled=True,
+            ).preference_fingerprint,
+        )
+        empty = FeedSnapshotDocument(
+            request_id=cache_id,
+            items=[],
+            feed_name=FEED_RKEY,
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+        cursor = FeedCursor(id=cache_id, offset=1).encode()
+
+        with (
+            patch(
+                "app.routers.xrpc._run_pipeline_capturing_with_timeout",
+                new_callable=AsyncMock,
+                return_value=(empty, []),
+            ),
+            patch(
+                "app.routers.xrpc._write_feed_snapshot_background",
+                new_callable=AsyncMock,
+            ) as write_snapshot,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 4, "cursor": cursor},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["feed"] == []
+        written = write_snapshot.await_args
+        assert written is not None
+        assert written.args[2] == cache_id
+        assert written.args[3].items == []
 
     def test_full_scroll_returns_all_items(self):
         """Scrolling through all pages collects every generated post."""
@@ -3354,14 +3446,16 @@ class TestFeedDebugCapture:
             await coro
 
     @pytest.mark.asyncio
-    async def test_empty_snapshot_skips_firestore_write(self):
+    async def test_empty_snapshot_is_written_to_firestore(self):
         from ..routers.xrpc import _write_feed_snapshot_background
 
-        snapshot = MagicMock(items=[])
-        with patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock) as merge:
+        snapshot = MagicMock(items=[], feed_name="your-feed", generator_diagnostics=[])
+        with patch(
+            "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+        ) as merge:
             await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
 
-        merge.assert_not_awaited()
+        merge.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_truncated_snapshot_records_metric(self, caplog):

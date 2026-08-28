@@ -19,6 +19,7 @@ from ..lib.feed_cache import DEFAULT_TTL_SECONDS
 from ..lib.feed_preferences import resolve_feed_preferences
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import (
+    StaleFeedPreviewError,
     accept_feed_preview,
     delete_most_recent_seen_bucket,
     get_feed_snapshot,
@@ -522,36 +523,22 @@ async def accept_preview(
             detail="Feed preview does not match these settings",
         )
 
-    snapshot = FeedSnapshotDocument(
-        request_id=request_id,
-        items=cache_doc.items,
-        feed_name=feed_name,
-        generated_at=cache_doc.generated_at,
-        api_release_sha=cache_doc.api_release_sha,
-        expires_at=cache_doc.expires_at,
-        generator_diagnostics=cache_doc.generator_diagnostics,
-        applied_social_radius=cache_doc.applied_social_radius,
-        items_meta=cache_doc.items_meta,
-    )
     db: AsyncClient = request.app.state.firestore
-    hydrated = await hydrate_posts(db, snapshot.items)
-    visible_items, _, _, _ = _build_items(snapshot, hydrated)
-    visible_uris = [item.at_uri for item in visible_items]
-    if body.displayed_item_uris != visible_uris:
+    try:
+        accepted = await accept_feed_preview(
+            db,
+            user_did,
+            feed_name,
+            request_id,
+            patch,
+            body.displayed_item_uris,
+            ttl_seconds=DEFAULT_TTL_SECONDS,
+        )
+    except StaleFeedPreviewError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Feed preview contents changed; generate it again",
-        )
-
-    accepted = await accept_feed_preview(
-        db,
-        user_did,
-        feed_name,
-        request_id,
-        patch,
-        visible_uris,
-        ttl_seconds=DEFAULT_TTL_SECONDS,
-    )
+            detail="Settings changed after this preview was generated",
+        ) from exc
     if accepted is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feed preview not found")
     preferences, accepted_until = accepted
