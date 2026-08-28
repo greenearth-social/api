@@ -994,3 +994,18 @@ class TestScoreCandidatesCacheMetrics:
         )
         assert metrics["perspective.score.cached_count"] == 0
         assert metrics["perspective.score.live_count"] == 1
+
+
+def test_serving_quota_leaves_a_buffer_under_the_shared_limit():
+    """The 36 000 RPM Perspective quota is shared with ingest, which takes
+    9 000 RPM (GE_PERSPECTIVE_QPS=150 in ingex). The two are set to sum to
+    35 700, not 36 000, because neither limiter is exact — this one is a
+    per-process bucket and the api runs several processes.
+
+    If you change this, change ingest's to match. The failure mode is 429s in
+    production, which no test on either side can see.
+    """
+    serving_rpm = 26700
+    ingest_rpm = 9000
+    assert perspective_module._QUOTA_RPM == serving_rpm
+    assert serving_rpm + ingest_rpm == 35700

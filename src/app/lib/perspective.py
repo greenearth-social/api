@@ -268,16 +268,21 @@ class PerspectiveClient:
 # bucket, matching how the Perspective API measures its 36 000 RPM quota.
 #
 # That quota is shared with ingest, which scores posts as they arrive (see
-# ingex's internal/perspective) and takes its own configured slice. This is
-# serving's slice, and the two together should stay under 36 000. It is
-# configurable rather than a constant so the split can be retuned by redeploy
-# in either repo, independently — the two halves of api#368 ship separately
-# and neither should have to wait on the other to change a number.
+# ingex's internal/perspective) and takes its own configured slice of 9 000
+# RPM. The two budgets are deliberately set to sum to 35 700 rather than to
+# 36 000: a 300 RPM buffer, because neither limiter is exact. This one is a
+# per-process calendar-minute bucket and the api runs several processes, and
+# ingest's is a token bucket in a different process entirely, so the true
+# combined ceiling is above the sum of the two numbers, not equal to it.
 #
-# Note this bucket is per-process and the api runs several, so it has never
-# been a true global ceiling. The stored-score path is what actually brings
-# serving's usage down; this is a backstop.
-_QUOTA_RPM = int(os.environ.get("GE_PERSPECTIVE_QPM", "27000"))
+# Configurable rather than a constant so the split can be retuned by redeploy
+# in either repo, independently — the two halves of api#368 ship separately and
+# neither should have to wait on the other to change a number. If you raise
+# this, lower ingest's GE_PERSPECTIVE_QPS to match, and keep the buffer.
+#
+# The stored-score path is what actually brings serving's usage down; this is
+# only a backstop.
+_QUOTA_RPM = int(os.environ.get("GE_PERSPECTIVE_QPM", "26700"))
 _rate_lock = asyncio.Lock()
 _rate_bucket_minute: int = -1
 _rate_count: int = 0
