@@ -265,10 +265,19 @@ class PerspectiveClient:
 
 
 # Client-side rate limiter tracking usage within the current calendar-minute
-# bucket, matching how the Perspective API measures its 600 QPS quota.
-# Set to 500 QPS (30 000 RPM) to keep a safety margin.
-_QUOTA_QPS = 500
-_QUOTA_RPM = _QUOTA_QPS * 60
+# bucket, matching how the Perspective API measures its 36 000 RPM quota.
+#
+# That quota is shared with ingest, which scores posts as they arrive (see
+# ingex's internal/perspective) and takes its own configured slice. This is
+# serving's slice, and the two together should stay under 36 000. It is
+# configurable rather than a constant so the split can be retuned by redeploy
+# in either repo, independently — the two halves of api#368 ship separately
+# and neither should have to wait on the other to change a number.
+#
+# Note this bucket is per-process and the api runs several, so it has never
+# been a true global ceiling. The stored-score path is what actually brings
+# serving's usage down; this is a backstop.
+_QUOTA_RPM = int(os.environ.get("GE_PERSPECTIVE_QPM", "27000"))
 _rate_lock = asyncio.Lock()
 _rate_bucket_minute: int = -1
 _rate_count: int = 0
@@ -305,12 +314,41 @@ async def close_perspective_client() -> None:
         _client = None
 
 
+def _stored_score(c: CandidatePost) -> tuple[bool, float | None]:
+    """Resolve a candidate against what ingest already computed.
+
+    Returns ``(resolved, score)``. ``resolved`` means no API call is needed —
+    either because a score is stored, or because ingest established the post
+    cannot be scored at all.
+
+    The three document states are distinct on purpose (see ingex's
+    megastream_ingest README):
+
+    - a stored score: use it, this is the whole point;
+    - ``perspective_scored_at`` with no score: ingest submitted the post and
+      the API declined it — no text, or an unsupported language. Permanent, so
+      calling again would spend quota to be refused again;
+    - neither: never scored. Fall through to the live call, exactly as before
+      any of this existed.
+
+    That last case is what makes the api safe to deploy before, after, or
+    without the ingest half: absent fields are already the miss path.
+    """
+    if c.combined_perspective_score is not None:
+        return True, c.combined_perspective_score
+    if c.perspective_scored_at:
+        return True, None
+    return False, None
+
+
 async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float | None]:
     """Return PRC scores for *candidates*, keyed by ``at_uri``.
 
-    Posts with content=None, where the minute quota is exhausted, or where the
-    API call fails receive a missing score of None. Every candidate with an
-    ``at_uri`` is returned — none are dropped.
+    Scores computed at ingest are read straight off the candidate; only posts
+    without one are sent to the Perspective API. Posts with content=None,
+    where the minute quota is exhausted, or where the API call fails receive a
+    missing score of None. Every candidate with an ``at_uri`` is returned —
+    none are dropped.
     """
     if not candidates:
         return {}
@@ -363,10 +401,30 @@ async def score_candidates(candidates: list[CandidatePost]) -> dict[str, float |
                 ))
             return None
 
-    scorable = [c for c in candidates if c.at_uri]
-    scores = await asyncio.gather(*(_score_one(c) for c in scorable))
-    return {
-        c.at_uri: score
-        for c, score in zip(scorable, scores, strict=True)
-        if c.at_uri is not None
-    }
+    with_uri = [c for c in candidates if c.at_uri]
+
+    resolved: dict[str, float | None] = {}
+    needs_call: list[CandidatePost] = []
+    for c in with_uri:
+        was_resolved, score = _stored_score(c)
+        if was_resolved:
+            resolved[c.at_uri] = score  # type: ignore[index]  # filtered on at_uri above
+        else:
+            needs_call.append(c)
+
+    collector = get_metric_collector()
+    if collector is not None:
+        # The ratio of these two is how we watch ingest coverage grow, and how
+        # we would notice it regressing (a mapping change, a stalled ingest)
+        # as something other than a latency mystery.
+        collector.record("perspective.score.cached_count", len(resolved))
+        collector.record("perspective.score.live_count", len(needs_call))
+
+    if not needs_call:
+        return resolved
+
+    scores = await asyncio.gather(*(_score_one(c) for c in needs_call))
+    for c, score in zip(needs_call, scores, strict=True):
+        if c.at_uri is not None:
+            resolved[c.at_uri] = score
+    return resolved
