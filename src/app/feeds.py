@@ -165,7 +165,7 @@ FEEDS: dict[str, FeedConfig] = {
         public=True,
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
-        avatar="assets/icons/green-earth.png",
+        avatar="assets/icons/mysky.png",
         controls=("source_weights", "freshness", "purpose"),
         pinned_post_uri=_pinned_post_uri(
             "your-feed",
@@ -398,7 +398,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="mf-cs",
         internal_display_name="mf CS",
         logged_out="deny",
-        avatar="assets/icons/green-earth.png",
+        avatar="assets/icons/mysky.png",
         max_render_share=0.5,
         min_rank_score=0.425,
         min_mmr_score=-0.05,
