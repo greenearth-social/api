@@ -589,6 +589,26 @@ class PopularityCacheDocument(BaseModel):
     )
 
 
+class LlmQueryVectorDocument(BaseModel):
+    """Precomputed LLM query vector for a user prompt.
+
+    Stored at ``users/{user_did}/llm_query_vectors/{prompt_key}``.
+    One document per (user, prompt) pair, so a user can hold vectors for
+    multiple prompts simultaneously.
+    """
+
+    prompt_key: str = Field(..., description="Prompt identifier (also the document ID)")
+    user_did: str = Field(..., description="AT Protocol DID of the user")
+    query_vector: list[float] = Field(..., description="Embedding vector for candidate retrieval")
+    prompt: str = Field(..., description="Prompt text used to generate the vector")
+    created_at: datetime = Field(
+        default_factory=_utcnow, description="When the document was first written"
+    )
+    updated_at: datetime = Field(
+        default_factory=_utcnow, description="Last time the vector was refreshed"
+    )
+
+
 class RedirectDocument(BaseModel):
     """A slug → URL mapping stored in the ``redirects`` collection.
 

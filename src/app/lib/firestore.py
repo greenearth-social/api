@@ -26,6 +26,7 @@ from ..documents import (
     FeedPreferencesDocument,
     FeedSnapshotDocument,
     InteractionDocument,
+    LlmQueryVectorDocument,
     RedirectDocument,
     UserDocument,
 )
@@ -951,3 +952,87 @@ async def delete_redirect(db: AsyncClient, slug: str) -> bool:
         return False
     await ref.delete()
     return True
+
+
+# ---------------------------------------------------------------------------
+# LLM query vectors  (subcollection of users)
+# ---------------------------------------------------------------------------
+
+LLM_QUERY_VECTORS_SUBCOLLECTION = "llm_query_vectors"
+
+
+async def get_llm_query_vector(
+    db: AsyncClient, user_did: str, prompt_key: str
+) -> LlmQueryVectorDocument | None:
+    """Fetch one LLM query vector by user and prompt key, or ``None`` if not found."""
+    doc = await (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(LLM_QUERY_VECTORS_SUBCOLLECTION)
+        .document(prompt_key)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    data = doc.to_dict()
+    if data is None:
+        return None
+    return LlmQueryVectorDocument.model_validate(data)
+
+
+async def get_all_llm_query_vectors(
+    db: AsyncClient, user_did: str
+) -> list[LlmQueryVectorDocument]:
+    """Return all LLM query vector documents for a user."""
+    query = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(LLM_QUERY_VECTORS_SUBCOLLECTION)
+    )
+    docs: list[LlmQueryVectorDocument] = []
+    async for doc in query.stream():
+        data = doc.to_dict()
+        if data is not None:
+            docs.append(LlmQueryVectorDocument.model_validate(data))
+    return docs
+
+
+async def upsert_llm_query_vector(
+    db: AsyncClient,
+    user_did: str,
+    prompt_key: str,
+    query_vector: list[float],
+    prompt: str,
+) -> LlmQueryVectorDocument:
+    """Create or replace the LLM query vector for a (user, prompt) pair.
+
+    On first write the document is created with both timestamps set to now.
+    On subsequent writes ``query_vector``, ``prompt``, and ``updated_at`` are
+    refreshed; ``created_at`` is left unchanged.
+    """
+    ref = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(LLM_QUERY_VECTORS_SUBCOLLECTION)
+        .document(prompt_key)
+    )
+    doc = await ref.get()
+
+    now = datetime.now(UTC)
+
+    if doc.exists:
+        await ref.update({"query_vector": query_vector, "prompt": prompt, "updated_at": now})
+        data = doc.to_dict() or {}
+        data.update({"query_vector": query_vector, "prompt": prompt, "updated_at": now})
+        return LlmQueryVectorDocument.model_validate(data)
+
+    record = LlmQueryVectorDocument(
+        prompt_key=prompt_key,
+        user_did=user_did,
+        query_vector=query_vector,
+        prompt=prompt,
+        created_at=now,
+        updated_at=now,
+    )
+    await ref.set(record.model_dump())
+    return record
