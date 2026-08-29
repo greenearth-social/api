@@ -19,8 +19,8 @@ from ..documents import (
     ModelScoreMeta,
     PipelineItemMeta,
 )
-from ..main import app
 from ..lib.firestore import StaleFeedPreviewError
+from ..main import app
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -239,7 +239,7 @@ def test_list_feeds_collapses_identical_snapshots_and_keeps_newest(mock_query, c
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
-def test_list_feeds_keeps_only_the_newest_repeated_empty_refresh(mock_query, client):
+def test_list_feeds_hides_empty_bootstrap_until_first_populated_snapshot(mock_query, client):
     now = datetime.now(UTC)
     mock_query.return_value = [
         _snapshot_doc(
@@ -258,7 +258,74 @@ def test_list_feeds_keeps_only_the_newest_repeated_empty_refresh(mock_query, cli
 
     response = client.get("/api/feeds")
 
-    assert [feed["request_id"] for feed in response.json()["feeds"]] == ["empty-new"]
+    assert response.status_code == 200
+    assert response.json()["feeds"] == []
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_replaces_bootstrap_empty_with_first_populated_snapshot(mock_query, client):
+    now = datetime.now(UTC)
+    mock_query.return_value = [
+        _snapshot_doc(
+            request_id="first-populated",
+            generated_at=now,
+            items=["at://first/post"],
+        ),
+        _snapshot_doc(
+            request_id="bootstrap-empty",
+            generated_at=now - timedelta(minutes=5),
+            items=[],
+            items_meta=[],
+            generator_diagnostics=[
+                GeneratorDiagnostic(
+                    name="two_tower",
+                    weight=1,
+                    requested_count=100,
+                    returned_count=10,
+                    contributed_count=0,
+                    status="empty",
+                    reason="ranking_removed_all",
+                )
+            ],
+        ),
+    ]
+
+    response = client.get("/api/feeds")
+
+    assert response.status_code == 200
+    assert [feed["request_id"] for feed in response.json()["feeds"]] == ["first-populated"]
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_keeps_real_empty_refresh_after_first_populated_snapshot(mock_query, client):
+    now = datetime.now(UTC)
+    mock_query.return_value = [
+        _snapshot_doc(
+            request_id="real-empty",
+            generated_at=now,
+            items=[],
+            items_meta=[],
+        ),
+        _snapshot_doc(
+            request_id="first-populated",
+            generated_at=now - timedelta(minutes=5),
+            items=["at://first/post"],
+        ),
+        _snapshot_doc(
+            request_id="bootstrap-empty",
+            generated_at=now - timedelta(minutes=10),
+            items=[],
+            items_meta=[],
+        ),
+    ]
+
+    response = client.get("/api/feeds")
+
+    assert response.status_code == 200
+    assert [feed["request_id"] for feed in response.json()["feeds"]] == [
+        "real-empty",
+        "first-populated",
+    ]
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")

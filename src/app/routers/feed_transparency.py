@@ -213,11 +213,28 @@ async def list_feeds(
     # legacy snapshots written with a stage/internal published rkey visible.
     docs = await get_recent_feed_snapshots(db, user_doc_id, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT)
 
+    # An account can create one or more empty sessions before its first usable
+    # feed is served. Those are bootstrap state, not WAIST history: expose no
+    # empty snapshot until the feed has had a populated result. Once it has,
+    # empty refreshes newer than that first populated result are real,
+    # selectable outcomes.
+    first_populated_at: dict[str, datetime] = {}
+    for doc in docs:
+        resolved_feed_name = canonical_feed_name(doc.feed_name)
+        if resolved_feed_name is None or not FEEDS[resolved_feed_name].public or not doc.items:
+            continue
+        previous = first_populated_at.get(resolved_feed_name)
+        if previous is None or doc.generated_at < previous:
+            first_populated_at[resolved_feed_name] = doc.generated_at
+
     summaries: list[FeedSummary] = []
     seen_snapshots: set[tuple[str, tuple[str, ...]]] = set()
     for doc in docs:
         resolved_feed_name = canonical_feed_name(doc.feed_name)
         if resolved_feed_name is None or not FEEDS[resolved_feed_name].public:
+            continue
+        populated_at = first_populated_at.get(resolved_feed_name)
+        if not doc.items and (populated_at is None or doc.generated_at <= populated_at):
             continue
         # Treat the complete ordered post sequence as the snapshot identity.
         # Documents are newest-first, so skipping a repeated key retains the
