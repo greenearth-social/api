@@ -1716,6 +1716,16 @@ async def get_feed_skeleton(
         )
 
     feed_cfg = FEEDS[feed_name]
+    # AppView performs a one-item initial request to check that a generator is
+    # reachable. For feeds with a pinned post that response contains only the
+    # pin, so the organic page (and therefore its observability snapshot) is
+    # necessarily empty. It is not a feed slate the user viewed and must not
+    # consume an accepted Settings handoff or mutate user history.
+    is_appview_one_item_check = (
+        cursor is None
+        and limit == 1
+        and request.headers.get("user-agent", "").casefold().startswith("bskyappview")
+    )
 
     # Cloud Scheduler probe bypass: if GE_PROBE_SECRET is set and the request
     # carries the matching X-Probe-Secret header, skip AT Protocol auth and
@@ -1801,7 +1811,7 @@ async def get_feed_skeleton(
         logger.error("Firestore client not initialized")
         raise HTTPException(status_code=500, detail="Firestore unavailable")
 
-    if not is_anonymous:
+    if not is_anonymous and not is_appview_one_item_check:
         _spawn_background(
             _record_session(request, user_did, feed_name, db, is_load_test=is_load_test)
         )
@@ -2167,7 +2177,13 @@ async def get_feed_skeleton(
                 return reused.model_copy(deep=True)
 
         try:
-            if cursor is None and not is_probe and not is_anonymous and not is_load_test:
+            if (
+                cursor is None
+                and not is_probe
+                and not is_anonymous
+                and not is_load_test
+                and not is_appview_one_item_check
+            ):
                 try:
                     accepted_request_id = await claim_accepted_feed_slate(
                         db,
@@ -2281,7 +2297,7 @@ async def get_feed_skeleton(
                 debug_enabled=debug_enabled,
                 applied_social_radius=applied_social_radius,
             )
-            if low_score_uris and not is_anonymous:
+            if low_score_uris and not is_anonymous and not is_appview_one_item_check:
                 _spawn_background(
                     _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
                 )
@@ -2305,7 +2321,7 @@ async def get_feed_skeleton(
                 page, scores_by_uri, feed_name, batch=0, exclude_uri=feed_cfg.pinned_post_uri
             )
 
-            if not is_probe and not is_anonymous:
+            if not is_probe and not is_anonymous and not is_appview_one_item_check:
                 await _write_feed_snapshot_background(
                     db,
                     user_did,

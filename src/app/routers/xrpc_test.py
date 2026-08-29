@@ -836,6 +836,66 @@ class TestGetFeedSkeleton:
         assert len(data["feed"]) == 3
         assert data["feed"][0]["post"] == "at://p/0"
 
+    def test_appview_one_item_check_does_not_create_history_or_consume_accepted_slate(self):
+        now = datetime.now(UTC)
+        snapshot = FeedSnapshotDocument(
+            request_id="appview-check",
+            items=["at://p/0"],
+            items_meta=[PipelineItemMeta(at_uri="at://p/0")],
+            feed_name=FEED_RKEY,
+            generated_at=now,
+            expires_at=now + timedelta(minutes=10),
+        )
+        with (
+            patch(
+                "app.routers.xrpc._run_pipeline_capturing_with_timeout",
+                new_callable=AsyncMock,
+                return_value=(snapshot, ["at://discarded"]),
+            ),
+            patch(
+                "app.routers.xrpc.claim_accepted_feed_slate",
+                new_callable=AsyncMock,
+            ) as claim,
+            patch(
+                "app.routers.xrpc._write_feed_snapshot_background",
+                new_callable=AsyncMock,
+            ) as write_snapshot,
+            patch("app.routers.xrpc._record_session", new_callable=AsyncMock) as record_session,
+            patch("app.routers.xrpc._record_discarded", new_callable=AsyncMock) as record_discarded,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI_FROM_APPVIEW, "limit": 1},
+                headers={"User-Agent": "BskyAppView"},
+            )
+
+        assert response.status_code == 200
+        claim.assert_not_awaited()
+        write_snapshot.assert_not_awaited()
+        record_session.assert_not_awaited()
+        record_discarded.assert_not_awaited()
+
+    def test_other_one_item_requests_still_create_feed_history(self):
+        with (
+            self._patch_generators(_make_candidates("p", 3)),
+            patch(
+                "app.routers.xrpc.claim_accepted_feed_slate",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "app.routers.xrpc._write_feed_snapshot_background",
+                new_callable=AsyncMock,
+            ) as write_snapshot,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 1},
+            )
+
+        assert response.status_code == 200
+        write_snapshot.assert_awaited_once()
+
     def test_accepted_slate_is_served_in_order_across_cursor_pages(self):
         from .xrpc import _configured_generation
 

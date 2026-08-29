@@ -297,7 +297,7 @@ def test_list_feeds_replaces_bootstrap_empty_with_first_populated_snapshot(mock_
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
-def test_list_feeds_keeps_real_empty_refresh_after_first_populated_snapshot(mock_query, client):
+def test_list_feeds_hides_empty_refresh_after_first_populated_snapshot(mock_query, client):
     now = datetime.now(UTC)
     mock_query.return_value = [
         _snapshot_doc(
@@ -322,10 +322,7 @@ def test_list_feeds_keeps_real_empty_refresh_after_first_populated_snapshot(mock
     response = client.get("/api/feeds")
 
     assert response.status_code == 200
-    assert [feed["request_id"] for feed in response.json()["feeds"]] == [
-        "real-empty",
-        "first-populated",
-    ]
+    assert [feed["request_id"] for feed in response.json()["feeds"]] == ["first-populated"]
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
