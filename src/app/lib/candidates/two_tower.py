@@ -117,27 +117,6 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         reason = None
         if not candidates:
             reason = "no_recent_authors_topics_posts"
-            if exclude_uris and num_candidates > 0:
-                try:
-                    unexcluded = await knn_search_posts(
-                        es,
-                        user_embedding,
-                        1,
-                        search_field=GE_POST_EMBEDDING_FIELD,
-                        generator_name=self.name,
-                        video_only=video_only,
-                        exclude_uris=None,
-                        ge_post_embedding_model_uuid=post_tower_uuid,
-                        min_like_count=min_like_count,
-                        max_age_hours=max_age_hours,
-                        index=resolved_index,
-                    )
-                    if unexcluded:
-                        reason = "history_exclusions"
-                except Exception:
-                    # The primary query succeeded, so a diagnostic-only probe
-                    # must not turn a truthful empty result into a feed error.
-                    logger.warning("Failed to classify empty two-tower history exclusions")
 
         return CandidateResult(
             generator_name=self.name,

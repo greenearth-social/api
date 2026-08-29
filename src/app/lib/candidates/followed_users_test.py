@@ -322,7 +322,13 @@ class TestFollowedUsersCandidateGenerator:
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
         es = FakeEs()
 
-        result = await generator.generate(es, "did:plc:user1", num_candidates=10)
+        result = await generator.generate(
+            es,
+            "did:plc:user1",
+            num_candidates=10,
+            exclude_uris=["at://post/seen"],
+        )
 
         assert result.candidates == []
         assert result.reason == "no_recent_followed_posts"
+        assert len(es.calls) == 1

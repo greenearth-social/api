@@ -626,11 +626,18 @@ class TestNetworkLikesCandidateGenerator:
     @pytest.mark.asyncio
     async def test_generate_explains_no_recent_likes(self, generator, monkeypatch):
         stub_followed_dids(monkeypatch, ["did:plc:follow1"])
+        es = FakeEs()
 
-        result = await generator.generate(FakeEs(), "did:plc:user1", num_candidates=10)
+        result = await generator.generate(
+            es,
+            "did:plc:user1",
+            num_candidates=10,
+            exclude_uris=["at://post/seen"],
+        )
 
         assert result.candidates == []
         assert result.reason == "no_recent_network_likes"
+        assert [call["index"] for call in es.calls] == ["likes"]
 
     @pytest.mark.asyncio
     async def test_generate_explains_liked_posts_missing_from_corpus(self, generator, monkeypatch):

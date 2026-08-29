@@ -110,20 +110,6 @@ async def _followed_users_search_with_reason(
     candidates = candidates[:num_candidates]
     if candidates:
         return candidates, None
-    if exclude_uris:
-        try:
-            history_probe = await es.search(
-                index="posts_recent",
-                op="author_scan",
-                query={"bool": {"filter": query["bool"]["filter"]}},
-                size=1,
-                sort=[{"created_at": "desc"}],
-                _source=CANDIDATE_SOURCE_FIELDS,
-            )
-            if candidate_posts_from_es_response(history_probe, generator_name=generator_name):
-                return [], "history_exclusions"
-        except Exception:
-            logger.warning("Failed to classify empty followed-users history exclusions")
     return [], "no_recent_followed_posts"
 
 

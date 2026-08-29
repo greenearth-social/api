@@ -188,15 +188,9 @@ class TestTwoTowerCandidateGenerator:
         assert result.reason == "no_user_like_history"
 
     @pytest.mark.asyncio
-    async def test_generate_explains_when_history_excludes_all_matches(self, generator):
+    async def test_generate_does_not_probe_again_when_exclusions_return_no_matches(self, generator):
         es = object()
         user_embedding = [0.5, 0.6]
-        candidate = CandidatePost(
-            at_uri="at://post/seen",
-            content="seen",
-            score=0.9,
-            generator_name=TWO_TOWER_GENERATOR_NAME,
-        )
 
         with (
             patch(GET_INFERENCE_SETTINGS, return_value=INFERENCE_SETTINGS),
@@ -213,7 +207,7 @@ class TestTwoTowerCandidateGenerator:
             patch(
                 KNN_SEARCH_POSTS,
                 new_callable=AsyncMock,
-                side_effect=[[], [candidate]],
+                return_value=[],
             ) as knn_search,
         ):
             result = await generator.generate(
@@ -222,12 +216,10 @@ class TestTwoTowerCandidateGenerator:
                 exclude_uris=["at://post/seen"],
             )
 
-        assert knn_search.await_count == 2
+        assert knn_search.await_count == 1
         assert knn_search.await_args_list[0].kwargs["exclude_uris"] == ["at://post/seen"]
-        assert knn_search.await_args_list[1].args[2] == 1
-        assert knn_search.await_args_list[1].kwargs["exclude_uris"] is None
         assert result.candidates == []
-        assert result.reason == "history_exclusions"
+        assert result.reason == "no_recent_authors_topics_posts"
 
     @pytest.mark.asyncio
     async def test_generate_uses_default_options(self, generator):

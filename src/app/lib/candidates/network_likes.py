@@ -20,7 +20,7 @@ from ...models import CandidatePost, MaxAgeHours
 from ..bsky import FollowedUsersLookupError
 from ..config import fail_fast
 from ..elasticsearch import unwrap_es_response
-from ..followed_users_cache import MAX_FOLLOWED_USERS, get_followed_dids_cached
+from ..followed_users_cache import get_followed_dids_cached
 from ..metrics import get_metric_collector
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult
@@ -280,18 +280,6 @@ async def _network_likes_search_with_reason(
         )
 
         if not liked_uris:
-            if exclude_uris:
-                try:
-                    unexcluded = await fetch_recent_liked_post_uris(
-                        es,
-                        followed_dids,
-                        size=1,
-                        max_age_hours=max_age_hours,
-                    )
-                    if unexcluded:
-                        return [], "history_exclusions"
-                except Exception:
-                    logger.warning("Failed to classify empty network-likes history exclusions")
             return [], "no_recent_network_likes"
 
         for order, uri in enumerate(liked_uris):
