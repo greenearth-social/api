@@ -118,7 +118,7 @@ router = APIRouter(tags=["xrpc"])
 # ---------------------------------------------------------------------------
 
 FEED_SNAPSHOT_RETENTION_SECONDS = 24 * 60 * 60  # 24 hours
-INITIAL_REQUEST_REUSE_SECONDS = 5
+ACCEPTED_SLATE_CLAIM_GRACE_SECONDS = 5
 
 try:
     _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
@@ -128,14 +128,8 @@ except ValueError:
     _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
 
 
-@dataclass
-class _InitialRequestEntry:
-    created_at: float
-    future: Future[FeedSkeletonResponse]
-
-
 _initial_request_lock = Lock()
-_initial_requests: dict[tuple[str, str, int, bool], _InitialRequestEntry] = {}
+_initial_requests: dict[tuple[str, str, int, bool], Future[FeedSkeletonResponse]] = {}
 
 
 def _claim_initial_request(
@@ -144,30 +138,21 @@ def _claim_initial_request(
     limit: int,
     is_load_test: bool,
 ) -> tuple[bool, Future[FeedSkeletonResponse]]:
-    """Elect one generator for identical initial requests within a short window.
+    """Elect one generator for identical initial requests already in flight.
 
     ``is_load_test`` is part of the key so real and load-test requests for the
     same (user, feed, limit) never share a response: the shared response carries
     the leader's signed feedContext (with its ``lt`` claim), and a follower of
     the other traffic class would otherwise inherit the wrong provenance.
     """
-    now = time.monotonic()
     key = (user_did, feed_name, limit, is_load_test)
     with _initial_request_lock:
-        expired = [
-            existing_key
-            for existing_key, entry in _initial_requests.items()
-            if now - entry.created_at >= INITIAL_REQUEST_REUSE_SECONDS
-        ]
-        for existing_key in expired:
-            _initial_requests.pop(existing_key, None)
-
         existing = _initial_requests.get(key)
         if existing is not None:
-            return False, existing.future
+            return False, existing
 
         future: Future[FeedSkeletonResponse] = Future()
-        _initial_requests[key] = _InitialRequestEntry(created_at=now, future=future)
+        _initial_requests[key] = future
         return True, future
 
 
@@ -182,11 +167,14 @@ def _complete_initial_request(
     error: BaseException | None = None,
 ) -> None:
     key = (user_did, feed_name, limit, is_load_test)
+    # Followers that already claimed this future still receive its result. By
+    # releasing the key before resolving it, any request that begins after the
+    # leader completes becomes a new leader and performs a real refresh.
+    with _initial_request_lock:
+        if _initial_requests.get(key) is future:
+            _initial_requests.pop(key, None)
+
     if error is not None:
-        with _initial_request_lock:
-            entry = _initial_requests.get(key)
-            if entry is not None and entry.future is future:
-                _initial_requests.pop(key, None)
         if not future.done():
             future.set_exception(error)
             # Mark the exception observed for the no-follower case. Awaiting
@@ -2189,7 +2177,7 @@ async def get_feed_skeleton(
                         db,
                         user_did,
                         feed_name,
-                        claim_grace_seconds=INITIAL_REQUEST_REUSE_SECONDS,
+                        claim_grace_seconds=ACCEPTED_SLATE_CLAIM_GRACE_SECONDS,
                         cache_ttl_seconds=DEFAULT_TTL_SECONDS,
                     )
                 except Exception:

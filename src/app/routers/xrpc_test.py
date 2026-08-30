@@ -937,9 +937,9 @@ class TestGetFeedSkeleton:
             ).json()
             refreshed = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
-                # A different limit avoids the process-local overlap cache and
-                # represents a distinct initial Bluesky refresh.
-                params={"feed": FEED_URI, "limit": 3},
+                # The first request is complete, so this identical shape is a
+                # real refresh. Accepted-slate grace remains independent.
+                params={"feed": FEED_URI, "limit": 2},
             ).json()
 
         second = client.get(
@@ -948,7 +948,7 @@ class TestGetFeedSkeleton:
         ).json()
 
         assert [item["post"] for item in first["feed"]] == uris[:2]
-        assert [item["post"] for item in refreshed["feed"]] == uris[:3]
+        assert [item["post"] for item in refreshed["feed"]] == uris[:2]
         assert [item["post"] for item in second["feed"]] == uris[2:4]
         assert claim.await_count == 2
         claim_call = claim.await_args
@@ -1114,7 +1114,7 @@ class TestGetFeedSkeleton:
         rids = {p.rid for p in payloads if p is not None}
         assert len(rids) == 1
 
-    def test_identical_initial_requests_within_window_reuse_response(self):
+    def test_sequential_initial_requests_start_new_sessions_immediately(self):
         candidates = _make_candidates("p", 8)
         with (
             self._patch_generators(candidates) as mock_get,
@@ -1133,31 +1133,38 @@ class TestGetFeedSkeleton:
                 params={"feed": FEED_URI, "limit": 3},
             )
 
-        assert first.json() == second.json()
-        mock_get.side_effect("two_tower").generate.assert_awaited_once()
-        snapshot_write.assert_awaited_once()
-
-    def test_initial_request_after_reuse_window_gets_new_session(self):
-        from app.routers import xrpc as xrpc_mod
-
-        candidates = _make_candidates("p", 8)
-        with self._patch_generators(candidates):
-            first = client.get(
-                "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": FEED_URI, "limit": 3},
-            ).json()
-            key = ("did:plc:testuser", FEED_RKEY, 3, False)
-            xrpc_mod._initial_requests[key].created_at -= xrpc_mod.INITIAL_REQUEST_REUSE_SECONDS + 1
-            second = client.get(
-                "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": FEED_URI, "limit": 3},
-            ).json()
-
-        first_context = decode_feed_context(first["feed"][0]["feedContext"])
-        second_context = decode_feed_context(second["feed"][0]["feedContext"])
+        first_context = decode_feed_context(first.json()["feed"][0]["feedContext"])
+        second_context = decode_feed_context(second.json()["feed"][0]["feedContext"])
         assert first_context is not None
         assert second_context is not None
         assert first_context.rid != second_context.rid
+        assert mock_get.side_effect("two_tower").generate.await_count == 2
+        assert snapshot_write.await_count == 2
+
+    def test_overlapping_initial_requests_share_only_until_completion(self):
+        from app.routers import xrpc as xrpc_mod
+
+        args = ("did:plc:testuser", FEED_RKEY, 3)
+        is_leader, leader_future = xrpc_mod._claim_initial_request(*args, False)
+        is_follower, follower_future = xrpc_mod._claim_initial_request(*args, False)
+        is_load_test_leader, load_test_future = xrpc_mod._claim_initial_request(*args, True)
+
+        assert is_leader is True
+        assert is_follower is False
+        assert follower_future is leader_future
+        assert is_load_test_leader is True
+        assert load_test_future is not leader_future
+
+        response = MagicMock()
+        xrpc_mod._complete_initial_request(*args, False, leader_future, response=response)
+        assert leader_future.result() is response
+
+        is_next_leader, next_future = xrpc_mod._claim_initial_request(*args, False)
+        assert is_next_leader is True
+        assert next_future is not leader_future
+
+        xrpc_mod._complete_initial_request(*args, False, next_future, response=MagicMock())
+        xrpc_mod._complete_initial_request(*args, True, load_test_future, response=MagicMock())
 
     # --- rkey matching ---
 
@@ -3892,9 +3899,8 @@ class TestLoadTestSession:
                 headers=self._headers(),
             ).json()
 
-        # Two separate reuse entries were created (one per traffic class).
-        keys = {k[3] for k in xrpc_mod._initial_requests}
-        assert keys == {True, False}
+        # Completed requests release both in-flight keys immediately.
+        assert xrpc_mod._initial_requests == {}
         real_ctx = decode_feed_context(real["feed"][0]["feedContext"])
         lt_ctx = decode_feed_context(lt["feed"][0]["feedContext"])
         assert real_ctx is not None and lt_ctx is not None
