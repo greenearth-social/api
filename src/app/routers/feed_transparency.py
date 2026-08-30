@@ -522,7 +522,7 @@ async def accept_preview(
     cache_doc = await cache.retrieve_document(request_id)
     if (
         cache_doc is None
-        or cache_doc.mode != "preview"
+        or cache_doc.mode not in {"preview", "accepted"}
         or cache_doc.user_did != user_did
         or cache_doc.feed_name != feed_name
         or cache_doc.generated_at is None
