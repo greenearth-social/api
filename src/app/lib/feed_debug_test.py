@@ -201,9 +201,12 @@ def test_snapshot_diagnostics_use_one_followed_users_source():
     )
     recent = _candidate("at://p/recent")
     older = _candidate("at://p/older")
-    rec.record_generator_output(CandidateResult(
-        generator_name="followed_users", candidates=[recent, older],
-    ))
+    rec.record_generator_output(
+        CandidateResult(
+            generator_name="followed_users",
+            candidates=[recent, older],
+        )
+    )
     rec.record_final_candidates([recent, older])
     rec.record_final_order(["at://p/recent", "at://p/older"])
     now = datetime.now(timezone.utc)
@@ -377,6 +380,46 @@ class TestBuildPipelineMetadata:
         assert snap.generator_diagnostics[0].requested_count == 30
         assert snap.generator_diagnostics[0].returned_count == 2
         assert snap.generator_diagnostics[0].contributed_count == 2
+
+    @pytest.mark.parametrize(
+        ("configure", "expected_reason"),
+        [
+            (
+                lambda rec: setattr(rec, "ranker_model", "heavy_ranker"),
+                "missing_candidate_embeddings",
+            ),
+            (
+                lambda rec: rec.record_cutoff("rank_score", ["at://candidate"]),
+                "quality_filters_removed_all",
+            ),
+        ],
+    )
+    def test_empty_snapshot_explains_downstream_candidate_removal(self, configure, expected_reason):
+        rec = FeedDebugRecorder(feed_name="your-feed", regenerated=False)
+        rec.set_generate_request(
+            CandidateGenerateRequest(
+                generators=[GeneratorSpec(name="followed_users", weight=1.0)],
+                user_did="did:plc:user",
+                num_candidates=30,
+                video_only=False,
+                max_age_hours=168,
+                infill=None,
+            )
+        )
+        rec.record_generator_output(
+            CandidateResult(
+                generator_name="followed_users",
+                candidates=[CandidatePost(at_uri="at://candidate")],
+            )
+        )
+        configure(rec)
+        now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+
+        snapshot = rec.build_pipeline_metadata(request_id="empty", generated_at=now, expires_at=now)
+
+        assert snapshot.items == []
+        assert snapshot.generator_diagnostics[0].status == "empty"
+        assert snapshot.generator_diagnostics[0].reason == expected_reason
 
     def test_per_uri_rank_and_model_scores(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)

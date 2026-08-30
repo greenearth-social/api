@@ -9,11 +9,14 @@ import pytest
 from google.cloud.firestore import ArrayUnion
 
 from ..documents import (
+    FeedCacheDocument,
     FeedDebugDocument,
     FeedPreferencesDocument,
     FeedSnapshotDocument,
+    GeneratorDiagnostic,
     InteractionDocument,
     PipelineItemMeta,
+    SourceWeightsDocument,
 )
 from ..lib.firestore import (
     DISCARDED_POSTS_COLLECTION,
@@ -24,14 +27,19 @@ from ..lib.firestore import (
     MAX_FEED_SNAPSHOT_DOCUMENTS,
     MAX_FEED_SNAPSHOT_ITEMS,
     SEEN_POSTS_COLLECTION,
+    StaleFeedPreviewError,
     USERS_COLLECTION,
+    _accepted_preview_diagnostics,
     _merge_feed_snapshots,
+    accept_feed_preview,
+    claim_accepted_feed_slate,
     delete_feed_snapshot,
     get_feed_activity,
     get_feed_debug,
     get_newer_feed_snapshot_uris,
     get_recent_discarded_uris,
     get_recent_feed_debug,
+    get_recent_feed_snapshots,
     get_recent_seen_uris,
     get_user,
     get_user_by_username,
@@ -57,6 +65,27 @@ from ..models import CandidateGenerateRequest, GeneratorSpec
 USER_DID = "did:plc:testuser123"
 USERNAME = "testuser.bsky.app"
 FEED_NAME = "unranked-your-feed"
+
+
+def test_accepted_empty_preview_retains_hydration_removal_reason():
+    cache = FeedCacheDocument(
+        items=["at://did:plc:author/app.bsky.feed.post/ranked"],
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        generator_diagnostics=[
+            GeneratorDiagnostic(
+                name="followed_users",
+                weight=1.0,
+                requested_count=30,
+                returned_count=1,
+                contributed_count=1,
+            )
+        ],
+    )
+
+    diagnostics = _accepted_preview_diagnostics(cache, [])
+
+    assert diagnostics[0].status == "empty"
+    assert diagnostics[0].reason == "hydration_removed_all"
 
 
 def _mock_feed_activity_client():
@@ -459,6 +488,9 @@ async def test_patch_user_feed_preferences_materializes_in_transaction():
     db, _, doc_ref = _mock_firestore_client()
     transaction = MagicMock()
     db.transaction.return_value = transaction
+    accepted_ref = MagicMock()
+    doc_ref.collection = MagicMock()
+    doc_ref.collection.return_value.document.return_value = accepted_ref
     doc_ref.get.return_value = _mock_doc_snapshot(
         True,
         {
@@ -483,6 +515,266 @@ async def test_patch_user_feed_preferences_materializes_in_transaction():
     assert written["feed_preferences"] == {"best-of-friends": {"freshness": 2, "purpose": 0.65}}
     assert written["created_by_load_test"] is False
     assert transaction.set.call_args.kwargs == {"merge": True}
+    transaction.delete.assert_called_once_with(accepted_ref)
+
+
+@pytest.mark.asyncio
+async def test_accept_feed_preview_stages_cache_without_rewriting_preferences():
+    now = datetime.now(UTC)
+    uri = "at://did:plc:author/app.bsky.feed.post/accepted"
+    db = MagicMock()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    users_collection = MagicMock()
+    cache_collection = MagicMock()
+    db.collection.side_effect = lambda name: (
+        users_collection if name == USERS_COLLECTION else cache_collection
+    )
+    user_ref = MagicMock()
+    cache_ref = MagicMock()
+    accepted_ref = MagicMock()
+    users_collection.document.return_value = user_ref
+    cache_collection.document.return_value = cache_ref
+    accepted_collection = MagicMock()
+    accepted_collection.document.return_value = accepted_ref
+    user_ref.collection.return_value = accepted_collection
+    effective_preferences = FeedPreferencesDocument(
+        source_weights=SourceWeightsDocument(
+            following=0.3,
+            network_likes=0.2,
+            authors_topics=0.25,
+            popular=0.25,
+        ),
+        freshness=2,
+        purpose=0.5,
+    )
+    cache_ref.get = AsyncMock(
+        return_value=_mock_doc_snapshot(
+            True,
+            FeedCacheDocument(
+                items=[uri, "at://filtered"],
+                items_meta=[PipelineItemMeta(at_uri=uri), PipelineItemMeta(at_uri="at://filtered")],
+                user_did=USER_DID,
+                feed_name="your-feed",
+                generated_at=now,
+                expires_at=now + timedelta(minutes=5),
+                mode="preview",
+                preference_patch=FeedPreferencesDocument(freshness=2),
+                effective_preferences=effective_preferences,
+            ).model_dump(),
+        )
+    )
+    user_ref.get = AsyncMock(
+        return_value=_mock_doc_snapshot(
+            True,
+            {
+                "user_did": USER_DID,
+                "feed_preferences": {
+                    "your-feed": effective_preferences.model_dump(exclude_none=True)
+                },
+            },
+        )
+    )
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        result = await accept_feed_preview(
+            db,
+            USER_DID,
+            "your-feed",
+            "preview-id",
+            FeedPreferencesDocument(freshness=2),
+            [uri],
+            ttl_seconds=600,
+        )
+
+    assert result is not None
+    updated, accepted_until = result
+    assert updated.freshness == 2
+    assert accepted_until is None
+    cache_write = next(call for call in transaction.set.call_args_list if call.args[0] is cache_ref)
+    assert cache_write.args[1]["mode"] == "accepted"
+    assert cache_write.args[1]["items"] == [uri]
+    pointer_write = next(
+        call for call in transaction.set.call_args_list if call.args[0] is accepted_ref
+    )
+    assert pointer_write.args[1]["request_id"] == "preview-id"
+    assert pointer_write.args[1]["slate"]["items"] == [uri]
+    assert pointer_write.args[1]["slate"]["mode"] == "accepted"
+    assert "expires_at" not in pointer_write.args[1]
+    assert all(call.args[0] is not user_ref for call in transaction.set.call_args_list)
+    transaction.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_accept_feed_preview_rejects_preferences_saved_after_generation():
+    now = datetime.now(UTC)
+    db = MagicMock()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    users_collection = MagicMock()
+    cache_collection = MagicMock()
+    db.collection.side_effect = lambda name: (
+        users_collection if name == USERS_COLLECTION else cache_collection
+    )
+    user_ref = MagicMock()
+    cache_ref = MagicMock()
+    users_collection.document.return_value = user_ref
+    cache_collection.document.return_value = cache_ref
+    user_ref.collection.return_value.document.return_value = MagicMock()
+    cache_ref.get = AsyncMock(
+        return_value=_mock_doc_snapshot(
+            True,
+            FeedCacheDocument(
+                items=[],
+                user_did=USER_DID,
+                feed_name="your-feed",
+                generated_at=now,
+                expires_at=now + timedelta(minutes=5),
+                mode="preview",
+                preference_patch=FeedPreferencesDocument(freshness=2),
+                effective_preferences=FeedPreferencesDocument(freshness=2),
+            ).model_dump(),
+        )
+    )
+    user_ref.get = AsyncMock(
+        return_value=_mock_doc_snapshot(
+            True,
+            {"user_did": USER_DID, "feed_preferences": {"your-feed": {"freshness": 5}}},
+        )
+    )
+
+    with (
+        patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn),
+        pytest.raises(StaleFeedPreviewError),
+    ):
+        await accept_feed_preview(
+            db,
+            USER_DID,
+            "your-feed",
+            "preview-id",
+            FeedPreferencesDocument(freshness=2),
+            [],
+            ttl_seconds=600,
+        )
+
+    transaction.set.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_claim_accepted_feed_slate_reuses_one_load_then_consumes_pointer():
+    now = datetime.now(UTC)
+    slate = FeedCacheDocument(
+        items=["at://accepted/one", "at://accepted/two"],
+        user_did=USER_DID,
+        feed_name="your-feed",
+        generated_at=now - timedelta(hours=1),
+        expires_at=now - timedelta(minutes=30),
+        mode="accepted",
+    )
+    db = MagicMock()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    users_collection = MagicMock()
+    cache_collection = MagicMock()
+    db.collection.side_effect = lambda name: (
+        users_collection if name == USERS_COLLECTION else cache_collection
+    )
+    user_ref = MagicMock()
+    ref = MagicMock()
+    cache_ref = MagicMock()
+    users_collection.document.return_value = user_ref
+    accepted_collection = MagicMock()
+    user_ref.collection.return_value = accepted_collection
+    accepted_collection.document.return_value = ref
+    cache_collection.document.return_value = cache_ref
+    ref.get = AsyncMock(
+        side_effect=[
+            _mock_doc_snapshot(
+                True,
+                {
+                    "request_id": "accepted-id",
+                    "slate": slate.model_dump(),
+                },
+            ),
+            _mock_doc_snapshot(
+                True,
+                {
+                    "request_id": "accepted-id",
+                    "slate": slate.model_dump(),
+                    "claimed_at": datetime.now(UTC),
+                },
+            ),
+            _mock_doc_snapshot(
+                True,
+                {
+                    "request_id": "accepted-id",
+                    "slate": slate.model_dump(),
+                    "claimed_at": datetime.now(UTC) - timedelta(seconds=6),
+                },
+            ),
+        ]
+    )
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        assert await claim_accepted_feed_slate(db, USER_DID, "your-feed") == "accepted-id"
+        assert await claim_accepted_feed_slate(db, USER_DID, "your-feed") == "accepted-id"
+        assert await claim_accepted_feed_slate(db, USER_DID, "your-feed") is None
+
+    assert transaction.set.call_count == 2
+    cache_write = next(call for call in transaction.set.call_args_list if call.args[0] is cache_ref)
+    assert cache_write.args[1]["generated_at"] > now
+    assert cache_write.args[1]["expires_at"] > now + timedelta(minutes=9)
+    claim_write = next(call for call in transaction.set.call_args_list if call.args[0] is ref)
+    assert "claimed_at" in claim_write.args[1]
+    assert claim_write.kwargs == {"merge": True}
+    transaction.delete.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
+async def test_claim_accepted_feed_slate_supports_live_legacy_pointer():
+    now = datetime.now(UTC)
+    db = MagicMock()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    users_collection = MagicMock()
+    cache_collection = MagicMock()
+    db.collection.side_effect = lambda name: (
+        users_collection if name == USERS_COLLECTION else cache_collection
+    )
+    user_ref = MagicMock()
+    accepted_ref = MagicMock()
+    cache_ref = MagicMock()
+    users_collection.document.return_value = user_ref
+    accepted_collection = MagicMock()
+    user_ref.collection.return_value = accepted_collection
+    accepted_collection.document.return_value = accepted_ref
+    cache_collection.document.return_value = cache_ref
+    accepted_ref.get = AsyncMock(
+        return_value=_mock_doc_snapshot(
+            True,
+            {"request_id": "legacy-id", "expires_at": now + timedelta(minutes=5)},
+        )
+    )
+    cache_ref.get = AsyncMock(
+        return_value=_mock_doc_snapshot(
+            True,
+            FeedCacheDocument(
+                items=["at://legacy/one"],
+                user_did=USER_DID,
+                feed_name="your-feed",
+                generated_at=now,
+                expires_at=now + timedelta(minutes=5),
+                mode="accepted",
+            ).model_dump(),
+        )
+    )
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        result = await claim_accepted_feed_slate(db, USER_DID, "your-feed")
+
+    assert result == "legacy-id"
+    cache_ref.get.assert_awaited_once_with(transaction=transaction)
+    assert any(call.args[0] is cache_ref for call in transaction.set.call_args_list)
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +1195,23 @@ class TestGetRecentFeedDebug:
         assert docs[0].request_id == REQUEST_ID
 
 
+class TestGetRecentFeedSnapshots:
+    @pytest.mark.asyncio
+    async def test_can_propagate_query_errors_to_authoritative_callers(self):
+        async def failing_stream():
+            raise RuntimeError("query unavailable")
+            yield
+
+        db = MagicMock()
+        query = MagicMock()
+        query.stream.return_value = failing_stream()
+        collection = db.collection.return_value.document.return_value.collection.return_value
+        collection.order_by.return_value.limit.return_value = query
+
+        with pytest.raises(RuntimeError, match="query unavailable"):
+            await get_recent_feed_snapshots(db, USER_DID, raise_on_error=True)
+
+
 class TestGetFeedDebug:
     @pytest.mark.asyncio
     async def test_returns_record(self):
@@ -1115,12 +1424,37 @@ class TestMergeFeedSnapshots:
         prune.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_empty_batch_skips_transaction(self):
+    async def test_empty_first_batch_creates_observable_snapshot(self):
         doc = _feed_snapshot("session-1", datetime.now(UTC), [])
-        db = MagicMock()
+        db, doc_ref = _mock_feed_activity_client()
+        transaction = MagicMock()
+        db.transaction.return_value = transaction
+        doc_ref.get.return_value = _mock_doc_snapshot(False)
 
-        assert await merge_feed_snapshot(db, USER_DID, "session-1", doc) is False
-        db.transaction.assert_not_called()
+        with (
+            patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn),
+            patch("app.lib.firestore.prune_feed_snapshots", new_callable=AsyncMock) as prune,
+        ):
+            assert await merge_feed_snapshot(db, USER_DID, "session-1", doc) is False
+
+        transaction.set.assert_called_once_with(doc_ref, doc.model_dump())
+        prune.assert_awaited_once_with(db, USER_DID)
+
+    @pytest.mark.asyncio
+    async def test_empty_later_batch_preserves_existing_posts(self):
+        now = datetime.now(UTC)
+        existing = _feed_snapshot("session-1", now, ["at://a"])
+        incoming = _feed_snapshot("session-1", now + timedelta(minutes=1), [])
+        db, doc_ref = _mock_feed_activity_client()
+        transaction = MagicMock()
+        db.transaction.return_value = transaction
+        doc_ref.get.return_value = _mock_doc_snapshot(True, existing.model_dump())
+
+        with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+            assert await merge_feed_snapshot(db, USER_DID, "session-1", incoming) is False
+
+        written = transaction.set.call_args.args[1]
+        assert written["items"] == ["at://a"]
 
 
 class TestPruneFeedSnapshots:

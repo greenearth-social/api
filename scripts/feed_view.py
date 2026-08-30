@@ -3,8 +3,8 @@
 
 Requests ``getFeedSkeleton`` from a running api as a chosen dev persona,
 hydrates each post from Elasticsearch, and prints the feed. Nothing is
-published and no write path is exercised — it just lets a developer see the
-feed they are working on.
+published; the only write is the normal user-scoped transparency snapshot
+recorded by the api for every signed-in feed load.
 
 Hydration is deliberately local-only: the skeleton returns bare AT URIs, and
 we resolve them against the environment's own Elasticsearch rather than the
@@ -56,6 +56,18 @@ console = Console()
 DEFAULT_FEED = "your-feed"
 DEFAULT_FEED_PUBLISHER = "did:web:test"
 POSTS_ALIAS = "posts_recent"
+SNAPSHOT_WAIT_TIMEOUT_SECONDS = 5.0
+SNAPSHOT_WAIT_INTERVAL_SECONDS = 0.1
+
+CLI_FEED_ALIASES = {
+    "mysky": "your-feed",
+}
+
+CLI_FEED_LABELS = {
+    "your-feed": "MySky",
+    "best-of-friends": "Best of Friends",
+    "random": "Random",
+}
 
 # Fields worth pulling for display. Post embeddings live in the same documents
 # and are large enough that fetching them makes paging visibly slow.
@@ -84,6 +96,19 @@ def feed_uri(feed: str, publisher: str) -> str:
     if feed.startswith("at://"):
         return feed
     return f"at://{publisher}/app.bsky.feed.generator/{feed}"
+
+
+def canonical_cli_feed(feed: str) -> str:
+    """Map presentation-only CLI aliases to stable feed identifiers."""
+    if feed.startswith("at://"):
+        return feed
+    return CLI_FEED_ALIASES.get(feed.casefold(), feed)
+
+
+def feed_display_name(feed: str) -> str:
+    """Human-readable CLI label while keeping the canonical id visible."""
+    label = CLI_FEED_LABELS.get(feed)
+    return f"{label} ({feed})" if label else feed
 
 
 def request_id_from_feed_context(feed_context: str | None) -> str | None:
@@ -170,6 +195,25 @@ async def load_pipeline_meta(user_did: str, request_id: str) -> dict[str, Any] |
         "diversify": doc.diversify,
         "items": {m.at_uri: m for m in doc.items_meta},
     }
+
+
+async def wait_for_pipeline_meta(
+    user_did: str,
+    request_id: str,
+    *,
+    timeout: float = SNAPSHOT_WAIT_TIMEOUT_SECONDS,
+    interval: float = SNAPSHOT_WAIT_INTERVAL_SECONDS,
+) -> dict[str, Any] | None:
+    """Wait briefly for the api's background snapshot write to become readable."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        pipeline = await load_pipeline_meta(user_did, request_id)
+        if pipeline is not None:
+            return pipeline
+        if loop.time() >= deadline:
+            return None
+        await asyncio.sleep(interval)
 
 
 def _parse_created_at(value: str | None) -> datetime | None:
@@ -314,7 +358,8 @@ async def run(args: argparse.Namespace) -> None:
     if not user_did.startswith("did:plc:"):
         _die(f"--user must be a did:plc DID, got: {user_did}")
 
-    uri = feed_uri(args.feed, args.publisher)
+    feed = canonical_cli_feed(args.feed)
+    uri = feed_uri(feed, args.publisher)
 
     es_key = os.environ.get("GE_ELASTICSEARCH_API_KEY")
     if not es_key:
@@ -329,6 +374,8 @@ async def run(args: argparse.Namespace) -> None:
         request_timeout=30,
     )
 
+    snapshot_failure: str | None = None
+    snapshot_confirmed = False
     try:
         cursor = args.cursor
         position = 1
@@ -353,16 +400,39 @@ async def run(args: argparse.Namespace) -> None:
                 if not args.no_pipeline and items:
                     rid = request_id_from_feed_context(items[0].get("feedContext"))
                     if rid:
-                        pipeline = await load_pipeline_meta(user_did, rid)
+                        pipeline = await wait_for_pipeline_meta(user_did, rid)
+                        if pipeline is None:
+                            snapshot_failure = (
+                                f"Frontend snapshot {rid} was not readable after "
+                                f"{SNAPSHOT_WAIT_TIMEOUT_SECONDS:g} seconds. Check the api and "
+                                "Firestore logs, then run `devctl feed` again."
+                            )
+                        else:
+                            snapshot_confirmed = True
+                    else:
+                        snapshot_failure = (
+                            "The feed response did not include a snapshot request id, so frontend "
+                            "population could not be confirmed."
+                        )
+                elif not args.no_pipeline and not items and not snapshot_confirmed:
+                    snapshot_failure = (
+                        "The feed is empty, so the api did not create a frontend snapshot. "
+                        "Run `devctl seed`, check `devctl doctor`, and try again."
+                    )
 
                 render_page(
-                    feed=args.feed,
+                    feed=feed_display_name(feed),
                     user_did=user_did,
                     skeleton=skeleton,
                     hydrated=hydrated,
                     pipeline=pipeline,
                     start_position=position,
                 )
+                if pipeline is not None:
+                    console.print(
+                        f"[green]Frontend snapshot ready:[/green] "
+                        f"{feed_display_name(feed)} as {user_did}"
+                    )
                 position += len(items)
 
             cursor = skeleton.get("cursor")
@@ -377,6 +447,9 @@ async def run(args: argparse.Namespace) -> None:
     finally:
         await es.close()
 
+    if snapshot_failure is not None and not args.json and not args.no_pipeline:
+        _die(snapshot_failure)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -386,7 +459,7 @@ def build_parser() -> argparse.ArgumentParser:
         "feed",
         nargs="?",
         default=DEFAULT_FEED,
-        help=f"Feed name or full at:// URI (default {DEFAULT_FEED})",
+        help=f"Feed name, `mysky` alias, or full at:// URI (default {DEFAULT_FEED})",
     )
     parser.add_argument("--user", help="Persona DID (defaults to the seeded GE_PROBE_USER_DID)")
     parser.add_argument("--limit", type=int, default=20, help="Posts per page (default 20)")

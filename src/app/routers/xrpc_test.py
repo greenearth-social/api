@@ -7,11 +7,16 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from ..documents import (
     FeedCacheDocument,
+    FeedPreferencesDocument,
+    FeedSnapshotDocument,
     PipelineItemMeta,
+    SourceWeightsDocument,
+    UserDocument,
 )
 from ..feeds import FEEDS, LOGGED_OUT_POST_URI
 from ..lib.candidates.base import CandidateResult
@@ -143,6 +148,260 @@ class FakeMetricCollector:
 
     def record(self, name: str, value: float, **attributes: str) -> None:
         self.calls.append((name, value, dict(attributes)))
+
+
+@pytest.mark.asyncio
+async def test_preview_exclusions_ignore_seen_and_retain_discarded():
+    from .xrpc import _generation_exclusions
+
+    feed_cfg = FEEDS["your-feed"].model_copy(
+        update={"exclude_seen_posts": True, "min_rank_score": 0.1}
+    )
+    with (
+        patch(
+            "app.routers.xrpc.get_recent_seen_uris",
+            new_callable=AsyncMock,
+            return_value=["at://seen"],
+        ) as seen,
+        patch(
+            "app.routers.xrpc.get_recent_discarded_uris",
+            new_callable=AsyncMock,
+            return_value=["at://discarded"],
+        ) as discarded,
+    ):
+        exclusions = await _generation_exclusions(
+            MagicMock(),
+            "did:plc:testuser",
+            feed_cfg,
+            include_seen=False,
+        )
+
+    assert exclusions == ["at://discarded"]
+    seen.assert_not_awaited()
+    discarded.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("expanded_batch", "expected_candidates"), [(False, 100), (True, 200)])
+async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache(
+    expanded_batch: bool, expected_candidates: int
+):
+    from .xrpc import generate_feed_preview
+
+    now = datetime.now(UTC)
+    uris = [f"at://preview/{index}" for index in range(35)]
+    snapshot = FeedSnapshotDocument(
+        request_id="preview-request",
+        items=uris,
+        feed_name="your-feed",
+        generated_at=now,
+        expires_at=now + timedelta(days=1),
+        items_meta=[PipelineItemMeta(at_uri=uri) for uri in uris],
+    )
+    cache = InMemoryFeedCache()
+    app.state.firestore = MagicMock()
+    app.state.feed_cache = cache
+    request = Request({"type": "http", "app": app})
+    user = UserDocument(
+        user_did="did:plc:testuser",
+        feed_preferences={
+            "your-feed": FeedPreferencesDocument(
+                freshness=5,
+                purpose=0.5,
+                source_weights=SourceWeightsDocument(
+                    following=0.3,
+                    network_likes=0.2,
+                    authors_topics=0.25,
+                    popular=0.25,
+                ),
+            )
+        },
+    )
+    draft = FeedPreferencesDocument(
+        freshness=2,
+        purpose=0.8,
+        source_weights=SourceWeightsDocument(
+            following=0.5,
+            network_likes=0.1,
+            authors_topics=0.2,
+            popular=0.2,
+        ),
+    )
+
+    async def pipeline_result(*_args, **kwargs):
+        return (
+            snapshot.model_copy(update={"request_id": kwargs["request_id"]}),
+            ["at://discarded-by-cutoff"],
+        )
+
+    pipeline = AsyncMock(side_effect=pipeline_result)
+    exclusions = AsyncMock(return_value=["at://already-discarded"])
+
+    with (
+        patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
+        patch(
+            "app.routers.xrpc.get_posthog_client",
+            return_value=MagicMock() if expanded_batch else None,
+        ),
+        patch(
+            "app.routers.xrpc.evaluate_feature_flags",
+            return_value={
+                "expanded-candidate-batch": expanded_batch,
+                "network-likes-in-your-feed": True,
+            },
+        ),
+        patch("app.routers.xrpc._generation_exclusions", exclusions),
+        patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", pipeline),
+        patch(
+            "app.routers.xrpc.record_discarded_posts", new_callable=AsyncMock
+        ) as record_discarded,
+        patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock) as upsert_user,
+        patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock) as feed_activity,
+        patch("app.routers.xrpc.track_session") as track_session,
+    ):
+        result = await generate_feed_preview(
+            request,
+            "did:plc:testuser",
+            "your-feed",
+            draft,
+        )
+
+    assert pipeline.await_args is not None
+    feed_cfg = pipeline.await_args.args[2]
+    gen_request = pipeline.await_args.args[3]
+    model_weights = {model.name: model.weight for model in feed_cfg.rank_request_template.models}
+    assert model_weights["perspective"] == pytest.approx(0.8)
+    assert gen_request.max_age_hours == 24
+    assert [(generator.name, generator.weight) for generator in gen_request.generators] == [
+        ("followed_users", 0.5),
+        ("two_tower", 0.2),
+        ("popularity", 0.2),
+        ("network_likes", 0.1),
+    ]
+    assert gen_request.exclude_uris == ["at://already-discarded"]
+    assert gen_request.num_candidates == expected_candidates
+    exclusions.assert_awaited_once()
+    assert exclusions.await_args is not None
+    assert exclusions.await_args.kwargs == {"include_seen": False}
+    assert len(result.items) == 35
+    stored = cache._docs[result.request_id]
+    assert stored.mode == "preview"
+    assert stored.preference_patch == draft
+    assert stored.preference_fingerprint is not None
+    assert stored.user_did == "did:plc:testuser"
+    assert stored.feed_name == "your-feed"
+    assert len(stored.items) == 35
+    assert [meta.at_uri for meta in stored.items_meta] == uris
+    record_discarded.assert_not_awaited()
+    upsert_user.assert_not_awaited()
+    feed_activity.assert_not_awaited()
+    track_session.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("weights", "expected_generator"),
+    [
+        (
+            SourceWeightsDocument(
+                following=1.0,
+                network_likes=0.0,
+                authors_topics=0.0,
+                popular=0.0,
+            ),
+            "followed_users",
+        ),
+        (
+            SourceWeightsDocument(
+                following=0.0,
+                network_likes=1.0,
+                authors_topics=0.0,
+                popular=0.0,
+            ),
+            "network_likes",
+        ),
+        (
+            SourceWeightsDocument(
+                following=0.0,
+                network_likes=0.0,
+                authors_topics=1.0,
+                popular=0.0,
+            ),
+            "two_tower",
+        ),
+    ],
+)
+def test_configured_generation_preserves_exact_single_source_weights(
+    weights: SourceWeightsDocument,
+    expected_generator: str,
+):
+    from .xrpc import _configured_generation
+
+    user = UserDocument(
+        user_did="did:plc:testuser",
+        feed_preferences={
+            "your-feed": FeedPreferencesDocument(
+                source_weights=weights,
+                freshness=5,
+                purpose=0.5,
+            )
+        },
+    )
+
+    configured = _configured_generation(
+        "your-feed",
+        user,
+        network_likes_enabled=False,
+    )
+
+    assert [
+        (generator.name, generator.weight)
+        for generator in configured.generators_override["generators"]
+    ] == [(expected_generator, 1.0)]
+    assert configured.effective_preferences.source_weights == weights
+    assert configured.preference_fingerprint
+
+
+def test_100_percent_following_and_best_of_friends_share_pipeline_configuration():
+    from .xrpc import _configured_generation
+
+    shared = FeedPreferencesDocument(freshness=3, purpose=0.65)
+    user = UserDocument(
+        user_did="did:plc:testuser",
+        feed_preferences={
+            "your-feed": shared.model_copy(
+                update={
+                    "source_weights": SourceWeightsDocument(
+                        following=1.0,
+                        network_likes=0.0,
+                        authors_topics=0.0,
+                        popular=0.0,
+                    )
+                }
+            ),
+            "best-of-friends": shared,
+        },
+    )
+
+    following = _configured_generation(
+        "your-feed",
+        user,
+        network_likes_enabled=True,
+    )
+    friends = _configured_generation(
+        "best-of-friends",
+        user,
+        network_likes_enabled=True,
+    )
+
+    assert (
+        following.generators_override["generators"]
+        == friends.feed_cfg.gen_request_template.generators
+    )
+    assert following.max_age_hours == friends.max_age_hours
+    assert following.feed_cfg.max_render_share == friends.feed_cfg.max_render_share
+    assert following.feed_cfg.min_rank_score == friends.feed_cfg.min_rank_score
+    assert following.feed_cfg.min_mmr_score == friends.feed_cfg.min_mmr_score
+    assert following.feed_cfg.rank_request_template == friends.feed_cfg.rank_request_template
 
 
 @pytest.mark.asyncio
@@ -417,7 +676,12 @@ def fake_app_es():
     app.state.id_resolver.did.resolve = AsyncMock(return_value=did_doc)
     app.state.firestore = AsyncMock()
     app.state.feed_cache = InMemoryFeedCache()
-    yield
+    with patch(
+        "app.routers.xrpc.claim_accepted_feed_slate",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        yield
     try:
         delattr(app.state, "es")
     except Exception:
@@ -574,6 +838,165 @@ class TestGetFeedSkeleton:
         assert len(data["feed"]) == 3
         assert data["feed"][0]["post"] == "at://p/0"
 
+    def test_appview_one_item_check_does_not_create_history_or_consume_accepted_slate(self):
+        now = datetime.now(UTC)
+        snapshot = FeedSnapshotDocument(
+            request_id="appview-check",
+            items=["at://p/0"],
+            items_meta=[PipelineItemMeta(at_uri="at://p/0")],
+            feed_name=FEED_RKEY,
+            generated_at=now,
+            expires_at=now + timedelta(minutes=10),
+        )
+        with (
+            patch(
+                "app.routers.xrpc._run_pipeline_capturing_with_timeout",
+                new_callable=AsyncMock,
+                return_value=(snapshot, ["at://discarded"]),
+            ),
+            patch(
+                "app.routers.xrpc.claim_accepted_feed_slate",
+                new_callable=AsyncMock,
+            ) as claim,
+            patch(
+                "app.routers.xrpc._write_feed_snapshot_background",
+                new_callable=AsyncMock,
+            ) as write_snapshot,
+            patch("app.routers.xrpc._record_session", new_callable=AsyncMock) as record_session,
+            patch("app.routers.xrpc._record_discarded", new_callable=AsyncMock) as record_discarded,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI_FROM_APPVIEW, "limit": 1},
+                headers={"User-Agent": "BskyAppView"},
+            )
+
+        assert response.status_code == 200
+        claim.assert_not_awaited()
+        write_snapshot.assert_not_awaited()
+        record_session.assert_not_awaited()
+        record_discarded.assert_not_awaited()
+
+    def test_other_one_item_requests_still_create_feed_history(self):
+        with (
+            self._patch_generators(_make_candidates("p", 3)),
+            patch(
+                "app.routers.xrpc.claim_accepted_feed_slate",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "app.routers.xrpc._write_feed_snapshot_background",
+                new_callable=AsyncMock,
+            ) as write_snapshot,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 1},
+            )
+
+        assert response.status_code == 200
+        write_snapshot.assert_awaited_once()
+
+    def test_accepted_slate_is_served_in_order_across_cursor_pages(self):
+        from .xrpc import _configured_generation
+
+        request_id = "accepted-settings-slate"
+        uris = [f"at://accepted/{index}" for index in range(5)]
+        app.state.feed_cache._docs[request_id] = FeedCacheDocument(
+            items=uris,
+            items_meta=[PipelineItemMeta(at_uri=uri) for uri in uris],
+            user_did="did:plc:testuser",
+            feed_name=FEED_RKEY,
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            mode="accepted",
+            preference_fingerprint=_configured_generation(
+                FEED_RKEY,
+                None,
+                network_likes_enabled=True,
+            ).preference_fingerprint,
+        )
+
+        with (
+            patch(
+                "app.routers.xrpc.claim_accepted_feed_slate",
+                new_callable=AsyncMock,
+                return_value=request_id,
+            ) as claim,
+            patch(
+                "app.routers.xrpc._write_feed_snapshot_background",
+                new_callable=AsyncMock,
+            ) as write_snapshot,
+            patch(
+                "app.routers.xrpc._run_pipeline_capturing_with_timeout",
+                new_callable=AsyncMock,
+            ) as pipeline,
+        ):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 2},
+            ).json()
+            refreshed = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                # The first request is complete, so this identical shape is a
+                # real refresh. Accepted-slate grace remains independent.
+                params={"feed": FEED_URI, "limit": 2},
+            ).json()
+
+        second = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": FEED_URI, "limit": 2, "cursor": first["cursor"]},
+        ).json()
+
+        assert [item["post"] for item in first["feed"]] == uris[:2]
+        assert [item["post"] for item in refreshed["feed"]] == uris[:2]
+        assert [item["post"] for item in second["feed"]] == uris[2:4]
+        assert claim.await_count == 2
+        claim_call = claim.await_args
+        assert claim_call is not None
+        assert claim_call.args[1:] == ("did:plc:testuser", FEED_RKEY)
+        assert claim_call.kwargs == {
+            "claim_grace_seconds": 5,
+            "cache_ttl_seconds": 600,
+        }
+        assert write_snapshot.await_count == 2
+        pipeline.assert_not_awaited()
+
+    def test_accepted_ranked_slate_keeps_the_pinned_post_outside_its_order(self):
+        request_id = "accepted-ranked-slate"
+        uris = ["at://accepted/one", "at://accepted/two"]
+        app.state.feed_cache._docs[request_id] = FeedCacheDocument(
+            items=uris,
+            items_meta=[PipelineItemMeta(at_uri=uri) for uri in uris],
+            user_did="did:plc:testuser",
+            feed_name="your-feed",
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            mode="accepted",
+        )
+
+        with (
+            patch(
+                "app.routers.xrpc.claim_accepted_feed_slate",
+                new_callable=AsyncMock,
+                return_value=request_id,
+            ),
+            patch(
+                "app.routers.xrpc._write_feed_snapshot_background",
+                new_callable=AsyncMock,
+            ),
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": 2},
+            ).json()
+
+        assert [item["post"] for item in response["feed"]] == [
+            FEEDS["your-feed"].pinned_post_uri,
+            uris[0],
+        ]
+
     def test_seen_uris_excluded_on_fresh_request(self):
         """A fresh feed load excludes the user's recently-seen posts."""
         primary_gen = AsyncMock()
@@ -693,7 +1116,7 @@ class TestGetFeedSkeleton:
         rids = {p.rid for p in payloads if p is not None}
         assert len(rids) == 1
 
-    def test_identical_initial_requests_within_window_reuse_response(self):
+    def test_sequential_initial_requests_start_new_sessions_immediately(self):
         candidates = _make_candidates("p", 8)
         with (
             self._patch_generators(candidates) as mock_get,
@@ -712,31 +1135,38 @@ class TestGetFeedSkeleton:
                 params={"feed": FEED_URI, "limit": 3},
             )
 
-        assert first.json() == second.json()
-        mock_get.side_effect("two_tower").generate.assert_awaited_once()
-        snapshot_write.assert_awaited_once()
-
-    def test_initial_request_after_reuse_window_gets_new_session(self):
-        from app.routers import xrpc as xrpc_mod
-
-        candidates = _make_candidates("p", 8)
-        with self._patch_generators(candidates):
-            first = client.get(
-                "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": FEED_URI, "limit": 3},
-            ).json()
-            key = ("did:plc:testuser", FEED_RKEY, 3, False)
-            xrpc_mod._initial_requests[key].created_at -= xrpc_mod.INITIAL_REQUEST_REUSE_SECONDS + 1
-            second = client.get(
-                "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": FEED_URI, "limit": 3},
-            ).json()
-
-        first_context = decode_feed_context(first["feed"][0]["feedContext"])
-        second_context = decode_feed_context(second["feed"][0]["feedContext"])
+        first_context = decode_feed_context(first.json()["feed"][0]["feedContext"])
+        second_context = decode_feed_context(second.json()["feed"][0]["feedContext"])
         assert first_context is not None
         assert second_context is not None
         assert first_context.rid != second_context.rid
+        assert mock_get.side_effect("two_tower").generate.await_count == 2
+        assert snapshot_write.await_count == 2
+
+    def test_overlapping_initial_requests_share_only_until_completion(self):
+        from app.routers import xrpc as xrpc_mod
+
+        args = ("did:plc:testuser", FEED_RKEY, 3)
+        is_leader, leader_future = xrpc_mod._claim_initial_request(*args, False)
+        is_follower, follower_future = xrpc_mod._claim_initial_request(*args, False)
+        is_load_test_leader, load_test_future = xrpc_mod._claim_initial_request(*args, True)
+
+        assert is_leader is True
+        assert is_follower is False
+        assert follower_future is leader_future
+        assert is_load_test_leader is True
+        assert load_test_future is not leader_future
+
+        response = MagicMock()
+        xrpc_mod._complete_initial_request(*args, False, leader_future, response=response)
+        assert leader_future.result() is response
+
+        is_next_leader, next_future = xrpc_mod._claim_initial_request(*args, False)
+        assert is_next_leader is True
+        assert next_future is not leader_future
+
+        xrpc_mod._complete_initial_request(*args, False, next_future, response=MagicMock())
+        xrpc_mod._complete_initial_request(*args, True, load_test_future, response=MagicMock())
 
     # --- rkey matching ---
 
@@ -1196,6 +1626,83 @@ class TestFeedSkeletonCursor:
         assert len(second["feed"]) == 4
         assert second["feed"][0]["post"] == "at://p/4"
 
+    def test_changed_preferences_replace_an_active_cursor_cache(self):
+        cache_id = "old-preference-cache"
+        old_uris = [f"at://old/{index}" for index in range(6)]
+        app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
+            items=old_uris,
+            items_meta=[PipelineItemMeta(at_uri=uri) for uri in old_uris],
+            user_did="did:plc:testuser",
+            feed_name=FEED_RKEY,
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            preference_fingerprint="settings-before-edit",
+        )
+        user = UserDocument(
+            user_did="did:plc:testuser",
+            feed_preferences={
+                "your-feed": FeedPreferencesDocument(
+                    source_weights=SourceWeightsDocument(
+                        following=1.0,
+                        network_likes=0.0,
+                        authors_topics=0.0,
+                        popular=0.0,
+                    ),
+                    freshness=5,
+                    purpose=0.5,
+                )
+            },
+        )
+        replacement_uris = [f"at://new/{index}" for index in range(4)]
+        now = datetime.now(UTC)
+        replacement = FeedSnapshotDocument(
+            request_id="replacement",
+            items=replacement_uris,
+            items_meta=[PipelineItemMeta(at_uri=uri) for uri in replacement_uris],
+            feed_name=FEED_RKEY,
+            generated_at=now,
+            expires_at=now + timedelta(minutes=10),
+        )
+        pipeline = AsyncMock(return_value=(replacement, []))
+        cursor = FeedCursor(id=cache_id, offset=2).encode()
+
+        with (
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
+            patch(
+                "app.routers.xrpc._generation_exclusions",
+                new_callable=AsyncMock,
+                return_value=["at://seen/one"],
+            ),
+            patch(
+                "app.routers.xrpc._run_pipeline_capturing_with_timeout",
+                pipeline,
+            ),
+            patch(
+                "app.routers.xrpc._write_feed_snapshot_background",
+                new_callable=AsyncMock,
+            ),
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 2, "cursor": cursor},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [item["post"] for item in data["feed"]] == replacement_uris[:2]
+        replacement_cursor = FeedCursor.decode(data["cursor"])
+        assert replacement_cursor.id != cache_id
+        assert replacement_cursor.offset == 2
+        assert pipeline.await_args is not None
+        request_body = pipeline.await_args.args[3]
+        assert request_body.exclude_uris == [*old_uris[:2], "at://seen/one"]
+        assert [(generator.name, generator.weight) for generator in request_body.generators] == [
+            ("followed_users", 1.0)
+        ]
+        replacement_cache = app.state.feed_cache._docs[replacement_cursor.id]
+        assert replacement_cache.items == replacement_uris
+        assert replacement_cache.preference_fingerprint != "settings-before-edit"
+
     def test_last_page_has_no_cursor(self):
         candidates = _make_candidates("p", 6)
         with self._patch_generators(candidates):
@@ -1222,6 +1729,55 @@ class TestFeedSkeletonCursor:
             ).json()
 
         assert third["feed"] == []
+
+    def test_empty_cursor_regeneration_merges_snapshot_diagnostics(self):
+        from .xrpc import _configured_generation
+
+        cache_id = "empty-later-page"
+        app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
+            items=["at://already/served"],
+            items_meta=[PipelineItemMeta(at_uri="at://already/served")],
+            user_did="did:plc:testuser",
+            feed_name=FEED_RKEY,
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            preference_fingerprint=_configured_generation(
+                FEED_RKEY,
+                None,
+                network_likes_enabled=True,
+            ).preference_fingerprint,
+        )
+        empty = FeedSnapshotDocument(
+            request_id=cache_id,
+            items=[],
+            feed_name=FEED_RKEY,
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+        cursor = FeedCursor(id=cache_id, offset=1).encode()
+
+        with (
+            patch(
+                "app.routers.xrpc._run_pipeline_capturing_with_timeout",
+                new_callable=AsyncMock,
+                return_value=(empty, []),
+            ),
+            patch(
+                "app.routers.xrpc._write_feed_snapshot_background",
+                new_callable=AsyncMock,
+            ) as write_snapshot,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 4, "cursor": cursor},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["feed"] == []
+        written = write_snapshot.await_args
+        assert written is not None
+        assert written.args[2] == cache_id
+        assert written.args[3].items == []
 
     def test_full_scroll_returns_all_items(self):
         """Scrolling through all pages collects every generated post."""
@@ -1281,6 +1837,25 @@ class TestFeedSkeletonCursor:
             feed_name="unranked-your-feed",
         )
         cursor = FeedCursor(id="user-bound-cache", offset=0).encode()
+
+        response = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": FEED_URI, "cursor": cursor},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Invalid cursor"
+
+    def test_unaccepted_preview_cannot_be_used_as_a_public_cursor(self):
+        cache_id = "unaccepted-preview"
+        app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
+            items=["at://preview/1"],
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            user_did="did:plc:testuser",
+            feed_name=FEED_RKEY,
+            mode="preview",
+        )
+        cursor = FeedCursor(id=cache_id, offset=0).encode()
 
         response = client.get(
             "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2951,14 +3526,16 @@ class TestFeedDebugCapture:
             await coro
 
     @pytest.mark.asyncio
-    async def test_empty_snapshot_skips_firestore_write(self):
+    async def test_empty_snapshot_is_written_to_firestore(self):
         from ..routers.xrpc import _write_feed_snapshot_background
 
-        snapshot = MagicMock(items=[])
-        with patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock) as merge:
+        snapshot = MagicMock(items=[], feed_name="your-feed", generator_diagnostics=[])
+        with patch(
+            "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+        ) as merge:
             await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
 
-        merge.assert_not_awaited()
+        merge.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_truncated_snapshot_records_metric(self, caplog):
@@ -3326,9 +3903,8 @@ class TestLoadTestSession:
                 headers=self._headers(),
             ).json()
 
-        # Two separate reuse entries were created (one per traffic class).
-        keys = {k[3] for k in xrpc_mod._initial_requests}
-        assert keys == {True, False}
+        # Completed requests release both in-flight keys immediately.
+        assert xrpc_mod._initial_requests == {}
         real_ctx = decode_feed_context(real["feed"][0]["feedContext"])
         lt_ctx = decode_feed_context(lt["feed"][0]["feedContext"])
         assert real_ctx is not None and lt_ctx is not None
@@ -4396,7 +4972,7 @@ class TestSourceWeightsOverride:
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
-    def test_disabled_network_likes_normalizes_custom_weights(
+    def test_disabled_network_likes_flag_preserves_explicit_custom_weights(
         self,
         mock_pipeline,
         mock_get_user,
@@ -4432,12 +5008,12 @@ class TestSourceWeightsOverride:
 
         assert response.status_code == 200
         generators = mock_pipeline.call_args.args[1].generators
-        assert [generator.name for generator in generators] == [
-            "followed_users",
-            "two_tower",
-            "popularity",
+        assert [(generator.name, generator.weight) for generator in generators] == [
+            ("followed_users", 0.4),
+            ("two_tower", 0.1),
+            ("popularity", 0.3),
+            ("network_likes", 0.2),
         ]
-        assert [generator.weight for generator in generators] == pytest.approx([0.5, 0.125, 0.375])
 
 
 class TestPurposeOverride:

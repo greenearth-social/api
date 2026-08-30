@@ -13,6 +13,7 @@ Convention:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -144,11 +145,45 @@ class FeedCacheDocument(BaseModel):
     feed_name: str | None = None
     generated_at: datetime | None = None
     api_release_sha: str | None = None
+    mode: Literal["served", "preview", "accepted"] = Field(
+        default="served",
+        description="Whether this cache entry is served, hypothetical, or accepted for serving.",
+    )
+    preference_patch: FeedPreferencesDocument | None = Field(
+        default=None,
+        description="Sparse draft used to generate a settings preview.",
+    )
+    effective_preferences: FeedPreferencesDocument | None = Field(
+        default=None,
+        description="Fully resolved settings used to generate a settings preview.",
+    )
+    preference_fingerprint: str | None = Field(
+        default=None,
+        description="Deterministic fingerprint of the effective generation preferences.",
+    )
     load_test: bool = Field(
         default=False,
         description="True when this cache entry was created by a load-test session. The cache "
         "collection is keyed by request_id (not user), so this tag is how "
         "scripts/load_test/cleanup.py finds and removes test-created entries.",
+    )
+
+
+class AcceptedFeedSlateDocument(BaseModel):
+    """Durable Settings slate waiting for one Bluesky feed load."""
+
+    request_id: str
+    slate: FeedCacheDocument | None = Field(
+        default=None,
+        description="Complete accepted slate, retained until its first feed load.",
+    )
+    expires_at: datetime | None = Field(
+        default=None,
+        description="Legacy pending-pointer expiration; new handoffs do not expire.",
+    )
+    claimed_at: datetime | None = Field(
+        default=None,
+        description="When the first request in the accepted feed load claimed this slate.",
     )
 
 

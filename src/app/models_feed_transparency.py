@@ -93,6 +93,7 @@ class FeedItemView(BaseModel):
     media: MediaView | None = None
     engagement: EngagementView | None = None
     post_url: str | None = None
+    is_partial: bool = False
 
 
 class FeedDetailResponse(BaseModel):
@@ -104,6 +105,15 @@ class FeedDetailResponse(BaseModel):
     displayed_item_count: int = 0
     publicly_filtered_count: int = 0
     unavailable_count: int = 0
+    partial_item_count: int = 0
+    generator_diagnostics: list[GeneratorDiagnosticView] = Field(default_factory=list)
+
+
+class FeedPreviewResponse(BaseModel):
+    request_id: str
+    feed_name: str
+    generated_at: datetime
+    expires_at: datetime
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +144,19 @@ class FeedPreferences(BaseModel):
     freshness: int | None = Field(default=None, ge=0, le=5)
     politics: float | None = Field(default=None, ge=0.5, le=1.5)
     purpose: float | None = Field(default=None, ge=0.2, le=0.8)
+
+
+class AcceptFeedPreviewRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    preferences: FeedPreferences
+    displayed_item_uris: list[str] = Field(max_length=200)
+
+
+class AcceptedFeedPreviewResponse(BaseModel):
+    request_id: str
+    preferences: FeedPreferences
+    accepted_until: datetime | None = None
 
 
 class PreferencesResponse(BaseModel):

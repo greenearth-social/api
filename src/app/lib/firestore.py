@@ -21,15 +21,19 @@ from google.cloud.firestore import (  # type: ignore[import-untyped]
 )
 
 from ..documents import (
+    AcceptedFeedSlateDocument,
     FeedActivityDocument,
+    FeedCacheDocument,
     FeedDebugDocument,
     FeedPreferencesDocument,
     FeedSnapshotDocument,
+    GeneratorDiagnostic,
     InteractionDocument,
     LlmQueryVectorDocument,
     RedirectDocument,
     UserDocument,
 )
+from .feed_cache import FEED_CACHE_COLLECTION
 from .feed_preferences import preference_source, resolve_feed_preferences
 
 logger = logging.getLogger(__name__)
@@ -41,6 +45,7 @@ SEEN_POSTS_COLLECTION = "seen_posts"
 DISCARDED_POSTS_COLLECTION = "discarded_posts"
 FEED_DEBUG_COLLECTION = "feed_debug"
 FEED_SNAPSHOTS_COLLECTION = "feed_snapshots"
+ACCEPTED_FEED_SLATES_COLLECTION = "accepted_feed_slates"
 MAX_FEED_SNAPSHOT_ITEMS = 500
 MAX_FEED_SNAPSHOT_DOCUMENTS = 100
 FIRESTORE_WRITE_BATCH_LIMIT = 500
@@ -282,6 +287,7 @@ async def patch_user_feed_preferences(
 ) -> FeedPreferencesDocument:
     """Atomically patch and materialize one feed without replacing siblings."""
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    accepted_ref = ref.collection(ACCEPTED_FEED_SLATES_COLLECTION).document(feed_name)
     transaction = db.transaction()
 
     @async_transactional
@@ -305,9 +311,231 @@ async def patch_user_feed_preferences(
             },
             merge=True,
         )
+        # Any accepted handoff represents the settings that existed before
+        # this write. Removing it in the same transaction closes the race where
+        # an older Preview finishes accepting while a newer save is in flight.
+        transaction.delete(accepted_ref)
         return updated
 
     return await _patch(transaction)
+
+
+class StaleFeedPreviewError(Exception):
+    """The user's persisted settings no longer match a generated preview."""
+
+
+def _accepted_preview_diagnostics(
+    cache_doc: FeedCacheDocument,
+    displayed_item_uris: list[str],
+) -> list[GeneratorDiagnostic]:
+    """Retain why a ranked Preview became an accepted empty slate."""
+    if displayed_item_uris or not cache_doc.items:
+        return cache_doc.generator_diagnostics
+    return [
+        diagnostic.model_copy(update={"status": "empty", "reason": "hydration_removed_all"})
+        if diagnostic.contributed_count > 0
+        else diagnostic
+        for diagnostic in cache_doc.generator_diagnostics
+    ]
+
+
+async def accept_feed_preview(
+    db: AsyncClient,
+    user_did: str,
+    feed_name: str,
+    request_id: str,
+    preference_patch: FeedPreferencesDocument,
+    displayed_item_uris: list[str],
+    *,
+    ttl_seconds: int,
+) -> tuple[FeedPreferencesDocument, datetime | None] | None:
+    """Atomically stage a saved settings preview for the next feed load.
+
+    ``None`` means the cache entry stopped being acceptable before the
+    transaction committed (expired, wrong owner/feed/provenance, or changed).
+    ``StaleFeedPreviewError`` means a newer settings save superseded the preview.
+    """
+
+    user_ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    cache_ref = db.collection(FEED_CACHE_COLLECTION).document(request_id)
+    accepted_ref = user_ref.collection(ACCEPTED_FEED_SLATES_COLLECTION).document(feed_name)
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _accept(transaction) -> tuple[FeedPreferencesDocument, datetime | None] | None:
+        cache_snapshot = await cache_ref.get(transaction=transaction)
+        if not cache_snapshot.exists:
+            return None
+        cache_data = cache_snapshot.to_dict()
+        if cache_data is None:
+            return None
+        try:
+            cache_doc = FeedCacheDocument.model_validate(cache_data)
+        except Exception:
+            return None
+
+        now = datetime.now(UTC)
+        cache_expires_at = cache_doc.expires_at
+        if cache_expires_at.tzinfo is None:
+            cache_expires_at = cache_expires_at.replace(tzinfo=UTC)
+        cached_patch = (
+            cache_doc.preference_patch.model_dump(exclude_none=True)
+            if cache_doc.preference_patch is not None
+            else None
+        )
+        requested_patch = preference_patch.model_dump(exclude_none=True)
+        if (
+            cache_doc.mode != "preview"
+            or cache_doc.user_did != user_did
+            or cache_doc.feed_name != feed_name
+            or cache_expires_at <= now
+            or cached_patch != requested_patch
+        ):
+            return None
+
+        cursor = 0
+        for at_uri in displayed_item_uris:
+            try:
+                cursor = cache_doc.items.index(at_uri, cursor) + 1
+            except ValueError:
+                return None
+        if len(displayed_item_uris) != len(set(displayed_item_uris)):
+            return None
+
+        user_snapshot = await user_ref.get(transaction=transaction)
+        user_data = user_snapshot.to_dict() if user_snapshot.exists else None
+        user = UserDocument.model_validate(user_data) if user_data is not None else None
+        current = resolve_feed_preferences(user, feed_name)
+        expected = cache_doc.effective_preferences
+        if expected is None or current.model_dump(exclude_none=True) != expected.model_dump(
+            exclude_none=True
+        ):
+            raise StaleFeedPreviewError
+
+        accepted_until = now + timedelta(seconds=ttl_seconds)
+        meta_by_uri = {meta.at_uri: meta for meta in cache_doc.items_meta}
+        accepted_cache = cache_doc.model_copy(
+            update={
+                "items": displayed_item_uris,
+                "items_meta": [
+                    meta_by_uri[at_uri] for at_uri in displayed_item_uris if at_uri in meta_by_uri
+                ],
+                "generator_diagnostics": _accepted_preview_diagnostics(
+                    cache_doc, displayed_item_uris
+                ),
+                "expires_at": accepted_until,
+                "mode": "accepted",
+            }
+        )
+
+        transaction.set(cache_ref, accepted_cache.model_dump())
+        transaction.set(
+            accepted_ref,
+            AcceptedFeedSlateDocument(
+                request_id=request_id,
+                slate=accepted_cache,
+            ).model_dump(exclude_none=True),
+        )
+        return current, None
+
+    return await _accept(transaction)
+
+
+async def claim_accepted_feed_slate(
+    db: AsyncClient,
+    user_did: str,
+    feed_name: str,
+    *,
+    claim_grace_seconds: int = 5,
+    cache_ttl_seconds: int = 600,
+) -> str | None:
+    """Claim the accepted slate for one feed load.
+
+    New handoffs embed the complete slate and wait until claimed. The first
+    request atomically materializes a fresh cursor cache and marks the handoff
+    claimed; parallel requests within a short grace period receive the same
+    slate. A later initial request consumes the pointer and generates a normal
+    fresh feed. Legacy pointer-only documents remain usable while their old
+    cache entry is still live.
+    """
+
+    ref = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(ACCEPTED_FEED_SLATES_COLLECTION)
+        .document(feed_name)
+    )
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _claim(transaction) -> str | None:
+        snapshot = await ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return None
+        data = snapshot.to_dict()
+        try:
+            accepted = AcceptedFeedSlateDocument.model_validate(data)
+        except Exception:
+            transaction.delete(ref)
+            return None
+
+        now = datetime.now(UTC)
+        cache_ref = db.collection(FEED_CACHE_COLLECTION).document(accepted.request_id)
+        slate = accepted.slate
+        if slate is None:
+            # Compatibility path for pointer-only documents written before
+            # accepted handoffs embedded their durable slate.
+            expires_at = accepted.expires_at
+            if expires_at is None:
+                transaction.delete(ref)
+                return None
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if expires_at <= now:
+                transaction.delete(ref)
+                return None
+            cache_snapshot = await cache_ref.get(transaction=transaction)
+            if not cache_snapshot.exists:
+                transaction.delete(ref)
+                return None
+            cache_data = cache_snapshot.to_dict()
+            try:
+                slate = FeedCacheDocument.model_validate(cache_data)
+            except Exception:
+                transaction.delete(ref)
+                return None
+            cache_expires_at = slate.expires_at
+            if cache_expires_at.tzinfo is None:
+                cache_expires_at = cache_expires_at.replace(tzinfo=UTC)
+            if cache_expires_at <= now:
+                transaction.delete(ref)
+                return None
+
+        if slate.mode != "accepted" or slate.user_did != user_did or slate.feed_name != feed_name:
+            transaction.delete(ref)
+            return None
+
+        claimed_at = accepted.claimed_at
+        if claimed_at is not None:
+            if claimed_at.tzinfo is None:
+                claimed_at = claimed_at.replace(tzinfo=UTC)
+            if (now - claimed_at).total_seconds() <= claim_grace_seconds:
+                return accepted.request_id
+            transaction.delete(ref)
+            return None
+
+        materialized = slate.model_copy(
+            update={
+                "generated_at": now,
+                "expires_at": now + timedelta(seconds=cache_ttl_seconds),
+                "mode": "accepted",
+            }
+        )
+        transaction.set(cache_ref, materialized.model_dump())
+        transaction.set(ref, {"claimed_at": now}, merge=True)
+        return accepted.request_id
+
+    return await _claim(transaction)
 
 
 # ---------------------------------------------------------------------------
@@ -690,11 +918,9 @@ async def merge_feed_snapshot(
     """Atomically create or extend a feed-session snapshot.
 
     Returns ``True`` when the merged session exceeded the item safety limit and
-    was truncated. Empty batches are ignored.
+    was truncated. Empty initial batches remain observable; empty later batches
+    merge diagnostics without erasing posts already served in the session.
     """
-    if not doc.items:
-        return False
-
     if len(doc.items) > MAX_FEED_SNAPSHOT_ITEMS:
         included_items = doc.items[:MAX_FEED_SNAPSHOT_ITEMS]
         included = set(included_items)
@@ -820,6 +1046,7 @@ async def get_recent_feed_snapshots(
     feed_name: str | None = None,
     cutoff: datetime | None = None,
     limit: int = 20,
+    raise_on_error: bool = False,
 ) -> list[FeedSnapshotDocument]:
     """Return a user's most recent feed snapshots, newest first.
 
@@ -854,6 +1081,8 @@ async def get_recent_feed_snapshots(
             user_did,
             feed_name,
         )
+        if raise_on_error:
+            raise
         return []
 
 
