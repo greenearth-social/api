@@ -554,6 +554,8 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         exclude_seen_posts=True,
         pinned_post_uri=None,
         pinned_post_content=None,
+        survey_post_uri=None,
+        survey_post_content=None,
         max_render_share=None,
         min_rank_score=None,
         min_mmr_score=None,
@@ -2293,7 +2295,9 @@ class TestGetFeedSkeletonAuth:
             )
 
         assert resp.status_code == 200
-        mock_activity.assert_awaited_once_with(app.state.firestore, "did:plc:autheduser", FEED_RKEY)
+        mock_activity.assert_awaited_once_with(
+            app.state.firestore, "did:plc:autheduser", FEED_RKEY, is_initial_load=True
+        )
 
     def test_feed_activity_failure_is_logged_but_non_fatal(self, caplog):
         """Feed-activity upserts run in a background task; failures are
@@ -4390,6 +4394,233 @@ class TestPinnedPost:
         assert resp.status_code == 200
         post_uris = [item["post"] for item in resp.json()["feed"]]
         assert self.PINNED_URI not in post_uris
+
+
+# ---------------------------------------------------------------------------
+# Survey post injection
+# ---------------------------------------------------------------------------
+
+
+class TestSurveyPost:
+    SURVEY_URI = "at://did:plc:notifyauthor/app.bsky.feed.post/surveypost"
+
+    def _patched_feeds(self):
+        cfg = FEEDS["your-feed"].model_copy(update={"survey_post_uri": self.SURVEY_URI})
+        return {"your-feed": cfg, **{k: v for k, v in FEEDS.items() if k != "your-feed"}}
+
+    def _eligible_activity(self):
+        from ..documents import FeedActivityDocument
+
+        return FeedActivityDocument(
+            feed_name="your-feed",
+            first_seen_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            load_count=5,
+        )
+
+    def _eligible_user(self):
+        from ..documents import UserDocument
+
+        return UserDocument(user_did="did:plc:testuser", survey_post_last_seen_at=None)
+
+    def _make_snapshot(self, uris: list[str], feed_name: str = "your-feed"):
+        from ..documents import FeedSnapshotDocument
+
+        return FeedSnapshotDocument(
+            request_id="testid",
+            items=uris,
+            feed_name=feed_name,
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+        )
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
+    def test_survey_post_injected_at_position_6(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+        """Survey post appears at position 6 for eligible users."""
+        from app.routers import xrpc as xrpc_mod
+
+        mock_get_user.return_value = self._eligible_user()
+        mock_get_activity.return_value = self._eligible_activity()
+        uris = [f"at://did:plc:a/{i}" for i in range(20)]
+        mock_pipeline.return_value = (self._make_snapshot(uris), [])
+
+        with patch.object(xrpc_mod, "FEEDS", self._patched_feeds()):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": 10},
+            )
+
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert posts[5] == self.SURVEY_URI
+        assert len(posts) == 10
+        assert self.SURVEY_URI not in posts[:5]
+        assert self.SURVEY_URI not in posts[6:]
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
+    def test_survey_not_shown_when_load_count_below_threshold(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+        """Survey post is suppressed when the user has fewer than 3 loads."""
+        from app.routers import xrpc as xrpc_mod
+        from ..documents import FeedActivityDocument
+
+        mock_get_user.return_value = self._eligible_user()
+        mock_get_activity.return_value = FeedActivityDocument(
+            feed_name="your-feed",
+            first_seen_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            load_count=2,
+        )
+        uris = [f"at://did:plc:a/{i}" for i in range(20)]
+        mock_pipeline.return_value = (self._make_snapshot(uris), [])
+
+        with patch.object(xrpc_mod, "FEEDS", self._patched_feeds()):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": 10},
+            )
+
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert self.SURVEY_URI not in posts
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
+    def test_survey_not_shown_when_seen_within_7_days(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+        """Survey post is suppressed if the user saw it within the past 7 days."""
+        from app.routers import xrpc as xrpc_mod
+        from ..documents import UserDocument
+
+        recently = datetime.now(UTC) - timedelta(days=3)
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser", survey_post_last_seen_at=recently
+        )
+        mock_get_activity.return_value = self._eligible_activity()
+        uris = [f"at://did:plc:a/{i}" for i in range(20)]
+        mock_pipeline.return_value = (self._make_snapshot(uris), [])
+
+        with patch.object(xrpc_mod, "FEEDS", self._patched_feeds()):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": 10},
+            )
+
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert self.SURVEY_URI not in posts
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
+    def test_survey_shown_after_cooldown_expires(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+        """Survey post reappears after the 7-day cooldown."""
+        from app.routers import xrpc as xrpc_mod
+        from ..documents import UserDocument
+
+        long_ago = datetime.now(UTC) - timedelta(days=8)
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser", survey_post_last_seen_at=long_ago
+        )
+        mock_get_activity.return_value = self._eligible_activity()
+        uris = [f"at://did:plc:a/{i}" for i in range(20)]
+        mock_pipeline.return_value = (self._make_snapshot(uris), [])
+
+        with patch.object(xrpc_mod, "FEEDS", self._patched_feeds()):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": 10},
+            )
+
+        assert resp.status_code == 200
+        posts = [item["post"] for item in resp.json()["feed"]]
+        assert posts[5] == self.SURVEY_URI
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
+    def test_survey_not_in_observability_snapshot(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+        """Survey URI is excluded from the feed snapshot written for the transparency API."""
+        from app.routers import xrpc as xrpc_mod
+
+        mock_get_user.return_value = self._eligible_user()
+        mock_get_activity.return_value = self._eligible_activity()
+        uris = [f"at://did:plc:a/{i}" for i in range(20)]
+        mock_pipeline.return_value = (self._make_snapshot(uris), [])
+
+        with (
+            patch.object(xrpc_mod, "FEEDS", self._patched_feeds()),
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False) as snap,
+        ):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": 10},
+            )
+
+        assert resp.status_code == 200
+        assert snap.await_args is not None
+        snapshot = snap.await_args.args[3]
+        assert self.SURVEY_URI not in snapshot.items
+
+    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
+    def test_survey_cursor_offset_excludes_survey_uri(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+        """Cursor offset counts only generated posts so page 2 continues correctly."""
+        from app.routers import xrpc as xrpc_mod
+
+        mock_get_user.return_value = self._eligible_user()
+        mock_get_activity.return_value = self._eligible_activity()
+        uris = [f"at://did:plc:a/{i}" for i in range(20)]
+        mock_pipeline.return_value = (self._make_snapshot(uris), [])
+
+        patched = self._patched_feeds()
+        # Disable pinned post so we control slot math precisely.
+        patched["your-feed"] = patched["your-feed"].model_copy(update={"pinned_post_uri": None})
+
+        with patch.object(xrpc_mod, "FEEDS", patched):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": 10},
+            ).json()
+
+        posts = [item["post"] for item in first["feed"]]
+        assert posts[5] == self.SURVEY_URI
+        assert len(posts) == 10
+        # 9 generated posts consumed (limit=10 minus 1 for survey)
+        assert FeedCursor.decode(first["cursor"]).offset == 9
+
+        with patch.object(xrpc_mod, "FEEDS", patched):
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": 10, "cursor": first["cursor"]},
+            ).json()
+
+        second_posts = [item["post"] for item in second["feed"]]
+        # Page 2 starts immediately after the last generated post on page 1.
+        assert second_posts[0] == "at://did:plc:a/9"
+        assert self.SURVEY_URI not in second_posts
 
 
 # ---------------------------------------------------------------------------

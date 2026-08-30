@@ -376,6 +376,30 @@ deploy_api_service() {
             --remove-env-vars="GE_FIRESTORE_EMULATOR_HOST,FIRESTORE_EMULATOR_HOST" > /dev/null
         log_info "Set GE_FEED_GENERATOR_DID=$generator_did (follow-up revision)"
     fi
+
+    reset_traffic_to_latest
+}
+
+# A rollback (scripts/rollback.sh) pins traffic to a named revision, which takes
+# LATEST out of the traffic split — after that, deploying would create a
+# perfectly healthy revision that serves nothing. Resetting to LATEST here makes
+# "deploy the fix" the way out of a rolled-back state, with no extra step to
+# remember. On a normal deploy this is a no-op. It runs only after the deploy
+# above succeeded, so a failed build leaves traffic where the rollback put it
+# (see issue #181).
+reset_traffic_to_latest() {
+    log_info "Pointing traffic at the latest revision..."
+
+    if ! gcloud run services update-traffic "greenearth-api-$ENVIRONMENT" \
+        --region="$REGION" \
+        --project="$PROJECT_ID" \
+        --to-latest \
+        --quiet > /dev/null; then
+        log_error "Deployed successfully, but could not point traffic at the new revision."
+        log_error "The previous revision is still serving. Retry with:"
+        log_error "  gcloud run services update-traffic greenearth-api-$ENVIRONMENT --region=$REGION --to-latest"
+        exit 1
+    fi
 }
 
 resolve_generator_did() {
@@ -400,7 +424,7 @@ sync_pinned_posts() {
     local bsky_handle="caterpie-internal.bsky.social"
     local bsky_secret="bsky-app-password-caterpie"
     if [ "$ENVIRONMENT" = "prod" ]; then
-        bsky_handle="greenearth-social.bsky.social"
+        bsky_handle="greenearth.social"
         bsky_secret="bsky-app-password-prod"
     fi
 
@@ -544,7 +568,7 @@ sync_feeds() {
         #   Pass 2 — internal feeds → Caterpie account (obfuscated names)
         _sync_feeds_to_account \
             "GreenEarth" \
-            "greenearth-social.bsky.social" \
+            "greenearth.social" \
             "bsky-app-password-prod" \
             "$generator_did" \
             "--public-only"

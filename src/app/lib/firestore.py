@@ -15,6 +15,7 @@ from google.cloud.firestore import (  # type: ignore[import-untyped]
     ArrayUnion,
     AsyncClient,
     FieldFilter,
+    Increment,
     Query,
     async_transactional,
 )
@@ -28,6 +29,7 @@ from ..documents import (
     FeedSnapshotDocument,
     GeneratorDiagnostic,
     InteractionDocument,
+    LlmQueryVectorDocument,
     RedirectDocument,
     UserDocument,
 )
@@ -561,13 +563,14 @@ async def get_feed_activity(
 
 
 async def upsert_feed_activity(
-    db: AsyncClient, user_did: str, feed_name: str
+    db: AsyncClient, user_did: str, feed_name: str, *, is_initial_load: bool = True
 ) -> FeedActivityDocument:
     """Record that a user loaded a feed.
 
     On first visit creates the document with both timestamps set to now.
     On subsequent visits updates only ``last_seen_at``; ``first_seen_at`` is
-    never overwritten.
+    never overwritten.  When ``is_initial_load`` is True (no pagination cursor),
+    ``load_count`` is also incremented so survey-post eligibility can be checked.
     """
     ref = (
         db.collection(USERS_COLLECTION)
@@ -586,17 +589,29 @@ async def upsert_feed_activity(
                 "Firestore feed_activity document exists but to_dict() returned "
                 f"None for {user_did}/{feed_name}"
             )
-        await ref.update({"last_seen_at": now})
+        update: dict = {"last_seen_at": now}
+        if is_initial_load:
+            update["load_count"] = Increment(1)
+        await ref.update(update)
         data["last_seen_at"] = now
+        if is_initial_load:
+            data["load_count"] = (data.get("load_count") or 0) + 1
         return FeedActivityDocument.model_validate(data)
 
     activity = FeedActivityDocument(
         feed_name=feed_name,
         first_seen_at=now,
         last_seen_at=now,
+        load_count=1 if is_initial_load else 0,
     )
     await ref.set(activity.model_dump())
     return activity
+
+
+async def update_survey_post_seen(db: AsyncClient, user_did: str) -> None:
+    """Stamp when the user last received an interactionSeen event for the survey post."""
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    await ref.update({"survey_post_last_seen_at": datetime.now(UTC)})
 
 
 # ---------------------------------------------------------------------------
@@ -1166,3 +1181,87 @@ async def delete_redirect(db: AsyncClient, slug: str) -> bool:
         return False
     await ref.delete()
     return True
+
+
+# ---------------------------------------------------------------------------
+# LLM query vectors  (subcollection of users)
+# ---------------------------------------------------------------------------
+
+LLM_QUERY_VECTORS_SUBCOLLECTION = "llm_query_vectors"
+
+
+async def get_llm_query_vector(
+    db: AsyncClient, user_did: str, prompt_key: str
+) -> LlmQueryVectorDocument | None:
+    """Fetch one LLM query vector by user and prompt key, or ``None`` if not found."""
+    doc = await (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(LLM_QUERY_VECTORS_SUBCOLLECTION)
+        .document(prompt_key)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    data = doc.to_dict()
+    if data is None:
+        return None
+    return LlmQueryVectorDocument.model_validate(data)
+
+
+async def get_all_llm_query_vectors(
+    db: AsyncClient, user_did: str
+) -> list[LlmQueryVectorDocument]:
+    """Return all LLM query vector documents for a user."""
+    query = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(LLM_QUERY_VECTORS_SUBCOLLECTION)
+    )
+    docs: list[LlmQueryVectorDocument] = []
+    async for doc in query.stream():
+        data = doc.to_dict()
+        if data is not None:
+            docs.append(LlmQueryVectorDocument.model_validate(data))
+    return docs
+
+
+async def upsert_llm_query_vector(
+    db: AsyncClient,
+    user_did: str,
+    prompt_key: str,
+    query_vector: list[float],
+    prompt: str,
+) -> LlmQueryVectorDocument:
+    """Create or replace the LLM query vector for a (user, prompt) pair.
+
+    On first write the document is created with both timestamps set to now.
+    On subsequent writes ``query_vector``, ``prompt``, and ``updated_at`` are
+    refreshed; ``created_at`` is left unchanged.
+    """
+    ref = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(LLM_QUERY_VECTORS_SUBCOLLECTION)
+        .document(prompt_key)
+    )
+    doc = await ref.get()
+
+    now = datetime.now(UTC)
+
+    if doc.exists:
+        await ref.update({"query_vector": query_vector, "prompt": prompt, "updated_at": now})
+        data = doc.to_dict() or {}
+        data.update({"query_vector": query_vector, "prompt": prompt, "updated_at": now})
+        return LlmQueryVectorDocument.model_validate(data)
+
+    record = LlmQueryVectorDocument(
+        prompt_key=prompt_key,
+        user_did=user_did,
+        query_vector=query_vector,
+        prompt=prompt,
+        created_at=now,
+        updated_at=now,
+    )
+    await ref.set(record.model_dump())
+    return record

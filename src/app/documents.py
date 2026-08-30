@@ -116,6 +116,11 @@ class UserDocument(BaseModel):
         default_factory=dict,
         description="Per-feed control values keyed by canonical feed name.",
     )
+    survey_post_last_seen_at: datetime | None = Field(
+        default=None,
+        description="When the user last received an interactionSeen event for the survey post. "
+        "Used to enforce the once-per-week throttle.",
+    )
     created_by_load_test: bool = Field(
         default=False,
         description="True when this document was created by a load-test session and no real "
@@ -271,6 +276,10 @@ class FeedActivityDocument(BaseModel):
     )
     last_seen_at: datetime = Field(
         default_factory=_utcnow, description="Most recent time the user loaded this feed"
+    )
+    load_count: int = Field(
+        default=0,
+        description="Number of initial (no-cursor) feed loads recorded for this feed.",
     )
 
 
@@ -612,6 +621,26 @@ class PopularityCacheDocument(BaseModel):
     )
     api_release_sha: str | None = Field(
         default=None, description="Git SHA of the API instance that wrote this entry"
+    )
+
+
+class LlmQueryVectorDocument(BaseModel):
+    """Precomputed LLM query vector for a user prompt.
+
+    Stored at ``users/{user_did}/llm_query_vectors/{prompt_key}``.
+    One document per (user, prompt) pair, so a user can hold vectors for
+    multiple prompts simultaneously.
+    """
+
+    prompt_key: str = Field(..., description="Prompt identifier (also the document ID)")
+    user_did: str = Field(..., description="AT Protocol DID of the user")
+    query_vector: list[float] = Field(..., description="Embedding vector for candidate retrieval")
+    prompt: str = Field(..., description="Prompt text used to generate the vector")
+    created_at: datetime = Field(
+        default_factory=_utcnow, description="When the document was first written"
+    )
+    updated_at: datetime = Field(
+        default_factory=_utcnow, description="Last time the vector was refreshed"
     )
 
 

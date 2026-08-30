@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -107,6 +108,7 @@ def _client_summary(records: list[dict]) -> None:
 # metrics.py) surfaces as this monitored-resource label in Cloud Monitoring.
 # It separates stage from prod, which share the project and the metric type.
 ENV_RESOURCE_LABEL = "namespace"
+METRIC_PREFIX = "custom.googleapis.com/greenearth-api"
 
 # The percentiles to pull, mapped to Cloud Monitoring cross-series reducers.
 # feed.render.duration_ms is exported as a CUMULATIVE DISTRIBUTION, and the
