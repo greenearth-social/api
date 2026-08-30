@@ -191,11 +191,11 @@ FEEDS: dict[str, FeedConfig] = {
         ),
         survey_post_uri=_survey_post_uri(
             "your-feed",
-            "at://did:plc:66mudnfk2p4olwpaskmrw2vq/app.bsky.feed.post/3mtxartxzwx2s",
+            "at://did:plc:66mudnfk2p4olwpaskmrw2vq/app.bsky.feed.post/3mu3wufox4t2l",
         ),
         survey_post_content=(
             "🦋 Enjoying MySky? Or not? 🦋\n"
-            "[Sign up here](https://calendly.com/jonathanstray/bluesky-algorithms-talk) "
+            "[Sign up here](https://www.greenearth.social/p/build-the-open-social-web-by-talking) "
             "for a paid user interview, $15 to help us build the open social web."
         ),
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
