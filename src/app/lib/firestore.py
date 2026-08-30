@@ -385,7 +385,7 @@ async def accept_feed_preview(
         )
         requested_patch = preference_patch.model_dump(exclude_none=True)
         if (
-            cache_doc.mode != "preview"
+            cache_doc.mode not in {"preview", "accepted"}
             or cache_doc.user_did != user_did
             or cache_doc.feed_name != feed_name
             or cache_expires_at <= now
@@ -393,12 +393,19 @@ async def accept_feed_preview(
         ):
             return None
 
-        cursor = 0
-        for at_uri in displayed_item_uris:
-            try:
-                cursor = cache_doc.items.index(at_uri, cursor) + 1
-            except ValueError:
+        if cache_doc.mode == "accepted":
+            # Re-staging is used by Settings Undo/Redo to return to the exact
+            # previously displayed slate. Never let that path mutate or trim
+            # the accepted ordering.
+            if displayed_item_uris != cache_doc.items:
                 return None
+        else:
+            cursor = 0
+            for at_uri in displayed_item_uris:
+                try:
+                    cursor = cache_doc.items.index(at_uri, cursor) + 1
+                except ValueError:
+                    return None
         if len(displayed_item_uris) != len(set(displayed_item_uris)):
             return None
 

@@ -665,7 +665,8 @@ def test_get_feed_preview_hides_served_cache_entries(client):
 
 
 @patch("app.routers.feed_transparency.accept_feed_preview", new_callable=AsyncMock)
-def test_accept_preview_persists_the_exact_visible_slate(mock_accept, client):
+@pytest.mark.parametrize("cache_mode", ["preview", "accepted"])
+def test_accept_preview_persists_the_exact_visible_slate(mock_accept, client, cache_mode):
     snapshot = _snapshot_doc(request_id="preview-accept")
     uri = snapshot.items[0]
     app.state.feed_cache = MagicMock(
@@ -677,7 +678,7 @@ def test_accept_preview_persists_the_exact_visible_slate(mock_accept, client):
                 feed_name="your-feed",
                 generated_at=snapshot.generated_at,
                 expires_at=datetime.now(UTC) + timedelta(minutes=5),
-                mode="preview",
+                mode=cache_mode,
                 preference_patch=FeedPreferencesDocument(freshness=2),
             )
         )

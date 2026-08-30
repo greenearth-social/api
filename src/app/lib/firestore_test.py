@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,8 +28,8 @@ from ..lib.firestore import (
     MAX_FEED_SNAPSHOT_DOCUMENTS,
     MAX_FEED_SNAPSHOT_ITEMS,
     SEEN_POSTS_COLLECTION,
-    StaleFeedPreviewError,
     USERS_COLLECTION,
+    StaleFeedPreviewError,
     _accepted_preview_diagnostics,
     _merge_feed_snapshots,
     accept_feed_preview,
@@ -519,9 +520,13 @@ async def test_patch_user_feed_preferences_materializes_in_transaction():
 
 
 @pytest.mark.asyncio
-async def test_accept_feed_preview_stages_cache_without_rewriting_preferences():
+@pytest.mark.parametrize("cache_mode", ["preview", "accepted"])
+async def test_accept_feed_preview_stages_cache_without_rewriting_preferences(
+    cache_mode: Literal["preview", "accepted"],
+):
     now = datetime.now(UTC)
     uri = "at://did:plc:author/app.bsky.feed.post/accepted"
+    cached_items = [uri] if cache_mode == "accepted" else [uri, "at://filtered"]
     db = MagicMock()
     transaction = MagicMock()
     db.transaction.return_value = transaction
@@ -552,13 +557,13 @@ async def test_accept_feed_preview_stages_cache_without_rewriting_preferences():
         return_value=_mock_doc_snapshot(
             True,
             FeedCacheDocument(
-                items=[uri, "at://filtered"],
-                items_meta=[PipelineItemMeta(at_uri=uri), PipelineItemMeta(at_uri="at://filtered")],
+                items=cached_items,
+                items_meta=[PipelineItemMeta(at_uri=item) for item in cached_items],
                 user_did=USER_DID,
                 feed_name="your-feed",
                 generated_at=now,
                 expires_at=now + timedelta(minutes=5),
-                mode="preview",
+                mode=cache_mode,
                 preference_patch=FeedPreferencesDocument(freshness=2),
                 effective_preferences=effective_preferences,
             ).model_dump(),
@@ -603,6 +608,21 @@ async def test_accept_feed_preview_stages_cache_without_rewriting_preferences():
     assert "expires_at" not in pointer_write.args[1]
     assert all(call.args[0] is not user_ref for call in transaction.set.call_args_list)
     transaction.delete.assert_not_called()
+
+    if cache_mode == "accepted":
+        transaction.reset_mock()
+        with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+            changed_order = await accept_feed_preview(
+                db,
+                USER_DID,
+                "your-feed",
+                "preview-id",
+                FeedPreferencesDocument(freshness=2),
+                [],
+                ttl_seconds=600,
+            )
+        assert changed_order is None
+        transaction.set.assert_not_called()
 
 
 @pytest.mark.asyncio
