@@ -19,11 +19,16 @@ Freshness comes from three places:
 1. **Jetstream** (``ingex``) appends newly-followed DIDs to ``pending_adds``
    and stamps ``invalidated_at`` on an unfollow.  This is the primary
    mechanism; the TTL below is the backstop for anything it misses.
-2. **A TTL refresh**, run in the background after a response has been served,
-   so no user request ever waits on Bluesky.
+2. **A recurring backfill job** (``ingex``'s ``followed_users_backfill``,
+   see api#453), which re-walks any entry this module's ``_staleness`` rule
+   would flag. The API itself no longer refreshes on staleness — it only
+   still does one synchronous cold-start walk when there is no entry at all,
+   and falls back to a live walk on a Firestore read failure. Both of those
+   remaining cases are "nothing to serve", not "what's cached is aging".
 3. **The completeness flag** — see :class:`~app.lib.bsky.FollowsFetch`.  A
-   truncated walk is still served, but is never trusted: it refreshes on every
-   read until one walk finishes, and it can never overwrite a complete entry.
+   truncated walk is still served, but is never trusted: it is flagged for the
+   backfill job on every read until one walk finishes, and it can never
+   overwrite a complete entry.
 
 Every failure degrades to the pre-cache behaviour rather than breaking feed
 serving: a Firestore outage means a live Bluesky walk, and a Bluesky outage
@@ -37,12 +42,11 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from google.cloud.firestore import (  # type: ignore[import-untyped]
     AsyncClient,
     FieldFilter,
-    async_transactional,
 )
 
 from .bsky import FollowedUsersLookupError, FollowsFetch, fetch_followed_user_dids
@@ -89,30 +93,6 @@ def _int_env(name: str, default: int) -> int:
 def ttl_seconds() -> int:
     """Age at which an entry is refreshed. A backstop under jetstream, so hours."""
     return _int_env("GE_FOLLOWS_CACHE_TTL_SEC", 21_600)  # 6 hours
-
-
-def lease_seconds() -> int:
-    """Longest a refresh may hold the lease before another instance may retry."""
-    return _int_env("GE_FOLLOWS_CACHE_LEASE_SEC", 30)
-
-
-def refresh_timeout_seconds() -> float:
-    """Budget for a background walk.
-
-    Generous compared with the request-path clamp in ``bsky.py``: nothing is
-    waiting on it, and a walk that gives up early writes an incomplete entry
-    that has to be redone.
-    """
-    return float(_int_env("GE_FOLLOWS_REFRESH_TIMEOUT_SEC", 15))
-
-
-def retry_cooldown_seconds() -> int:
-    """Quiet period after a failed refresh.
-
-    Without it, a user whose follows cannot be fetched would spawn a refresh
-    task on every single request.
-    """
-    return _int_env("GE_FOLLOWS_CACHE_RETRY_COOLDOWN_SEC", 60)
 
 
 def sweep_interval_seconds() -> int:
@@ -171,17 +151,21 @@ class FollowedUsersCache:
 
     def __init__(self, db: AsyncClient) -> None:
         self._db = db
-        # In-flight refreshes, so one instance does not stack duplicate tasks
-        # for the same user while a refresh is already running.
+        # In-flight background tasks, so one instance does not stack
+        # duplicates for the same key (a cold-store write, the sweep).
         self._refreshing: set[str] = set()
-        # Strong references keep background refreshes from being garbage
+        # Strong references keep background tasks from being garbage
         # collected mid-flight; the done callback drops them.
         self._tasks: set[asyncio.Task] = set()
 
     # -- public API --------------------------------------------------------
 
     async def get_followed_dids(self, user_did: str) -> list[str]:
-        """Return the DIDs *user_did* follows, refreshing in the background if stale.
+        """Return the DIDs *user_did* follows.
+
+        A stale, incomplete, or invalidated entry is still served as-is —
+        see the module docstring — the ingex backfill job re-walks it, not
+        this request path.
 
         Raises :class:`FollowedUsersLookupError` only when there is nothing
         cached *and* the live walk fails — the same signal the generators
@@ -222,8 +206,10 @@ class FollowedUsersCache:
             self._record("hit")
             return follows
 
+        # Refreshing stale entries is now owned by the ingex followed-users
+        # backfill job (a recurring Cloud Run Job), not the request path —
+        # see api#453. This branch only records why the entry is stale.
         self._record(reason)
-        self._spawn(key, self._refresh(key, user_did))
         return follows
 
     async def drain(self) -> None:
@@ -326,135 +312,6 @@ class FollowedUsersCache:
             fetch.complete,
         )
 
-    async def _claim(self, key: str) -> bool:
-        """Take the refresh lease for *key*, transactionally.
-
-        Returns ``False`` when another instance already refreshed the entry,
-        is refreshing it now under an unexpired lease, or failed so recently
-        that a retry would be pointless.
-        """
-        from ..documents import FollowedUsersCacheDocument  # cycle; see _read
-
-        ref = self._doc_ref(key)
-        lease = lease_seconds()
-        cooldown = retry_cooldown_seconds()
-
-        async def claim(transaction) -> bool:
-            now = datetime.now(timezone.utc)
-            snapshot = await ref.get(transaction=transaction)
-            data = snapshot.to_dict() if snapshot.exists else None
-            if data is not None:
-                try:
-                    entry = FollowedUsersCacheDocument.model_validate(data)
-                except Exception:
-                    # Unreadable: claim it and overwrite with a good one.
-                    entry = FollowedUsersCacheDocument()
-                else:
-                    if self._staleness(entry) is None:
-                        return False
-                started = _age_seconds(entry.refresh_started_at, now)
-                if started is not None and started < lease:
-                    return False
-                failed = _age_seconds(entry.refresh_failed_at, now)
-                if failed is not None and failed < cooldown:
-                    return False
-            transaction.set(ref, {"refresh_started_at": now}, merge=True)
-            return True
-
-        return await self._run_transaction(claim)
-
-    async def _run_transaction(self, body: Callable[..., Awaitable[bool]]) -> bool:
-        """Run *body* inside a Firestore transaction.
-
-        A seam: the SDK's transaction machinery is impractical to fake, so
-        tests substitute a plain transaction object here and exercise the
-        claim logic itself.
-        """
-        return await async_transactional(body)(self._db.transaction())
-
-    async def _refresh(self, key: str, user_did: str) -> None:
-        """Re-walk one user's follows, if this process wins the lease.
-
-        Runs detached from any request, so every failure is contained here:
-        the worst outcome is that the entry stays stale until the next request
-        tries again.
-        """
-        outcome = "error"
-        try:
-            if not await self._claim(key):
-                outcome = "skipped"
-                return
-            try:
-                fetch = await self._fetch(user_did, timeout_seconds=refresh_timeout_seconds())
-            except FollowedUsersLookupError:
-                logger.warning("Followed-users refresh for %s found nothing", user_did)
-                outcome = "failed"
-                await self._release(key, failed=True)
-                return
-
-            previous = await self._read(key)
-            if not fetch.complete and previous is not None and previous.complete:
-                # A partial walk must never shrink a complete entry. Leave it
-                # stale so the next request tries again.
-                logger.info(
-                    "Discarding partial followed-users refresh for %s (%d dids); "
-                    "keeping the complete entry",
-                    user_did,
-                    len(fetch.dids),
-                )
-                outcome = "partial_discarded"
-                await self._release(key, failed=True)
-                return
-
-            self._note_drift(previous, fetch, user_did)
-            await self._doc_ref(key).set(self._document(fetch))
-            outcome = "success" if fetch.complete else "partial"
-            logger.info(
-                "Refreshed followed-users cache for %s follows=%d complete=%s",
-                user_did,
-                len(fetch.dids),
-                fetch.complete,
-            )
-        except Exception:
-            logger.exception("Followed-users cache refresh failed for %s", user_did)
-            await self._release(key, failed=True)
-        finally:
-            self._refreshing.discard(key)
-            if mc := get_metric_collector():
-                mc.record("follows_cache.refresh_count", 1, outcome=outcome)
-
-    def _note_drift(
-        self,
-        previous: "FollowedUsersCacheDocument | None",
-        fetch: FollowsFetch,
-        user_did: str,
-    ) -> None:
-        """Record how far the refreshed set moved from what we were serving.
-
-        This is the only correctness signal in the system. An entry that is
-        confidently ``complete`` but *wrong* — because jetstream deltas were
-        dropped and the TTL had not yet fired — is otherwise indistinguishable
-        from a correct one. In steady state churn per refresh sits near zero;
-        a rising delta at TTL boundaries means the live update path is not
-        doing its job.
-        """
-        if previous is None:
-            return  # Nothing was being served; there is no drift to speak of.
-        served = set(_merge(previous.follows, previous.pending_adds))
-        refreshed = set(fetch.dids)
-        added = len(refreshed - served)
-        removed = len(served - refreshed)
-        if mc := get_metric_collector():
-            mc.record("follows_cache.refresh_added", added)
-            mc.record("follows_cache.refresh_removed", removed)
-        if added or removed:
-            logger.info(
-                "Followed-users refresh for %s moved the set: +%d -%d",
-                user_did,
-                added,
-                removed,
-            )
-
     def _maybe_sweep(self) -> None:
         """Schedule a population sweep if one is due.
 
@@ -512,21 +369,6 @@ class FollowedUsersCache:
         """Unwrap a Firestore count() aggregation result."""
         result = await aggregation.get()
         return int(result[0][0].value)
-
-    async def _release(self, key: str, *, failed: bool) -> None:
-        """Drop the lease so the next request can retry immediately.
-
-        The lease exists to exclude concurrent refreshes, not to impose a
-        penalty box; ``refresh_failed_at`` is what paces the retries.
-        """
-        update: dict = {"refresh_started_at": None}
-        if failed:
-            update["refresh_failed_at"] = datetime.now(timezone.utc)
-        try:
-            await self._doc_ref(key).set(update, merge=True)
-        except Exception:
-            # The lease expires on its own; nothing further to do.
-            logger.warning("Failed to release followed-users refresh lease for %s", key)
 
     def _spawn(self, key: str, coro) -> None:
         if key in self._refreshing:
