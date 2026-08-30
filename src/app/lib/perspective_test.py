@@ -98,6 +98,28 @@ class TestPrcScore:
         # all at 1.0 -> raw score = -1.0 -> final score = 0.0
         assert _prc_score(attr) == pytest.approx(0.0)
 
+    def test_matches_the_ingest_implementation(self):
+        """The Go half of this formula lives in ingex's
+        internal/perspective/attributes.go, and the api reads its output
+        straight out of Elasticsearch. If the two drift, a post's score starts
+        depending on which service happened to compute it — a scored post and
+        an unscored one would rank differently for the same text.
+
+        These are the same three anchors asserted in attributes_test.go there.
+        """
+        assert _prc_score(_zero_attr()) == pytest.approx(0.5)
+
+        all_bridging = {**_zero_attr(), **dict.fromkeys(_BRIDGING_ATTRS, 1.0)}
+        assert _prc_score(all_bridging) == pytest.approx(1.0)
+
+        mixed = {
+            **dict.fromkeys(_BRIDGING_ATTRS, 0.6),
+            **dict.fromkeys(_OUTRAGE_SIXTH_ATTRS, 0.3),
+            **dict.fromkeys(_OUTRAGE_EIGHTEENTH_ATTRS, 0.9),
+            **dict.fromkeys(_TOXIC_EIGHTH_ATTRS, 0.4),
+        }
+        assert _prc_score(mixed) == pytest.approx(0.575)
+
     def test_known_mixed_inputs(self):
         attr = {
             **dict.fromkeys(_BRIDGING_ATTRS, 0.6),
@@ -781,3 +803,209 @@ class TestScoreCandidatesDegradation:
 
         assert all(v is None for v in scores.values())
         assert len(ctx.degradations) == 2  # one per post — conservative tracking
+
+
+# ---------------------------------------------------------------------------
+# Stored scores from ingest
+#
+# ingest scores posts on the way in (ingex's internal/perspective), so serving
+# should be reading those rather than re-scoring the same post for every user
+# who sees it. What these tests pin down is that the *absence* of stored
+# fields is still the old behaviour, exactly — which is what lets this api
+# change and the ingest change deploy in either order, or one without the
+# other, without a flag.
+# ---------------------------------------------------------------------------
+
+
+def _scored_candidate(uri: str, score: float, content: str = "text") -> CandidatePost:
+    return CandidatePost(
+        at_uri=uri,
+        content=content,
+        combined_perspective_score=score,
+        perspective_scored_at="2026-08-28T00:00:00Z",
+    )
+
+
+def _unscorable_candidate(uri: str, content: str = "text") -> CandidatePost:
+    """A post ingest submitted and the API declined — unsupported language, or
+    no text. Stamped, deliberately without a score."""
+    return CandidatePost(
+        at_uri=uri,
+        content=content,
+        perspective_scored_at="2026-08-28T00:00:00Z",
+    )
+
+
+class TestScoreCandidatesUsesStoredScores:
+    def test_stored_score_is_used_without_calling_the_api(self):
+        candidates = [_scored_candidate("at://a/1", 0.73)]
+        fake = _fake_client([])
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
+            result = asyncio.run(score_candidates(candidates))
+
+        assert result == {"at://a/1": 0.73}
+        fake.score.assert_not_called()
+
+    def test_zero_stored_score_is_a_score_not_a_miss(self):
+        """0.0 is maximally toxic. Treating it as absent would silently
+        re-score exactly the posts the ranker most needs to demote."""
+        candidates = [_scored_candidate("at://a/1", 0.0)]
+        fake = _fake_client([])
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
+            result = asyncio.run(score_candidates(candidates))
+
+        assert result == {"at://a/1": 0.0}
+        fake.score.assert_not_called()
+
+    def test_unscorable_post_is_not_resubmitted(self):
+        """ingest already asked and was refused. Asking again spends quota to
+        be refused again, on every request, forever."""
+        candidates = [_unscorable_candidate("at://a/1")]
+        fake = _fake_client([])
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
+            result = asyncio.run(score_candidates(candidates))
+
+        assert result == {"at://a/1": None}
+        fake.score.assert_not_called()
+
+    def test_unscored_post_still_calls_the_api(self):
+        """No stored fields is the pre-change path, unchanged."""
+        candidates = [_make_candidate("at://a/1", content="hello")]
+        fake = _fake_client([0.42])
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
+            result = asyncio.run(score_candidates(candidates))
+
+        assert result == {"at://a/1": 0.42}
+        fake.score.assert_awaited_once_with("hello")
+
+    def test_mixed_slate_calls_only_the_uncached_candidates(self):
+        """The steady state: posts predating ingest scoring, posts ingest
+        skipped under quota pressure, and unscorable posts all coexist with
+        scored ones. Resolution is per-candidate."""
+        candidates = [
+            _scored_candidate("at://a/1", 0.9),
+            _make_candidate("at://a/2", content="needs scoring"),
+            _unscorable_candidate("at://a/3"),
+            _make_candidate("at://a/4", content="also needs scoring"),
+        ]
+        fake = _fake_client([0.2, 0.3])
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
+            result = asyncio.run(score_candidates(candidates))
+
+        assert result == {
+            "at://a/1": 0.9,
+            "at://a/2": 0.2,
+            "at://a/3": None,
+            "at://a/4": 0.3,
+        }
+        # Exactly the two uncached ones, in candidate order.
+        assert [call.args[0] for call in fake.score.await_args_list] == [
+            "needs scoring",
+            "also needs scoring",
+        ]
+
+    def test_no_perspective_fields_at_all_behaves_exactly_as_before(self):
+        """The deploy-order guarantee: an Elasticsearch index that has never
+        seen a perspective field yields candidates with both fields None, and
+        every one of them takes the live path. Deploying this api ahead of the
+        ingest change must be a no-op."""
+        candidates = [
+            _make_candidate("at://a/1", content="one"),
+            _make_candidate("at://a/2", content=None),
+            _make_candidate("at://a/3", content="three"),
+        ]
+        assert all(
+            c.combined_perspective_score is None and c.perspective_scored_at is None
+            for c in candidates
+        )
+        fake = _fake_client([0.1, 0.3])
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
+            result = asyncio.run(score_candidates(candidates))
+
+        assert result == {"at://a/1": 0.1, "at://a/2": None, "at://a/3": 0.3}
+
+    def test_candidates_without_at_uri_are_still_dropped(self):
+        candidates = [
+            _scored_candidate("at://a/1", 0.5),
+            CandidatePost(at_uri=None, content="orphan"),
+        ]
+        fake = _fake_client([])
+
+        with patch("app.lib.perspective._get_client", return_value=fake):
+            result = asyncio.run(score_candidates(candidates))
+
+        assert result == {"at://a/1": 0.5}
+
+    def test_fully_cached_slate_never_builds_a_client(self):
+        """Nothing to ask means nothing to connect to — a feed of entirely
+        pre-scored posts should not touch the network at all."""
+        candidates = [_scored_candidate("at://a/1", 0.5), _unscorable_candidate("at://a/2")]
+
+        with patch("app.lib.perspective._get_client") as mock_get:
+            mock_get.return_value = _fake_client([])
+            result = asyncio.run(score_candidates(candidates))
+            client = mock_get.return_value
+
+        assert result == {"at://a/1": 0.5, "at://a/2": None}
+        client.score.assert_not_called()
+
+
+class TestScoreCandidatesCacheMetrics:
+    """cached_count vs live_count is how ingest coverage is watched. A
+    regression — a mapping change, a stalled ingest — should read as the
+    cache rate falling, not as an unexplained latency rise."""
+
+    def _record_metrics(self, candidates, scores):
+        recorded: list[tuple[str, float]] = []
+        collector = MagicMock()
+        collector.record = lambda name, value, **kw: recorded.append((name, value))
+
+        with (
+            patch("app.lib.perspective._get_client", return_value=_fake_client(scores)),
+            patch("app.lib.perspective.get_metric_collector", return_value=collector),
+        ):
+            asyncio.run(score_candidates(candidates))
+        return dict(recorded)
+
+    def test_counts_cached_and_live_candidates(self):
+        metrics = self._record_metrics(
+            [
+                _scored_candidate("at://a/1", 0.9),
+                _unscorable_candidate("at://a/2"),
+                _make_candidate("at://a/3", content="live"),
+            ],
+            [0.4],
+        )
+        # Unscorable counts as cached: it cost no API call, which is the thing
+        # the metric is measuring.
+        assert metrics["perspective.score.cached_count"] == 2
+        assert metrics["perspective.score.live_count"] == 1
+
+    def test_reports_zero_cached_before_ingest_scoring_exists(self):
+        metrics = self._record_metrics(
+            [_make_candidate("at://a/1", content="live")],
+            [0.4],
+        )
+        assert metrics["perspective.score.cached_count"] == 0
+        assert metrics["perspective.score.live_count"] == 1
+
+
+def test_serving_quota_leaves_a_buffer_under_the_shared_limit():
+    """The 36 000 RPM Perspective quota is shared with ingest, which takes
+    9 000 RPM (GE_PERSPECTIVE_QPS=150 in ingex). The two are set to sum to
+    35 700, not 36 000, because neither limiter is exact — this one is a
+    per-process bucket and the api runs several processes.
+
+    If you change this, change ingest's to match. The failure mode is 429s in
+    production, which no test on either side can see.
+    """
+    serving_rpm = 26700
+    ingest_rpm = 9000
+    assert perspective_module._QUOTA_RPM == serving_rpm
+    assert serving_rpm + ingest_rpm == 35700
