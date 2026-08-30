@@ -134,6 +134,15 @@ def test_list_feeds_queries_last_24_hours_with_100_document_limit(mock_query, cl
     assert mock_query.await_args is not None
     assert earliest_cutoff <= mock_query.await_args.kwargs["cutoff"] <= latest_cutoff
     assert mock_query.await_args.kwargs["limit"] == 100
+    assert mock_query.await_args.kwargs["raise_on_error"] is True
+
+
+@patch("app.routers.feed_transparency.get_recent_feed_snapshots")
+def test_list_feeds_does_not_report_query_failures_as_empty_history(mock_query, client):
+    mock_query.side_effect = RuntimeError("query unavailable")
+
+    with pytest.raises(RuntimeError, match="query unavailable"):
+        client.get("/api/feeds")
 
 
 @patch("app.routers.feed_transparency.get_recent_feed_snapshots")
@@ -1263,6 +1272,24 @@ def test_patch_preferences_updates_only_selected_feed(mock_patch_prefs, mock_del
     args = mock_patch_prefs.await_args.args
     assert args[1:3] == ("did:plc:test-user", "best-of-friends")
     assert args[3].model_dump(exclude_none=True) == {"freshness": 4}
+    mock_delete_seen.assert_awaited_once()
+
+
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+def test_patch_preferences_succeeds_when_seen_cleanup_fails(
+    mock_patch_prefs, mock_delete_seen, client
+):
+    mock_patch_prefs.return_value = FeedPreferencesDocument(freshness=4, purpose=0.65)
+    mock_delete_seen.side_effect = RuntimeError("cleanup unavailable")
+
+    response = client.patch(
+        "/api/feeds/preferences/best-of-friends",
+        json={"freshness": 4},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"freshness": 4, "purpose": 0.65}
     mock_delete_seen.assert_awaited_once()
 
 

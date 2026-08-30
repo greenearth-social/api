@@ -211,7 +211,13 @@ async def list_feeds(
     # Query all recent loads without a feed-name index, then expose only the
     # configured public pages below. In-memory canonicalization also keeps
     # legacy snapshots written with a stage/internal published rkey visible.
-    docs = await get_recent_feed_snapshots(db, user_doc_id, cutoff=cutoff, limit=DEFAULT_LIST_LIMIT)
+    docs = await get_recent_feed_snapshots(
+        db,
+        user_doc_id,
+        cutoff=cutoff,
+        limit=DEFAULT_LIST_LIMIT,
+        raise_on_error=True,
+    )
 
     summaries: list[FeedSummary] = []
     seen_snapshots: set[tuple[str, tuple[str, ...]]] = set()
@@ -326,7 +332,12 @@ async def patch_preferences(
         feed_name,
         patch,
     )
-    await delete_most_recent_seen_bucket(db, user_did)
+    try:
+        await delete_most_recent_seen_bucket(db, user_did)
+    except Exception:
+        # Preference persistence has already committed. Seen-history cleanup is
+        # best-effort and must not make the client roll back a successful save.
+        logger.exception("Failed to clear seen-post history for user '%s'", user_did)
     return FeedPreferences.model_validate(updated.model_dump(exclude_none=True))
 
 

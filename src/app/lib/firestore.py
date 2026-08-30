@@ -1031,6 +1031,7 @@ async def get_recent_feed_snapshots(
     feed_name: str | None = None,
     cutoff: datetime | None = None,
     limit: int = 20,
+    raise_on_error: bool = False,
 ) -> list[FeedSnapshotDocument]:
     """Return a user's most recent feed snapshots, newest first.
 
@@ -1065,6 +1066,8 @@ async def get_recent_feed_snapshots(
             user_did,
             feed_name,
         )
+        if raise_on_error:
+            raise
         return []
 
 

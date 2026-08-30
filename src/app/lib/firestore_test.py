@@ -39,6 +39,7 @@ from ..lib.firestore import (
     get_newer_feed_snapshot_uris,
     get_recent_discarded_uris,
     get_recent_feed_debug,
+    get_recent_feed_snapshots,
     get_recent_seen_uris,
     get_user,
     get_user_by_username,
@@ -1192,6 +1193,23 @@ class TestGetRecentFeedDebug:
 
         assert len(docs) == 1
         assert docs[0].request_id == REQUEST_ID
+
+
+class TestGetRecentFeedSnapshots:
+    @pytest.mark.asyncio
+    async def test_can_propagate_query_errors_to_authoritative_callers(self):
+        async def failing_stream():
+            raise RuntimeError("query unavailable")
+            yield
+
+        db = MagicMock()
+        query = MagicMock()
+        query.stream.return_value = failing_stream()
+        collection = db.collection.return_value.document.return_value.collection.return_value
+        collection.order_by.return_value.limit.return_value = query
+
+        with pytest.raises(RuntimeError, match="query unavailable"):
+            await get_recent_feed_snapshots(db, USER_DID, raise_on_error=True)
 
 
 class TestGetFeedDebug:
