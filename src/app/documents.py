@@ -193,10 +193,17 @@ class FollowedUsersCacheDocument(BaseModel):
     The document ID is the user's ``user_doc_id``.  Replaces a live
     ``app.bsky.graph.getFollows`` walk on every feed request (see issue #83).
 
-    Two writers touch this document.  The API owns ``follows`` and rewrites it
-    on refresh; the jetstream ingester only ever appends to ``pending_adds``
-    (via ``ArrayUnion``, so it never reads first) or stamps ``invalidated_at``.
-    That split is what keeps the two writers from clobbering each other.
+    Three writers touch this document.  The API's cold-start path writes a
+    full document (``follows``, ``complete``, ``generated_at``, etc.) the
+    first time a user is ever seen; ``ingex``'s recurring backfill job
+    (api#453) writes that same full shape on a schedule to refresh entries
+    that are already cached.  Both are full, from-scratch writes of a
+    completed Bluesky walk, so last-write-wins between them is safe.  The
+    jetstream ingester is different: it only ever appends to
+    ``pending_adds`` (via ``ArrayUnion``, so it never reads first) or
+    stamps ``invalidated_at`` — it never touches ``follows``/``complete``/
+    ``generated_at`` directly, which is what keeps it from clobbering
+    either of the other two writers.
     """
 
     follows: list[str] = Field(
@@ -209,10 +216,10 @@ class FollowedUsersCacheDocument(BaseModel):
         default=False,
         description="True when the walk that produced 'follows' exhausted the cursor or hit "
         "the follow cap.  False means it was truncated by an error or an expired "
-        "budget, and the entry is refreshed on the next read however young it is "
-        "— otherwise one Bluesky blip pins a user to a partial follow set for a "
-        "whole TTL.  Defaults False so a legacy or unreadable document is "
-        "refreshed rather than trusted.",
+        "budget, and the entry is refreshed on the next run of ingex's recurring "
+        "backfill job (up to ~15 minutes later) — otherwise one Bluesky blip pins "
+        "a user to a partial follow set for a whole TTL.  Defaults False so a "
+        "legacy or unreadable document is refreshed rather than trusted.",
     )
     generated_at: datetime | None = Field(
         default=None, description="When 'follows' was fetched from Bluesky"
