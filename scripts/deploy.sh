@@ -43,6 +43,16 @@ GE_PINNED_POST_CONFIG_SHA=""
 DEPLOYED_PINNED_POST_CONFIG_SHA=""
 FORCE_SYNC_PINNED_POSTS=false
 
+# Bluesky publishing identities. Use the production account's stable DID for
+# authentication so an account handle change cannot break deployments again.
+# Caterpie's environment-specific app-password secrets belong to the same
+# account, whose handle is stable enough for internal/dev publishing.
+PROD_BSKY_PUBLISHER_ID="did:plc:wrmpulygwvuhjn2c3jbalgqj"
+PROD_BSKY_SECRET="bsky-app-password-prod"
+CATERPIE_BSKY_PUBLISHER_ID="caterpie-internal.bsky.social"
+CATERPIE_STAGE_BSKY_SECRET="bsky-app-password-caterpie"
+CATERPIE_PROD_BSKY_SECRET="bsky-app-password-caterpie-prod"
+
 # PostHog configuration. Each environment is a separate PostHog project (separate
 # API key, provisioned via scripts/gcp_setup.sh), but all projects live on the same
 # PostHog Cloud host, so the host is a constant here rather than a per-env secret.
@@ -420,30 +430,85 @@ resolve_generator_did() {
     echo "did:web:$service_host"
 }
 
-sync_pinned_posts() {
-    local bsky_handle="caterpie-internal.bsky.social"
-    local bsky_secret="bsky-app-password-caterpie"
+_validate_bsky_publisher() {
+    local account_label="$1"
+    local publisher_id="$2"
+    local bsky_secret="$3"
+
+    local bsky_password
+    if ! bsky_password=$(gcloud secrets versions access latest \
+        --secret="$bsky_secret" --project="$PROJECT_ID" 2>/dev/null); then
+        bsky_password=""
+    fi
+    if [ -z "$bsky_password" ]; then
+        log_error "Could not fetch $account_label app password from secret '$bsky_secret'."
+        return 1
+    fi
+
+    log_info "Validating Bluesky publisher → $account_label ($publisher_id)..."
+    if ! pipenv run python scripts/publish_feed.py \
+        --handle "$publisher_id" \
+        --app-password "$bsky_password" \
+        --list > /dev/null; then
+        log_error "Could not authenticate the $account_label Bluesky publisher."
+        return 1
+    fi
+}
+
+preflight_bsky_publishers() {
+    log_info "Validating Bluesky publishing credentials before deployment..."
+
     if [ "$ENVIRONMENT" = "prod" ]; then
-        bsky_handle="greenearth.social"
-        bsky_secret="bsky-app-password-prod"
+        if ! _validate_bsky_publisher \
+            "GreenEarth" \
+            "$PROD_BSKY_PUBLISHER_ID" \
+            "$PROD_BSKY_SECRET"; then
+            return 1
+        fi
+        if ! _validate_bsky_publisher \
+            "Caterpie" \
+            "$CATERPIE_BSKY_PUBLISHER_ID" \
+            "$CATERPIE_PROD_BSKY_SECRET"; then
+            return 1
+        fi
+    else
+        if ! _validate_bsky_publisher \
+            "Caterpie" \
+            "$CATERPIE_BSKY_PUBLISHER_ID" \
+            "$CATERPIE_STAGE_BSKY_SECRET"; then
+            return 1
+        fi
+    fi
+
+    log_info "Bluesky publishing credentials are valid."
+}
+
+sync_pinned_posts() {
+    local publisher_id="$CATERPIE_BSKY_PUBLISHER_ID"
+    local bsky_secret="$CATERPIE_STAGE_BSKY_SECRET"
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        publisher_id="$PROD_BSKY_PUBLISHER_ID"
+        bsky_secret="$PROD_BSKY_SECRET"
     fi
 
     local bsky_password
-    bsky_password=$(gcloud secrets versions access latest \
-        --secret="$bsky_secret" --project="$PROJECT_ID" 2>/dev/null)
+    if ! bsky_password=$(gcloud secrets versions access latest \
+        --secret="$bsky_secret" --project="$PROJECT_ID" 2>/dev/null); then
+        bsky_password=""
+    fi
     if [ -z "$bsky_password" ]; then
         log_error "Could not fetch the pinned-post app password from '$bsky_secret'"
         log_error "Refusing to deploy a revision whose managed pin URIs are unresolved."
         exit 1
     fi
 
-    log_info "Publishing/reusing managed feed pins → $bsky_handle..."
+    log_info "Publishing/reusing managed feed pins → $publisher_id..."
     GE_PINNED_POST_YOUR_FEED_URI=""
     GE_PINNED_POST_BEST_OF_FRIENDS_URI=""
     GE_PINNED_POST_RANDOM_URI=""
     local pin_output
     if ! pin_output=$(pipenv run python scripts/manage_pinned_posts.py \
-        --handle "$bsky_handle" \
+        --handle "$publisher_id" \
         --app-password "$bsky_password" \
         --format tsv); then
         log_error "Managed pinned-post sync failed; Cloud Run was not changed."
@@ -523,32 +588,36 @@ prepare_pinned_posts() {
 
 _sync_feeds_to_account() {
     local account_label="$1"
-    local bsky_handle="$2"
+    local publisher_id="$2"
     local bsky_secret="$3"
     local generator_did="$4"
     local visibility_flag="$5"   # "--public-only", "--internal-only", or ""
 
     local bsky_password
-    bsky_password=$(gcloud secrets versions access latest --secret="$bsky_secret" --project="$PROJECT_ID" 2>/dev/null)
+    if ! bsky_password=$(gcloud secrets versions access latest \
+        --secret="$bsky_secret" --project="$PROJECT_ID" 2>/dev/null); then
+        bsky_password=""
+    fi
     if [ -z "$bsky_password" ]; then
-        log_warn "Could not fetch $account_label app password from secret '$bsky_secret'"
-        log_warn "Skipping $account_label feed sync. Store the password with:"
-        log_warn "  echo -n '<password>' | gcloud secrets create $bsky_secret --data-file=- --project=$PROJECT_ID"
-        return 0
+        log_error "Could not fetch $account_label app password from secret '$bsky_secret'."
+        return 1
     fi
 
-    log_info "Syncing feeds → $account_label ($bsky_handle)..."
+    log_info "Syncing feeds → $account_label ($publisher_id)..."
 
     # shellcheck disable=SC2086
-    pipenv run python scripts/publish_feed.py \
-        --handle "$bsky_handle" \
+    if ! pipenv run python scripts/publish_feed.py \
+        --handle "$publisher_id" \
         --app-password "$bsky_password" \
         --generator-did "$generator_did" \
         --environment "$ENVIRONMENT" \
         --sync \
-        $visibility_flag \
-    && log_info "$account_label feed sync complete" \
-    || log_warn "$account_label feed sync failed — feeds may be out of date"
+        $visibility_flag; then
+        log_error "$account_label feed sync failed."
+        return 1
+    fi
+
+    log_info "$account_label feed sync complete"
 }
 
 sync_feeds() {
@@ -556,8 +625,8 @@ sync_feeds() {
 
     local generator_did
     if ! generator_did=$(resolve_generator_did); then
-        log_warn "Could not determine service URL — skipping feed sync"
-        return 0
+        log_error "Could not determine service URL — feed sync cannot continue."
+        return 1
     fi
 
     log_info "Generator DID: $generator_did"
@@ -566,27 +635,33 @@ sync_feeds() {
         # Prod: two-pass sync
         #   Pass 1 — public feeds → GreenEarth account (original names)
         #   Pass 2 — internal feeds → Caterpie account (obfuscated names)
-        _sync_feeds_to_account \
+        if ! _sync_feeds_to_account \
             "GreenEarth" \
-            "greenearth.social" \
-            "bsky-app-password-prod" \
+            "$PROD_BSKY_PUBLISHER_ID" \
+            "$PROD_BSKY_SECRET" \
             "$generator_did" \
-            "--public-only"
+            "--public-only"; then
+            return 1
+        fi
 
-        _sync_feeds_to_account \
+        if ! _sync_feeds_to_account \
             "Caterpie" \
-            "caterpie-internal.bsky.social" \
-            "bsky-app-password-caterpie-prod" \
+            "$CATERPIE_BSKY_PUBLISHER_ID" \
+            "$CATERPIE_PROD_BSKY_SECRET" \
             "$generator_did" \
-            "--internal-only"
+            "--internal-only"; then
+            return 1
+        fi
     else
         # Stage/dev: all feeds go to Caterpie (display names get "GE " prefix)
-        _sync_feeds_to_account \
+        if ! _sync_feeds_to_account \
             "Caterpie" \
-            "caterpie-internal.bsky.social" \
-            "bsky-app-password-caterpie" \
+            "$CATERPIE_BSKY_PUBLISHER_ID" \
+            "$CATERPIE_STAGE_BSKY_SECRET" \
             "$generator_did" \
-            ""
+            ""; then
+            return 1
+        fi
     fi
 }
 
@@ -598,6 +673,10 @@ main() {
 
     require_clean_worktree
     validate_config
+    if ! preflight_bsky_publishers; then
+        log_error "Bluesky publishing preflight failed; Cloud Run was not changed."
+        exit 1
+    fi
     verify_vpc_connector
 
     # Configure kubectl if needed for ES URL auto-detection
@@ -609,7 +688,10 @@ main() {
     generate_requirements
     prepare_pinned_posts
     deploy_api_service
-    sync_feeds
+    if ! sync_feeds; then
+        log_error "Cloud Run deployed, but Bluesky feed sync failed."
+        exit 1
+    fi
 
     log_info "Deployment complete!"
 }
