@@ -91,7 +91,10 @@ def _int_env(name: str, default: int) -> int:
 
 
 def ttl_seconds() -> int:
-    """Age at which an entry is refreshed. A backstop under jetstream, so hours."""
+    """Staleness threshold for observability only (see ``_staleness``/``_sweep``);
+    ingex's recurring backfill job is what actually refreshes an entry, on its
+    own copy of this same threshold. Must stay in sync with ingex's
+    GE_FOLLOWS_CACHE_TTL_SEC — do not diverge."""
     return _int_env("GE_FOLLOWS_CACHE_TTL_SEC", 21_600)  # 6 hours
 
 
