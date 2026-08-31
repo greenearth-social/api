@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 # Db singleton — injected by main.py at startup, same pattern as
 # popularity_cache.py's set_popularity_cache / get_popularity_cache.
 # ---------------------------------------------------------------------------
+# TODO: register this generator in candidates/__init__.py and wire
+# set_llm_query_vector_db(app.state.firestore) in main.py's lifespan handler.
 
 _db = None
 
