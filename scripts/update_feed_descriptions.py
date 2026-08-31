@@ -43,7 +43,9 @@ class EnvironmentTarget:
 
 ENVIRONMENT_TARGETS = {
     "prod": EnvironmentTarget(
-        handle="greenearth.social",
+        # Authenticate with the stable account DID so handle changes do not
+        # break this production publishing operation.
+        handle="did:plc:wrmpulygwvuhjn2c3jbalgqj",
         secret="bsky-app-password-prod",
     ),
     "stage": EnvironmentTarget(
