@@ -37,7 +37,17 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-from .routers import candidates, diversify, feed_transparency, health, rank, redirect, skylight, xrpc
+from .routers import (
+    candidates,
+    diversify,
+    feed_transparency,
+    health,
+    llm_query_vectors,
+    rank,
+    redirect,
+    skylight,
+    xrpc,
+)
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
 from .lib.firebase_auth import init_firebase_auth
@@ -298,6 +308,15 @@ _TAGS = [
         ),
     },
     {
+        "name": "llm-query-vectors",
+        "description": (
+            "Fit a MiniLM query vector to a free-text prompt: an LLM expands the "
+            "prompt to keywords, scores a sample of matching posts, and a ridge "
+            "regression turns (embedding, score) pairs into a vector stored per "
+            "user in Firestore for candidate retrieval. Admin API key."
+        ),
+    },
+    {
         "name": "health",
         "description": "Service liveness check.",
     },
@@ -425,6 +444,7 @@ app.include_router(candidates.router)
 app.include_router(diversify.router)
 app.include_router(feed_transparency.router)
 app.include_router(health.router)
+app.include_router(llm_query_vectors.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)
 app.include_router(redirect.router)
