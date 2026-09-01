@@ -49,6 +49,7 @@ from .lib.followed_users_cache import FollowedUsersCache, set_followed_users_cac
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
 from .lib.perspective import close_perspective_client
+from .lib.llm_query_vector_fit import close_anthropic_client
 from .lib import inflight
 from .lib.metrics import MetricCollector, get_metric_collector, set_metric_collector
 from .lib.posthog_client import get_posthog_client, init_posthog_client, set_posthog_client
@@ -199,6 +200,10 @@ async def lifespan(app: FastAPI):
             pass
         try:
             await close_perspective_client()
+        except Exception:
+            pass
+        try:
+            await close_anthropic_client()
         except Exception:
             pass
         try:
