@@ -132,6 +132,11 @@ class CandidateGenerateRequest(BaseModel):
             "the user in previous pages)."
         ),
     )
+    hydrate_embeddings: bool = Field(default=False, 
+
+        description="When true, refetches the 384-dim embedding arrays for the final candidates."
+    )
+
     infill: str | None = Field(
         None,
         description=(

@@ -2456,7 +2456,7 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.routers.xrpc.fetch_post_embeddings",
+                "app.lib.candidates.generate.fetch_post_embeddings",
                 new_callable=AsyncMock,
                 return_value=[("at://p/0", [1.0, 0.0, 0.0])],
             ) as mock_fetch,
@@ -2505,7 +2505,7 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.routers.xrpc._hydrate_embeddings",
+                "app.routers.xrpc.hydrate_embeddings",
                 new_callable=AsyncMock,
                 return_value=candidates,
             ),
@@ -2615,9 +2615,9 @@ class TestEmbeddingHydrationTimeout:
             PipelineContext,
             pipeline_context_scope,
         )
-        from ..routers import xrpc as xrpc_module
+        from ..lib.candidates import generate as generate_module
 
-        monkeypatch.setattr(xrpc_module, "_EMBED_HYDRATION_TIMEOUT_SEC", 0.01)
+        monkeypatch.setattr(generate_module, "_EMBED_HYDRATION_TIMEOUT_SEC", 0.01)
 
         async def _hangs(*args, **kwargs):
             await asyncio.sleep(9999)
@@ -2625,11 +2625,11 @@ class TestEmbeddingHydrationTimeout:
         candidates = [CandidatePost(at_uri="at://post/1", score=0.5)]
 
         with (
-            patch("app.routers.xrpc.fetch_post_embeddings", side_effect=_hangs),
+            patch("app.lib.candidates.generate.fetch_post_embeddings", side_effect=_hangs),
             pipeline_context_scope(PipelineContext(feed_name="f")) as ctx,
-            caplog.at_level(logging.WARNING, logger=xrpc_module.logger.name),
+            caplog.at_level(logging.WARNING, logger=generate_module.logger.name),
         ):
-            result = await xrpc_module._hydrate_embeddings(object(), candidates)
+            result = await generate_module.hydrate_embeddings(object(), candidates)
 
         assert result == candidates
         assert len(ctx.degradations) == 1
@@ -2640,7 +2640,7 @@ class TestEmbeddingHydrationTimeout:
         hydration_logs = [
             record
             for record in caplog.records
-            if record.name == xrpc_module.logger.name
+            if record.name == generate_module.logger.name
             and record.message.startswith("Embedding hydration")
         ]
         assert len(hydration_logs) == 1
@@ -2655,21 +2655,21 @@ class TestEmbeddingHydrationTimeout:
             PipelineContext,
             pipeline_context_scope,
         )
-        from ..routers import xrpc as xrpc_module
+        from ..lib.candidates import generate as generate_module
 
         failure = RuntimeError("Elasticsearch failed")
         candidates = [CandidatePost(at_uri="at://post/1", score=0.5)]
 
         with (
             patch(
-                "app.routers.xrpc.fetch_post_embeddings",
+                "app.lib.candidates.generate.fetch_post_embeddings",
                 new_callable=AsyncMock,
                 side_effect=failure,
             ),
             pipeline_context_scope(PipelineContext(feed_name="f")) as ctx,
-            caplog.at_level(logging.ERROR, logger=xrpc_module.logger.name),
+            caplog.at_level(logging.ERROR, logger=generate_module.logger.name),
         ):
-            result = await xrpc_module._hydrate_embeddings(object(), candidates)
+            result = await generate_module.hydrate_embeddings(object(), candidates)
 
         assert result == candidates
         assert len(ctx.degradations) == 1
@@ -2680,7 +2680,7 @@ class TestEmbeddingHydrationTimeout:
         hydration_logs = [
             record
             for record in caplog.records
-            if record.name == xrpc_module.logger.name
+            if record.name == generate_module.logger.name
             and record.message.startswith("Embedding hydration")
         ]
         assert len(hydration_logs) == 1
