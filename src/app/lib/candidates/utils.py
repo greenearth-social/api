@@ -19,8 +19,11 @@ CANDIDATE_SOURCE_FIELDS = [
     "image_count",          # media metadata (feed debugging)
     "video_count",          # media metadata (feed debugging)
     "external_embed",       # link embed metadata (feed debugging)
-    "like_count",
+    "like_count",           # used for popularity scoring
+    "topic_scores",         # used for politics multiplier
 ]
+
+POLITICS_KEY = "News & Social Concern"
 
 
 def candidate_posts_from_es_response(
@@ -59,6 +62,9 @@ def candidate_post_from_hit(
         external_embed.get("uri") if isinstance(external_embed, dict) else None
     )
 
+    topic_scores = src.get("topic_scores") or {}
+    politics_score = topic_scores.get(POLITICS_KEY) if isinstance(topic_scores, dict) else None
+
     return CandidatePost(
         author_did=src.get("author_did"),
         at_uri=src.get("at_uri"),
@@ -72,4 +78,5 @@ def candidate_post_from_hit(
         video_count=src.get("video_count"),
         external_uri=external_uri,
         like_count=src.get("like_count"),
+        politics_score=politics_score if isinstance(politics_score, (int, float)) else None,
     )

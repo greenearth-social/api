@@ -180,7 +180,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
         avatar="assets/icons/mysky.png",
-        controls=("source_weights", "freshness", "purpose"),
+        controls=("source_weights", "freshness", "purpose", "politics"),
         pinned_post_uri=_pinned_post_uri(
             "your-feed",
             "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetfgpr3t2s",
