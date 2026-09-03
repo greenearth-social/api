@@ -211,7 +211,6 @@ async def run_predict(
     # Apply politics multiplier
     multiplied_scores_initial_order = []
     politics_multiplier = request.politics if request.politics is not None else 1.0
-    logger.info("\n\nApplying politics multiplier: %.3f \n\n", politics_multiplier)
     for idx, uri, score, politics_score in candidates_with_scores_initial_order:
         if politics_score is None:
             politics_score = 0.0
