@@ -854,7 +854,6 @@ def _configured_generation(
         else DEFAULT_FRESHNESS_INDEX
     )
     max_age_hours = max_age_hours_for_freshness(freshness_index)
-    politics = effective.politics if "politics" in controls and effective.politics is not None else 1.0
     realized_generators = generators_override.get(
         "generators", feed_cfg.gen_request_template.generators
     )
@@ -863,7 +862,6 @@ def _configured_generation(
         "preferences": effective.model_dump(include=set(controls), exclude_none=True),
         "generators": [generator.model_dump(mode="json") for generator in realized_generators],
         "max_age_hours": max_age_hours,
-        "politics": politics,
     }
     preference_fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
