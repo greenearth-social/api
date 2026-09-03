@@ -728,6 +728,24 @@ def _with_purpose_weights(feed_cfg: FeedConfig, purpose: float) -> FeedConfig:
     )
 
 
+def _with_politics_multiplier(feed_cfg: FeedConfig, politics: float) -> FeedConfig:
+    """Return a request-local feed config with the user's politics multiplier.
+
+    The politics multiplier gets applied to the combined rank score.
+    """
+    rank_template = feed_cfg.rank_request_template
+    if rank_template is None:
+        return feed_cfg
+
+    return feed_cfg.model_copy(
+        update={
+            "rank_request_template": rank_template.model_copy(
+                update={"politics": politics}
+            )
+        }
+    )
+
+
 def _source_generators(
     weights: SourceWeightsDocument,
     *,
@@ -787,6 +805,9 @@ def _configured_generation(
     if "purpose" in controls:
         assert effective.purpose is not None
         feed_cfg = _with_purpose_weights(feed_cfg, effective.purpose)
+    if "politics" in controls:
+        assert effective.politics is not None
+        feed_cfg = _with_politics_multiplier(feed_cfg, effective.politics)
 
     generators_override: dict[str, list[GeneratorSpec]] = {}
     applied_social_radius: int | None = None

@@ -159,16 +159,16 @@ async def run_predict(
                 results_by_candidate[uri][name] = score
 
     # loop through again to normalize scores and drop candidates with no valid scores in any model
-    candidate_uris = [c.at_uri for c in request.candidates if c.at_uri]
-    valid_candidate_uris = []
+    candidate_uris_and_politics_scores = [(c.at_uri, c.politics_score) for c in request.candidates if c.at_uri]
+    valid_uris_and_politics_scores = []
     normalized_by_model: dict[str, dict[str, float]] = {}  # {model_name: {uri: normalized_score}}
     dropped_candidate_count = 0
-    for uri in candidate_uris:
+    for uri, politics_score in candidate_uris_and_politics_scores:
         # if the model has no valid results in any of the rank models, exclude it
         if uri not in results_by_candidate:
             dropped_candidate_count += 1
             continue
-        valid_candidate_uris.append(uri)
+        valid_uris_and_politics_scores.append((uri, politics_score))
         for model_name, _, ranker in models_with_valid_results:
             bounds = ranker.score_bounds
             score = None
@@ -204,11 +204,22 @@ async def run_predict(
         )
 
     candidates_with_scores_initial_order = [
-        (initial_idx, uri, _combined(uri))
-        for initial_idx, uri in enumerate(valid_candidate_uris)
+        (initial_idx, uri, _combined(uri), politics_score)
+        for initial_idx, (uri, politics_score) in enumerate(valid_uris_and_politics_scores)
     ]
+
+    # Apply politics multiplier
+    multiplied_scores_initial_order = []
+    politics_multiplier = request.politics if request.politics is not None else 1.0
+    for idx, uri, score, politics_score in candidates_with_scores_initial_order:
+        if politics_score is None:
+            politics_score = 0.0
+        final_multiplier = (politics_multiplier - 1.0) * politics_score + 1.0
+        final_score = score * final_multiplier
+        multiplied_scores_initial_order.append((idx, uri, final_score))
+
     ranked = enumerate(sorted(
-        candidates_with_scores_initial_order,
+        multiplied_scores_initial_order,
         key=lambda item: (-item[2], item[0]),
     ), start=1)
 
