@@ -89,6 +89,9 @@ class CandidatePost(BaseModel):
     like_count: int | None = Field(
         default=None, description="Number of likes the post has received"
     )
+    politics_score: float | None = Field(
+        default=None, description="News & Social Concern topic score (0-1), when present"
+    )
 
 
 class GeneratorSpec(BaseModel):
@@ -180,7 +183,11 @@ class RankPredictRequest(BaseModel):
         ...,
         description="AT Protocol DID of the user being ranked for",
     )
-
+    politics: float = Field(
+        default=1.0,
+        gt=0,
+        description="Multiplier applied to the final rank score based on the post's politics score"
+    )
 
 class RankedCandidate(BaseModel):
     """A single ranked candidate and any metadata produced during ranking."""

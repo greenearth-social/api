@@ -728,6 +728,24 @@ def _with_purpose_weights(feed_cfg: FeedConfig, purpose: float) -> FeedConfig:
     )
 
 
+def _with_politics_multiplier(feed_cfg: FeedConfig, politics: float) -> FeedConfig:
+    """Return a request-local feed config with the user's politics multiplier.
+
+    The politics multiplier gets applied to the combined rank score.
+    """
+    rank_template = feed_cfg.rank_request_template
+    if rank_template is None:
+        return feed_cfg
+
+    return feed_cfg.model_copy(
+        update={
+            "rank_request_template": rank_template.model_copy(
+                update={"politics": politics}
+            )
+        }
+    )
+
+
 def _source_generators(
     weights: SourceWeightsDocument,
     *,
@@ -766,6 +784,7 @@ class _ConfiguredGeneration:
     max_age_hours: int
     applied_social_radius: int | None
     preference_fingerprint: str
+    politics: float
 
 
 def _configured_generation(
@@ -787,6 +806,9 @@ def _configured_generation(
     if "purpose" in controls:
         assert effective.purpose is not None
         feed_cfg = _with_purpose_weights(feed_cfg, effective.purpose)
+    if "politics" in controls:
+        assert effective.politics is not None
+        feed_cfg = _with_politics_multiplier(feed_cfg, effective.politics)
 
     generators_override: dict[str, list[GeneratorSpec]] = {}
     applied_social_radius: int | None = None
@@ -833,6 +855,7 @@ def _configured_generation(
         else DEFAULT_FRESHNESS_INDEX
     )
     max_age_hours = max_age_hours_for_freshness(freshness_index)
+    politics = effective.politics if "politics" in controls and effective.politics is not None else 1.0
     realized_generators = generators_override.get(
         "generators", feed_cfg.gen_request_template.generators
     )
@@ -841,6 +864,7 @@ def _configured_generation(
         "preferences": effective.model_dump(include=set(controls), exclude_none=True),
         "generators": [generator.model_dump(mode="json") for generator in realized_generators],
         "max_age_hours": max_age_hours,
+        "politics": politics,
     }
     preference_fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
@@ -852,6 +876,7 @@ def _configured_generation(
         max_age_hours=max_age_hours,
         applied_social_radius=applied_social_radius,
         preference_fingerprint=preference_fingerprint,
+        politics=politics,
     )
 
 
@@ -1897,6 +1922,7 @@ async def get_feed_skeleton(
     applied_social_radius = configured.applied_social_radius
     max_age_hours = configured.max_age_hours
     preference_fingerprint = configured.preference_fingerprint
+    politics = configured.politics
 
     feed_cache = _get_feed_cache(request)
 
@@ -2114,6 +2140,7 @@ async def get_feed_skeleton(
                         "num_candidates": batch,
                         "exclude_uris": exclude_uris,
                         "max_age_hours": max_age_hours,
+                        "politics": politics,
                         **generators_override,
                     }
                 )
