@@ -784,7 +784,6 @@ class _ConfiguredGeneration:
     max_age_hours: int
     applied_social_radius: int | None
     preference_fingerprint: str
-    politics: float
 
 
 def _configured_generation(
@@ -876,7 +875,6 @@ def _configured_generation(
         max_age_hours=max_age_hours,
         applied_social_radius=applied_social_radius,
         preference_fingerprint=preference_fingerprint,
-        politics=politics,
     )
 
 
@@ -1922,7 +1920,6 @@ async def get_feed_skeleton(
     applied_social_radius = configured.applied_social_radius
     max_age_hours = configured.max_age_hours
     preference_fingerprint = configured.preference_fingerprint
-    politics = configured.politics
 
     feed_cache = _get_feed_cache(request)
 
@@ -2140,7 +2137,6 @@ async def get_feed_skeleton(
                         "num_candidates": batch,
                         "exclude_uris": exclude_uris,
                         "max_age_hours": max_age_hours,
-                        "politics": politics,
                         **generators_override,
                     }
                 )
