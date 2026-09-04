@@ -22,7 +22,6 @@ This module is pure library code: no FastAPI, no Firestore. The router
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import math
@@ -809,13 +808,6 @@ def fit_ridge(
 
 class PoolTooSmallError(FitError):
     """The corpus has too few posts matching the bag to fit anything."""
-
-
-def prompt_key(prompt: str) -> str:
-    """Firestore document id for a prompt: sha256 of the stripped text, first
-    16 hex chars. The same prompt from the same user overwrites its vector;
-    different prompts coexist under the user document."""
-    return hashlib.sha256(prompt.strip().encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass

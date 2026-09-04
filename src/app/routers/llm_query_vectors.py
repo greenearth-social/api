@@ -3,8 +3,10 @@ prompt (ingex#482).
 
 The pipeline lives in lib/llm_query_vector_fit.py; this router validates the
 request, runs it, writes the vector to Firestore (documents.LlmQueryVectorDocument,
-`users/{user}/llm_query_vectors/{prompt_key}`) and returns the fit's statistics
-so the caller can see that the job ran and how well.
+a new document under `users/{user}/llm_query_vectors/` per fit) and returns the
+fit's statistics so the caller can see that the job ran and how well. The
+llm_query_vector candidate generator (ingex#484) reads the user's most recently
+updated document, so the newest fit is the one that serves.
 """
 
 import logging
@@ -12,13 +14,8 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..lib.firestore import upsert_llm_query_vector
-from ..lib.llm_query_vector_fit import (
-    FitError,
-    PoolTooSmallError,
-    fit_query_vector,
-    prompt_key,
-)
+from ..lib.firestore import add_llm_query_vector
+from ..lib.llm_query_vector_fit import FitError, PoolTooSmallError, fit_query_vector
 from ..security import RequireAdminApiKey
 
 logger = logging.getLogger(__name__)
@@ -46,7 +43,7 @@ class QueryVectorFitRequest(BaseModel):
 
 
 class QueryVectorFitResponse(BaseModel):
-    prompt_key: str = Field(..., description="Firestore document id of the stored vector")
+    vector_id: str = Field(..., description="Firestore document id of the stored vector")
     user_did: str
     keywords: list[str] = Field(..., description="Search terms the prompt was expanded to")
     n_pool: int = Field(..., description="Deduplicated posts matching the keywords")
@@ -91,7 +88,7 @@ async def fit_llm_query_vector(
 ) -> QueryVectorFitResponse:
     """Expand the prompt to keywords, sample and score posts, fit a query
     vector, store it under the user. Synchronous: ~10 s and ~$0.13 per call.
-    Re-fitting the same prompt for the same user overwrites its vector."""
+    Every fit stores a new document; the feed uses the user's newest one."""
     db = getattr(request.app.state, "firestore", None)
     if db is None:
         raise HTTPException(status_code=503, detail="Firestore unavailable")
@@ -112,10 +109,10 @@ async def fit_llm_query_vector(
             status_code=502, detail="Elasticsearch or model request failed"
         ) from exc
 
-    key = prompt_key(prompt)
-    await upsert_llm_query_vector(db, body.user_did, key, result.query_vector, prompt)
+    stored = await add_llm_query_vector(db, body.user_did, result.query_vector, prompt)
+    key = stored.prompt_key
     logger.info(
-        "llm_qv_fit stored user_did=%s prompt_key=%s n_pool=%d n_keyword=%d n_random=%d "
+        "llm_qv_fit stored user_did=%s vector_id=%s n_pool=%d n_keyword=%d n_random=%d "
         "n_scored=%d n_cancelled=%d n_failed=%d train_r2=%s duration_s=%.1f cost_usd=%.3f "
         "tokens_in=%d tokens_out=%d",
         body.user_did, key, result.n_pool, result.n_keyword_posts, result.n_random_posts,
@@ -124,7 +121,7 @@ async def fit_llm_query_vector(
         result.duration_s, result.cost_usd, result.input_tokens, result.output_tokens,
     )
     return QueryVectorFitResponse(
-        prompt_key=key,
+        vector_id=key,
         user_did=body.user_did,
         keywords=result.keywords,
         n_pool=result.n_pool,
