@@ -48,16 +48,41 @@ class FitError(RuntimeError):
 @dataclass
 class Usage:
     """Token counter shared by every model call in one fit; feeds the cost
-    figure in the response and the cost breaker in step 4."""
+    figure in the response and the cost breaker in step 4.
+
+    `input_tokens`/`output_tokens` are what the API reported. A scoring call
+    cancelled at the deadline reports nothing but is still billed for its
+    input and for whatever it generated before the disconnect, so step 4 adds
+    an estimate for those under `est_*` and cost_usd() charges both. The
+    estimate leans high (see score_posts), so the figure is a ceiling on real
+    spend rather than an undercount; on measured runs with 2-6 of 80 calls
+    cancelled it sits 3-8% above the reported tokens' cost.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
     calls: int = 0
+    max_output_tokens: int = 0
+    est_input_tokens: int = 0
+    est_output_tokens: int = 0
 
     def add(self, usage) -> None:
         self.input_tokens += usage.input_tokens
         self.output_tokens += usage.output_tokens
+        self.max_output_tokens = max(self.max_output_tokens, usage.output_tokens)
         self.calls += 1
+
+    def add_estimate(self, input_tokens: int, output_tokens: int) -> None:
+        self.est_input_tokens += input_tokens
+        self.est_output_tokens += output_tokens
+
+    def merge(self, other: Usage) -> None:
+        self.input_tokens += other.input_tokens
+        self.output_tokens += other.output_tokens
+        self.max_output_tokens = max(self.max_output_tokens, other.max_output_tokens)
+        self.calls += other.calls
+        self.est_input_tokens += other.est_input_tokens
+        self.est_output_tokens += other.est_output_tokens
 
 
 # --------------------------------------------------------------------------- #
@@ -250,10 +275,12 @@ _POOL_OVERFETCH = 1.2
 # so without this filter a viral story fills a fifth of the sample.
 NEAR_DUP_JACCARD = 0.8
 # Fields pulled from _source. Deliberately not the embedding: a 384-float
-# vector is ~30x the size of a short post, and only the ~200 sampled posts
-# need one, so embeddings are hydrated for the sample alone in step 3 via
-# fetch_post_embeddings (docvalue_fields), the way the candidate generators
-# do it.
+# vector is ~30x the size of a short post, and only the ~200 posts in the
+# fitting sample (80 LLM-scored keyword posts + 120 forced-to-1 random
+# negatives, all of which the regression needs vectors for) ever need one.
+# So the pool is fetched as text, and embeddings are hydrated for the sample
+# alone in step 3 via fetch_post_embeddings (docvalue_fields), the way the
+# candidate generators do it.
 _POST_SOURCE_FIELDS = ["at_uri", "content"]
 
 
@@ -548,14 +575,24 @@ SCORE_DEADLINE_S = 3.0
 # selection biased toward whatever the model answers fastest.
 MIN_SCORED_FRACTION = 0.8
 # Cost breaker. A normal fit is ~$0.13 (80 posts x ~420 in / ~70 out tokens
-# plus the expansion); even every call running to _SCORE_MAX_TOKENS stays
-# under $0.60. This exists so a misconfiguration (a much larger sample, a
-# pricier model id) fails loudly instead of quietly writing a vector.
+# plus the expansion); the worst case, every call at the input bound below
+# and running to _SCORE_MAX_TOKENS, is ~$0.65. This exists so a
+# misconfiguration (a much larger sample, a pricier model id) fails loudly
+# instead of quietly spending: checked once before the scoring calls are
+# fired, against that worst case, and once after, against what they cost.
 MAX_COST_USD = 2.0
 # claude-sonnet-5 list price per million tokens, 2026-09-01. Only used for the
 # response's cost figure and the breaker above.
 _USD_PER_MTOK_INPUT = 2.0
 _USD_PER_MTOK_OUTPUT = 10.0
+# Per-call input ceiling for the preflight check and for calls whose usage
+# never came back: the rubric and template are ~250 tokens, a 2000-char
+# prompt (the router's cap) ~500, a 300-grapheme post ~300. Measured calls
+# use ~420.
+_SCORE_INPUT_TOKENS_BOUND = 1500
+_SCORE_CALL_COST_BOUND_USD = (
+    _SCORE_INPUT_TOKENS_BOUND * _USD_PER_MTOK_INPUT + _SCORE_MAX_TOKENS * _USD_PER_MTOK_OUTPUT
+) / 1_000_000
 
 SCORING_SYSTEM = (
     "You curate someone's social media feed. They have told you what they want "
@@ -644,10 +681,13 @@ async def score_posts(
     n = len(posts)
     floor = math.ceil(MIN_SCORED_FRACTION * n)
     semaphore = asyncio.Semaphore(SCORE_CONCURRENCY)
+    # Scoring's own counter, merged into `usage` at the end: the cancelled-call
+    # estimate below needs this step's per-call figures, not the expansion's.
+    scoring_usage = Usage()
 
     async def one(post: Post) -> int | None:
         async with semaphore:
-            return await _score_one(client, prompt, post.content, usage)
+            return await _score_one(client, prompt, post.content, scoring_usage)
 
     def n_scored_in(done: set[asyncio.Task[int | None]]) -> int:
         return sum(
@@ -677,8 +717,28 @@ async def score_posts(
             n_failed += 1
             first_error = first_error or t.exception()
             scores.append(None)
+        elif t.result() is None:
+            # The call returned but the reply had no readable score: no label,
+            # counted as failed so the three counts always add up to `n` and a
+            # change in the model's reply format shows up in the log.
+            n_failed += 1
+            scores.append(None)
         else:
             scores.append(t.result())
+    if n_cancelled:
+        # Cancelled calls are billed but report no usage. Charge each the mean
+        # input of the calls that did report and the *longest* reply any of
+        # them produced: a call cut off mid-reply cannot have generated more
+        # than a whole reply to the same prompt (measured stragglers are slow,
+        # not long: 56-76 output tokens against a 68-74 mean). With nothing
+        # reported, fall back to the per-call bounds.
+        if scoring_usage.calls:
+            mean_input = math.ceil(scoring_usage.input_tokens / scoring_usage.calls)
+            max_output = scoring_usage.max_output_tokens
+        else:
+            mean_input, max_output = _SCORE_INPUT_TOKENS_BOUND, _SCORE_MAX_TOKENS
+        scoring_usage.add_estimate(n_cancelled * mean_input, n_cancelled * max_output)
+    usage.merge(scoring_usage)
     n_scored = sum(1 for s in scores if s is not None)
     if n_scored < floor:
         detail = f"scored {n_scored} of {n} posts (need {floor})"
@@ -691,8 +751,10 @@ async def score_posts(
 
 
 def cost_usd(usage: Usage) -> float:
+    """Spend at list price: reported tokens plus the estimate for cancelled calls."""
     return (
-        usage.input_tokens * _USD_PER_MTOK_INPUT + usage.output_tokens * _USD_PER_MTOK_OUTPUT
+        (usage.input_tokens + usage.est_input_tokens) * _USD_PER_MTOK_INPUT
+        + (usage.output_tokens + usage.est_output_tokens) * _USD_PER_MTOK_OUTPUT
     ) / 1_000_000
 
 
@@ -801,6 +863,12 @@ async def fit_query_vector(es, prompt: str) -> FitResult:
             f"only {len(keyword_posts)} keyword posts have embeddings (need {MIN_KEYWORD_POSTS})"
         )
 
+    worst_case = cost_usd(usage) + len(keyword_posts) * _SCORE_CALL_COST_BOUND_USD
+    if worst_case > MAX_COST_USD:
+        raise ScoringError(
+            f"scoring {len(keyword_posts)} posts could cost ${worst_case:.2f}, "
+            f"over the ${MAX_COST_USD:.2f} cap; nothing sent"
+        )
     outcome = await score_posts(client, prompt, keyword_posts, usage)
     cost = cost_usd(usage)
     if cost > MAX_COST_USD:

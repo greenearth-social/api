@@ -61,7 +61,16 @@ class QueryVectorFitResponse(BaseModel):
         ..., description="Fit R^2 on its own sample; null if scores were constant"
     )
     duration_s: float
-    cost_usd: float = Field(..., description="Model spend for this fit at list price")
+    cost_usd: float = Field(
+        ...,
+        description=(
+            "Model spend for this fit at list price. Reported tokens, plus an "
+            "estimate for calls cancelled at the deadline (billed, but they report "
+            "no usage): each charged the mean input and the longest reply of the "
+            "calls that completed. Leans high; measured 3-8% above the reported "
+            "tokens' cost when 2-6 of 80 calls are cancelled."
+        ),
+    )
 
 
 @router.post(
