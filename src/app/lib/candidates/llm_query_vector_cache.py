@@ -1,11 +1,9 @@
-"""LLM query vector candidate generator and its Firestore-backed cache.
+"""Per-user in-process cache for LLM query vectors.
 
-Reads a precomputed query vector from Firestore (written by the prompt
-ingestion service) via an in-process TTL cache and runs a kNN search in
-Elasticsearch using the MiniLM-L12 embedding field.
-
-Query vectors are written by a separate ingestion service and change
-infrequently, so a 60-second local TTL captures almost all reuse while
+Wraps ``get_latest_llm_query_vector`` from Firestore with a short in-process
+TTL layer so repeated feed requests within the same window skip the Firestore
+round-trip.  Query vectors are written by a separate ingestion service and
+change infrequently, so a 60-second local TTL captures almost all reuse while
 staying responsive to newly-generated vectors.
 """
 
@@ -19,21 +17,12 @@ from typing import TYPE_CHECKING
 
 from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
 
-from ...models import MaxAgeHours
-from ..embeddings import MINILM_L12_EMBEDDING_FIELD
 from ..firestore import get_latest_llm_query_vector
-from .base import CandidateGenerator, CandidateResult
-from .es_candidates import knn_search_posts
 
 if TYPE_CHECKING:
     from ...documents import LlmQueryVectorDocument
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Cache
-# ---------------------------------------------------------------------------
 
 
 def ttl_seconds() -> int:
@@ -87,6 +76,12 @@ class LlmQueryVectorCache:
 
 # ---------------------------------------------------------------------------
 # Process-level accessor
+#
+# Candidate generators are constructed at import time and their ``generate``
+# signature is fixed by the CandidateGenerator interface, so the cache is
+# reached the same way the metric collector and PostHog client are: a
+# process-level handle installed during app startup.  When it is unset (unit
+# tests, scripts) the generator returns an empty result.
 # ---------------------------------------------------------------------------
 
 _llm_query_vector_cache: LlmQueryVectorCache | None = None
@@ -99,63 +94,3 @@ def set_llm_query_vector_cache(cache: LlmQueryVectorCache | None) -> None:
 
 def get_llm_query_vector_cache() -> LlmQueryVectorCache | None:
     return _llm_query_vector_cache
-
-
-# ---------------------------------------------------------------------------
-# Generator
-# ---------------------------------------------------------------------------
-
-
-class LlmQueryVectorCandidateGenerator(CandidateGenerator):
-    """Candidate generator driven by a user's LLM-generated query vector.
-
-    Reads the most recently updated query vector via the in-process cache and
-    searches Elasticsearch using the MiniLM-L12 embedding field.  If no vector
-    is found the generator returns an empty result so the pipeline can fall
-    back to other sources.
-    """
-
-    @property
-    def name(self) -> str:
-        return "llm_query_vector"
-
-    async def generate(
-        self,
-        es,
-        user_did: str,
-        num_candidates: int = 100,
-        video_only: bool = False,
-        exclude_uris: list[str] | None = None,
-        max_age_hours: MaxAgeHours = 168,
-    ) -> CandidateResult:
-        cache = get_llm_query_vector_cache()
-        if cache is None:
-            logger.warning("llm_query_vector generator called before cache was configured")
-            return CandidateResult(
-                generator_name=self.name,
-                candidates=[],
-                status="not_run",
-                reason="cache_not_configured",
-            )
-
-        latest = await cache.get_latest(user_did)
-        if latest is None:
-            return CandidateResult(
-                generator_name=self.name,
-                candidates=[],
-                status="not_run",
-                reason="no_query_vector",
-            )
-
-        candidates = await knn_search_posts(
-            es,
-            latest.query_vector,
-            num_candidates,
-            search_field=MINILM_L12_EMBEDDING_FIELD,
-            generator_name=self.name,
-            video_only=video_only,
-            exclude_uris=exclude_uris,
-            max_age_hours=max_age_hours,
-        )
-
-        return CandidateResult(generator_name=self.name, candidates=candidates)
