@@ -1233,6 +1233,24 @@ async def get_all_llm_query_vectors(
     return docs
 
 
+async def get_latest_llm_query_vector(
+    db: AsyncClient, user_did: str
+) -> LlmQueryVectorDocument | None:
+    """Return the most recently updated LLM query vector for a user, or None."""
+    query = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(LLM_QUERY_VECTORS_SUBCOLLECTION)
+        .order_by("updated_at", direction=Query.DESCENDING)
+        .limit(1)
+    )
+    async for doc in query.stream():
+        data = doc.to_dict()
+        if data is not None:
+            return LlmQueryVectorDocument.model_validate(data)
+    return None
+
+
 async def add_llm_query_vector(
     db: AsyncClient,
     user_did: str,

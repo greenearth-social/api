@@ -9,7 +9,7 @@ import logging
 
 from ...models import MaxAgeHours
 from ..embeddings import MINILM_L12_EMBEDDING_FIELD
-from ..firestore import get_all_llm_query_vectors
+from ..firestore import get_latest_llm_query_vector
 from .base import CandidateGenerator, CandidateResult
 from .es_candidates import knn_search_posts
 
@@ -41,10 +41,10 @@ def get_llm_query_vector_db():
 class LlmQueryVectorCandidateGenerator(CandidateGenerator):
     """Candidate generator driven by a user's LLM-generated query vector.
 
-    Reads all query vectors stored for the user in Firestore, selects the
-    most recently updated one, and searches Elasticsearch using the
-    MiniLM-L12 embedding field.  If no vector is found the generator
-    returns an empty result so the pipeline can fall back to other sources.
+    Reads the most recently updated query vector from Firestore and searches
+    Elasticsearch using the MiniLM-L12 embedding field.  If no vector is
+    found the generator returns an empty result so the pipeline can fall back
+    to other sources.
     """
 
     @property
@@ -70,8 +70,8 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
                 reason="db_not_configured",
             )
 
-        docs = await get_all_llm_query_vectors(db, user_did)
-        if not docs:
+        latest = await get_latest_llm_query_vector(db, user_did)
+        if latest is None:
             return CandidateResult(
                 generator_name=self.name,
                 candidates=[],
@@ -79,7 +79,6 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
                 reason="no_query_vector",
             )
 
-        latest = max(docs, key=lambda d: d.updated_at)
         candidates = await knn_search_posts(
             es,
             latest.query_vector,
