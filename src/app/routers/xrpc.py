@@ -54,6 +54,7 @@ from ..feeds import (
 )
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
+from ..lib.candidates.generate import hydrate_embeddings
 from ..lib.config import set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
 from ..lib.elasticsearch import fetch_post_embeddings
@@ -125,12 +126,12 @@ SURVEY_POST_POSITION = 6  # 1-indexed position in the first page where the surve
 SURVEY_POST_MIN_VISITS = 3  # minimum initial loads before the survey is shown
 SURVEY_POST_COOLDOWN_DAYS = 7  # days between survey showings (triggered by interactionSeen)
 
-try:
-    _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
-        os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5")
-    )
-except ValueError:
-    _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
+
+
+@dataclass
+class _InitialRequestEntry:
+    created_at: float
+    future: Future[FeedSkeletonResponse]
 
 
 _initial_request_lock = Lock()
@@ -420,62 +421,6 @@ class SendInteractionsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[CandidatePost]:
-    """Fetch missing L12 embeddings in a single batched ES call.
-
-    Candidate generators skip the embedding when reading from ES — the
-    array is ~4-5 KB per doc and dominates response size for kNN
-    searches. We refetch embeddings here, after dedup, against just
-    the candidates that survived. The per-request cache means later
-    callers (e.g. the two-tower ranker re-asking for the same URIs)
-    pay no additional ES cost.
-    """
-    missing = [c.at_uri for c in candidates if c.at_uri and not c.minilm_l12_embedding]
-    if not missing:
-        return candidates
-
-    try:
-        async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
-            pairs = await asyncio.wait_for(
-                fetch_post_embeddings(es, missing, index="posts_recent"),
-                timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
-            )
-    except Exception as exc:
-        if isinstance(exc, TimeoutError):
-            logger.warning(
-                "Embedding hydration timed out after %.1fs; continuing without",
-                _EMBED_HYDRATION_TIMEOUT_SEC,
-            )
-        else:
-            logger.exception("Embedding hydration failed; continuing without")
-
-        ctx = current_pipeline_context()
-        if ctx is not None:
-            ctx.record(
-                DegradationEvent(
-                    stage=DegradationStage.EMBED_HYDRATION,
-                    component="fetch_post_embeddings",
-                    cause=exc,
-                )
-            )
-        return candidates
-
-    encoded: dict[str, str] = {}
-    for uri, vec in pairs:
-        try:
-            encoded[uri] = encode_float32_b64(vec)
-        except Exception:
-            continue
-
-    if not encoded:
-        return candidates
-
-    return [
-        c.model_copy(update={"minilm_l12_embedding": encoded[c.at_uri]})
-        if c.at_uri and not c.minilm_l12_embedding and c.at_uri in encoded
-        else c
-        for c in candidates
-    ]
 
 
 # When cutoffs empty a slate that still had candidates, serve the best pre-cutoff
@@ -570,7 +515,7 @@ async def _run_ranking_pipeline(
         # Generators fetch lightweight candidates (no embedding); ranker and
         # MMR need embeddings, so backfill in one batched ES call now that
         # the candidate set has been deduped down to the working size.
-        candidates = await _hydrate_embeddings(es, candidates)
+        candidates = await hydrate_embeddings(es, candidates)
 
         low_score_uris: list[str] = []
         if feed_cfg.rank_request_template is not None:
