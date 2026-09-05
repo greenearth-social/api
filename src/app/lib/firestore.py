@@ -1233,42 +1233,49 @@ async def get_all_llm_query_vectors(
     return docs
 
 
-async def upsert_llm_query_vector(
-    db: AsyncClient,
-    user_did: str,
-    prompt_key: str,
-    query_vector: list[float],
-    prompt: str,
-) -> LlmQueryVectorDocument:
-    """Create or replace the LLM query vector for a (user, prompt) pair.
-
-    On first write the document is created with both timestamps set to now.
-    On subsequent writes ``query_vector``, ``prompt``, and ``updated_at`` are
-    refreshed; ``created_at`` is left unchanged.
-    """
-    ref = (
+async def get_latest_llm_query_vector(
+    db: AsyncClient, user_did: str
+) -> LlmQueryVectorDocument | None:
+    """Return the most recently updated LLM query vector for a user, or None."""
+    query = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
         .collection(LLM_QUERY_VECTORS_SUBCOLLECTION)
-        .document(prompt_key)
+        .order_by("updated_at", direction=Query.DESCENDING)
+        .limit(1)
     )
-    doc = await ref.get()
+    async for doc in query.stream():
+        data = doc.to_dict()
+        if data is not None:
+            return LlmQueryVectorDocument.model_validate(data)
+    return None
 
+
+async def add_llm_query_vector(
+    db: AsyncClient,
+    user_did: str,
+    query_vector: list[float],
+    prompt: str,
+) -> LlmQueryVectorDocument:
+    """Add a new LLM query vector document for a user.
+
+    Each call creates a new document with an auto-generated ID so that
+    multiple vectors can coexist for the same user.
+    """
     now = datetime.now(UTC)
-
-    if doc.exists:
-        await ref.update({"query_vector": query_vector, "prompt": prompt, "updated_at": now})
-        data = doc.to_dict() or {}
-        data.update({"query_vector": query_vector, "prompt": prompt, "updated_at": now})
-        return LlmQueryVectorDocument.model_validate(data)
-
+    doc_ref = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(LLM_QUERY_VECTORS_SUBCOLLECTION)
+        .document()
+    )
     record = LlmQueryVectorDocument(
-        prompt_key=prompt_key,
+        prompt_key=doc_ref.id,
         user_did=user_did,
         query_vector=query_vector,
         prompt=prompt,
         created_at=now,
         updated_at=now,
     )
-    await ref.set(record.model_dump())
+    await doc_ref.set(record.model_dump())
     return record
