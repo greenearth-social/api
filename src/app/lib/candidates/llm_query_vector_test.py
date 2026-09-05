@@ -14,7 +14,7 @@ from .llm_query_vector import (
 )
 
 GENERATOR_NAME = "llm_query_vector"
-GET_ALL_VECTORS = "app.lib.candidates.llm_query_vector.get_all_llm_query_vectors"
+GET_LATEST_VECTOR = "app.lib.candidates.llm_query_vector.get_latest_llm_query_vector"
 KNN_SEARCH_POSTS = "app.lib.candidates.llm_query_vector.knn_search_posts"
 
 
@@ -75,7 +75,7 @@ class TestLlmQueryVectorCandidateGenerator:
     async def test_returns_empty_when_no_vectors_in_firestore(self, generator):
         set_llm_query_vector_db(object())
 
-        with patch(GET_ALL_VECTORS, new_callable=AsyncMock, return_value=[]):
+        with patch(GET_LATEST_VECTOR, new_callable=AsyncMock, return_value=None):
             result = await generator.generate(object(), "did:plc:user1")
 
         assert result.generator_name == GENERATOR_NAME
@@ -101,7 +101,7 @@ class TestLlmQueryVectorCandidateGenerator:
         ]
 
         with (
-            patch(GET_ALL_VECTORS, new_callable=AsyncMock, return_value=[doc]),
+            patch(GET_LATEST_VECTOR, new_callable=AsyncMock, return_value=doc),
             patch(KNN_SEARCH_POSTS, new_callable=AsyncMock, return_value=candidates) as knn,
         ):
             result = await generator.generate(
@@ -127,27 +127,19 @@ class TestLlmQueryVectorCandidateGenerator:
         assert result.candidates == candidates
 
     @pytest.mark.asyncio
-    async def test_picks_most_recently_updated_vector_when_multiple_exist(self, generator):
+    async def test_uses_vector_returned_by_firestore(self, generator):
         set_llm_query_vector_db(object())
-        old_vector = [0.1, 0.2]
-        new_vector = [0.9, 0.8]
-        older = _make_vector_doc(
-            "old", old_vector,
-            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
-        )
-        newer = _make_vector_doc(
-            "new", new_vector,
-            updated_at=datetime(2026, 8, 1, tzinfo=UTC),
-        )
+        vector = [0.9, 0.8]
+        doc = _make_vector_doc("key1", vector, updated_at=datetime(2026, 8, 1, tzinfo=UTC))
 
         with (
-            patch(GET_ALL_VECTORS, new_callable=AsyncMock, return_value=[older, newer]),
+            patch(GET_LATEST_VECTOR, new_callable=AsyncMock, return_value=doc),
             patch(KNN_SEARCH_POSTS, new_callable=AsyncMock, return_value=[]) as knn,
         ):
             await generator.generate(object(), "did:plc:user1")
 
         assert knn.await_args is not None
-        assert knn.await_args.args[1] == new_vector
+        assert knn.await_args.args[1] == vector
 
     @pytest.mark.asyncio
     async def test_passes_user_did_to_firestore(self, generator):
@@ -155,12 +147,12 @@ class TestLlmQueryVectorCandidateGenerator:
         set_llm_query_vector_db(fake_db)
 
         with (
-            patch(GET_ALL_VECTORS, new_callable=AsyncMock, return_value=[]) as get_vectors,
+            patch(GET_LATEST_VECTOR, new_callable=AsyncMock, return_value=None) as get_latest,
             patch(KNN_SEARCH_POSTS, new_callable=AsyncMock, return_value=[]),
         ):
             await generator.generate(object(), "did:plc:specificuser")
 
-        get_vectors.assert_awaited_once_with(fake_db, "did:plc:specificuser")
+        get_latest.assert_awaited_once_with(fake_db, "did:plc:specificuser")
 
     @pytest.mark.asyncio
     async def test_uses_default_options(self, generator):
@@ -169,7 +161,7 @@ class TestLlmQueryVectorCandidateGenerator:
         doc = _make_vector_doc("key1", vector, updated_at=datetime.now(UTC))
 
         with (
-            patch(GET_ALL_VECTORS, new_callable=AsyncMock, return_value=[doc]),
+            patch(GET_LATEST_VECTOR, new_callable=AsyncMock, return_value=doc),
             patch(KNN_SEARCH_POSTS, new_callable=AsyncMock, return_value=[]) as knn,
         ):
             await generator.generate(object(), "did:plc:user1")
