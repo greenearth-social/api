@@ -124,6 +124,7 @@ ACCEPTED_SLATE_CLAIM_GRACE_SECONDS = 5
 SURVEY_POST_POSITION = 6  # 1-indexed position in the first page where the survey post appears
 SURVEY_POST_MIN_VISITS = 3  # minimum initial loads before the survey is shown
 SURVEY_POST_COOLDOWN_DAYS = 7  # days between survey showings (triggered by interactionSeen)
+MIN_FEED_POST_COUNT = 5  # feeds below this threshold trigger an alert (WARNING for BoF, ERROR for others)
 
 try:
     _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
@@ -1422,15 +1423,20 @@ async def _write_feed_snapshot_background(
     transparency reader would have to filter on.
     """
     try:
-        if not snapshot.items:
-            logger.warning(
-                "Persisting empty feed snapshot",
+        if len(snapshot.items) < MIN_FEED_POST_COUNT:
+            _log = (
+                logger.warning
+                if snapshot.feed_name == "best-of-friends"
+                else logger.error
+            )
+            _log(
+                "Feed returned fewer than %d posts",
+                MIN_FEED_POST_COUNT,
                 extra={
                     "request_id": request_id,
                     "feed_name": snapshot.feed_name,
-                    "generator_diagnostics": [
-                        diagnostic.model_dump() for diagnostic in snapshot.generator_diagnostics
-                    ],
+                    "user_did": user_did,
+                    "post_count": len(snapshot.items),
                 },
             )
         truncated = await merge_feed_snapshot(
