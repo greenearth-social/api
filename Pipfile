@@ -19,6 +19,7 @@ posthog = "*"
 firebase-admin = "*"
 numpy = "*"
 jsonschema = "*"
+anthropic = "*"
 
 [dev-packages]
 pytest = "*"

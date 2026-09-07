@@ -258,6 +258,7 @@ deploy_api_service() {
     local probe_secret="probe-secret-stage"
     local load_test_secret="load-test-secret-stage"
     local perspective_api_key_secret="perspective-api-key-stage"
+    local anthropic_api_key_secret="anthropic-api-key-stage"
     local posthog_api_key_secret="posthog-api-key-stage"
     local firestore_database="greenearth-stage"
     if [ "$ENVIRONMENT" = "prod" ]; then
@@ -268,6 +269,7 @@ deploy_api_service() {
         probe_secret="probe-secret-prod"
         load_test_secret="load-test-secret-prod"
         perspective_api_key_secret="perspective-api-key-prod"
+        anthropic_api_key_secret="anthropic-api-key-prod"
         posthog_api_key_secret="posthog-api-key-prod"
         firestore_database="greenearth-prod"
     fi
@@ -317,6 +319,7 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-secrets=GE_PROBE_SECRET=$probe_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_LOAD_TEST_SECRET=$load_test_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_PERSPECTIVE_API_KEY=$perspective_api_key_secret:latest"
+    deploy_cmd="$deploy_cmd --set-secrets=GE_ANTHROPIC_API_KEY=$anthropic_api_key_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_POSTHOG_API_KEY=$posthog_api_key_secret:latest"
 
     # Resource and scaling configuration
