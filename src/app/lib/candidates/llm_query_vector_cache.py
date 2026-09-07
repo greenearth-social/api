@@ -17,8 +17,6 @@ from typing import TYPE_CHECKING
 
 from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
 
-from ..firestore import get_latest_llm_query_vector
-
 if TYPE_CHECKING:
     from ...documents import LlmQueryVectorDocument
 
@@ -62,6 +60,11 @@ class LlmQueryVectorCache:
         entry = self._local.get(user_did)
         if entry is not None and time.monotonic() - entry.fetched_at < ttl_seconds():
             return entry.document
+
+        # Imported here (not at module top) to avoid an import cycle:
+        # documents -> candidates.base -> ... -> llm_query_vector_cache
+        # -> lib.firestore -> documents.  Same pattern as popularity_cache.
+        from ..firestore import get_latest_llm_query_vector
 
         try:
             doc = await get_latest_llm_query_vector(self._db, user_did)
