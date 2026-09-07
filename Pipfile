@@ -17,6 +17,7 @@ opentelemetry-exporter-gcp-monitoring = "*"
 posthog = "*"
 firebase-admin = "*"
 numpy = "*"
+anthropic = "*"
 
 [dev-packages]
 pytest = "*"

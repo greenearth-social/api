@@ -25,6 +25,9 @@ BSKY_APP_PASSWORD=""
 # Perspective API key for post-ranking
 GE_PERSPECTIVE_API_KEY=""
 
+# Anthropic API key for LLM query-vector fitting (ingex#482)
+GE_ANTHROPIC_API_KEY=""
+
 # PostHog API key for user analytics (each environment is a separate PostHog project)
 GE_POSTHOG_API_KEY=""
 
@@ -101,6 +104,12 @@ validate_config() {
         log_info "Perspective API key provided - will be stored/updated in Secret Manager"
     else
         log_warn "Perspective API key not provided - skipping secret creation (assuming it already exists)"
+    fi
+
+    if [ -n "$GE_ANTHROPIC_API_KEY" ]; then
+        log_info "Anthropic API key provided - will be stored/updated in Secret Manager"
+    else
+        log_warn "Anthropic API key not provided - skipping secret creation (assuming it already exists)"
     fi
 
     if [ -n "$GE_POSTHOG_API_KEY" ]; then
@@ -192,6 +201,14 @@ get_perspective_api_key_secret() {
         echo "perspective-api-key-prod"
     else
         echo "perspective-api-key-stage"
+    fi
+}
+
+get_anthropic_api_key_secret() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "anthropic-api-key-prod"
+    else
+        echo "anthropic-api-key-stage"
     fi
 }
 
@@ -608,6 +625,39 @@ setup_perspective_secret() {
         --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $perspective_secret"
 }
 
+setup_anthropic_secret() {
+    log_info "Setting up Anthropic API key secret..."
+
+    local anthropic_secret
+    anthropic_secret="$(get_anthropic_api_key_secret)"
+    local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
+
+    if [ -n "$GE_ANTHROPIC_API_KEY" ]; then
+        if ! gcloud secrets describe "$anthropic_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            echo -n "$GE_ANTHROPIC_API_KEY" | gcloud secrets create "$anthropic_secret" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "Anthropic API key secret created: $anthropic_secret"
+        else
+            echo -n "$GE_ANTHROPIC_API_KEY" | gcloud secrets versions add "$anthropic_secret" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "Anthropic API key secret updated: $anthropic_secret"
+        fi
+    else
+        if gcloud secrets describe "$anthropic_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            log_info "Anthropic API key secret already exists: $anthropic_secret"
+        else
+            log_warn "Anthropic API key not provided and secret does not exist: $anthropic_secret"
+            log_warn "Run with --anthropic-api-key '<key>' to create it, or create manually:"
+            log_warn "  echo -n '<key>' | gcloud secrets create $anthropic_secret --data-file=- --project=$PROJECT_ID"
+        fi
+    fi
+
+    gcloud secrets add-iam-policy-binding "$anthropic_secret" \
+        --member="serviceAccount:$sa_email" \
+        --role="roles/secretmanager.secretAccessor" \
+        --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $anthropic_secret"
+}
+
 setup_posthog_secret() {
     log_info "Setting up PostHog API key secret..."
 
@@ -811,6 +861,7 @@ main() {
     setup_secrets
     setup_bsky_secret
     setup_perspective_secret
+    setup_anthropic_secret
     setup_posthog_secret
     check_vpc_connector
     setup_feed_probe_cloud_scheduler
@@ -867,6 +918,10 @@ while [[ $# -gt 0 ]]; do
             GE_PERSPECTIVE_API_KEY="$2"
             shift 2
             ;;
+        --anthropic-api-key)
+            GE_ANTHROPIC_API_KEY="$2"
+            shift 2
+            ;;
         --posthog-api-key)
             GE_POSTHOG_API_KEY="$2"
             shift 2
@@ -890,6 +945,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --bsky-app-password PWD  Bluesky app password (stored in Secret Manager)"
             echo "  --perspective-api-key KEY"
             echo "                           Perspective API key (stored in Secret Manager)"
+            echo "  --anthropic-api-key KEY  Anthropic API key for LLM query-vector fitting"
+            echo "                           (stored in Secret Manager)"
             echo "  --posthog-api-key KEY    PostHog project API key for this environment"
             echo "                           (stored in Secret Manager; stage and prod use separate"
             echo "                           PostHog projects, so pass a different key per environment)"
