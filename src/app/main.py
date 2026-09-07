@@ -37,7 +37,17 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-from .routers import candidates, diversify, feed_transparency, health, rank, redirect, skylight, xrpc
+from .routers import (
+    candidates,
+    diversify,
+    feed_transparency,
+    health,
+    llm_query_vectors,
+    rank,
+    redirect,
+    skylight,
+    xrpc,
+)
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
 from .lib.firebase_auth import init_firebase_auth
@@ -49,6 +59,7 @@ from .lib.followed_users_cache import FollowedUsersCache, set_followed_users_cac
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
 from .lib.perspective import close_perspective_client
+from .lib.llm_query_vector_fit import close_anthropic_client
 from .lib import inflight
 from .lib.metrics import MetricCollector, get_metric_collector, set_metric_collector
 from .lib.posthog_client import get_posthog_client, init_posthog_client, set_posthog_client
@@ -202,6 +213,10 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
         try:
+            await close_anthropic_client()
+        except Exception:
+            pass
+        try:
             await stop_eventloop_monitor(eventloop_task)
         except Exception:
             pass
@@ -290,6 +305,15 @@ _TAGS = [
             "index. These endpoints are independent of the candidate/rank/"
             "diversify pipeline and can be used on their own by applications "
             "that need direct content search (e.g. the Skylight app)."
+        ),
+    },
+    {
+        "name": "llm-query-vectors",
+        "description": (
+            "Fit a MiniLM query vector to a free-text prompt: an LLM expands the "
+            "prompt to keywords, scores a sample of matching posts, and a ridge "
+            "regression turns (embedding, score) pairs into a vector stored per "
+            "user in Firestore for candidate retrieval. Admin API key."
         ),
     },
     {
@@ -420,6 +444,7 @@ app.include_router(candidates.router)
 app.include_router(diversify.router)
 app.include_router(feed_transparency.router)
 app.include_router(health.router)
+app.include_router(llm_query_vectors.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)
 app.include_router(redirect.router)
