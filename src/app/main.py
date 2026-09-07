@@ -54,6 +54,7 @@ from .lib.firebase_auth import init_firebase_auth
 from .lib.es_client import SlowQueryLoggingES
 from .lib.eventloop_monitor import start_eventloop_monitor, stop_eventloop_monitor
 from .lib.candidates.popularity_cache import PopularityCache, set_popularity_cache
+from .lib.candidates.llm_query_vector_cache import LlmQueryVectorCache, set_llm_query_vector_cache
 from .lib.feed_cache import FirestoreFeedCache
 from .lib.followed_users_cache import FollowedUsersCache, set_followed_users_cache
 from .lib.firestore import init_firestore_client
@@ -169,6 +170,7 @@ async def lifespan(app: FastAPI):
     set_followed_users_cache(app.state.followed_users_cache)
     app.state.user_history_cache = FirestoreUserHistoryCache(app.state.firestore)
     set_user_history_cache(app.state.user_history_cache)
+    set_llm_query_vector_cache(LlmQueryVectorCache(app.state.firestore))
     try:
         init_firebase_auth()
     except Exception:
@@ -186,6 +188,7 @@ async def lifespan(app: FastAPI):
             await app.state.popularity_cache.drain()
         except Exception:
             pass
+        set_llm_query_vector_cache(None)
         set_followed_users_cache(None)
         try:
             await app.state.followed_users_cache.drain()

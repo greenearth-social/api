@@ -17,8 +17,6 @@ from typing import TYPE_CHECKING
 
 from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
 
-from ..firestore import get_latest_llm_query_vector
-
 if TYPE_CHECKING:
     from ...documents import LlmQueryVectorDocument
 
@@ -62,6 +60,14 @@ class LlmQueryVectorCache:
         entry = self._local.get(user_did)
         if entry is not None and time.monotonic() - entry.fetched_at < ttl_seconds():
             return entry.document
+
+        # Imported here, not at module level: documents.py imports
+        # candidates.base, which initialises the candidates package, and
+        # lib.firestore imports documents. Once the generator is registered
+        # in candidates/__init__.py a module-level import of lib.firestore
+        # from here closes a cycle that breaks whichever entry point imports
+        # documents first (scripts/apikeys.py, pytest collection).
+        from ..firestore import get_latest_llm_query_vector
 
         try:
             doc = await get_latest_llm_query_vector(self._db, user_did)
