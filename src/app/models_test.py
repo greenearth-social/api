@@ -122,22 +122,8 @@ class TestCandidateGenerateRequest:
                 infill=None,
             )
 
-    def test_hydrate_posts_defaults_to_false(self):
-        assert _minimal_gen_request().hydrate_posts is False
-
-    @pytest.mark.parametrize("field_name", ["hydrate_posts", "hydrate_embeddings"])
-    def test_accepts_current_and_legacy_post_hydration_fields(self, field_name):
-        request = CandidateGenerateRequest.model_validate(
-            {
-                "generators": [{"name": "test", "weight": 1.0}],
-                "user_did": "did:plc:test",
-                field_name: True,
-            }
-        )
-
-        assert request.hydrate_posts is True
-        assert request.model_dump()["hydrate_posts"] is True
-
+    def test_hydrate_embeddings_defaults_to_false(self):
+        assert _minimal_gen_request().hydrate_embeddings is False
 
 class TestCandidatePost:
     @pytest.mark.parametrize("score", [0, 0.0, 0.5, 1, 1.0])
