@@ -211,11 +211,13 @@ async def run_predict(
     # Apply politics multiplier
     multiplied_scores_initial_order = []
     politics_multiplier = request.politics if request.politics is not None else 1.0
+    logger.info(f"Applying politics multiplier: {politics_multiplier:.3f}")
     for idx, uri, score, politics_score in candidates_with_scores_initial_order:
         if politics_score is None:
             politics_score = 0.0
         final_multiplier = (politics_multiplier - 1.0) * politics_score + 1.0
         final_score = score * final_multiplier
+        logger.info(f"Initial score {score:.3f}, politics score {politics_score:.3f}, final multiplier {final_multiplier:.3f}, final score {final_score:.3f}")
         multiplied_scores_initial_order.append((idx, uri, final_score))
 
     ranked = enumerate(sorted(

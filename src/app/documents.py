@@ -56,7 +56,7 @@ class FeedPreferencesDocument(BaseModel):
     # a social-radius preset.
     social_radius: int | None = Field(default=None, ge=0, le=4)
     freshness: int | None = Field(default=None, ge=0, le=5)
-    politics: float | None = Field(default=None, ge=0.5, le=1.5)
+    politics: float | None = Field(default=None, ge=0.0, le=2.0)
     purpose: float | None = Field(default=None, ge=0.2, le=0.8)
 
 
@@ -101,9 +101,9 @@ class UserDocument(BaseModel):
     )
     politics: float = Field(
         default=1.0,
-        ge=0.5,
-        le=1.5,
-        description="Politics multiplier: 0.5-1.5.  Applied to political content scores.",
+        ge=0.0,
+        le=2.0,
+        description="Politics multiplier: 0.0-2.0.  Applied to political content scores.",
     )
     purpose: float = Field(
         default=0.5,

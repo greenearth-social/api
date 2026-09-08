@@ -41,7 +41,10 @@ def two_tower_knn_index() -> str:
     return configured or POSTS_QUALITY_KNN_INDEX
 
 
-POST_EMBEDDING_SOURCE_FIELDS = [ "content" ]
+POST_EMBEDDING_SOURCE_FIELDS = [ "content", "topic_scores" ]
+
+# The name of the key in the topic_scores object that holds the politics score.
+POLITICS_KEY = "News & Social Concern"
 
 
 def _has_nonblank_string(value) -> bool:
@@ -216,14 +219,14 @@ async def fetch_recent_liked_post_uris_and_times(
     return await cache.get_or_compute(key, _fetch)
 
 
-async def fetch_post_embeddings(
+async def fetch_post_embeddings_and_politics_scores(
     es,
     at_uris: list[str],
     index: str = "posts",
-) -> list[tuple[str, list[float]]]:
-    """Fetch MiniLM L12 embeddings for a list of post AT URIs.
+) -> list[tuple[str, list[float], float | None]]:
+    """Fetch MiniLM L12 embeddings and politics scores for a list of post AT URIs.
 
-    Returns ``(at_uri, embedding)`` pairs in the same order as ``at_uris``.
+    Returns ``(at_uri, embedding, politics_score)`` tuples in the same order as ``at_uris``.
     Posts without embeddings or embedding source text are silently skipped.
 
     When a request cache is active the result is memoized so repeat
@@ -232,8 +235,8 @@ async def fetch_post_embeddings(
     if not at_uris:
         return []
 
-    async def _fetch() -> list[tuple[str, list[float]]]:
-        async with timed(logger, "es_post_embeddings", n_uris=len(at_uris)):
+    async def _fetch() -> list[tuple[str, list[float], float | None]]:
+        async with timed(logger, "es_post_embeddings_and_politics_scores", n_uris=len(at_uris)):
             query = {"terms": {"at_uri": at_uris}}
 
             resp = await es.search(
@@ -249,7 +252,7 @@ async def fetch_post_embeddings(
             )
 
             data = unwrap_es_response(resp)
-            embeddings_by_uri: dict[str, list[float]] = {}
+            results_by_uri: dict[str, tuple[list[float], float | None]] = {}
             for hit in data.get("hits", {}).get("hits", []):
                 src = hit.get("_source") or {}
                 at_uri = src.get("at_uri")
@@ -258,20 +261,27 @@ async def fetch_post_embeddings(
                 if not post_has_embedding_source(src):
                     continue
                 vec = embedding_from_fields(hit)
+                topic_scores = src.get("topic_scores") or {}
+                politics_score = None
+                if (
+                    topic_scores.get(POLITICS_KEY) is not None and isinstance(topic_scores, dict)
+                    and isinstance(topic_scores.get(POLITICS_KEY), (int, float))
+                ):
+                    politics_score = topic_scores.get(POLITICS_KEY)
                 if vec:
-                    embeddings_by_uri[at_uri] = vec
+                    results_by_uri[at_uri] = (vec, politics_score)
 
-            ordered_embeddings: list[tuple[str, list[float]]] = []
+            ordered_results: list[tuple[str, list[float], float | None]] = []
             for at_uri in at_uris:
-                vec = embeddings_by_uri.get(at_uri)
-                if vec:
-                    ordered_embeddings.append((at_uri, vec))
-            return ordered_embeddings
+                post_data = results_by_uri.get(at_uri)
+                if post_data:
+                    ordered_results.append((at_uri, post_data[0], post_data[1]))
+            return ordered_results
 
     cache = get_request_cache()
     if cache is None:
         return await _fetch()
-    key = ("fetch_post_embeddings", index, tuple(at_uris))
+    key = ("fetch_post_embeddings_and_politics_scores", index, tuple(at_uris))
     return await cache.get_or_compute(key, _fetch)
 
 

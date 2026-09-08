@@ -1,5 +1,5 @@
 from ...models import CandidatePost
-from ..elasticsearch import post_has_embedding_source, unwrap_es_response
+from ..elasticsearch import post_has_embedding_source, unwrap_es_response, POLITICS_KEY
 from ..embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
 
 
@@ -22,8 +22,6 @@ CANDIDATE_SOURCE_FIELDS = [
     "like_count",           # used for popularity scoring
     "topic_scores",         # used for politics multiplier
 ]
-
-POLITICS_KEY = "News & Social Concern"
 
 
 def candidate_posts_from_es_response(

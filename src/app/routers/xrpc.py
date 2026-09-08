@@ -54,11 +54,9 @@ from ..feeds import (
 )
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
-from ..lib.candidates.generate import hydrate_embeddings
+from ..lib.candidates.generate import hydrate_posts
 from ..lib.config import set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
-from ..lib.elasticsearch import fetch_post_embeddings
-from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
@@ -515,7 +513,7 @@ async def _run_ranking_pipeline(
         # Generators fetch lightweight candidates (no embedding); ranker and
         # MMR need embeddings, so backfill in one batched ES call now that
         # the candidate set has been deduped down to the working size.
-        candidates = await hydrate_embeddings(es, candidates)
+        candidates = await hydrate_posts(es, candidates)
 
         low_score_uris: list[str] = []
         if feed_cfg.rank_request_template is not None:
