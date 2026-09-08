@@ -1,50 +1,27 @@
 """LLM query vector candidate generator.
 
-Reads a precomputed query vector from Firestore (written by the prompt
-ingestion service) and runs a kNN search in Elasticsearch using the
-MiniLM-L12 embedding field.
+Reads a precomputed query vector from Firestore via ``LlmQueryVectorCache``
+and runs a kNN search in Elasticsearch using the MiniLM-L12 embedding field.
 """
 
 import logging
 
 from ...models import MaxAgeHours
 from ..embeddings import MINILM_L12_EMBEDDING_FIELD
-from ..firestore import get_latest_llm_query_vector
 from .base import CandidateGenerator, CandidateResult
 from .es_candidates import knn_search_posts
+from .llm_query_vector_cache import get_llm_query_vector_cache
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Db singleton — injected by main.py at startup, same pattern as
-# popularity_cache.py's set_popularity_cache / get_popularity_cache.
-# ---------------------------------------------------------------------------
-# TODO: register this generator in candidates/__init__.py and wire
-# set_llm_query_vector_db(app.state.firestore) in main.py's lifespan handler.
-
-_db = None
-
-
-def set_llm_query_vector_db(db) -> None:
-    global _db
-    _db = db
-
-
-def get_llm_query_vector_db():
-    return _db
-
-
-# ---------------------------------------------------------------------------
-# Generator
-# ---------------------------------------------------------------------------
 
 class LlmQueryVectorCandidateGenerator(CandidateGenerator):
     """Candidate generator driven by a user's LLM-generated query vector.
 
-    Reads the most recently updated query vector from Firestore and searches
-    Elasticsearch using the MiniLM-L12 embedding field.  If no vector is
-    found the generator returns an empty result so the pipeline can fall back
-    to other sources.
+    Reads the most recently updated query vector via the in-process cache and
+    searches Elasticsearch using the MiniLM-L12 embedding field.  If no vector
+    is found the generator returns an empty result so the pipeline can fall
+    back to other sources.
     """
 
     @property
@@ -60,17 +37,17 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
         exclude_uris: list[str] | None = None,
         max_age_hours: MaxAgeHours = 168,
     ) -> CandidateResult:
-        db = get_llm_query_vector_db()
-        if db is None:
-            logger.warning("llm_query_vector generator called before db was configured")
+        cache = get_llm_query_vector_cache()
+        if cache is None:
+            logger.warning("llm_query_vector generator called before cache was configured")
             return CandidateResult(
                 generator_name=self.name,
                 candidates=[],
                 status="not_run",
-                reason="db_not_configured",
+                reason="cache_not_configured",
             )
 
-        latest = await get_latest_llm_query_vector(db, user_did)
+        latest = await cache.get_latest(user_did)
         if latest is None:
             return CandidateResult(
                 generator_name=self.name,

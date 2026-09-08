@@ -173,6 +173,25 @@ FEEDS: dict[str, FeedConfig] = {
             exclude_uris=[],
         ),
     ),
+    "llm-qv-dev": FeedConfig(
+        display_name="LLM QV dev",
+        description=(
+            "Development feed: only the llm_query_vector generator (ingex#484), unranked, "
+            "so a fitted query vector's retrieval can be inspected on its own."
+        ),
+        internal_rkey="e9-qv",
+        internal_display_name="e9 QV",
+        logged_out="deny",
+        diversify=False,
+        exclude_seen_posts=False,
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[GeneratorSpec(name="llm_query_vector", weight=1.0)],
+            infill=None,
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
+        ),
+    ),
     "your-feed": FeedConfig(
         display_name="MySky by GreenEarth",
         description="A feed you control, designed for constructive conversation.",
