@@ -551,6 +551,7 @@ async def test_accept_feed_preview_stages_cache_without_rewriting_preferences(
             popular=0.25,
         ),
         freshness=2,
+        politics=1.0,
         purpose=0.5,
     )
     cache_ref.get = AsyncMock(

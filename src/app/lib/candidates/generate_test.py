@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -193,6 +193,88 @@ def _stub_generators(monkeypatch, mapping: dict) -> None:
 def _reset_metric_collector():
     yield
     set_metric_collector(None)
+
+
+# ---------------------------------------------------------------------------
+# Post hydration
+# ---------------------------------------------------------------------------
+
+
+class TestPostHydration:
+    @pytest.mark.asyncio
+    async def test_fills_missing_embeddings_and_politics_scores_without_overwriting_values(
+        self, monkeypatch
+    ):
+        existing_embedding = encode_float32_b64([9.0, 8.0])
+        candidates = [
+            CandidatePost(at_uri="at://post/both-missing"),
+            CandidatePost(
+                at_uri="at://post/politics-missing",
+                minilm_l12_embedding=existing_embedding,
+            ),
+            CandidatePost(
+                at_uri="at://post/embedding-missing",
+                politics_score=0.4,
+            ),
+            CandidatePost(
+                at_uri="at://post/complete",
+                minilm_l12_embedding=existing_embedding,
+                politics_score=0.6,
+            ),
+        ]
+        fetch = AsyncMock(
+            return_value=[
+                ("at://post/both-missing", [1.0, 2.0], 0.0),
+                ("at://post/politics-missing", [3.0, 4.0], 0.25),
+                ("at://post/embedding-missing", [5.0, 6.0], 0.9),
+            ]
+        )
+        monkeypatch.setattr(
+            generate_module,
+            "fetch_post_embeddings_and_politics_scores",
+            fetch,
+        )
+        es = object()
+
+        hydrated = await generate_module.hydrate_posts(es, candidates)
+
+        fetch.assert_awaited_once_with(
+            es,
+            [
+                "at://post/both-missing",
+                "at://post/politics-missing",
+                "at://post/embedding-missing",
+            ],
+            index="posts_recent",
+        )
+        assert hydrated[0].minilm_l12_embedding == encode_float32_b64([1.0, 2.0])
+        assert hydrated[0].politics_score == 0.0
+        assert hydrated[1].minilm_l12_embedding == existing_embedding
+        assert hydrated[1].politics_score == 0.25
+        assert hydrated[2].minilm_l12_embedding == encode_float32_b64([5.0, 6.0])
+        assert hydrated[2].politics_score == 0.4
+        assert hydrated[3] is candidates[3]
+
+    @pytest.mark.asyncio
+    async def test_skips_es_when_every_candidate_is_fully_hydrated(self, monkeypatch):
+        candidates = [
+            CandidatePost(
+                at_uri="at://post/complete",
+                minilm_l12_embedding=encode_float32_b64([1.0, 2.0]),
+                politics_score=0.0,
+            )
+        ]
+        fetch = AsyncMock()
+        monkeypatch.setattr(
+            generate_module,
+            "fetch_post_embeddings_and_politics_scores",
+            fetch,
+        )
+
+        hydrated = await generate_module.hydrate_posts(object(), candidates)
+
+        assert hydrated is candidates
+        fetch.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

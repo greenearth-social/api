@@ -41,7 +41,7 @@ def two_tower_knn_index() -> str:
     return configured or POSTS_QUALITY_KNN_INDEX
 
 
-POST_EMBEDDING_SOURCE_FIELDS = [ "content", "topic_scores" ]
+POST_EMBEDDING_SOURCE_FIELDS = [ "content" ]
 
 # The name of the key in the topic_scores object that holds the politics score.
 POLITICS_KEY = "News & Social Concern"
@@ -247,6 +247,7 @@ async def fetch_post_embeddings_and_politics_scores(
                 _source=[
                     "at_uri",
                     *POST_EMBEDDING_SOURCE_FIELDS,
+                    "topic_scores",
                 ],
                 docvalue_fields=[MINILM_L12_EMBEDDING_FIELD],
             )
@@ -264,7 +265,7 @@ async def fetch_post_embeddings_and_politics_scores(
                 topic_scores = src.get("topic_scores") or {}
                 politics_score = None
                 if (
-                    topic_scores.get(POLITICS_KEY) is not None and isinstance(topic_scores, dict)
+                    isinstance(topic_scores, dict) and topic_scores.get(POLITICS_KEY) is not None
                     and isinstance(topic_scores.get(POLITICS_KEY), (int, float))
                 ):
                     politics_score = topic_scores.get(POLITICS_KEY)

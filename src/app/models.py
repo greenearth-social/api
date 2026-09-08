@@ -190,7 +190,8 @@ class RankPredictRequest(BaseModel):
     )
     politics: float = Field(
         default=1.0,
-        gt=0,
+        ge=0.0,
+        le=2.0,
         description="Multiplier applied to the final rank score based on the post's politics score"
     )
 

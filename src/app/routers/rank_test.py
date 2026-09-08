@@ -5,8 +5,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
-from fastapi import HTTPException, status
+from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
 
 from ..lib.rankers import RankerExecutionError
@@ -94,6 +93,101 @@ def test_predict_ranks_candidates_by_score_desc(app):
             },
         ],
     }
+
+
+def test_predict_applies_politics_multiplier(app):
+    client = TestClient(app, headers=HEADERS)
+
+    response = client.post(
+        "/rank/predict",
+        json={
+            "user_did": "did:plc:user1",
+            "politics": 2.0,
+            "models": [{"name": "candidate_score", "weight": 1.0}],
+            "candidates": [
+                {
+                    "at_uri": "at://post/non-political",
+                    "score": 0.4,
+                    "politics_score": 0.0,
+                },
+                {
+                    "at_uri": "at://post/political",
+                    "score": 0.3,
+                    "politics_score": 1.0,
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["rankings"] == [
+        {
+            "at_uri": "at://post/political",
+            "rank": 1,
+            "rank_score": pytest.approx(0.6),
+        },
+        {
+            "at_uri": "at://post/non-political",
+            "rank": 2,
+            "rank_score": pytest.approx(0.4),
+        },
+    ]
+
+
+def test_predict_accepts_zero_politics_multiplier(app):
+    client = TestClient(app, headers=HEADERS)
+
+    response = client.post(
+        "/rank/predict",
+        json={
+            "user_did": "did:plc:user1",
+            "politics": 0.0,
+            "models": [{"name": "candidate_score", "weight": 1.0}],
+            "candidates": [
+                {
+                    "at_uri": "at://post/non-political",
+                    "score": 0.4,
+                    "politics_score": 0.0,
+                },
+                {
+                    "at_uri": "at://post/political",
+                    "score": 0.3,
+                    "politics_score": 1.0,
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["rankings"] == [
+        {
+            "at_uri": "at://post/non-political",
+            "rank": 1,
+            "rank_score": pytest.approx(0.4),
+        },
+        {
+            "at_uri": "at://post/political",
+            "rank": 2,
+            "rank_score": pytest.approx(0.0),
+        },
+    ]
+
+
+@pytest.mark.parametrize("politics", [-0.01, 2.01])
+def test_predict_rejects_out_of_range_politics_multiplier(app, politics):
+    client = TestClient(app, headers=HEADERS)
+
+    response = client.post(
+        "/rank/predict",
+        json={
+            "user_did": "did:plc:user1",
+            "politics": politics,
+            "models": [{"name": "candidate_score", "weight": 1.0}],
+            "candidates": [{"at_uri": "at://post/1", "score": 0.4}],
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_predict_keeps_duplicate_candidate_count_and_collapses_scores_by_uri(app):

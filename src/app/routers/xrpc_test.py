@@ -206,6 +206,7 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
         feed_preferences={
             "your-feed": FeedPreferencesDocument(
                 freshness=5,
+                politics=0.75,
                 purpose=0.5,
                 source_weights=SourceWeightsDocument(
                     following=0.3,
@@ -218,6 +219,7 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
     )
     draft = FeedPreferencesDocument(
         freshness=2,
+        politics=1.5,
         purpose=0.8,
         source_weights=SourceWeightsDocument(
             following=0.5,
@@ -270,6 +272,7 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
     gen_request = pipeline.await_args.args[3]
     model_weights = {model.name: model.weight for model in feed_cfg.rank_request_template.models}
     assert model_weights["perspective"] == pytest.approx(0.8)
+    assert feed_cfg.rank_request_template.politics == 1.5
     assert gen_request.max_age_hours == 24
     assert [(generator.name, generator.weight) for generator in gen_request.generators] == [
         ("followed_users", 0.5),
@@ -358,6 +361,39 @@ def test_configured_generation_preserves_exact_single_source_weights(
     ] == [(expected_generator, 1.0)]
     assert configured.effective_preferences.source_weights == weights
     assert configured.preference_fingerprint
+
+
+@pytest.mark.parametrize("politics", [0.0, 2.0])
+def test_configured_generation_applies_politics_to_request_local_rank_template(politics):
+    from .xrpc import _configured_generation
+
+    original_rank_template = FEEDS["your-feed"].rank_request_template
+    user = UserDocument(
+        user_did="did:plc:testuser",
+        feed_preferences={
+            "your-feed": FeedPreferencesDocument(politics=politics),
+        },
+    )
+
+    configured = _configured_generation(
+        "your-feed",
+        user,
+        network_likes_enabled=True,
+    )
+
+    neutral = _configured_generation(
+        "your-feed",
+        None,
+        network_likes_enabled=True,
+    )
+
+    assert configured.effective_preferences.politics == politics
+    assert configured.feed_cfg.rank_request_template is not None
+    assert configured.feed_cfg.rank_request_template.politics == politics
+    assert configured.preference_fingerprint != neutral.preference_fingerprint
+    assert FEEDS["your-feed"].rank_request_template is original_rank_template
+    assert original_rank_template is not None
+    assert original_rank_template.politics == 1.0
 
 
 def test_100_percent_following_and_best_of_friends_share_pipeline_configuration():
@@ -2443,6 +2479,45 @@ class TestRankedFeed:
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
+    def test_user_politics_preference_is_passed_to_ranker(self):
+        candidates = [
+            CandidatePost(
+                at_uri="at://p/0",
+                minilm_l12_embedding=TEST_EMBEDDING,
+                politics_score=0.8,
+                generator_name="two_tower",
+            )
+        ]
+        user = UserDocument(
+            user_did="did:plc:testuser",
+            feed_preferences={
+                "your-feed": FeedPreferencesDocument(politics=1.75),
+            },
+        )
+        rank_result = RankPredictResult(
+            rankings=[RankedCandidate(at_uri="at://p/0", rank=1, rank_score=1.0)]
+        )
+
+        with (
+            self._patch_generators(candidates),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
+            patch(
+                "app.routers.xrpc.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
+            ) as mock_run,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        assert response.status_code == 200
+        assert mock_run.await_args is not None
+        rank_request = mock_run.await_args.args[0]
+        assert rank_request.politics == 1.75
+        assert rank_request.candidates[0].politics_score == 0.8
+
     def test_hydrates_lightweight_candidates_before_ranking(self):
         """Embedding-free generated candidates are hydrated before ranking."""
         candidates = _make_candidates("p", 1)
@@ -2455,9 +2530,9 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.lib.candidates.generate.fetch_post_embeddings",
+                "app.lib.candidates.generate.fetch_post_embeddings_and_politics_scores",
                 new_callable=AsyncMock,
-                return_value=[("at://p/0", [1.0, 0.0, 0.0])],
+                return_value=[("at://p/0", [1.0, 0.0, 0.0], 0.75)],
             ) as mock_fetch,
             patch(
                 "app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result
@@ -2474,6 +2549,7 @@ class TestRankedFeed:
         assert mock_fetch.await_args.args[1] == ["at://p/0"]
         rank_req = mock_run.await_args.args[0]
         assert rank_req.candidates[0].minilm_l12_embedding == TEST_EMBEDDING
+        assert rank_req.candidates[0].politics_score == 0.75
         assert [item["post"] for item in data["feed"]] == ["at://p/0"]
 
     def test_drops_candidates_missing_embeddings_before_ranking(self):
@@ -2504,7 +2580,7 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.routers.xrpc.hydrate_embeddings",
+                "app.routers.xrpc.hydrate_posts",
                 new_callable=AsyncMock,
                 return_value=candidates,
             ),
@@ -5100,7 +5176,10 @@ class TestGetFeedSkeletonMetrics:
         assert success_calls[0][2]["feed_name"] == FEED_RKEY
 
     def test_degraded_render_records_primary_stage_and_component(self):
-        candidates = _make_candidates("p", 3, with_embedding=True)
+        candidates = [
+            candidate.model_copy(update={"politics_score": 0.1})
+            for candidate in _make_candidates("p", 3, with_embedding=True)
+        ]
 
         with (
             _patch_unranked_your_feed_generators(candidates),

@@ -142,7 +142,7 @@ class FeedPreferences(BaseModel):
 
     source_weights: SourceWeights | None = None
     freshness: int | None = Field(default=None, ge=0, le=5)
-    politics: float | None = Field(default=None, ge=0.5, le=1.5)
+    politics: float | None = Field(default=None, ge=0.0, le=2.0)
     purpose: float | None = Field(default=None, ge=0.2, le=0.8)
 
 

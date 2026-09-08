@@ -61,7 +61,14 @@ def candidate_post_from_hit(
     )
 
     topic_scores = src.get("topic_scores") or {}
-    politics_score = topic_scores.get(POLITICS_KEY) if isinstance(topic_scores, dict) else None
+    politics_score = None
+    if isinstance(topic_scores, dict):
+        raw_politics_score = topic_scores.get(POLITICS_KEY)
+        if (
+            raw_politics_score is not None and isinstance(raw_politics_score, (int, float))
+            and raw_politics_score >= 0.0 and raw_politics_score <= 1.0
+        ):
+            politics_score = raw_politics_score
 
     return CandidatePost(
         author_did=src.get("author_did"),
@@ -76,5 +83,5 @@ def candidate_post_from_hit(
         video_count=src.get("video_count"),
         external_uri=external_uri,
         like_count=src.get("like_count"),
-        politics_score=politics_score if isinstance(politics_score, (int, float)) else None,
+        politics_score=politics_score,
     )

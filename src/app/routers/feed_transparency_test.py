@@ -1217,6 +1217,7 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
                     "popular": 0.25,
                 },
                 "freshness": 5,
+                "politics": 1.0,
                 "purpose": 0.5,
             },
             "best-of-friends": {"freshness": 5, "purpose": 0.5},
@@ -1249,6 +1250,7 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
                 "popular": 0.0,
             },
             "freshness": 3,
+            "politics": 1.25,
             "purpose": 0.65,
         },
         "best-of-friends": {"freshness": 3, "purpose": 0.65},
@@ -1274,6 +1276,41 @@ def test_patch_preferences_updates_only_selected_feed(mock_patch_prefs, mock_del
     assert args[1:3] == ("did:plc:test-user", "best-of-friends")
     assert args[3].model_dump(exclude_none=True) == {"freshness": 4}
     mock_delete_seen.assert_awaited_once()
+
+
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@pytest.mark.parametrize("politics", [0.0, 2.0])
+def test_patch_preferences_updates_politics_for_your_feed(
+    mock_patch_prefs, mock_delete_seen, politics, client
+):
+    mock_patch_prefs.return_value = FeedPreferencesDocument(politics=politics)
+
+    response = client.patch(
+        "/api/feeds/preferences/your-feed",
+        json={"politics": politics},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"politics": politics}
+    args = mock_patch_prefs.await_args.args
+    assert args[1:3] == ("did:plc:test-user", "your-feed")
+    assert args[3].model_dump(exclude_none=True) == {"politics": politics}
+    mock_delete_seen.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
+
+
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@pytest.mark.parametrize("politics", [-0.01, 2.01])
+def test_patch_preferences_rejects_out_of_range_politics(
+    mock_patch_prefs, politics, client
+):
+    response = client.patch(
+        "/api/feeds/preferences/your-feed",
+        json={"politics": politics},
+    )
+
+    assert response.status_code == 422
+    mock_patch_prefs.assert_not_awaited()
 
 
 @patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")

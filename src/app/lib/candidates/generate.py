@@ -111,7 +111,7 @@ async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePo
     """Fetch missing L12 embeddings and politics scores in a single batched ES call."""
     missing = [
         c.at_uri for c in candidates
-        if c.at_uri and (not c.minilm_l12_embedding or not c.politics_score)
+        if c.at_uri and (not c.minilm_l12_embedding or c.politics_score is None)
     ]
     if not missing:
         return candidates
@@ -160,7 +160,7 @@ async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePo
         update_dict = {}
         if c.at_uri and not c.minilm_l12_embedding and c.at_uri in encoded:
             update_dict["minilm_l12_embedding"] = encoded[c.at_uri]
-        if c.at_uri and not c.politics_score and c.at_uri in politics_scores:
+        if c.at_uri and c.politics_score is None and c.at_uri in politics_scores:
             update_dict["politics_score"] = politics_scores[c.at_uri]
         if update_dict:
             final_candidate = c.model_copy(update=update_dict)
