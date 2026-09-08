@@ -103,7 +103,6 @@ from ..lib.request_context import set_traffic
 from ..lib.telemetry import timed
 from ..models import (
     CandidateGenerateRequest,
-    CandidatePost,
     FeedConfig,
     FeedCursor,
     GeneratorSpec,
@@ -510,9 +509,8 @@ async def _run_ranking_pipeline(
         if not candidates:
             return PipelineResult([], [])
 
-        # Generators fetch lightweight candidates (no embedding); ranker and
-        # MMR need embeddings, so backfill in one batched ES call now that
-        # the candidate set has been deduped down to the working size.
+        # Generators fetch lightweight candidates. Backfill embeddings and topic
+        # scores in one batched ES call after deduping to the working set.
         candidates = await hydrate_posts(es, candidates)
 
         low_score_uris: list[str] = []

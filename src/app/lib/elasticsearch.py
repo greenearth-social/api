@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from .embeddings import MINILM_L12_EMBEDDING_FIELD
 from .request_cache import get_request_cache
 from .telemetry import timed
+from .topic_scores import politics_score_from_source
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,6 @@ def two_tower_knn_index() -> str:
 
 
 POST_EMBEDDING_SOURCE_FIELDS = [ "content" ]
-
-# The name of the key in the topic_scores object that holds the politics score.
-POLITICS_KEY = "News & Social Concern"
 
 
 def _has_nonblank_string(value) -> bool:
@@ -262,13 +260,7 @@ async def fetch_post_embeddings_and_politics_scores(
                 if not post_has_embedding_source(src):
                     continue
                 vec = embedding_from_fields(hit)
-                topic_scores = src.get("topic_scores") or {}
-                politics_score = None
-                if (
-                    isinstance(topic_scores, dict) and topic_scores.get(POLITICS_KEY) is not None
-                    and isinstance(topic_scores.get(POLITICS_KEY), (int, float))
-                ):
-                    politics_score = topic_scores.get(POLITICS_KEY)
+                politics_score = politics_score_from_source(src)
                 if vec:
                     results_by_uri[at_uri] = (vec, politics_score)
 

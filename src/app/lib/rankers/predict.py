@@ -13,9 +13,9 @@ import statistics
 
 from ...models import RankedCandidate, RankPredictRequest, RankPredictResult
 from ..feed_debug import current_recorder
+from ..metrics import get_metric_collector
 from ..telemetry import timed
 from .base import Ranker, RankerError, RankerExecutionError, RankerResult, get_ranker
-from ..metrics import get_metric_collector
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ async def run_predict(
     medians_by_model: dict[str, float] = {}  # {model_name: median_score}
     results_by_candidate: dict[str, dict[str, float]] = {}  # {uri: {model_name: score}}
     models_with_valid_results: list[tuple[str, float, Ranker]] = [] # filtered version of resolved
-    for (name, weight, ranker), result in zip(resolved, results):
+    for (name, weight, ranker), result in zip(resolved, results, strict=True):
         if isinstance(result, BaseException):
             # A model that timed out contributes no scores, same as one that
             # returned zero valid rankings. Any other error still propagates.
@@ -159,7 +159,9 @@ async def run_predict(
                 results_by_candidate[uri][name] = score
 
     # loop through again to normalize scores and drop candidates with no valid scores in any model
-    candidate_uris_and_politics_scores = [(c.at_uri, c.politics_score) for c in request.candidates if c.at_uri]
+    candidate_uris_and_politics_scores = [
+        (c.at_uri, c.politics_score) for c in request.candidates if c.at_uri
+    ]
     valid_uris_and_politics_scores = []
     normalized_by_model: dict[str, dict[str, float]] = {}  # {model_name: {uri: normalized_score}}
     dropped_candidate_count = 0

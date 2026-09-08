@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ..elasticsearch import POLITICS_KEY
 from ..embeddings import MINILM_L12_EMBEDDING_KEY
+from ..topic_scores import POLITICS_KEY
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_post_from_hit
 
 SAMPLE_EMBEDDING = [0.1, 0.2, 0.3]

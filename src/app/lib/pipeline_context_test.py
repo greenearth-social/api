@@ -57,7 +57,7 @@ class TestRecord:
     def test_record_does_not_raise_when_fail_fast_false(self):
         ctx = PipelineContext(feed_name="your-feed", fail_fast=False)
         ctx.record(
-            DegradationEvent(DegradationStage.EMBED_HYDRATION, "fetch_post_embeddings", OSError())
+            DegradationEvent(DegradationStage.POST_HYDRATION, "post_hydration", OSError())
         )
         assert len(ctx.degradations) == 1  # recorded, not raised
 

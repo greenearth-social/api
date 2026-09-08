@@ -1,7 +1,7 @@
 from ...models import CandidatePost
-from ..elasticsearch import post_has_embedding_source, unwrap_es_response, POLITICS_KEY
+from ..elasticsearch import post_has_embedding_source, unwrap_es_response
 from ..embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
-
+from ..topic_scores import politics_score_from_source
 
 # Fields every candidate generator should pull from ES via `_source`.
 # Critically, this does NOT include the 384-dim embedding array, even
@@ -60,16 +60,6 @@ def candidate_post_from_hit(
         external_embed.get("uri") if isinstance(external_embed, dict) else None
     )
 
-    topic_scores = src.get("topic_scores") or {}
-    politics_score = None
-    if isinstance(topic_scores, dict):
-        raw_politics_score = topic_scores.get(POLITICS_KEY)
-        if (
-            raw_politics_score is not None and isinstance(raw_politics_score, (int, float))
-            and raw_politics_score >= 0.0 and raw_politics_score <= 1.0
-        ):
-            politics_score = raw_politics_score
-
     return CandidatePost(
         author_did=src.get("author_did"),
         at_uri=src.get("at_uri"),
@@ -83,5 +73,5 @@ def candidate_post_from_hit(
         video_count=src.get("video_count"),
         external_uri=external_uri,
         like_count=src.get("like_count"),
-        politics_score=politics_score,
+        politics_score=politics_score_from_source(src),
     )

@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.models import CandidateGenerateRequest, FeedConfig, GeneratorSpec
+from app.models import CandidateGenerateRequest, CandidatePost, FeedConfig, GeneratorSpec
 
 
 def _minimal_gen_request() -> CandidateGenerateRequest:
@@ -121,3 +121,33 @@ class TestCandidateGenerateRequest:
                 max_age_hours=hours,
                 infill=None,
             )
+
+    def test_hydrate_posts_defaults_to_false(self):
+        assert _minimal_gen_request().hydrate_posts is False
+
+    @pytest.mark.parametrize("field_name", ["hydrate_posts", "hydrate_embeddings"])
+    def test_accepts_current_and_legacy_post_hydration_fields(self, field_name):
+        request = CandidateGenerateRequest.model_validate(
+            {
+                "generators": [{"name": "test", "weight": 1.0}],
+                "user_did": "did:plc:test",
+                field_name: True,
+            }
+        )
+
+        assert request.hydrate_posts is True
+        assert request.model_dump()["hydrate_posts"] is True
+
+
+class TestCandidatePost:
+    @pytest.mark.parametrize("score", [0, 0.0, 0.5, 1, 1.0])
+    def test_accepts_finite_politics_scores_in_range(self, score):
+        assert CandidatePost(politics_score=score).politics_score == float(score)
+
+    @pytest.mark.parametrize(
+        "score",
+        [True, False, -0.01, 1.01, float("nan"), float("inf"), float("-inf")],
+    )
+    def test_rejects_invalid_politics_scores(self, score):
+        with pytest.raises(ValidationError):
+            CandidatePost(politics_score=score)

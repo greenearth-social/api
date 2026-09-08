@@ -25,7 +25,6 @@ from ..pipeline_context import DegradationEvent, DegradationStage, current_pipel
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult, get_generator
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -48,7 +47,7 @@ def allocate_counts(specs: list[GeneratorSpec], total: int) -> list[int]:
     weight_sum = sum(s.weight for s in specs)
     raw = [(s.weight / weight_sum) * total for s in specs]
     floors = [math.floor(r) for r in raw]
-    remainders = [r - f for r, f in zip(raw, floors)]
+    remainders = [r - f for r, f in zip(raw, floors, strict=True)]
     leftover = total - sum(floors)
     # Award the leftover slots to the specs with the largest fractional part
     for idx in sorted(range(len(specs)), key=lambda i: -remainders[i]):
@@ -101,11 +100,15 @@ class GeneratorError(Exception):
 
 
 try:
-    _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
-        os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5")
+    _POST_HYDRATION_TIMEOUT_SEC: float = float(
+        os.environ.get(
+            "GE_POST_HYDRATION_TIMEOUT_SEC",
+            os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5"),
+        )
     )
 except ValueError:
-    _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
+    _POST_HYDRATION_TIMEOUT_SEC = 1.5
+
 
 async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePost]:
     """Fetch missing L12 embeddings and politics scores in a single batched ES call."""
@@ -120,23 +123,23 @@ async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePo
         async with timed(logger, "hydrate_posts", n_missing=len(missing)):
             hydration_results = await asyncio.wait_for(
                 fetch_post_embeddings_and_politics_scores(es, missing, index="posts_recent"),
-                timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
+                timeout=_POST_HYDRATION_TIMEOUT_SEC,
             )
     except Exception as exc:
         if isinstance(exc, TimeoutError):
             logger.warning(
-                "Embedding hydration timed out after %.1fs; continuing without",
-                _EMBED_HYDRATION_TIMEOUT_SEC,
+                "Post hydration timed out after %.1fs; continuing without",
+                _POST_HYDRATION_TIMEOUT_SEC,
             )
         else:
-            logger.exception("Embedding hydration failed; continuing without")
+            logger.exception("Post hydration failed; continuing without")
 
         ctx = current_pipeline_context()
         if ctx is not None:
             ctx.record(
                 DegradationEvent(
-                    stage=DegradationStage.EMBED_HYDRATION,
-                    component="fetch_post_embeddings",
+                    stage=DegradationStage.POST_HYDRATION,
+                    component="fetch_post_embeddings_and_politics_scores",
                     cause=exc,
                 )
             )
@@ -189,7 +192,7 @@ async def run_generate(
     # Resolve generators up front so missing-name errors raise deterministically
     # before any network work begins.
     active: list[tuple[GeneratorSpec, int, CandidateGenerator]] = []
-    for spec, count in zip(request.generators, counts):
+    for spec, count in zip(request.generators, counts, strict=True):
         if count <= 0:
             continue
         gen = get_generator(spec.name)
