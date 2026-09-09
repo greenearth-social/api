@@ -554,6 +554,44 @@ def test_run_predict_records_normalized_model_scores_and_weight(monkeypatch):
     ]
 
 
+def test_run_predict_records_politics_score_adjustments(monkeypatch):
+    candidates = [
+        CandidatePost(at_uri="at://post/missing", politics_score=None),
+        CandidatePost(at_uri="at://post/partial", politics_score=0.5),
+        CandidatePost(at_uri="at://post/full", politics_score=1.0),
+    ]
+    ranker = StubRanker(
+        "x",
+        (0.0, 1.0),
+        {
+            "at://post/missing": 0.4,
+            "at://post/partial": 0.3,
+            "at://post/full": 0.2,
+        },
+    )
+    monkeypatch.setattr(predict_module, "get_ranker", lambda _name: ranker)
+
+    rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+    with feed_debug_scope(rec):
+        asyncio.run(
+            predict_module.run_predict(
+                _request(
+                    models=[RankModelSpec(name="x", weight=1.0)],
+                    candidates=candidates,
+                    politics=1.5,
+                ),
+                es=object(),
+            )
+        )
+
+    assert rec.politics_setting == 1.5
+    assert rec.politics_adjustments == [
+        ("at://post/missing", None, 1.0, 0.4, 0.4),
+        ("at://post/partial", 0.5, 1.25, 0.3, pytest.approx(0.375)),
+        ("at://post/full", 1.0, 1.5, 0.2, pytest.approx(0.3)),
+    ]
+
+
 def test_run_predict_preserves_duplicate_candidate_count(monkeypatch):
     """Combination is keyed by `at_uri` (raw scores collapse last-write-wins
     for duplicate uris), but the output still contains one ranking per input

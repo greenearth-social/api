@@ -82,6 +82,13 @@ class TestBuildDocument:
                 ]
             )
         )
+        rec.record_politics_adjustments(
+            1.5,
+            [
+                ("at://p/1", 0.8, 1.4, 0.5, 0.7),
+                ("at://p/2", None, 1.0, 0.5, 0.5),
+            ],
+        )
         rec.record_order_after_rank(["at://p/1", "at://p/2"])
         rec.record_final_order(["at://p/2", "at://p/1"])
         return rec
@@ -112,6 +119,23 @@ class TestBuildDocument:
         assert doc.final_order == ["at://p/2", "at://p/1"]
         assert doc.user_features[0].source == "two_tower"
         assert doc.user_features[0].num_embeddings == 1
+        assert doc.politics_setting == 1.5
+        assert [adjustment.model_dump() for adjustment in doc.politics_adjustments] == [
+            {
+                "at_uri": "at://p/1",
+                "topic_score": 0.8,
+                "score_multiplier": 1.4,
+                "score_before": 0.5,
+                "score_after": 0.7,
+            },
+            {
+                "at_uri": "at://p/2",
+                "topic_score": None,
+                "score_multiplier": 1.0,
+                "score_before": 0.5,
+                "score_after": 0.5,
+            },
+        ]
 
     def test_strips_embeddings(self):
         doc = self._build(self._recorder())
@@ -159,6 +183,8 @@ class TestBuildDocument:
         rec.set_generate_request(_request())
         doc = self._build(rec)
         assert doc.model_scores == []
+        assert doc.politics_setting is None
+        assert doc.politics_adjustments == []
 
     def test_includes_diversification(self):
         rec = self._recorder()

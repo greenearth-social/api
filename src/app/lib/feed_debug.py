@@ -63,6 +63,10 @@ class FeedDebugRecorder:
         # (model_name, weight, {at_uri: normalized_score}) per configured rank
         # model, in the order they were run; populated only when ranking runs.
         self.model_scores: list[tuple[str, float, dict[str, float]]] = []
+        self.politics_setting: float | None = None
+        # (at_uri, topic_score, score_multiplier, score_before, score_after)
+        # per ranked candidate, in request order.
+        self.politics_adjustments: list[tuple[str, float | None, float, float, float]] = []
         self.order_after_rank: list[str] = []
         self.final_order: list[str] = []
         # (at_uri, relevance, score, author_penalty, content_penalty,
@@ -98,10 +102,19 @@ class FeedDebugRecorder:
         """Record one rank model's normalized per-candidate scores and weight.
 
         Captures the score *after* normalization to [0, 1] (the form the
-        scores are in when combined), not the model's raw output — and not
-        the final combined score, which is already captured via `ranking`.
+        scores are in when combined), not the model's raw output. The exact
+        pre- and post-politics combined scores are captured separately.
         """
         self.model_scores.append((model_name, weight, dict(scores)))
+
+    def record_politics_adjustments(
+        self,
+        setting: float,
+        adjustments: list[tuple[str, float | None, float, float, float]],
+    ) -> None:
+        """Record how the politics setting changed each candidate's combined score."""
+        self.politics_setting = setting
+        self.politics_adjustments = list(adjustments)
 
     def record_order_after_rank(self, uris: list[str]) -> None:
         self.order_after_rank = list(uris)
@@ -143,6 +156,7 @@ class FeedDebugRecorder:
             FeedDebugDiversificationEntry,
             FeedDebugDocument,
             FeedDebugModelScoreEntry,
+            FeedDebugPoliticsAdjustment,
             FeedDebugScoreEntry,
             FeedDebugUserFeatures,
         )
@@ -194,6 +208,22 @@ class FeedDebugRecorder:
             )
             for model_name, weight, scores in self.model_scores
         ]
+        politics_adjustments = [
+            FeedDebugPoliticsAdjustment(
+                at_uri=at_uri,
+                topic_score=topic_score,
+                score_multiplier=score_multiplier,
+                score_before=score_before,
+                score_after=score_after,
+            )
+            for (
+                at_uri,
+                topic_score,
+                score_multiplier,
+                score_before,
+                score_after,
+            ) in self.politics_adjustments
+        ]
         diversification = [
             FeedDebugDiversificationEntry(
                 at_uri=at_uri,
@@ -220,6 +250,8 @@ class FeedDebugRecorder:
             final_candidates=final_candidates,
             ranking=self.ranking,
             model_scores=model_scores,
+            politics_setting=self.politics_setting,
+            politics_adjustments=politics_adjustments,
             order_after_rank=self.order_after_rank,
             final_order=self.final_order,
             diversification=diversification,

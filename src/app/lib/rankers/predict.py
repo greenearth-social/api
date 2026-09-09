@@ -132,7 +132,7 @@ async def run_predict(
     # loop through results once to calculate medians and get scores per candidate
     medians_by_model: dict[str, float] = {}  # {model_name: median_score}
     results_by_candidate: dict[str, dict[str, float]] = {}  # {uri: {model_name: score}}
-    models_with_valid_results: list[tuple[str, float, Ranker]] = [] # filtered version of resolved
+    models_with_valid_results: list[tuple[str, float, Ranker]] = []  # filtered version of resolved
     for (name, weight, ranker), result in zip(resolved, results, strict=True):
         if isinstance(result, BaseException):
             # A model that timed out contributes no scores, same as one that
@@ -212,18 +212,25 @@ async def run_predict(
 
     # Apply politics multiplier
     multiplied_scores_initial_order = []
+    politics_adjustments: list[tuple[str, float | None, float, float, float]] = []
     politics_multiplier = request.politics if request.politics is not None else 1.0
     for idx, uri, score, politics_score in candidates_with_scores_initial_order:
-        if politics_score is None:
-            politics_score = 0.0
-        final_multiplier = (politics_multiplier - 1.0) * politics_score + 1.0
+        effective_politics_score = politics_score if politics_score is not None else 0.0
+        final_multiplier = (politics_multiplier - 1.0) * effective_politics_score + 1.0
         final_score = score * final_multiplier
         multiplied_scores_initial_order.append((idx, uri, final_score))
+        politics_adjustments.append((uri, politics_score, final_multiplier, score, final_score))
 
-    ranked = enumerate(sorted(
-        multiplied_scores_initial_order,
-        key=lambda item: (-item[2], item[0]),
-    ), start=1)
+    if rec is not None:
+        rec.record_politics_adjustments(politics_multiplier, politics_adjustments)
+
+    ranked = enumerate(
+        sorted(
+            multiplied_scores_initial_order,
+            key=lambda item: (-item[2], item[0]),
+        ),
+        start=1,
+    )
 
     rankings: list[RankedCandidate] = []
     for rank_idx, (_, at_uri, score) in ranked:
