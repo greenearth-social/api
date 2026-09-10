@@ -226,7 +226,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="fd-bof",
         internal_display_name="fd BOF",
         avatar="assets/icons/best-of-friends.png",
-        controls=("freshness", "purpose"),
+        controls=("freshness", "purpose", "politics"),
         pinned_post_uri=_pinned_post_uri(
             "best-of-friends",
             "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetho32pa2g",
