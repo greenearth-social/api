@@ -3,6 +3,7 @@ from ..elasticsearch import post_has_embedding_source, unwrap_es_response
 from ..embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
 from ..topic_scores import politics_score_from_source
 
+
 # Fields every candidate generator should pull from ES via `_source`.
 # Critically, this does NOT include the 384-dim embedding array, even
 # though MMR and the two-tower ranker need it downstream. A kNN search

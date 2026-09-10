@@ -989,7 +989,7 @@ class TestHydrateEmbeddingsFailures:
     async def test_timeout_returns_unhydrated_candidates_and_records_degradation(
         self, monkeypatch, caplog
     ):
-        monkeypatch.setattr(generate_module, "_POST_HYDRATION_TIMEOUT_SEC", 0.01)
+        monkeypatch.setattr(generate_module, "_EMBED_HYDRATION_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
 
         async def _hangs(*args, **kwargs):
@@ -1006,20 +1006,16 @@ class TestHydrateEmbeddingsFailures:
         assert result.candidates[0].minilm_l12_embedding is None
 
         hydration_degradations = [
-            d for d in ctx.degradations if d.stage == DegradationStage.POST_HYDRATION
+            d for d in ctx.degradations if d.stage == DegradationStage.EMBED_HYDRATION
         ]
         assert len(hydration_degradations) == 1
-        assert (
-            ctx.degradations[0].component
-            == "fetch_post_embeddings_and_politics_scores"
-        )
+        assert hydration_degradations[0].component == "fetch_post_embeddings_and_politics_scores"
         assert isinstance(hydration_degradations[0].cause, TimeoutError)
 
         hydration_logs = [
             r
             for r in caplog.records
-            if r.name == generate_module.logger.name and 
-            r.message.startswith("Post hydration")
+            if r.name == generate_module.logger.name and r.message.startswith("Post hydration")
         ]
         assert len(hydration_logs) == 1
         assert hydration_logs[0].levelno == logging.WARNING
@@ -1049,19 +1045,15 @@ class TestHydrateEmbeddingsFailures:
         assert result.candidates[0].minilm_l12_embedding is None
 
         hydration_degradations = [
-            d for d in ctx.degradations if d.stage == DegradationStage.POST_HYDRATION
+            d for d in ctx.degradations if d.stage == DegradationStage.EMBED_HYDRATION
         ]
-        assert (
-            ctx.degradations[0].component
-            == "fetch_post_embeddings_and_politics_scores"
-        )
+        assert len(hydration_degradations) == 1
         assert hydration_degradations[0].cause is failure
 
         hydration_logs = [
             r
             for r in caplog.records
-            if r.name == generate_module.logger.name
-            and r.message.startswith("Post hydration")
+            if r.name == generate_module.logger.name and r.message.startswith("Post hydration")
         ]
         assert len(hydration_logs) == 1
         assert hydration_logs[0].levelno == logging.ERROR
@@ -1102,4 +1094,4 @@ class TestHydrateEmbeddingsFailures:
                 await run_generate(_hydrate_request("gen"), es=object())
 
         assert len(ctx.degradations) == 1
-        assert ctx.degradations[0].stage == DegradationStage.POST_HYDRATION
+        assert ctx.degradations[0].stage == DegradationStage.EMBED_HYDRATION

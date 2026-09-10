@@ -5,7 +5,8 @@ import os
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI
+from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
 from ..lib.rankers import RankerExecutionError

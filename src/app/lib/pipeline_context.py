@@ -19,7 +19,7 @@ from enum import Enum
 class DegradationStage(str, Enum):
     CANDIDATE_GEN = "candidate_gen"
     RANK = "rank"
-    POST_HYDRATION = "post_hydration"
+    EMBED_HYDRATION = "embed_hydration"
 
 
 @dataclass

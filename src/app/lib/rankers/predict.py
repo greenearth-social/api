@@ -13,9 +13,9 @@ import statistics
 
 from ...models import RankedCandidate, RankPredictRequest, RankPredictResult
 from ..feed_debug import current_recorder
-from ..metrics import get_metric_collector
 from ..telemetry import timed
 from .base import Ranker, RankerError, RankerExecutionError, RankerResult, get_ranker
+from ..metrics import get_metric_collector
 
 logger = logging.getLogger(__name__)
 
@@ -132,8 +132,8 @@ async def run_predict(
     # loop through results once to calculate medians and get scores per candidate
     medians_by_model: dict[str, float] = {}  # {model_name: median_score}
     results_by_candidate: dict[str, dict[str, float]] = {}  # {uri: {model_name: score}}
-    models_with_valid_results: list[tuple[str, float, Ranker]] = []  # filtered version of resolved
-    for (name, weight, ranker), result in zip(resolved, results, strict=True):
+    models_with_valid_results: list[tuple[str, float, Ranker]] = [] # filtered version of resolved
+    for (name, weight, ranker), result in zip(resolved, results):
         if isinstance(result, BaseException):
             # A model that timed out contributes no scores, same as one that
             # returned zero valid rankings. Any other error still propagates.
@@ -224,13 +224,10 @@ async def run_predict(
     if rec is not None:
         rec.record_politics_adjustments(politics_multiplier, politics_adjustments)
 
-    ranked = enumerate(
-        sorted(
-            multiplied_scores_initial_order,
-            key=lambda item: (-item[2], item[0]),
-        ),
-        start=1,
-    )
+    ranked = enumerate(sorted(
+        multiplied_scores_initial_order,
+        key=lambda item: (-item[2], item[0]),
+    ), start=1)
 
     rankings: list[RankedCandidate] = []
     for rank_idx, (_, at_uri, score) in ranked:

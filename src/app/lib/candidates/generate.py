@@ -47,7 +47,7 @@ def allocate_counts(specs: list[GeneratorSpec], total: int) -> list[int]:
     weight_sum = sum(s.weight for s in specs)
     raw = [(s.weight / weight_sum) * total for s in specs]
     floors = [math.floor(r) for r in raw]
-    remainders = [r - f for r, f in zip(raw, floors, strict=True)]
+    remainders = [r - f for r, f in zip(raw, floors)]
     leftover = total - sum(floors)
     # Award the leftover slots to the specs with the largest fractional part
     for idx in sorted(range(len(specs)), key=lambda i: -remainders[i]):
@@ -100,15 +100,11 @@ class GeneratorError(Exception):
 
 
 try:
-    _POST_HYDRATION_TIMEOUT_SEC: float = float(
-        os.environ.get(
-            "GE_POST_HYDRATION_TIMEOUT_SEC",
-            os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5"),
-        )
+    _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
+        os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5")
     )
 except ValueError:
-    _POST_HYDRATION_TIMEOUT_SEC = 1.5
-
+    _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
 
 async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePost]:
     """Fetch missing L12 embeddings and politics scores in a single batched ES call."""
@@ -123,13 +119,13 @@ async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePo
         async with timed(logger, "hydrate_posts", n_missing=len(missing)):
             hydration_results = await asyncio.wait_for(
                 fetch_post_embeddings_and_politics_scores(es, missing, index="posts_recent"),
-                timeout=_POST_HYDRATION_TIMEOUT_SEC,
+                timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
             )
     except Exception as exc:
         if isinstance(exc, TimeoutError):
             logger.warning(
                 "Post hydration timed out after %.1fs; continuing without",
-                _POST_HYDRATION_TIMEOUT_SEC,
+                _EMBED_HYDRATION_TIMEOUT_SEC,
             )
         else:
             logger.exception("Post hydration failed; continuing without")
@@ -138,7 +134,7 @@ async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePo
         if ctx is not None:
             ctx.record(
                 DegradationEvent(
-                    stage=DegradationStage.POST_HYDRATION,
+                    stage=DegradationStage.EMBED_HYDRATION,
                     component="fetch_post_embeddings_and_politics_scores",
                     cause=exc,
                 )
@@ -192,7 +188,7 @@ async def run_generate(
     # Resolve generators up front so missing-name errors raise deterministically
     # before any network work begins.
     active: list[tuple[GeneratorSpec, int, CandidateGenerator]] = []
-    for spec, count in zip(request.generators, counts, strict=True):
+    for spec, count in zip(request.generators, counts):
         if count <= 0:
             continue
         gen = get_generator(spec.name)
