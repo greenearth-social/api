@@ -20,6 +20,14 @@ CANDIDATE_SOURCE_FIELDS = [
     "video_count",          # media metadata (feed debugging)
     "external_embed",       # link embed metadata (feed debugging)
     "like_count",
+    # Perspective scores computed at ingest (ingex), so the perspective ranker
+    # does not have to call the API on the serving path. Two fields, not one:
+    # a post stamped with `perspective_scored_at` and no score is permanently
+    # unscorable (no text, or a language the API declines to rate), which is
+    # different from one that has simply never been scored. See
+    # lib/perspective.score_candidates.
+    "combined_perspective_score",
+    "perspective_scored_at",
 ]
 
 
@@ -72,4 +80,6 @@ def candidate_post_from_hit(
         video_count=src.get("video_count"),
         external_uri=external_uri,
         like_count=src.get("like_count"),
+        combined_perspective_score=src.get("combined_perspective_score"),
+        perspective_scored_at=src.get("perspective_scored_at"),
     )
