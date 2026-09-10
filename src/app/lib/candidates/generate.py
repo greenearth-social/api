@@ -17,13 +17,13 @@ from ...models import (
     CandidatePost,
     GeneratorSpec,
 )
+from ..elasticsearch import fetch_post_embeddings
+from ..embeddings import encode_float32_b64
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
 from ..pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult, get_generator
-from ..elasticsearch import fetch_post_embeddings
-from ..embeddings import encode_float32_b64
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ async def hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[Candid
                 timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
             )
     except Exception as exc:
-        if isinstance(exc, asyncio.TimeoutError):
+        if isinstance(exc, TimeoutError):
             logger.warning(
                 "Embedding hydration timed out after %.1fs; continuing without",
                 _EMBED_HYDRATION_TIMEOUT_SEC,
@@ -248,7 +248,7 @@ async def run_generate(
                     normalized.append(result)
             return normalized
         except Exception as exc:
-            if isinstance(exc, asyncio.TimeoutError):
+            if isinstance(exc, TimeoutError):
                 logger.warning(
                     "Candidate generator '%s' timed out after %.1fs",
                     spec.name,
@@ -337,7 +337,7 @@ async def run_generate(
                     is_infill="true",
                 )
         except Exception as exc:
-            if isinstance(exc, asyncio.TimeoutError):
+            if isinstance(exc, TimeoutError):
                 logger.warning(
                     "Infill generator '%s' timed out after %.1fs",
                     request.infill,

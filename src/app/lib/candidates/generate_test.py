@@ -14,6 +14,7 @@ from ..candidates import generate as generate_module
 from ..candidates.base import CandidateGenerator, CandidateResult
 from ..candidates.generate import GeneratorError, run_generate
 from ..config import set_fail_fast_for_request
+from ..embeddings import decode_float32_b64, encode_float32_b64
 from ..feed_debug import FeedDebugRecorder, feed_debug_scope
 from ..metrics import MetricCollector, set_metric_collector
 from ..pipeline_context import (
@@ -21,7 +22,6 @@ from ..pipeline_context import (
     PipelineContext,
     pipeline_context_scope,
 )
-
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -700,3 +700,316 @@ class TestWithPipelineContext:
 
         assert len(result.candidates) == 1
         assert any(d.component == "popularity:infill" for d in ctx.degradations)
+
+
+# ---------------------------------------------------------------------------
+# Embedding hydration (request.hydrate_embeddings)
+# ---------------------------------------------------------------------------
+
+
+class _FixedGenerator(CandidateGenerator):
+    """Returns a fixed candidate list, ignoring the allocated count.
+
+    Lets a single generator drive dedup/truncation in the tests below.
+    """
+
+    def __init__(self, name: str, candidates: list[CandidatePost]):
+        self._name = name
+        self._candidates = candidates
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def generate(
+        self,
+        es,
+        user_did,
+        num_candidates=100,
+        video_only=False,
+        exclude_uris=None,
+        max_age_hours=168,
+    ):
+        return CandidateResult(generator_name=self._name, candidates=list(self._candidates))
+
+
+class _RecordingFetch:
+    """Stands in for ``fetch_post_embeddings``, recording its call args."""
+
+    def __init__(self, pairs: list[tuple[str, object]] | None = None):
+        self._pairs = pairs or []
+        self.calls: list[dict] = []
+
+    async def __call__(self, es, at_uris, index="posts"):
+        self.calls.append({"es": es, "at_uris": list(at_uris), "index": index})
+        return list(self._pairs)
+
+
+def _hydrate_request(
+    generator_name: str,
+    *,
+    num_candidates: int = 5,
+    hydrate: bool = True,
+) -> CandidateGenerateRequest:
+    return CandidateGenerateRequest(
+        generators=[GeneratorSpec(name=generator_name, weight=1.0)],
+        user_did="did:plc:test",
+        num_candidates=num_candidates,
+        video_only=False,
+        infill=None,
+        exclude_uris=[],
+        max_age_hours=168,
+        hydrate_embeddings=hydrate,
+    )
+
+
+class TestHydrateEmbeddingsRequestFlag:
+    @pytest.mark.asyncio
+    async def test_disabled_by_default_skips_es_fetch(self, monkeypatch):
+        fetch = _RecordingFetch([("at://a", [1.0, 0.5])])
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+
+        result = await run_generate(_make_request("gen"), es=object())
+
+        assert fetch.calls == []
+        assert result.candidates[0].minilm_l12_embedding is None
+
+    @pytest.mark.asyncio
+    async def test_explicitly_disabled_skips_es_fetch(self, monkeypatch):
+        fetch = _RecordingFetch([("at://a", [1.0, 0.5])])
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+
+        result = await run_generate(_hydrate_request("gen", hydrate=False), es=object())
+
+        assert fetch.calls == []
+        assert result.candidates[0].minilm_l12_embedding is None
+
+    @pytest.mark.asyncio
+    async def test_enabled_hydrates_missing_embeddings_as_base64(self, monkeypatch):
+        vec = [1.0, 0.5, -0.25]
+        fetch = _RecordingFetch([("at://a", vec)])
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+
+        result = await run_generate(_hydrate_request("gen"), es=object())
+
+        assert len(fetch.calls) == 1
+        assert fetch.calls[0]["at_uris"] == ["at://a"]
+        assert fetch.calls[0]["index"] == "posts_recent"
+
+        encoded = result.candidates[0].minilm_l12_embedding
+        assert isinstance(encoded, str)
+        # Base64-encoded little-endian float32, per the CandidatePost contract.
+        assert encoded == encode_float32_b64(vec)
+        assert decode_float32_b64(encoded) == vec
+
+    @pytest.mark.asyncio
+    async def test_candidates_with_existing_embedding_are_not_refetched(self, monkeypatch):
+        existing = encode_float32_b64([9.0, 9.0])
+        candidates = [
+            CandidatePost(at_uri="at://a", minilm_l12_embedding=existing),
+            _candidate("at://b"),
+        ]
+        fetch = _RecordingFetch([("at://b", [1.0, 0.5])])
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+
+        result = await run_generate(_hydrate_request("gen"), es=object())
+
+        assert fetch.calls[0]["at_uris"] == ["at://b"]
+        assert result.candidates[0].minilm_l12_embedding == existing
+        encoded = result.candidates[1].minilm_l12_embedding
+        assert isinstance(encoded, str)
+        assert decode_float32_b64(encoded) == [1.0, 0.5]
+
+    @pytest.mark.asyncio
+    async def test_no_es_call_when_every_candidate_already_hydrated(self, monkeypatch):
+        existing = encode_float32_b64([1.0])
+        candidates = [CandidatePost(at_uri="at://a", minilm_l12_embedding=existing)]
+        fetch = _RecordingFetch()
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+
+        result = await run_generate(_hydrate_request("gen"), es=object())
+
+        assert fetch.calls == []
+        assert result.candidates[0].minilm_l12_embedding == existing
+
+    @pytest.mark.asyncio
+    async def test_partial_es_result_hydrates_only_matched_candidates(self, monkeypatch):
+        candidates = [_candidate("at://a"), _candidate("at://b")]
+        # ES silently skips posts without a stored embedding.
+        fetch = _RecordingFetch([("at://a", [1.0, 0.5])])
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+
+        result = await run_generate(_hydrate_request("gen"), es=object())
+
+        assert fetch.calls[0]["at_uris"] == ["at://a", "at://b"]
+        assert [c.at_uri for c in result.candidates] == ["at://a", "at://b"]
+        encoded = result.candidates[0].minilm_l12_embedding
+        assert isinstance(encoded, str)
+        assert decode_float32_b64(encoded) == [1.0, 0.5]
+        assert result.candidates[1].minilm_l12_embedding is None
+
+    @pytest.mark.asyncio
+    async def test_unencodable_vector_is_skipped_without_dropping_candidates(self, monkeypatch):
+        candidates = [_candidate("at://a"), _candidate("at://b")]
+        fetch = _RecordingFetch([("at://a", [1.0, 0.5]), ("at://b", "not-a-vector")])
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+
+        result = await run_generate(_hydrate_request("gen"), es=object())
+
+        assert [c.at_uri for c in result.candidates] == ["at://a", "at://b"]
+        encoded = result.candidates[0].minilm_l12_embedding
+        assert isinstance(encoded, str)
+        assert decode_float32_b64(encoded) == [1.0, 0.5]
+        assert result.candidates[1].minilm_l12_embedding is None
+
+    @pytest.mark.asyncio
+    async def test_empty_es_result_leaves_candidates_unchanged(self, monkeypatch):
+        fetch = _RecordingFetch([])
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+
+        result = await run_generate(_hydrate_request("gen"), es=object())
+
+        assert len(fetch.calls) == 1
+        assert result.candidates[0].minilm_l12_embedding is None
+
+    @pytest.mark.asyncio
+    async def test_hydration_runs_after_dedup_and_truncation(self, monkeypatch):
+        # Duplicate "at://a" plus a third candidate beyond num_candidates: only the
+        # deduped, truncated final slate should reach ES.
+        candidates = [
+            _candidate("at://a"),
+            _candidate("at://a"),
+            _candidate("at://b"),
+            _candidate("at://c"),
+        ]
+        fetch = _RecordingFetch([("at://a", [1.0]), ("at://b", [0.5])])
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+
+        result = await run_generate(_hydrate_request("gen", num_candidates=2), es=object())
+
+        assert len(fetch.calls) == 1
+        assert fetch.calls[0]["at_uris"] == ["at://a", "at://b"]
+        assert [c.at_uri for c in result.candidates] == ["at://a", "at://b"]
+        assert all(c.minilm_l12_embedding is not None for c in result.candidates)
+
+
+class TestHydrateEmbeddingsFailures:
+    @pytest.mark.asyncio
+    async def test_timeout_returns_unhydrated_candidates_and_records_degradation(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(generate_module, "_EMBED_HYDRATION_TIMEOUT_SEC", 0.01)
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
+
+        async def _hangs(*args, **kwargs):
+            await asyncio.sleep(9999)
+
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", _hangs)
+
+        ctx = PipelineContext(feed_name="test-feed")
+        with pipeline_context_scope(ctx):
+            with caplog.at_level(logging.WARNING, logger=generate_module.logger.name):
+                result = await run_generate(_hydrate_request("gen"), es=object())
+
+        assert [c.at_uri for c in result.candidates] == ["at://a"]
+        assert result.candidates[0].minilm_l12_embedding is None
+
+        hydration_degradations = [
+            d for d in ctx.degradations if d.stage == DegradationStage.EMBED_HYDRATION
+        ]
+        assert len(hydration_degradations) == 1
+        assert hydration_degradations[0].component == "fetch_post_embeddings"
+        assert isinstance(hydration_degradations[0].cause, TimeoutError)
+
+        hydration_logs = [
+            r
+            for r in caplog.records
+            if r.name == generate_module.logger.name and r.message.startswith("Embedding hydration")
+        ]
+        assert len(hydration_logs) == 1
+        assert hydration_logs[0].levelno == logging.WARNING
+        # An expected timeout is a warning without a traceback, and reports the
+        # configured budget.
+        assert "timed out after 0.0s" in hydration_logs[0].message
+        assert hydration_logs[0].exc_info is None
+
+    @pytest.mark.asyncio
+    async def test_es_error_returns_unhydrated_candidates_and_records_degradation(
+        self, monkeypatch, caplog
+    ):
+        failure = RuntimeError("Elasticsearch failed")
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
+
+        async def _raises(*args, **kwargs):
+            raise failure
+
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", _raises)
+
+        ctx = PipelineContext(feed_name="test-feed")
+        with pipeline_context_scope(ctx):
+            with caplog.at_level(logging.ERROR, logger=generate_module.logger.name):
+                result = await run_generate(_hydrate_request("gen"), es=object())
+
+        assert [c.at_uri for c in result.candidates] == ["at://a"]
+        assert result.candidates[0].minilm_l12_embedding is None
+
+        hydration_degradations = [
+            d for d in ctx.degradations if d.stage == DegradationStage.EMBED_HYDRATION
+        ]
+        assert len(hydration_degradations) == 1
+        assert hydration_degradations[0].cause is failure
+
+        hydration_logs = [
+            r
+            for r in caplog.records
+            if r.name == generate_module.logger.name and r.message.startswith("Embedding hydration")
+        ]
+        assert len(hydration_logs) == 1
+        assert hydration_logs[0].levelno == logging.ERROR
+        # An unexpected failure keeps its traceback.
+        assert hydration_logs[0].message == "Embedding hydration failed; continuing without"
+        assert hydration_logs[0].exc_info is not None
+
+    @pytest.mark.asyncio
+    async def test_es_error_without_pipeline_context_still_returns_candidates(self, monkeypatch):
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
+
+        async def _raises(*args, **kwargs):
+            raise RuntimeError("Elasticsearch failed")
+
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", _raises)
+
+        # No PipelineContext: generator failures would hard-fail here, but a
+        # hydration failure is never fatal — the slate is served unhydrated.
+        result = await run_generate(_hydrate_request("gen"), es=object())
+
+        assert [c.at_uri for c in result.candidates] == ["at://a"]
+        assert result.candidates[0].minilm_l12_embedding is None
+
+    @pytest.mark.asyncio
+    async def test_hydration_failure_propagates_under_fail_fast(self, monkeypatch):
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
+
+        async def _raises(*args, **kwargs):
+            raise RuntimeError("Elasticsearch failed")
+
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings", _raises)
+
+        # fail_fast surfaces the cause out of ctx.record, so hydration is not
+        # silently degraded in that (diagnostic) mode.
+        ctx = PipelineContext(feed_name="test-feed", fail_fast=True)
+        with pipeline_context_scope(ctx):
+            with pytest.raises(RuntimeError, match="Elasticsearch failed"):
+                await run_generate(_hydrate_request("gen"), es=object())
+
+        assert len(ctx.degradations) == 1
+        assert ctx.degradations[0].stage == DegradationStage.EMBED_HYDRATION
