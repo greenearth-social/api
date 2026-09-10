@@ -498,6 +498,7 @@ async def test_patch_user_feed_preferences_materializes_in_transaction():
             "user_did": USER_DID,
             "freshness": 4,
             "purpose": 0.65,
+            "politics": 1.5,
             "feed_preferences": {"random": {"freshness": 1}},
         },
     )
@@ -510,10 +511,10 @@ async def test_patch_user_feed_preferences_materializes_in_transaction():
             FeedPreferencesDocument(freshness=2),
         )
 
-    assert updated.model_dump(exclude_none=True) == {"freshness": 2, "purpose": 0.65}
+    assert updated.model_dump(exclude_none=True) == {"freshness": 2, "purpose": 0.65, "politics": 1.5}
     doc_ref.get.assert_awaited_once_with(transaction=transaction)
     written = transaction.set.call_args.args[1]
-    assert written["feed_preferences"] == {"best-of-friends": {"freshness": 2, "purpose": 0.65}}
+    assert written["feed_preferences"] == {"best-of-friends": {"freshness": 2, "purpose": 0.65, "politics": 1.5}}
     assert written["created_by_load_test"] is False
     assert transaction.set.call_args.kwargs == {"merge": True}
     transaction.delete.assert_called_once_with(accepted_ref)

@@ -1286,7 +1286,7 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
                 "politics": 1.0,
                 "purpose": 0.5,
             },
-            "best-of-friends": {"freshness": 5, "purpose": 0.5},
+            "best-of-friends": {"freshness": 5, "purpose": 0.5, "politics": 1.0},
         }
     }
 
@@ -1319,7 +1319,7 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
             "politics": 1.25,
             "purpose": 0.65,
         },
-        "best-of-friends": {"freshness": 3, "purpose": 0.65},
+        "best-of-friends": {"freshness": 3, "purpose": 0.65, "politics": 1.25},
     }
 
 
