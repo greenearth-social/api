@@ -1,7 +1,6 @@
 """Tests for the XRPC feed generator endpoints."""
 
 import asyncio
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2456,7 +2455,7 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.routers.xrpc.fetch_post_embeddings",
+                "app.lib.candidates.generate.fetch_post_embeddings",
                 new_callable=AsyncMock,
                 return_value=[("at://p/0", [1.0, 0.0, 0.0])],
             ) as mock_fetch,
@@ -2505,7 +2504,7 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.routers.xrpc._hydrate_embeddings",
+                "app.routers.xrpc.hydrate_embeddings",
                 new_callable=AsyncMock,
                 return_value=candidates,
             ),
@@ -2596,97 +2595,6 @@ class TestRankedFeed:
         assert resp.status_code == 200
         posts = [item["post"] for item in resp.json()["feed"]]
         assert len(posts) == 3
-
-
-# ---------------------------------------------------------------------------
-# Embedding hydration timeout
-# ---------------------------------------------------------------------------
-
-
-class TestEmbeddingHydrationTimeout:
-    """A hung `fetch_post_embeddings` call must not block the pipeline past
-    `GE_EMBED_HYDRATION_TIMEOUT_SEC` — it should fall back to unhydrated
-    candidates and report the expected timeout as a warning."""
-
-    @pytest.mark.asyncio
-    async def test_timeout_falls_back_and_logs_warning(self, monkeypatch, caplog):
-        from ..lib.pipeline_context import (
-            DegradationStage,
-            PipelineContext,
-            pipeline_context_scope,
-        )
-        from ..routers import xrpc as xrpc_module
-
-        monkeypatch.setattr(xrpc_module, "_EMBED_HYDRATION_TIMEOUT_SEC", 0.01)
-
-        async def _hangs(*args, **kwargs):
-            await asyncio.sleep(9999)
-
-        candidates = [CandidatePost(at_uri="at://post/1", score=0.5)]
-
-        with (
-            patch("app.routers.xrpc.fetch_post_embeddings", side_effect=_hangs),
-            pipeline_context_scope(PipelineContext(feed_name="f")) as ctx,
-            caplog.at_level(logging.WARNING, logger=xrpc_module.logger.name),
-        ):
-            result = await xrpc_module._hydrate_embeddings(object(), candidates)
-
-        assert result == candidates
-        assert len(ctx.degradations) == 1
-        assert ctx.degradations[0].stage == DegradationStage.EMBED_HYDRATION
-        assert ctx.degradations[0].component == "fetch_post_embeddings"
-        assert isinstance(ctx.degradations[0].cause, asyncio.TimeoutError)
-
-        hydration_logs = [
-            record
-            for record in caplog.records
-            if record.name == xrpc_module.logger.name
-            and record.message.startswith("Embedding hydration")
-        ]
-        assert len(hydration_logs) == 1
-        assert hydration_logs[0].levelno == logging.WARNING
-        assert "timed out after 0.0s" in hydration_logs[0].message
-        assert hydration_logs[0].exc_info is None
-
-    @pytest.mark.asyncio
-    async def test_unexpected_failure_falls_back_and_logs_exception(self, caplog):
-        from ..lib.pipeline_context import (
-            DegradationStage,
-            PipelineContext,
-            pipeline_context_scope,
-        )
-        from ..routers import xrpc as xrpc_module
-
-        failure = RuntimeError("Elasticsearch failed")
-        candidates = [CandidatePost(at_uri="at://post/1", score=0.5)]
-
-        with (
-            patch(
-                "app.routers.xrpc.fetch_post_embeddings",
-                new_callable=AsyncMock,
-                side_effect=failure,
-            ),
-            pipeline_context_scope(PipelineContext(feed_name="f")) as ctx,
-            caplog.at_level(logging.ERROR, logger=xrpc_module.logger.name),
-        ):
-            result = await xrpc_module._hydrate_embeddings(object(), candidates)
-
-        assert result == candidates
-        assert len(ctx.degradations) == 1
-        assert ctx.degradations[0].stage == DegradationStage.EMBED_HYDRATION
-        assert ctx.degradations[0].component == "fetch_post_embeddings"
-        assert ctx.degradations[0].cause is failure
-
-        hydration_logs = [
-            record
-            for record in caplog.records
-            if record.name == xrpc_module.logger.name
-            and record.message.startswith("Embedding hydration")
-        ]
-        assert len(hydration_logs) == 1
-        assert hydration_logs[0].levelno == logging.ERROR
-        assert hydration_logs[0].message == "Embedding hydration failed; continuing without"
-        assert hydration_logs[0].exc_info is not None
 
 
 # ---------------------------------------------------------------------------
