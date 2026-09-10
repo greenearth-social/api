@@ -18,6 +18,7 @@ from ..documents import (
     GeneratorMeta,
     ModelScoreMeta,
     PipelineItemMeta,
+    PoliticsAdjustmentMeta,
 )
 from ..lib.firestore import StaleFeedPreviewError
 from ..main import app
@@ -1033,7 +1034,72 @@ def test_get_feed_detail_returns_merged_data(mock_get_snapshot, mock_hydrate, cl
     assert len(item["model_scores"]) == 1
     assert item["model_scores"][0]["name"] == "two_tower"
     assert item["model_scores"][0]["score"] == 0.92
+    assert item["politics_adjustment"] is None
     assert item["diversification"]["relevance"] == 0.95
+
+
+@pytest.mark.parametrize("partial_preview", [False, True])
+@pytest.mark.parametrize(
+    ("setting", "topic_score", "multiplier", "score_after"),
+    [(0.0, 1.0, 0.0, 0.0), (2.0, 1.0, 2.0, 1.2), (0.0, None, 1.0, 0.6)],
+)
+@patch("app.routers.feed_transparency.hydrate_posts", new_callable=AsyncMock)
+@patch("app.routers.feed_transparency.get_feed_snapshot", new_callable=AsyncMock)
+def test_public_items_preserve_recorded_politics_adjustment(
+    mock_get_snapshot,
+    mock_hydrate,
+    partial_preview,
+    setting,
+    topic_score,
+    multiplier,
+    score_after,
+    client,
+):
+    uri = "at://did:plc:author/app.bsky.feed.post/post1"
+    adjustment = {
+        "setting": setting,
+        "topic_score": topic_score,
+        "score_multiplier": multiplier,
+        "score_before": 0.6,
+        "score_after": score_after,
+    }
+    snapshot = _snapshot_doc(
+        items_meta=[
+            PipelineItemMeta(
+                at_uri=uri,
+                rank=1,
+                rank_score=score_after,
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.6)],
+                politics_adjustment=PoliticsAdjustmentMeta.model_validate(adjustment),
+            )
+        ]
+    )
+    mock_get_snapshot.return_value = snapshot
+    mock_hydrate.return_value = {} if partial_preview else _hydrated(uri)
+    if partial_preview:
+        app.state.feed_cache = MagicMock(
+            retrieve_document=AsyncMock(
+                return_value=FeedCacheDocument(
+                    items=snapshot.items,
+                    items_meta=snapshot.items_meta,
+                    user_did="did:plc:test-user",
+                    feed_name="your-feed",
+                    generated_at=snapshot.generated_at,
+                    expires_at=datetime.now(UTC) + timedelta(minutes=10),
+                    mode="preview",
+                )
+            )
+        )
+        response = client.get("/api/feeds/previews/req-abc")
+    else:
+        response = client.get("/api/feeds/req-abc")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["rank_score"] == score_after
+    assert item["model_scores"][0]["score"] == 0.6
+    assert item["politics_adjustment"] == adjustment
+    assert item["is_partial"] is partial_preview
 
 
 @patch("app.routers.feed_transparency.get_feed_snapshot")

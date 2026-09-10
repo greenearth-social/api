@@ -629,6 +629,153 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("politics", "political_score", "political_relevance", "neutral_relevance"),
+    [(2.0, 1.2, 1.0, 0.5), (0.5, 0.3, 0.5, 1.0)],
+)
+async def test_politics_explanation_survives_pipeline_cache_and_pagination(
+    politics, political_score, political_relevance, neutral_relevance
+):
+    from ..lib.feed_cache import FirestoreFeedCache
+    from ..lib.rankers.base import RankerResult
+    from .xrpc import _run_pipeline_capturing, _snapshot_page
+
+    neutral_uri = "at://did:plc:neutral/app.bsky.feed.post/1"
+    political_uri = "at://did:plc:political/app.bsky.feed.post/1"
+    candidates = [
+        CandidatePost(
+            at_uri=neutral_uri,
+            generator_name="two_tower",
+            politics_score=0.0,
+            minilm_l12_embedding=encode_float32_b64([1.0, 0.0]),
+        ),
+        CandidatePost(
+            at_uri=political_uri,
+            generator_name="two_tower",
+            politics_score=1.0,
+            minilm_l12_embedding=encode_float32_b64([0.0, 1.0]),
+        ),
+    ]
+    generator = AsyncMock()
+    generator.generate.return_value = CandidateResult(
+        generator_name="two_tower", candidates=candidates
+    )
+    ranker = MagicMock(score_bounds=(0.0, 1.0))
+    ranker.predict = AsyncMock(
+        return_value=RankerResult(
+            model="heavy_ranker",
+            result=RankPredictResult(
+                rankings=[
+                    RankedCandidate(at_uri=neutral_uri, rank=1, rank_score=0.6),
+                    RankedCandidate(at_uri=political_uri, rank=2, rank_score=0.6),
+                ]
+            ),
+        )
+    )
+    gen_request = CandidateGenerateRequest(
+        generators=[GeneratorSpec(name="two_tower", weight=1.0)],
+        user_did="did:plc:testuser",
+        num_candidates=2,
+        video_only=False,
+        max_age_hours=168,
+        infill=None,
+    )
+    feed_cfg = FEEDS["your-feed"].model_copy(
+        update={
+            "rank_request_template": RankPredictRequest(
+                candidates=[],
+                models=[RankModelSpec(name="heavy_ranker", weight=1.0)],
+                user_did=gen_request.user_did,
+                politics=politics,
+            ),
+            "diversify": True,
+            "min_rank_score": None,
+            "min_mmr_score": None,
+            "max_render_share": None,
+        }
+    )
+
+    with (
+        patch("app.lib.candidates.generate.get_generator", return_value=generator),
+        patch("app.lib.rankers.predict.get_ranker", return_value=ranker),
+    ):
+        snapshot, discarded = await _run_pipeline_capturing(
+            Request({"type": "http", "app": app}),
+            app.state.firestore,
+            feed_cfg,
+            gen_request,
+            feed_name="your-feed",
+            user_did=gen_request.user_did,
+            request_id="politics-explanation",
+            regenerated=False,
+            debug_enabled=False,
+        )
+
+    assert discarded == []
+    expected_order = (
+        [political_uri, neutral_uri] if politics > 1.0 else [neutral_uri, political_uri]
+    )
+    assert snapshot.items == expected_order
+    expected_by_uri = {
+        political_uri: (1.0, politics, political_score, political_relevance),
+        neutral_uri: (0.0, 1.0, 0.6, neutral_relevance),
+    }
+    for meta in snapshot.items_meta:
+        topic_score, multiplier, adjusted_score, relevance = expected_by_uri[meta.at_uri]
+        adjustment = meta.politics_adjustment
+        assert adjustment is not None
+        assert adjustment.model_dump() == {
+            "setting": politics,
+            "topic_score": topic_score,
+            "score_multiplier": multiplier,
+            "score_before": 0.6,
+            "score_after": adjusted_score,
+        }
+        assert meta.rank_score == pytest.approx(adjusted_score)
+        assert meta.model_scores[0].score == pytest.approx(0.6)
+        assert meta.diversification is not None
+        assert meta.diversification.relevance == pytest.approx(relevance)
+        # Every post must explain its relevance against the same strongest
+        # adjusted score in the batch, even though their base scores are tied.
+        assert adjustment.score_after / meta.diversification.relevance == pytest.approx(
+            max(0.6, political_score)
+        )
+
+    db = MagicMock()
+    doc_ref = AsyncMock()
+    db.collection.return_value.document.return_value = doc_ref
+    cache = FirestoreFeedCache(db)
+    await cache.store_document(
+        snapshot.request_id,
+        FeedCacheDocument(
+            items=snapshot.items,
+            items_meta=snapshot.items_meta,
+            expires_at=snapshot.expires_at,
+        ),
+    )
+    stored = doc_ref.set.call_args.args[0]
+    # Existing cache entries may contain older items without politics metadata.
+    legacy_uri = "at://did:plc:legacy/app.bsky.feed.post/1"
+    stored["items"].append(legacy_uri)
+    stored["items_meta"].append({"at_uri": legacy_uri})
+    cached_document = MagicMock(exists=True)
+    cached_document.to_dict.return_value = stored
+    doc_ref.get.return_value = cached_document
+
+    restored = await cache.retrieve_document(snapshot.request_id)
+    assert restored is not None
+    cached_snapshot = snapshot.model_copy(
+        update={"items": restored.items, "items_meta": restored.items_meta}
+    )
+    page = _snapshot_page(cached_snapshot, [expected_order[1], legacy_uri])
+    assert page.items == [expected_order[1], legacy_uri]
+    assert page.items_meta[0] == snapshot.items_meta[1]
+    assert page.items_meta[0].politics_adjustment is not None
+    assert page.items_meta[0].politics_adjustment.setting == politics
+    assert page.items_meta[1].politics_adjustment is None
+
+
 class InMemoryFeedCache(FeedCache):
     """Trivial in-memory feed cache for tests.
 

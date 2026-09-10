@@ -572,6 +572,16 @@ class ModelScoreMeta(BaseModel):
     score: float
 
 
+class PoliticsAdjustmentMeta(BaseModel):
+    """Politics setting and score adjustment recorded when an item was ranked."""
+
+    setting: float = Field(ge=0.0, le=2.0)
+    topic_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    score_multiplier: float = Field(ge=0.0, le=2.0)
+    score_before: float
+    score_after: float
+
+
 class PipelineItemMeta(BaseModel):
     """Per-URI pipeline metadata — already joined so readers don't need to."""
 
@@ -581,6 +591,10 @@ class PipelineItemMeta(BaseModel):
     after_rank_position: int | None = None
     generators: list[GeneratorMeta] = Field(default_factory=list)
     model_scores: list[ModelScoreMeta] = Field(default_factory=list)
+    politics_adjustment: PoliticsAdjustmentMeta | None = Field(
+        default=None,
+        description="Recorded politics adjustment; absent for older or unranked items",
+    )
     diversification: DiversificationMeta | None = None
 
 

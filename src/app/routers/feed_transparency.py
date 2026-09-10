@@ -46,6 +46,7 @@ from ..models_feed_transparency import (
     GeneratorView,
     MediaView,
     ModelScoreView,
+    PoliticsAdjustmentView,
     PreferencesResponse,
 )
 from .xrpc import generate_feed_preview
@@ -117,6 +118,11 @@ def _build_items(
     meta_by_uri = {meta.at_uri: meta for meta in snapshot.items_meta}
     for at_uri in snapshot.items:
         meta = meta_by_uri.get(at_uri, PipelineItemMeta(at_uri=at_uri))
+        politics_adjustment = (
+            PoliticsAdjustmentView.model_validate(meta.politics_adjustment.model_dump())
+            if meta.politics_adjustment is not None
+            else None
+        )
         hyd = hydrated.get(meta.at_uri, {})
         # The AppView applies user-specific moderation after this generator
         # returns skeleton URIs, so that exact state is not available here.
@@ -140,6 +146,7 @@ def _build_items(
                             ModelScoreView(name=s.name, weight=s.weight, score=s.score)
                             for s in meta.model_scores
                         ],
+                        politics_adjustment=politics_adjustment,
                         diversification=DiversificationView(
                             relevance=meta.diversification.relevance,
                             score=meta.diversification.score,
@@ -178,6 +185,7 @@ def _build_items(
                     ModelScoreView(name=s.name, weight=s.weight, score=s.score)
                     for s in meta.model_scores
                 ],
+                politics_adjustment=politics_adjustment,
                 diversification=DiversificationView(
                     relevance=meta.diversification.relevance,
                     score=meta.diversification.score,

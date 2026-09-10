@@ -284,6 +284,7 @@ class FeedDebugRecorder:
             GeneratorMeta,
             ModelScoreMeta,
             PipelineItemMeta,
+            PoliticsAdjustmentMeta,
         )
 
         # Generator legend (weights only, no scores).
@@ -414,6 +415,27 @@ class FeedDebugRecorder:
                     ModelScoreMeta(name=model_name, weight=weight, score=score)
                 )
 
+        # Keep the setting with each item: cached pages can contain posts from
+        # multiple ranking runs, and current preferences may have changed.
+        politics_by_uri: dict[str, PoliticsAdjustmentMeta] = {}
+        if self.politics_setting is not None:
+            politics_by_uri = {
+                at_uri: PoliticsAdjustmentMeta(
+                    setting=self.politics_setting,
+                    topic_score=topic_score,
+                    score_multiplier=score_multiplier,
+                    score_before=score_before,
+                    score_after=score_after,
+                )
+                for (
+                    at_uri,
+                    topic_score,
+                    score_multiplier,
+                    score_before,
+                    score_after,
+                ) in self.politics_adjustments
+            }
+
         # Per-URI position after ranking.
         after_rank_pos = {uri: i for i, uri in enumerate(self.order_after_rank, start=1)}
 
@@ -446,6 +468,7 @@ class FeedDebugRecorder:
                     after_rank_position=after_rank_pos.get(at_uri, pos + 1),
                     generators=gens_by_uri.get(at_uri, []),
                     model_scores=model_scores_by_uri.get(at_uri, []),
+                    politics_adjustment=politics_by_uri.get(at_uri),
                     diversification=div_by_uri.get(at_uri),
                 )
             )
