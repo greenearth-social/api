@@ -61,3 +61,4 @@ profiles/
 .DS_Store
 
 load_test_data
+.superpowers/
