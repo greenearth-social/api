@@ -206,6 +206,7 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
         feed_preferences={
             "your-feed": FeedPreferencesDocument(
                 freshness=5,
+                politics=0.75,
                 purpose=0.5,
                 source_weights=SourceWeightsDocument(
                     following=0.3,
@@ -218,6 +219,7 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
     )
     draft = FeedPreferencesDocument(
         freshness=2,
+        politics=1.5,
         purpose=0.8,
         source_weights=SourceWeightsDocument(
             following=0.5,
@@ -270,6 +272,7 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
     gen_request = pipeline.await_args.args[3]
     model_weights = {model.name: model.weight for model in feed_cfg.rank_request_template.models}
     assert model_weights["perspective"] == pytest.approx(0.8)
+    assert feed_cfg.rank_request_template.politics == 1.5
     assert gen_request.max_age_hours == 24
     assert [(generator.name, generator.weight) for generator in gen_request.generators] == [
         ("followed_users", 0.5),
@@ -358,6 +361,39 @@ def test_configured_generation_preserves_exact_single_source_weights(
     ] == [(expected_generator, 1.0)]
     assert configured.effective_preferences.source_weights == weights
     assert configured.preference_fingerprint
+
+
+@pytest.mark.parametrize("politics", [0.0, 2.0])
+def test_configured_generation_applies_politics_to_request_local_rank_template(politics):
+    from .xrpc import _configured_generation
+
+    original_rank_template = FEEDS["your-feed"].rank_request_template
+    user = UserDocument(
+        user_did="did:plc:testuser",
+        feed_preferences={
+            "your-feed": FeedPreferencesDocument(politics=politics),
+        },
+    )
+
+    configured = _configured_generation(
+        "your-feed",
+        user,
+        network_likes_enabled=True,
+    )
+
+    neutral = _configured_generation(
+        "your-feed",
+        None,
+        network_likes_enabled=True,
+    )
+
+    assert configured.effective_preferences.politics == politics
+    assert configured.feed_cfg.rank_request_template is not None
+    assert configured.feed_cfg.rank_request_template.politics == politics
+    assert configured.preference_fingerprint != neutral.preference_fingerprint
+    assert FEEDS["your-feed"].rank_request_template is original_rank_template
+    assert original_rank_template is not None
+    assert original_rank_template.politics == 1.0
 
 
 def test_100_percent_following_and_best_of_friends_share_pipeline_configuration():
@@ -591,6 +627,153 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         ["2026-01-01T00:00:00+00:00"],
         [5],
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("politics", "political_score", "political_relevance", "neutral_relevance"),
+    [(2.0, 1.2, 1.0, 0.5), (0.5, 0.3, 0.5, 1.0)],
+)
+async def test_politics_explanation_survives_pipeline_cache_and_pagination(
+    politics, political_score, political_relevance, neutral_relevance
+):
+    from ..lib.feed_cache import FirestoreFeedCache
+    from ..lib.rankers.base import RankerResult
+    from .xrpc import _run_pipeline_capturing, _snapshot_page
+
+    neutral_uri = "at://did:plc:neutral/app.bsky.feed.post/1"
+    political_uri = "at://did:plc:political/app.bsky.feed.post/1"
+    candidates = [
+        CandidatePost(
+            at_uri=neutral_uri,
+            generator_name="two_tower",
+            politics_score=0.0,
+            minilm_l12_embedding=encode_float32_b64([1.0, 0.0]),
+        ),
+        CandidatePost(
+            at_uri=political_uri,
+            generator_name="two_tower",
+            politics_score=1.0,
+            minilm_l12_embedding=encode_float32_b64([0.0, 1.0]),
+        ),
+    ]
+    generator = AsyncMock()
+    generator.generate.return_value = CandidateResult(
+        generator_name="two_tower", candidates=candidates
+    )
+    ranker = MagicMock(score_bounds=(0.0, 1.0))
+    ranker.predict = AsyncMock(
+        return_value=RankerResult(
+            model="heavy_ranker",
+            result=RankPredictResult(
+                rankings=[
+                    RankedCandidate(at_uri=neutral_uri, rank=1, rank_score=0.6),
+                    RankedCandidate(at_uri=political_uri, rank=2, rank_score=0.6),
+                ]
+            ),
+        )
+    )
+    gen_request = CandidateGenerateRequest(
+        generators=[GeneratorSpec(name="two_tower", weight=1.0)],
+        user_did="did:plc:testuser",
+        num_candidates=2,
+        video_only=False,
+        max_age_hours=168,
+        infill=None,
+    )
+    feed_cfg = FEEDS["your-feed"].model_copy(
+        update={
+            "rank_request_template": RankPredictRequest(
+                candidates=[],
+                models=[RankModelSpec(name="heavy_ranker", weight=1.0)],
+                user_did=gen_request.user_did,
+                politics=politics,
+            ),
+            "diversify": True,
+            "min_rank_score": None,
+            "min_mmr_score": None,
+            "max_render_share": None,
+        }
+    )
+
+    with (
+        patch("app.lib.candidates.generate.get_generator", return_value=generator),
+        patch("app.lib.rankers.predict.get_ranker", return_value=ranker),
+    ):
+        snapshot, discarded = await _run_pipeline_capturing(
+            Request({"type": "http", "app": app}),
+            app.state.firestore,
+            feed_cfg,
+            gen_request,
+            feed_name="your-feed",
+            user_did=gen_request.user_did,
+            request_id="politics-explanation",
+            regenerated=False,
+            debug_enabled=False,
+        )
+
+    assert discarded == []
+    expected_order = (
+        [political_uri, neutral_uri] if politics > 1.0 else [neutral_uri, political_uri]
+    )
+    assert snapshot.items == expected_order
+    expected_by_uri = {
+        political_uri: (1.0, politics, political_score, political_relevance),
+        neutral_uri: (0.0, 1.0, 0.6, neutral_relevance),
+    }
+    for meta in snapshot.items_meta:
+        topic_score, multiplier, adjusted_score, relevance = expected_by_uri[meta.at_uri]
+        adjustment = meta.politics_adjustment
+        assert adjustment is not None
+        assert adjustment.model_dump() == {
+            "setting": politics,
+            "topic_score": topic_score,
+            "score_multiplier": multiplier,
+            "score_before": 0.6,
+            "score_after": adjusted_score,
+        }
+        assert meta.rank_score == pytest.approx(adjusted_score)
+        assert meta.model_scores[0].score == pytest.approx(0.6)
+        assert meta.diversification is not None
+        assert meta.diversification.relevance == pytest.approx(relevance)
+        # Every post must explain its relevance against the same strongest
+        # adjusted score in the batch, even though their base scores are tied.
+        assert adjustment.score_after / meta.diversification.relevance == pytest.approx(
+            max(0.6, political_score)
+        )
+
+    db = MagicMock()
+    doc_ref = AsyncMock()
+    db.collection.return_value.document.return_value = doc_ref
+    cache = FirestoreFeedCache(db)
+    await cache.store_document(
+        snapshot.request_id,
+        FeedCacheDocument(
+            items=snapshot.items,
+            items_meta=snapshot.items_meta,
+            expires_at=snapshot.expires_at,
+        ),
+    )
+    stored = doc_ref.set.call_args.args[0]
+    # Existing cache entries may contain older items without politics metadata.
+    legacy_uri = "at://did:plc:legacy/app.bsky.feed.post/1"
+    stored["items"].append(legacy_uri)
+    stored["items_meta"].append({"at_uri": legacy_uri})
+    cached_document = MagicMock(exists=True)
+    cached_document.to_dict.return_value = stored
+    doc_ref.get.return_value = cached_document
+
+    restored = await cache.retrieve_document(snapshot.request_id)
+    assert restored is not None
+    cached_snapshot = snapshot.model_copy(
+        update={"items": restored.items, "items_meta": restored.items_meta}
+    )
+    page = _snapshot_page(cached_snapshot, [expected_order[1], legacy_uri])
+    assert page.items == [expected_order[1], legacy_uri]
+    assert page.items_meta[0] == snapshot.items_meta[1]
+    assert page.items_meta[0].politics_adjustment is not None
+    assert page.items_meta[0].politics_adjustment.setting == politics
+    assert page.items_meta[1].politics_adjustment is None
 
 
 class InMemoryFeedCache(FeedCache):
@@ -2443,6 +2626,45 @@ class TestRankedFeed:
         posts = [item["post"] for item in data["feed"]]
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
+    def test_user_politics_preference_is_passed_to_ranker(self):
+        candidates = [
+            CandidatePost(
+                at_uri="at://p/0",
+                minilm_l12_embedding=TEST_EMBEDDING,
+                politics_score=0.8,
+                generator_name="two_tower",
+            )
+        ]
+        user = UserDocument(
+            user_did="did:plc:testuser",
+            feed_preferences={
+                "your-feed": FeedPreferencesDocument(politics=1.75),
+            },
+        )
+        rank_result = RankPredictResult(
+            rankings=[RankedCandidate(at_uri="at://p/0", rank=1, rank_score=1.0)]
+        )
+
+        with (
+            self._patch_generators(candidates),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
+            patch(
+                "app.routers.xrpc.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
+            ) as mock_run,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        assert response.status_code == 200
+        assert mock_run.await_args is not None
+        rank_request = mock_run.await_args.args[0]
+        assert rank_request.politics == 1.75
+        assert rank_request.candidates[0].politics_score == 0.8
+
     def test_hydrates_lightweight_candidates_before_ranking(self):
         """Embedding-free generated candidates are hydrated before ranking."""
         candidates = _make_candidates("p", 1)
@@ -2455,9 +2677,9 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.lib.candidates.generate.fetch_post_embeddings",
+                "app.lib.candidates.generate.fetch_post_embeddings_and_politics_scores",
                 new_callable=AsyncMock,
-                return_value=[("at://p/0", [1.0, 0.0, 0.0])],
+                return_value=[("at://p/0", [1.0, 0.0, 0.0], 0.75)],
             ) as mock_fetch,
             patch(
                 "app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result
@@ -2474,6 +2696,7 @@ class TestRankedFeed:
         assert mock_fetch.await_args.args[1] == ["at://p/0"]
         rank_req = mock_run.await_args.args[0]
         assert rank_req.candidates[0].minilm_l12_embedding == TEST_EMBEDDING
+        assert rank_req.candidates[0].politics_score == 0.75
         assert [item["post"] for item in data["feed"]] == ["at://p/0"]
 
     def test_drops_candidates_missing_embeddings_before_ranking(self):
@@ -2504,7 +2727,7 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.routers.xrpc.hydrate_embeddings",
+                "app.routers.xrpc.hydrate_posts",
                 new_callable=AsyncMock,
                 return_value=candidates,
             ),
@@ -5100,7 +5323,10 @@ class TestGetFeedSkeletonMetrics:
         assert success_calls[0][2]["feed_name"] == FEED_RKEY
 
     def test_degraded_render_records_primary_stage_and_component(self):
-        candidates = _make_candidates("p", 3, with_embedding=True)
+        candidates = [
+            candidate.model_copy(update={"politics_score": 0.1})
+            for candidate in _make_candidates("p", 3, with_embedding=True)
+        ]
 
         with (
             _patch_unranked_your_feed_generators(candidates),

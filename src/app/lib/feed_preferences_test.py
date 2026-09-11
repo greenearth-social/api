@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from ..documents import FeedPreferencesDocument, SourceWeightsDocument, UserDocument
 from .feed_preferences import DEFAULT_SOURCE_WEIGHTS, resolve_feed_preferences
 
@@ -62,3 +65,32 @@ def test_resolver_uses_source_weight_defaults_without_a_user():
     resolved = resolve_feed_preferences(None, "your-feed")
 
     assert resolved.source_weights == DEFAULT_SOURCE_WEIGHTS
+
+
+def test_resolver_prefers_feed_scoped_politics_over_legacy_value():
+    user = UserDocument(
+        user_did="did:plc:test",
+        politics=0.25,
+        feed_preferences={
+            "your-feed": FeedPreferencesDocument(politics=0.0),
+        },
+    )
+
+    resolved = resolve_feed_preferences(user, "your-feed")
+
+    assert resolved.politics == 0.0
+
+
+def test_resolver_uses_neutral_politics_default_without_a_user():
+    assert resolve_feed_preferences(None, "your-feed").politics == 1.0
+
+
+@pytest.mark.parametrize("politics", [0.0, 2.0])
+def test_feed_preferences_document_accepts_politics_boundaries(politics):
+    assert FeedPreferencesDocument(politics=politics).politics == politics
+
+
+@pytest.mark.parametrize("politics", [-0.01, 2.01])
+def test_feed_preferences_document_rejects_politics_outside_boundaries(politics):
+    with pytest.raises(ValidationError):
+        FeedPreferencesDocument(politics=politics)

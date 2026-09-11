@@ -18,6 +18,7 @@ from ..documents import (
     GeneratorMeta,
     ModelScoreMeta,
     PipelineItemMeta,
+    PoliticsAdjustmentMeta,
 )
 from ..lib.firestore import StaleFeedPreviewError
 from ..main import app
@@ -1033,7 +1034,72 @@ def test_get_feed_detail_returns_merged_data(mock_get_snapshot, mock_hydrate, cl
     assert len(item["model_scores"]) == 1
     assert item["model_scores"][0]["name"] == "two_tower"
     assert item["model_scores"][0]["score"] == 0.92
+    assert item["politics_adjustment"] is None
     assert item["diversification"]["relevance"] == 0.95
+
+
+@pytest.mark.parametrize("partial_preview", [False, True])
+@pytest.mark.parametrize(
+    ("setting", "topic_score", "multiplier", "score_after"),
+    [(0.0, 1.0, 0.0, 0.0), (2.0, 1.0, 2.0, 1.2), (0.0, None, 1.0, 0.6)],
+)
+@patch("app.routers.feed_transparency.hydrate_posts", new_callable=AsyncMock)
+@patch("app.routers.feed_transparency.get_feed_snapshot", new_callable=AsyncMock)
+def test_public_items_preserve_recorded_politics_adjustment(
+    mock_get_snapshot,
+    mock_hydrate,
+    partial_preview,
+    setting,
+    topic_score,
+    multiplier,
+    score_after,
+    client,
+):
+    uri = "at://did:plc:author/app.bsky.feed.post/post1"
+    adjustment = {
+        "setting": setting,
+        "topic_score": topic_score,
+        "score_multiplier": multiplier,
+        "score_before": 0.6,
+        "score_after": score_after,
+    }
+    snapshot = _snapshot_doc(
+        items_meta=[
+            PipelineItemMeta(
+                at_uri=uri,
+                rank=1,
+                rank_score=score_after,
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.6)],
+                politics_adjustment=PoliticsAdjustmentMeta.model_validate(adjustment),
+            )
+        ]
+    )
+    mock_get_snapshot.return_value = snapshot
+    mock_hydrate.return_value = {} if partial_preview else _hydrated(uri)
+    if partial_preview:
+        app.state.feed_cache = MagicMock(
+            retrieve_document=AsyncMock(
+                return_value=FeedCacheDocument(
+                    items=snapshot.items,
+                    items_meta=snapshot.items_meta,
+                    user_did="did:plc:test-user",
+                    feed_name="your-feed",
+                    generated_at=snapshot.generated_at,
+                    expires_at=datetime.now(UTC) + timedelta(minutes=10),
+                    mode="preview",
+                )
+            )
+        )
+        response = client.get("/api/feeds/previews/req-abc")
+    else:
+        response = client.get("/api/feeds/req-abc")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["rank_score"] == score_after
+    assert item["model_scores"][0]["score"] == 0.6
+    assert item["politics_adjustment"] == adjustment
+    assert item["is_partial"] is partial_preview
 
 
 @patch("app.routers.feed_transparency.get_feed_snapshot")
@@ -1217,9 +1283,10 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
                     "popular": 0.25,
                 },
                 "freshness": 5,
+                "politics": 1.0,
                 "purpose": 0.5,
             },
-            "best-of-friends": {"freshness": 5, "purpose": 0.5},
+            "best-of-friends": {"freshness": 5, "purpose": 0.5, "politics": 1.0},
         }
     }
 
@@ -1249,9 +1316,10 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
                 "popular": 0.0,
             },
             "freshness": 3,
+            "politics": 1.25,
             "purpose": 0.65,
         },
-        "best-of-friends": {"freshness": 3, "purpose": 0.65},
+        "best-of-friends": {"freshness": 3, "purpose": 0.65, "politics": 1.25},
     }
 
 
@@ -1274,6 +1342,41 @@ def test_patch_preferences_updates_only_selected_feed(mock_patch_prefs, mock_del
     assert args[1:3] == ("did:plc:test-user", "best-of-friends")
     assert args[3].model_dump(exclude_none=True) == {"freshness": 4}
     mock_delete_seen.assert_awaited_once()
+
+
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@pytest.mark.parametrize("politics", [0.0, 2.0])
+def test_patch_preferences_updates_politics_for_your_feed(
+    mock_patch_prefs, mock_delete_seen, politics, client
+):
+    mock_patch_prefs.return_value = FeedPreferencesDocument(politics=politics)
+
+    response = client.patch(
+        "/api/feeds/preferences/your-feed",
+        json={"politics": politics},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"politics": politics}
+    args = mock_patch_prefs.await_args.args
+    assert args[1:3] == ("did:plc:test-user", "your-feed")
+    assert args[3].model_dump(exclude_none=True) == {"politics": politics}
+    mock_delete_seen.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
+
+
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@pytest.mark.parametrize("politics", [-0.01, 2.01])
+def test_patch_preferences_rejects_out_of_range_politics(
+    mock_patch_prefs, politics, client
+):
+    response = client.patch(
+        "/api/feeds/preferences/your-feed",
+        json={"politics": politics},
+    )
+
+    assert response.status_code == 422
+    mock_patch_prefs.assert_not_awaited()
 
 
 @patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")

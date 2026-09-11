@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -193,6 +193,88 @@ def _stub_generators(monkeypatch, mapping: dict) -> None:
 def _reset_metric_collector():
     yield
     set_metric_collector(None)
+
+
+# ---------------------------------------------------------------------------
+# Post hydration
+# ---------------------------------------------------------------------------
+
+
+class TestPostHydration:
+    @pytest.mark.asyncio
+    async def test_fills_missing_embeddings_and_politics_scores_without_overwriting_values(
+        self, monkeypatch
+    ):
+        existing_embedding = encode_float32_b64([9.0, 8.0])
+        candidates = [
+            CandidatePost(at_uri="at://post/both-missing"),
+            CandidatePost(
+                at_uri="at://post/politics-missing",
+                minilm_l12_embedding=existing_embedding,
+            ),
+            CandidatePost(
+                at_uri="at://post/embedding-missing",
+                politics_score=0.4,
+            ),
+            CandidatePost(
+                at_uri="at://post/complete",
+                minilm_l12_embedding=existing_embedding,
+                politics_score=0.6,
+            ),
+        ]
+        fetch = AsyncMock(
+            return_value=[
+                ("at://post/both-missing", [1.0, 2.0], 0.0),
+                ("at://post/politics-missing", [3.0, 4.0], 0.25),
+                ("at://post/embedding-missing", [5.0, 6.0], 0.9),
+            ]
+        )
+        monkeypatch.setattr(
+            generate_module,
+            "fetch_post_embeddings_and_politics_scores",
+            fetch,
+        )
+        es = object()
+
+        hydrated = await generate_module.hydrate_posts(es, candidates)
+
+        fetch.assert_awaited_once_with(
+            es,
+            [
+                "at://post/both-missing",
+                "at://post/politics-missing",
+                "at://post/embedding-missing",
+            ],
+            index="posts_recent",
+        )
+        assert hydrated[0].minilm_l12_embedding == encode_float32_b64([1.0, 2.0])
+        assert hydrated[0].politics_score == 0.0
+        assert hydrated[1].minilm_l12_embedding == existing_embedding
+        assert hydrated[1].politics_score == 0.25
+        assert hydrated[2].minilm_l12_embedding == encode_float32_b64([5.0, 6.0])
+        assert hydrated[2].politics_score == 0.4
+        assert hydrated[3] is candidates[3]
+
+    @pytest.mark.asyncio
+    async def test_skips_es_when_every_candidate_is_fully_hydrated(self, monkeypatch):
+        candidates = [
+            CandidatePost(
+                at_uri="at://post/complete",
+                minilm_l12_embedding=encode_float32_b64([1.0, 2.0]),
+                politics_score=0.0,
+            )
+        ]
+        fetch = AsyncMock()
+        monkeypatch.setattr(
+            generate_module,
+            "fetch_post_embeddings_and_politics_scores",
+            fetch,
+        )
+
+        hydrated = await generate_module.hydrate_posts(object(), candidates)
+
+        assert hydrated is candidates
+        fetch.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +818,7 @@ class _FixedGenerator(CandidateGenerator):
 class _RecordingFetch:
     """Stands in for ``fetch_post_embeddings``, recording its call args."""
 
-    def __init__(self, pairs: list[tuple[str, object]] | None = None):
+    def __init__(self, pairs: list[tuple[str, object, float]] | None = None):
         self._pairs = pairs or []
         self.calls: list[dict] = []
 
@@ -766,9 +848,9 @@ def _hydrate_request(
 class TestHydrateEmbeddingsRequestFlag:
     @pytest.mark.asyncio
     async def test_disabled_by_default_skips_es_fetch(self, monkeypatch):
-        fetch = _RecordingFetch([("at://a", [1.0, 0.5])])
+        fetch = _RecordingFetch([("at://a", [1.0, 0.5], 0.5)])
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
         result = await run_generate(_make_request("gen"), es=object())
 
@@ -777,9 +859,9 @@ class TestHydrateEmbeddingsRequestFlag:
 
     @pytest.mark.asyncio
     async def test_explicitly_disabled_skips_es_fetch(self, monkeypatch):
-        fetch = _RecordingFetch([("at://a", [1.0, 0.5])])
+        fetch = _RecordingFetch([("at://a", [1.0, 0.5], 0.5)])
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
         result = await run_generate(_hydrate_request("gen", hydrate=False), es=object())
 
@@ -789,9 +871,9 @@ class TestHydrateEmbeddingsRequestFlag:
     @pytest.mark.asyncio
     async def test_enabled_hydrates_missing_embeddings_as_base64(self, monkeypatch):
         vec = [1.0, 0.5, -0.25]
-        fetch = _RecordingFetch([("at://a", vec)])
+        fetch = _RecordingFetch([("at://a", vec, 0.5)])
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
         result = await run_generate(_hydrate_request("gen"), es=object())
 
@@ -809,12 +891,12 @@ class TestHydrateEmbeddingsRequestFlag:
     async def test_candidates_with_existing_embedding_are_not_refetched(self, monkeypatch):
         existing = encode_float32_b64([9.0, 9.0])
         candidates = [
-            CandidatePost(at_uri="at://a", minilm_l12_embedding=existing),
+            CandidatePost(at_uri="at://a", minilm_l12_embedding=existing, politics_score=0.5),
             _candidate("at://b"),
         ]
-        fetch = _RecordingFetch([("at://b", [1.0, 0.5])])
+        fetch = _RecordingFetch([("at://b", [1.0, 0.5], 0.5)])
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
         result = await run_generate(_hydrate_request("gen"), es=object())
 
@@ -827,10 +909,10 @@ class TestHydrateEmbeddingsRequestFlag:
     @pytest.mark.asyncio
     async def test_no_es_call_when_every_candidate_already_hydrated(self, monkeypatch):
         existing = encode_float32_b64([1.0])
-        candidates = [CandidatePost(at_uri="at://a", minilm_l12_embedding=existing)]
+        candidates = [CandidatePost(at_uri="at://a", minilm_l12_embedding=existing, politics_score=0.5)]
         fetch = _RecordingFetch()
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
         result = await run_generate(_hydrate_request("gen"), es=object())
 
@@ -841,9 +923,9 @@ class TestHydrateEmbeddingsRequestFlag:
     async def test_partial_es_result_hydrates_only_matched_candidates(self, monkeypatch):
         candidates = [_candidate("at://a"), _candidate("at://b")]
         # ES silently skips posts without a stored embedding.
-        fetch = _RecordingFetch([("at://a", [1.0, 0.5])])
+        fetch = _RecordingFetch([("at://a", [1.0, 0.5], 0.5)])
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
         result = await run_generate(_hydrate_request("gen"), es=object())
 
@@ -857,9 +939,9 @@ class TestHydrateEmbeddingsRequestFlag:
     @pytest.mark.asyncio
     async def test_unencodable_vector_is_skipped_without_dropping_candidates(self, monkeypatch):
         candidates = [_candidate("at://a"), _candidate("at://b")]
-        fetch = _RecordingFetch([("at://a", [1.0, 0.5]), ("at://b", "not-a-vector")])
+        fetch = _RecordingFetch([("at://a", [1.0, 0.5], 0.5), ("at://b", "not-a-vector", 0.0)])
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
         result = await run_generate(_hydrate_request("gen"), es=object())
 
@@ -873,7 +955,7 @@ class TestHydrateEmbeddingsRequestFlag:
     async def test_empty_es_result_leaves_candidates_unchanged(self, monkeypatch):
         fetch = _RecordingFetch([])
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
         result = await run_generate(_hydrate_request("gen"), es=object())
 
@@ -890,9 +972,9 @@ class TestHydrateEmbeddingsRequestFlag:
             _candidate("at://b"),
             _candidate("at://c"),
         ]
-        fetch = _RecordingFetch([("at://a", [1.0]), ("at://b", [0.5])])
+        fetch = _RecordingFetch([("at://a", [1.0], 0.5), ("at://b", [0.5], 0.5)])
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", fetch)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
         result = await run_generate(_hydrate_request("gen", num_candidates=2), es=object())
 
@@ -913,7 +995,7 @@ class TestHydrateEmbeddingsFailures:
         async def _hangs(*args, **kwargs):
             await asyncio.sleep(9999)
 
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", _hangs)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", _hangs)
 
         ctx = PipelineContext(feed_name="test-feed")
         with pipeline_context_scope(ctx):
@@ -927,13 +1009,13 @@ class TestHydrateEmbeddingsFailures:
             d for d in ctx.degradations if d.stage == DegradationStage.EMBED_HYDRATION
         ]
         assert len(hydration_degradations) == 1
-        assert hydration_degradations[0].component == "fetch_post_embeddings"
+        assert hydration_degradations[0].component == "fetch_post_embeddings_and_politics_scores"
         assert isinstance(hydration_degradations[0].cause, TimeoutError)
 
         hydration_logs = [
             r
             for r in caplog.records
-            if r.name == generate_module.logger.name and r.message.startswith("Embedding hydration")
+            if r.name == generate_module.logger.name and r.message.startswith("Post hydration")
         ]
         assert len(hydration_logs) == 1
         assert hydration_logs[0].levelno == logging.WARNING
@@ -952,7 +1034,7 @@ class TestHydrateEmbeddingsFailures:
         async def _raises(*args, **kwargs):
             raise failure
 
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", _raises)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", _raises)
 
         ctx = PipelineContext(feed_name="test-feed")
         with pipeline_context_scope(ctx):
@@ -971,12 +1053,12 @@ class TestHydrateEmbeddingsFailures:
         hydration_logs = [
             r
             for r in caplog.records
-            if r.name == generate_module.logger.name and r.message.startswith("Embedding hydration")
+            if r.name == generate_module.logger.name and r.message.startswith("Post hydration")
         ]
         assert len(hydration_logs) == 1
         assert hydration_logs[0].levelno == logging.ERROR
         # An unexpected failure keeps its traceback.
-        assert hydration_logs[0].message == "Embedding hydration failed; continuing without"
+        assert hydration_logs[0].message == "Post hydration failed; continuing without"
         assert hydration_logs[0].exc_info is not None
 
     @pytest.mark.asyncio
@@ -986,7 +1068,7 @@ class TestHydrateEmbeddingsFailures:
         async def _raises(*args, **kwargs):
             raise RuntimeError("Elasticsearch failed")
 
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", _raises)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", _raises)
 
         # No PipelineContext: generator failures would hard-fail here, but a
         # hydration failure is never fatal — the slate is served unhydrated.
@@ -1002,7 +1084,7 @@ class TestHydrateEmbeddingsFailures:
         async def _raises(*args, **kwargs):
             raise RuntimeError("Elasticsearch failed")
 
-        monkeypatch.setattr(generate_module, "fetch_post_embeddings", _raises)
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", _raises)
 
         # fail_fast surfaces the cause out of ctx.record, so hydration is not
         # silently degraded in that (diagnostic) mode.

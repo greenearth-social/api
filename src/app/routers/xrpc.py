@@ -54,11 +54,9 @@ from ..feeds import (
 )
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
-from ..lib.candidates.generate import hydrate_embeddings
+from ..lib.candidates.generate import hydrate_posts
 from ..lib.config import set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
-from ..lib.elasticsearch import fetch_post_embeddings
-from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
@@ -105,7 +103,6 @@ from ..lib.request_context import set_traffic
 from ..lib.telemetry import timed
 from ..models import (
     CandidateGenerateRequest,
-    CandidatePost,
     FeedConfig,
     FeedCursor,
     GeneratorSpec,
@@ -512,10 +509,9 @@ async def _run_ranking_pipeline(
         if not candidates:
             return PipelineResult([], [])
 
-        # Generators fetch lightweight candidates (no embedding); ranker and
-        # MMR need embeddings, so backfill in one batched ES call now that
-        # the candidate set has been deduped down to the working size.
-        candidates = await hydrate_embeddings(es, candidates)
+        # Generators fetch lightweight candidates. Backfill embeddings and topic
+        # scores in one batched ES call after deduping to the working set.
+        candidates = await hydrate_posts(es, candidates)
 
         low_score_uris: list[str] = []
         if feed_cfg.rank_request_template is not None:
@@ -673,6 +669,24 @@ def _with_purpose_weights(feed_cfg: FeedConfig, purpose: float) -> FeedConfig:
     )
 
 
+def _with_politics_multiplier(feed_cfg: FeedConfig, politics: float) -> FeedConfig:
+    """Return a request-local feed config with the user's politics multiplier.
+
+    The politics multiplier gets applied to the combined rank score.
+    """
+    rank_template = feed_cfg.rank_request_template
+    if rank_template is None:
+        return feed_cfg
+
+    return feed_cfg.model_copy(
+        update={
+            "rank_request_template": rank_template.model_copy(
+                update={"politics": politics}
+            )
+        }
+    )
+
+
 def _source_generators(
     weights: SourceWeightsDocument,
     *,
@@ -732,6 +746,9 @@ def _configured_generation(
     if "purpose" in controls:
         assert effective.purpose is not None
         feed_cfg = _with_purpose_weights(feed_cfg, effective.purpose)
+    if "politics" in controls:
+        assert effective.politics is not None
+        feed_cfg = _with_politics_multiplier(feed_cfg, effective.politics)
 
     generators_override: dict[str, list[GeneratorSpec]] = {}
     applied_social_radius: int | None = None

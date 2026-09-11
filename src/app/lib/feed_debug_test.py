@@ -82,6 +82,13 @@ class TestBuildDocument:
                 ]
             )
         )
+        rec.record_politics_adjustments(
+            1.5,
+            [
+                ("at://p/1", 0.8, 1.4, 0.5, 0.7),
+                ("at://p/2", None, 1.0, 0.5, 0.5),
+            ],
+        )
         rec.record_order_after_rank(["at://p/1", "at://p/2"])
         rec.record_final_order(["at://p/2", "at://p/1"])
         return rec
@@ -112,6 +119,23 @@ class TestBuildDocument:
         assert doc.final_order == ["at://p/2", "at://p/1"]
         assert doc.user_features[0].source == "two_tower"
         assert doc.user_features[0].num_embeddings == 1
+        assert doc.politics_setting == 1.5
+        assert [adjustment.model_dump() for adjustment in doc.politics_adjustments] == [
+            {
+                "at_uri": "at://p/1",
+                "topic_score": 0.8,
+                "score_multiplier": 1.4,
+                "score_before": 0.5,
+                "score_after": 0.7,
+            },
+            {
+                "at_uri": "at://p/2",
+                "topic_score": None,
+                "score_multiplier": 1.0,
+                "score_before": 0.5,
+                "score_after": 0.5,
+            },
+        ]
 
     def test_strips_embeddings(self):
         doc = self._build(self._recorder())
@@ -159,6 +183,8 @@ class TestBuildDocument:
         rec.set_generate_request(_request())
         doc = self._build(rec)
         assert doc.model_scores == []
+        assert doc.politics_setting is None
+        assert doc.politics_adjustments == []
 
     def test_includes_diversification(self):
         rec = self._recorder()
@@ -457,6 +483,50 @@ class TestBuildPipelineMetadata:
         assert item.model_scores[0].name == "two_tower"
         assert item.model_scores[0].weight == 1.0
         assert item.model_scores[0].score == 0.92
+        assert item.politics_adjustment is None
+
+    @pytest.mark.parametrize("setting", [0.0, 1.0, 2.0])
+    def test_politics_adjustments_follow_final_uri_order(self, setting):
+        rec = FeedDebugRecorder(feed_name="your-feed", regenerated=False)
+        rec.record_politics_adjustments(
+            setting,
+            [
+                ("at://political", 1.0, setting, 0.6, 0.6 * setting),
+                ("at://nonpolitical", 0.0, 1.0, 0.6, 0.6),
+                ("at://missing", None, 1.0, 0.6, 0.6),
+                ("at://discarded", 1.0, setting, 0.1, 0.1 * setting),
+            ],
+        )
+        rec.record_final_order(["at://missing", "at://political", "at://nonpolitical"])
+        now = datetime.now(timezone.utc)
+
+        snap = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
+
+        assert [item.at_uri for item in snap.items_meta] == rec.final_order
+        adjustments = [item.politics_adjustment for item in snap.items_meta]
+        assert [adjustment.model_dump() for adjustment in adjustments if adjustment is not None] == [
+            {
+                "setting": setting,
+                "topic_score": None,
+                "score_multiplier": 1.0,
+                "score_before": 0.6,
+                "score_after": 0.6,
+            },
+            {
+                "setting": setting,
+                "topic_score": 1.0,
+                "score_multiplier": setting,
+                "score_before": 0.6,
+                "score_after": 0.6 * setting,
+            },
+            {
+                "setting": setting,
+                "topic_score": 0.0,
+                "score_multiplier": 1.0,
+                "score_before": 0.6,
+                "score_after": 0.6,
+            },
+        ]
 
     def test_diversification_metadata(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
