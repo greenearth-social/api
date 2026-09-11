@@ -43,13 +43,12 @@ GE_PINNED_POST_CONFIG_SHA=""
 DEPLOYED_PINNED_POST_CONFIG_SHA=""
 FORCE_SYNC_PINNED_POSTS=false
 
-# Bluesky publishing identities. Use the production account's stable DID for
-# authentication so an account handle change cannot break deployments again.
-# Caterpie's environment-specific app-password secrets belong to the same
-# account, whose handle is stable enough for internal/dev publishing.
+# Bluesky publishing identities. Use stable account DIDs for authentication so
+# account handle changes cannot break deployments. Caterpie's environment-specific
+# app-password secrets belong to the same account.
 PROD_BSKY_PUBLISHER_ID="did:plc:wrmpulygwvuhjn2c3jbalgqj"
 PROD_BSKY_SECRET="bsky-app-password-prod"
-CATERPIE_BSKY_PUBLISHER_ID="caterpie-internal.bsky.social"
+CATERPIE_BSKY_PUBLISHER_ID="did:plc:s4tl2ajfsnstzuxtegl7r33g"
 CATERPIE_STAGE_BSKY_SECRET="bsky-app-password-caterpie"
 CATERPIE_PROD_BSKY_SECRET="bsky-app-password-caterpie-prod"
 

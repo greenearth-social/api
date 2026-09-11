@@ -539,19 +539,20 @@ curl https://your-machine.tail1234.ts.net/.well-known/did.json
 
 Use a dedicated dev Bluesky account (e.g. `caterpie-internal.bsky.social`).
 Get an [App Password](https://bsky.app/settings/app-passwords) for it and set
-`GE_BSKY_APP_PASSWORD` in `.env`. The `--handle` must include the full domain.
+`GE_BSKY_APP_PASSWORD` in `.env`. The `--handle` option accepts a DID or a handle
+including the full domain; use the account's stable DID to avoid handle changes.
 
 ```bash
 # Publish a single feed
 pipenv run python scripts/publish_feed.py \
-  --handle caterpie-internal.bsky.social \
+  --handle did:plc:s4tl2ajfsnstzuxtegl7r33g \
   --feed-name unranked-your-feed \
   --environment dev \
   --app-password $GE_BSKY_APP_PASSWORD
 
 # Or publish all feeds at once
 pipenv run python scripts/publish_feed.py \
-  --handle caterpie-internal.bsky.social \
+  --handle did:plc:s4tl2ajfsnstzuxtegl7r33g \
   --all \
   --environment dev \
   --app-password $GE_BSKY_APP_PASSWORD
@@ -632,9 +633,10 @@ The deployment lifecycle is deliberately change-aware:
 
 Production authenticates publishing with the stable account DID
 `did:plc:wrmpulygwvuhjn2c3jbalgqj` (currently `mysky.social`); stage/dev uses
-`caterpie-internal.bsky.social`. Deployments validate the required publisher
-credentials before changing Cloud Run. Feed generator metadata is synchronized
-later in the same deployment, but existing public descriptions are preserved;
+`did:plc:s4tl2ajfsnstzuxtegl7r33g` (currently `caterpie-internal.bsky.social`).
+Deployments validate the required publisher credentials before changing Cloud Run.
+Feed generator metadata is synchronized later in the same deployment, but existing
+public descriptions are preserved;
 a failed post-deploy sync makes the deployment command exit nonzero. Managed
 pinned-post publication remains part of the deployment lifecycle described above.
 
