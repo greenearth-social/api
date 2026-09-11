@@ -1,4 +1,4 @@
-# Green Earth API
+# Green Earth API - test
 
 An API server for handling bluesky content recommendation requests.
 
