@@ -124,8 +124,29 @@ class FakeDb:
         return object()
 
 
+class FakeTransaction:
+    """Applies writes straight through; the seam under test is the claim logic."""
+
+    def __init__(self, store: dict):
+        self._store = store
+
+    def set(self, ref: FakeDocRef, data: dict, merge: bool = False) -> None:
+        doc_id = ref._id
+        if merge and doc_id in self._store["docs"]:
+            self._store["docs"][doc_id].update(data)
+        else:
+            self._store["docs"][doc_id] = dict(data)
+
+
 def make_cache(db: FakeDb) -> FollowedUsersCache:
-    return FollowedUsersCache(cast(Any, db))
+    """A cache whose transaction seam runs the claim body inline."""
+    cache = FollowedUsersCache(cast(Any, db))
+
+    async def run_transaction(body):
+        return await body(FakeTransaction(db.store))
+
+    cache._run_transaction = run_transaction  # type: ignore[method-assign]
+    return cache
 
 
 def now() -> datetime:
@@ -244,19 +265,62 @@ class TestReadPath:
         ]
 
     @pytest.mark.asyncio
-    async def test_stale_entry_is_served_immediately_without_touching_bluesky(self, origin):
+    async def test_stale_entry_is_served_immediately_and_refreshed_in_background(self, origin):
         db = FakeDb()
         old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
         put(db, USER, follows=["did:plc:stale"], complete=True, generated_at=old)
         cache = make_cache(db)
 
-        # Refreshing stale entries is now owned by the ingex backfill job, not
-        # the request path (api#453) — the caller gets the stale value as-is.
+        # The caller is never made to wait on the refresh.
         assert await cache.get_followed_dids(USER) == ["did:plc:stale"]
         await cache.drain()
 
-        assert origin.calls == []
-        assert stored(db, USER).follows == ["did:plc:stale"]
+        assert origin.calls == [(USER, cache_module.refresh_timeout_seconds())]
+        assert stored(db, USER).follows == ["did:plc:a"]
+
+    @pytest.mark.asyncio
+    async def test_incomplete_entry_refreshes_however_young_it_is(self, origin):
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:partial"], complete=False, generated_at=now())
+        cache = make_cache(db)
+
+        assert await cache.get_followed_dids(USER) == ["did:plc:partial"]
+        await cache.drain()
+
+        assert len(origin.calls) == 1
+        assert stored(db, USER).complete is True
+
+    @pytest.mark.asyncio
+    async def test_invalidated_entry_refreshes(self, origin):
+        db = FakeDb()
+        put(
+            db,
+            USER,
+            follows=["did:plc:x"],
+            complete=True,
+            generated_at=now(),
+            invalidated_at=now(),
+        )
+        cache = make_cache(db)
+
+        assert await cache.get_followed_dids(USER) == ["did:plc:x"]
+        await cache.drain()
+
+        assert len(origin.calls) == 1
+        assert stored(db, USER).invalidated_at is None
+
+    @pytest.mark.asyncio
+    async def test_overfull_pending_adds_forces_a_refresh(self, origin):
+        db = FakeDb()
+        pending = [f"did:plc:p{i}" for i in range(cache_module.MAX_PENDING_ADDS + 1)]
+        put(db, USER, follows=[], complete=True, generated_at=now(), pending_adds=pending)
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert len(origin.calls) == 1
+        assert stored(db, USER).pending_adds == []
 
 
 class TestColdStart:
@@ -323,85 +387,152 @@ class TestColdStart:
 
 
 # ---------------------------------------------------------------------------
-# Stale entries serve as-is; refreshing them moved off the request path
-# (api#453) to a recurring ingex backfill job.
+# Refresh
 # ---------------------------------------------------------------------------
 
-class TestStaleEntriesServeWithoutRefreshing:
+class TestRefresh:
     @pytest.mark.asyncio
-    async def test_stale_entry_is_served_and_no_task_is_spawned(self, origin):
+    async def test_partial_refresh_never_shrinks_a_complete_entry(self, origin):
+        origin.results = [FollowsFetch(dids=["did:plc:a"], complete=False)]
         db = FakeDb()
         old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
-        put(db, USER, follows=["did:plc:a"], complete=True, generated_at=old)
+        full = [f"did:plc:f{i}" for i in range(50)]
+        put(db, USER, follows=full, complete=True, generated_at=old)
         cache = make_cache(db)
 
-        result = await cache.get_followed_dids(USER)
-        assert result == ["did:plc:a"]
+        await cache.get_followed_dids(USER)
         await cache.drain()
 
-        # The stale entry must be served as-is — nothing re-wrote the document.
-        assert origin.calls == []
-        assert stored(db, USER).generated_at == old
+        entry = stored(db, USER)
+        assert entry.follows == full
+        assert entry.complete is True
 
     @pytest.mark.asyncio
-    async def test_incomplete_entry_is_served_and_no_task_is_spawned(self, origin):
+    async def test_partial_refresh_replaces_an_incomplete_entry(self, origin):
+        origin.results = [FollowsFetch(dids=["did:plc:a", "did:plc:b"], complete=False)]
         db = FakeDb()
-        put(db, USER, follows=["did:plc:a"], complete=False, generated_at=now())
+        put(db, USER, follows=["did:plc:old"], complete=False, generated_at=now())
         cache = make_cache(db)
 
-        result = await cache.get_followed_dids(USER)
-        assert result == ["did:plc:a"]
+        await cache.get_followed_dids(USER)
         await cache.drain()
 
-        assert origin.calls == []
-        assert stored(db, USER).complete is False  # untouched, not silently "fixed"
+        assert stored(db, USER).follows == ["did:plc:a", "did:plc:b"]
 
     @pytest.mark.asyncio
-    async def test_invalidated_entry_is_served_and_no_task_is_spawned(self, origin):
+    async def test_failed_refresh_clears_the_lease_and_stamps_the_cooldown(self, origin):
+        origin.results = [FollowedUsersLookupError("boom")]
         db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(db, USER, follows=["did:plc:x"], complete=True, generated_at=old)
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        entry = stored(db, USER)
+        # The lease is for excluding concurrent refreshes, not a penalty box:
+        # the next request must be free to retry at once.
+        assert entry.refresh_started_at is None
+        assert entry.refresh_failed_at is not None
+        assert entry.follows == ["did:plc:x"]
+
+    @pytest.mark.asyncio
+    async def test_recent_failure_suppresses_another_refresh(self, origin):
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
         put(
             db,
             USER,
-            follows=["did:plc:a"],
+            follows=["did:plc:x"],
             complete=True,
-            generated_at=now(),
-            invalidated_at=now(),
+            generated_at=old,
+            refresh_failed_at=now(),
         )
         cache = make_cache(db)
 
-        result = await cache.get_followed_dids(USER)
-        assert result == ["did:plc:a"]
+        assert await cache.get_followed_dids(USER) == ["did:plc:x"]
         await cache.drain()
 
         assert origin.calls == []
-        assert stored(db, USER).invalidated_at is not None  # left for the ingex job to clear
 
     @pytest.mark.asyncio
-    async def test_pending_overflow_entry_is_served_and_no_task_is_spawned(self, origin):
-        db = FakeDb()
-        pending = [f"did:plc:p{i}" for i in range(cache_module.MAX_PENDING_ADDS + 1)]
-        put(db, USER, follows=[], complete=True, generated_at=now(), pending_adds=pending)
-        cache = make_cache(db)
-
-        await cache.get_followed_dids(USER)
-        await cache.drain()
-
-        assert origin.calls == []
-        assert stored(db, USER).pending_adds == pending
-
-    @pytest.mark.asyncio
-    async def test_stale_lookup_records_the_staleness_reason_for_observability(
-        self, origin, metrics
-    ):
+    async def test_expired_cooldown_allows_a_retry(self, origin):
         db = FakeDb()
         old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
-        put(db, USER, follows=[], complete=True, generated_at=old)
+        put(
+            db,
+            USER,
+            follows=["did:plc:x"],
+            complete=True,
+            generated_at=old,
+            refresh_failed_at=now()
+            - timedelta(seconds=cache_module.retry_cooldown_seconds() + 5),
+        )
         cache = make_cache(db)
 
         await cache.get_followed_dids(USER)
+        await cache.drain()
 
-        lookups = [(n, a["outcome"]) for n, v, a in metrics.records if n == "follows_cache.lookup_count"]
-        assert lookups == [("follows_cache.lookup_count", "stale")]
+        assert len(origin.calls) == 1
+
+
+class TestLease:
+    @pytest.mark.asyncio
+    async def test_unexpired_lease_from_another_instance_blocks_the_claim(self, origin):
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(
+            db,
+            USER,
+            follows=["did:plc:x"],
+            complete=True,
+            generated_at=old,
+            refresh_started_at=now(),
+        )
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert origin.calls == []
+
+    @pytest.mark.asyncio
+    async def test_expired_lease_is_reclaimed(self, origin):
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(
+            db,
+            USER,
+            follows=["did:plc:x"],
+            complete=True,
+            generated_at=old,
+            refresh_started_at=now() - timedelta(seconds=cache_module.lease_seconds() + 5),
+        )
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert len(origin.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_entry_refreshed_by_another_instance_is_not_refreshed_again(self, origin):
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(db, USER, follows=["did:plc:x"], complete=True, generated_at=old)
+        cache = make_cache(db)
+
+        async def refreshed_meanwhile(body):
+            put(db, USER, follows=["did:plc:new"], complete=True, generated_at=now())
+            return await body(FakeTransaction(db.store))
+
+        cache._run_transaction = refreshed_meanwhile  # type: ignore[method-assign]
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert origin.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +597,39 @@ class TestTelemetry:
         ages = metrics.values("follows_cache.age_seconds")
         assert len(ages) == 1
         assert 55 <= ages[0] <= 120
+
+    @pytest.mark.asyncio
+    async def test_refresh_records_how_much_the_follow_set_moved(self, origin, metrics):
+        # Churn per refresh is the only signal that distinguishes a cache that
+        # is confidently complete-but-wrong (jetstream deltas going missing)
+        # from one that is genuinely tracking Bluesky.
+        origin.results = [
+            FollowsFetch(dids=["did:plc:keep", "did:plc:added"], complete=True)
+        ]
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(db, USER, follows=["did:plc:keep", "did:plc:gone"], complete=True, generated_at=old)
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert metrics.values("follows_cache.refresh_added") == [1]
+        assert metrics.values("follows_cache.refresh_removed") == [1]
+
+    @pytest.mark.asyncio
+    async def test_steady_state_refresh_reports_no_churn(self, origin, metrics):
+        origin.results = [FollowsFetch(dids=["did:plc:a"], complete=True)]
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(db, USER, follows=["did:plc:a"], complete=True, generated_at=old)
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert metrics.values("follows_cache.refresh_added") == [0]
+        assert metrics.values("follows_cache.refresh_removed") == [0]
 
     @pytest.mark.asyncio
     async def test_population_sweep_counts_users_by_health(self, origin, metrics):
