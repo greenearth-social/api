@@ -3687,6 +3687,47 @@ class TestFeedDebugCapture:
         merge.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_low_post_count_non_bof_logs_error(self, caplog):
+        from ..routers.xrpc import _write_feed_snapshot_background
+
+        snapshot = MagicMock(items=["at://a", "at://b"], feed_name="your-feed", generator_diagnostics=[])
+        with (
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False),
+            caplog.at_level(logging.ERROR, logger="app.routers.xrpc"),
+        ):
+            await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
+
+        assert any("fewer than" in r.message and r.levelno == logging.ERROR for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_low_post_count_bof_logs_warning_not_error(self, caplog):
+        from ..routers.xrpc import _write_feed_snapshot_background
+
+        snapshot = MagicMock(items=["at://a", "at://b"], feed_name="best-of-friends", generator_diagnostics=[])
+        with (
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False),
+            caplog.at_level(logging.WARNING, logger="app.routers.xrpc"),
+        ):
+            await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
+
+        assert any("fewer than" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+        assert not any("fewer than" in r.message and r.levelno == logging.ERROR for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_sufficient_post_count_no_low_post_log(self, caplog):
+        from ..routers.xrpc import MIN_FEED_POST_COUNT, _write_feed_snapshot_background
+
+        items = [f"at://post{i}" for i in range(MIN_FEED_POST_COUNT)]
+        snapshot = MagicMock(items=items, feed_name="your-feed", generator_diagnostics=[])
+        with (
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False),
+            caplog.at_level(logging.WARNING, logger="app.routers.xrpc"),
+        ):
+            await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
+
+        assert not any("fewer than" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
     async def test_truncated_snapshot_records_metric(self, caplog):
         from ..routers.xrpc import _write_feed_snapshot_background
 
