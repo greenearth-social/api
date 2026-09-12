@@ -57,17 +57,23 @@ def test_init_posthog_client_creates_posthog():
 
 
 def test_track_session_none_client_is_noop():
-    track_session(None, USER_DID, "alice.bsky.app", "your-feed", NOW)
+    track_session(
+        None, USER_DID, "alice.bsky.app", "your-feed", NOW, requested_limit=30, has_cursor=False
+    )
 
 
 def test_track_session_captures_feed_loaded():
     mock = MagicMock()
-    track_session(mock, USER_DID, "alice.bsky.app", "your-feed", NOW)
+    track_session(
+        mock, USER_DID, "alice.bsky.app", "your-feed", NOW, requested_limit=30, has_cursor=False
+    )
     mock.capture.assert_called_once_with(
         distinct_id=USER_DID,
         event="feedLoaded",
         properties={
             "feed_name": "your-feed",
+            "requested_limit": 30,
+            "has_cursor": False,
             "$set": {"username": "alice.bsky.app"},
             "user_handle": "alice.bsky.app",
             **ANNOTATIONS,
@@ -76,15 +82,33 @@ def test_track_session_captures_feed_loaded():
     )
 
 
+def test_track_session_carries_the_requested_page_size_and_cursor_state():
+    # Different surfaces in the Bluesky app ask for different page sizes, so
+    # the limit is our only handle on where a feed load came from; the cursor
+    # flag separates a first page from a scroll-through of the same surface.
+    mock = MagicMock()
+    track_session(
+        mock, USER_DID, "alice.bsky.app", "your-feed", NOW, requested_limit=50, has_cursor=True
+    )
+    properties = mock.capture.call_args.kwargs["properties"]
+    assert properties["requested_limit"] == 50
+    assert properties["has_cursor"] is True
+
+
 def test_track_session_without_a_handle_still_captures_the_event():
     # The event is keyed on the DID, so an unresolved handle shouldn't cost us
     # the analytics signal...
     mock = MagicMock()
-    track_session(mock, USER_DID, None, "your-feed", NOW)
+    track_session(mock, USER_DID, None, "your-feed", NOW, requested_limit=30, has_cursor=False)
     mock.capture.assert_called_once_with(
         distinct_id=USER_DID,
         event="feedLoaded",
-        properties={"feed_name": "your-feed", **ANNOTATIONS},
+        properties={
+            "feed_name": "your-feed",
+            "requested_limit": 30,
+            "has_cursor": False,
+            **ANNOTATIONS,
+        },
         timestamp=NOW,
     )
 
@@ -92,7 +116,7 @@ def test_track_session_without_a_handle_still_captures_the_event():
 def test_track_session_without_a_handle_leaves_the_person_property_alone():
     # ...and must not null out a username PostHog already knows.
     mock = MagicMock()
-    track_session(mock, USER_DID, None, "your-feed", NOW)
+    track_session(mock, USER_DID, None, "your-feed", NOW, requested_limit=30, has_cursor=False)
     properties = mock.capture.call_args.kwargs["properties"]
     assert "$set" not in properties
 
@@ -173,7 +197,9 @@ def test_distinct_id_stays_the_did_even_when_the_handle_is_known():
     # The handle is mutable; keying on it would fork a person on every rename
     # and detach their history. The DID stays the key on every event.
     mock = MagicMock()
-    track_session(mock, USER_DID, "alice.bsky.app", "your-feed", NOW)
+    track_session(
+        mock, USER_DID, "alice.bsky.app", "your-feed", NOW, requested_limit=30, has_cursor=False
+    )
     track_interaction(
         mock, USER_DID, "interactionLike", "your-feed", None, NOW, username="alice.bsky.app"
     )
@@ -239,8 +265,10 @@ def test_annotations_win_over_caller_supplied_properties():
 
 def test_every_captured_event_carries_the_annotations():
     mock = MagicMock()
-    track_session(mock, USER_DID, "alice.bsky.app", "your-feed", NOW)
-    track_session(mock, USER_DID, None, "your-feed", NOW)
+    track_session(
+        mock, USER_DID, "alice.bsky.app", "your-feed", NOW, requested_limit=30, has_cursor=False
+    )
+    track_session(mock, USER_DID, None, "your-feed", NOW, requested_limit=30, has_cursor=False)
     track_interaction(mock, USER_DID, "interactionLike", "your-feed", "at://did/post/1", NOW)
     track_interaction(mock, USER_DID, "requestMore", "your-feed", None, NOW)
     track_redirect(mock, "slug", "https://example.com", {"utm_source": "bsky"})

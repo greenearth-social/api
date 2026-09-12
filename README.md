@@ -779,6 +779,22 @@ Conventions:
 - `scripts/backfill_posthog.py` stamps the same annotations, so historical
   API-origin events are not a gap in the partition.
 
+### Traffic source on `feedLoaded`
+
+Bluesky's AppView doesn't tell a feed generator which part of the app a request
+came from, but the surfaces ask for different page sizes, so `feedLoaded`
+carries the request shape:
+
+| Property | Purpose |
+|---|---|
+| `requested_limit` | The `limit` the client asked for. Distinct values cluster by surface, so this is the closest thing to a traffic source. |
+| `has_cursor` | Whether the request was paginated. Separates a first page from scroll-through within the same surface. |
+
+Both come straight from the `getFeedSkeleton` query parameters, not from the
+number of posts actually served. Requests that never reach the session record —
+logged-out callers, load-test traffic, and the AppView's one-item reachability
+check — emit no `feedLoaded` at all, so the distribution reflects real loads.
+
 ### User identity
 
 `distinct_id` is the user's `did:plc:…` on both surfaces (the frontend's Firebase

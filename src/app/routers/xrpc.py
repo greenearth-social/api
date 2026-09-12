@@ -1283,6 +1283,7 @@ async def _record_session(
     feed_name: str,
     db,
     *,
+    requested_limit: int,
     is_load_test: bool = False,
     is_initial_load: bool = True,
 ) -> None:
@@ -1300,7 +1301,11 @@ async def _record_session(
 
     ``is_initial_load`` is False for cursor-based (paginated) requests; only
     initial loads increment the feed-activity load counter used for survey
-    post eligibility.
+    post eligibility, and it is what the ``has_cursor`` analytics property
+    reports.
+
+    ``requested_limit`` is the page size the client asked for, tracked because
+    the Bluesky app requests different sizes from different surfaces.
     """
     # Handle resolution goes over the network to the PLC directory, so it fails
     # for reasons that have nothing to do with this user existing — a directory
@@ -1335,7 +1340,15 @@ async def _record_session(
         )
 
     try:
-        track_session(get_posthog_client(), user_did, username, feed_name, now)
+        track_session(
+            get_posthog_client(),
+            user_did,
+            username,
+            feed_name,
+            now,
+            requested_limit=requested_limit,
+            has_cursor=not is_initial_load,
+        )
     except Exception:
         logger.exception("Failed to track PostHog session for user '%s'", user_did)
 
@@ -1798,6 +1811,7 @@ async def get_feed_skeleton(
                 user_did,
                 feed_name,
                 db,
+                requested_limit=limit,
                 is_load_test=is_load_test,
                 is_initial_load=cursor is None,
             )
