@@ -1059,6 +1059,24 @@ class TestGetFeedSkeleton:
         record_session.assert_not_awaited()
         record_discarded.assert_not_awaited()
 
+    def test_request_page_size_and_cursor_reach_the_session_record(self):
+        # The Bluesky app's surfaces are distinguishable only by the page size
+        # they ask for, so the handler must forward the request's own limit and
+        # cursor state rather than a pipeline-internal value.
+        with (
+            self._patch_generators(_make_candidates("p", 3)),
+            patch("app.routers.xrpc._record_session", new_callable=AsyncMock) as record_session,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 12},
+            )
+
+        assert response.status_code == 200
+        assert record_session.await_args is not None
+        assert record_session.await_args.kwargs["requested_limit"] == 12
+        assert record_session.await_args.kwargs["is_initial_load"] is True
+
     def test_other_one_item_requests_still_create_feed_history(self):
         with (
             self._patch_generators(_make_candidates("p", 3)),
@@ -4111,7 +4129,9 @@ class TestLoadTestSession:
             patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
             patch("app.routers.xrpc.track_session") as track,
         ):
-            await _record_session(request, self.LT_DID, "your-feed", db, is_load_test=True)
+            await _record_session(
+                request, self.LT_DID, "your-feed", db, requested_limit=30, is_load_test=True
+            )
 
         upsert.assert_awaited_once()
         assert upsert.await_args is not None
@@ -5562,13 +5582,49 @@ class TestPosthogTracking:
         mock_client = MagicMock()
         with patch("app.routers.xrpc.get_posthog_client", return_value=mock_client):
             with patch("app.routers.xrpc.track_session") as mock_track:
-                await _record_session(request, "did:plc:abc", "your-feed", db)
+                await _record_session(request, "did:plc:abc", "your-feed", db, requested_limit=30)
                 mock_track.assert_called_once()
                 call_kwargs = mock_track.call_args
                 assert call_kwargs.args[0] is mock_client
                 assert call_kwargs.args[1] == "did:plc:abc"
                 assert call_kwargs.args[2] == "alice.bsky.app"
                 assert call_kwargs.args[3] == "your-feed"
+
+    @pytest.mark.asyncio
+    async def test_record_session_reports_page_size_and_cursor_state(self):
+        """The limit and cursor presence ride along on feedLoaded.
+
+        They are how traffic is attributed to a surface in the Bluesky app:
+        each one asks for a different number of posts.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ..routers.xrpc import _record_session
+
+        db = AsyncMock()
+        request = MagicMock()
+        request.app.state.id_resolver = AsyncMock()
+        did_doc = MagicMock()
+        did_doc.get_handle.return_value = "alice.bsky.app"
+        request.app.state.id_resolver.did.resolve = AsyncMock(return_value=did_doc)
+
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.upsert_user", new=AsyncMock()),
+            patch("app.routers.xrpc.upsert_feed_activity", new=AsyncMock()),
+            patch("app.routers.xrpc.track_session") as mock_track,
+        ):
+            await _record_session(
+                request,
+                "did:plc:abc",
+                "your-feed",
+                db,
+                requested_limit=15,
+                is_initial_load=False,
+            )
+
+        assert mock_track.call_args.kwargs["requested_limit"] == 15
+        assert mock_track.call_args.kwargs["has_cursor"] is True
 
     @pytest.mark.asyncio
     async def test_record_session_survives_handle_resolution_failure(self):
@@ -5596,7 +5652,9 @@ class TestPosthogTracking:
                     with patch(
                         "app.routers.xrpc.upsert_feed_activity", new=AsyncMock()
                     ) as mock_activity:
-                        await _record_session(request, "did:plc:abc", "your-feed", db)
+                        await _record_session(
+                            request, "did:plc:abc", "your-feed", db, requested_limit=30
+                        )
 
         mock_upsert.assert_awaited_once()
         upsert_args = mock_upsert.await_args

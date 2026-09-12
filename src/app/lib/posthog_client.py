@@ -8,7 +8,10 @@ Event names follow camelCase, matching the Bluesky interaction event names
 (e.g. ``interactionLike``, ``clickthroughItem``) forwarded from sendInteractions.
 
 PostHog events emitted:
-  feedLoaded       — one per getFeedSkeleton call (drives DAU/MAU/session counts)
+  feedLoaded       — one per getFeedSkeleton call (drives DAU/MAU/session counts).
+                     Carries ``requested_limit`` and ``has_cursor``, which
+                     together stand in for the traffic source: each surface in
+                     the Bluesky app asks for a different number of posts.
   <interaction>    — behavioural events forwarded from sendInteractions
                      e.g. interactionLike, clickthroughItem, requestMore
   redirectClicked  — UTM click counting. Keyed on the ``redirect_service``
@@ -100,6 +103,9 @@ def track_session(
     username: str | None,
     feed_name: str,
     timestamp: datetime,
+    *,
+    requested_limit: int,
+    has_cursor: bool,
 ) -> None:
     """Capture a feedLoaded event and update the user's person properties.
 
@@ -107,11 +113,20 @@ def track_session(
     event is still captured — it's keyed on the DID — but the person property
     is left alone rather than set to null, so a transient resolution failure
     doesn't erase a handle PostHog already has.
+
+    ``requested_limit`` is the ``limit`` the client asked for and
+    ``has_cursor`` whether the request was paginated. Together they are the
+    closest thing we have to a traffic source: the Bluesky app requests
+    different page sizes from different surfaces (the feed tab, the discover
+    row, a feed preview), so the limit identifies where a load came from and
+    the cursor separates a first page from scroll-through.
     """
     if client is None:
         return
     properties: dict[str, object] = {
         "feed_name": feed_name,
+        "requested_limit": requested_limit,
+        "has_cursor": has_cursor,
         **user_identity_properties(username),
     }
     client.capture(
