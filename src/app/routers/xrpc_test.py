@@ -1,7 +1,6 @@
 """Tests for the XRPC feed generator endpoints."""
 
 import asyncio
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -3539,6 +3538,7 @@ class TestFeedDebugCapture:
 
     @pytest.mark.asyncio
     async def test_low_post_count_non_bof_logs_error(self, caplog):
+        import logging
         from ..routers.xrpc import _write_feed_snapshot_background
 
         snapshot = MagicMock(items=["at://a", "at://b"], feed_name="your-feed", generator_diagnostics=[])
@@ -3552,6 +3552,7 @@ class TestFeedDebugCapture:
 
     @pytest.mark.asyncio
     async def test_low_post_count_bof_logs_warning_not_error(self, caplog):
+        import logging
         from ..routers.xrpc import _write_feed_snapshot_background
 
         snapshot = MagicMock(items=["at://a", "at://b"], feed_name="best-of-friends", generator_diagnostics=[])
@@ -3566,6 +3567,7 @@ class TestFeedDebugCapture:
 
     @pytest.mark.asyncio
     async def test_sufficient_post_count_no_low_post_log(self, caplog):
+        import logging
         from ..routers.xrpc import MIN_FEED_POST_COUNT, _write_feed_snapshot_background
 
         items = [f"at://post{i}" for i in range(MIN_FEED_POST_COUNT)]
