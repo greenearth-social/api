@@ -35,7 +35,11 @@ import certifi  # transitive via requests/httpx; adding it to Pipfile relocks 20
 import numpy as np
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 
-from .elasticsearch import POSTS_KNN_INDEX, fetch_post_embeddings, unwrap_es_response
+from .elasticsearch import (
+    POSTS_KNN_INDEX,
+    fetch_post_embeddings_and_politics_scores,
+    unwrap_es_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +170,7 @@ MIN_KEYWORDS = 16
 EXPANSION_SYSTEM = (
     "You generate keyword bags used as BM25 search queries against a corpus of "
     "Bluesky posts (short, informal, public social-media text). "
-    "A \"keyword\" here may be a single word *or* a short multi-word phrase — "
+    'A "keyword" here may be a single word *or* a short multi-word phrase — '
     "both are wanted. "
     "Your output is fed straight to the search engine, so what matters about "
     "every term is that its exact text plausibly appears verbatim in real "
@@ -222,11 +226,10 @@ _EXPANSION_SCHEMA = {
 def build_expansion_prompt(prompt: str, n: int = N_KEYWORDS) -> str:
     """The user message: the request, then the requirements block."""
     return (
-        f'Someone wants to see Bluesky posts matching this request:\n\n'
+        f"Someone wants to see Bluesky posts matching this request:\n\n"
         f'    "{prompt}"\n\n'
         f"Give {n} keywords to search for, to find posts they would find "
-        f"relevant."
-        + _EXPANSION_COMMON % {"n": n}
+        f"relevant." + _EXPANSION_COMMON % {"n": n}
     )
 
 
@@ -290,7 +293,7 @@ NEAR_DUP_JACCARD = 0.8
 # fitting sample (80 LLM-scored keyword posts + 120 forced-to-1 random
 # negatives, all of which the regression needs vectors for) ever need one.
 # So the pool is fetched as text, and embeddings are hydrated for the sample
-# alone in step 3 via fetch_post_embeddings (docvalue_fields), the way the
+# alone in step 3 via fetch_post_embeddings_and_politics_scores (docvalue_fields), the way the
 # candidate generators do it.
 _POST_SOURCE_FIELDS = ["at_uri", "content"]
 
@@ -310,9 +313,9 @@ _STOPWORDS = frozenset(
 _WORD_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)*", re.UNICODE)
 _HAN_RE = re.compile("[\u4e00-\u9fff\uf900-\ufaff]")
 _EMOJI_RE = re.compile(
-    "[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u2190-\u21FF]"
-    "[\ufe0e\ufe0f\U0001F3FB-\U0001F3FF]*"
-    "(?:\u200d[\U0001F000-\U0001FAFF\u2600-\u27BF][\ufe0e\ufe0f]*)*"
+    "[\U0001f000-\U0001faff\u2600-\u27bf\u2b00-\u2bff\u2190-\u21ff]"
+    "[\ufe0e\ufe0f\U0001f3fb-\U0001f3ff]*"
+    "(?:\u200d[\U0001f000-\U0001faff\u2600-\u27bf][\ufe0e\ufe0f]*)*"
 )
 
 
@@ -550,8 +553,10 @@ async def fetch_random_posts(es, n: int, exclude_uris: list[str]) -> list[Post]:
 async def hydrate_embeddings(es, posts: list[Post]) -> None:
     """Attach MiniLM embeddings to `posts` in place, one batched ES call.
     Posts the index has no embedding for are left with `embedding=None`."""
-    pairs = await fetch_post_embeddings(es, [p.at_uri for p in posts], index=POSTS_KNN_INDEX)
-    by_uri = dict(pairs)
+    triples = await fetch_post_embeddings_and_politics_scores(
+        es, [p.at_uri for p in posts], index=POSTS_KNN_INDEX
+    )
+    by_uri = {at_uri: vec for at_uri, vec, _politics in triples}
     for p in posts:
         p.embedding = by_uri.get(p.at_uri)
 
