@@ -1439,6 +1439,9 @@ async def _write_feed_snapshot_background(
                     "post_count": len(snapshot.items),
                 },
             )
+            collector = get_metric_collector()
+            if collector is not None:
+                collector.record("feed.snapshot.low_post_count", 1, feed_name=snapshot.feed_name)
         truncated = await merge_feed_snapshot(
             db,
             user_did,

@@ -3592,10 +3592,48 @@ class TestFeedDebugCapture:
         ):
             await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
 
-        collector.record.assert_called_once_with(
+        collector.record.assert_any_call(
             "feed.snapshot.truncated_count", 1, feed_name="your-feed"
         )
         assert "reached item limit" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_low_post_count_emits_metric(self):
+        from ..routers.xrpc import _write_feed_snapshot_background
+
+        snapshot = MagicMock(items=["at://a", "at://b"], feed_name="your-feed")
+        collector = MagicMock()
+        with (
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+            ),
+            patch("app.routers.xrpc.get_metric_collector", return_value=collector),
+        ):
+            await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
+
+        collector.record.assert_any_call(
+            "feed.snapshot.low_post_count", 1, feed_name="your-feed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sufficient_post_count_does_not_emit_low_post_count_metric(self):
+        from ..routers.xrpc import MIN_FEED_POST_COUNT, _write_feed_snapshot_background
+
+        snapshot = MagicMock(
+            items=[f"at://post{i}" for i in range(MIN_FEED_POST_COUNT)],
+            feed_name="your-feed",
+        )
+        collector = MagicMock()
+        with (
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+            ),
+            patch("app.routers.xrpc.get_metric_collector", return_value=collector),
+        ):
+            await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
+
+        for call in collector.record.call_args_list:
+            assert call.args[0] != "feed.snapshot.low_post_count"
 
     def test_snapshot_written_for_all_users(self):
         """Snapshot always written regardless of debug flag."""
