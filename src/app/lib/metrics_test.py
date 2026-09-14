@@ -344,7 +344,7 @@ class TestHistogramBoundaries:
         assert histogram_boundaries(name) == CONCURRENCY_BOUNDARIES
 
     def test_post_size_metrics(self):
-        assert histogram_boundaries("feed.snapshot._post_size") == POST_SIZE_BOUNDARIES
+        assert histogram_boundaries("feed.snapshot.post_size") == POST_SIZE_BOUNDARIES
 
     def test_post_size_boundaries_cover_key_thresholds(self):
         assert 5 in POST_SIZE_BOUNDARIES    # MIN_FEED_POST_COUNT alert threshold
