@@ -182,7 +182,7 @@ def histogram_boundaries(name: str) -> tuple[float, ...] | None:
     """
     if name == "eventloop.lag_ms":
         return EVENTLOOP_LAG_MS_BOUNDARIES
-    if name.endswith("post_size"):
+    if name.endswith("_post_size"):
         return POST_SIZE_BOUNDARIES
     if name.endswith("in_flight") or name.endswith("_size"):
         return CONCURRENCY_BOUNDARIES
