@@ -298,6 +298,7 @@ from .metrics import (  # noqa: E402
     EVENTLOOP_LAG_MS_BOUNDARIES,
     FAST_MS_BOUNDARIES,
     LATENCY_MS_BOUNDARIES,
+    POST_SIZE_BOUNDARIES,
     RATIO_BOUNDARIES,
     histogram_boundaries,
 )
@@ -342,6 +343,14 @@ class TestHistogramBoundaries:
     def test_concurrency_metrics(self, name):
         assert histogram_boundaries(name) == CONCURRENCY_BOUNDARIES
 
+    def test_post_size_metrics(self):
+        assert histogram_boundaries("feed.snapshot.post_size") == POST_SIZE_BOUNDARIES
+
+    def test_post_size_boundaries_cover_key_thresholds(self):
+        assert 5 in POST_SIZE_BOUNDARIES    # MIN_FEED_POST_COUNT alert threshold
+        assert 30 in POST_SIZE_BOUNDARIES   # default page size (limit query param default)
+        assert 100 in POST_SIZE_BOUNDARIES  # max page size (limit query param le=100)
+
     @pytest.mark.parametrize(
         "name",
         [
@@ -363,6 +372,7 @@ class TestHistogramBoundaries:
             EVENTLOOP_LAG_MS_BOUNDARIES,
             CONCURRENCY_BOUNDARIES,
             RATIO_BOUNDARIES,
+            POST_SIZE_BOUNDARIES,
         ):
             assert list(bounds) == sorted(bounds)
             assert len(set(bounds)) == len(bounds)
