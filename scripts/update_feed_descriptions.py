@@ -41,13 +41,14 @@ class EnvironmentTarget:
     secret: str
 
 
+# Authenticate with stable account DIDs so handle changes do not break publishing.
 ENVIRONMENT_TARGETS = {
     "prod": EnvironmentTarget(
-        handle="greenearth.social",
+        handle="did:plc:wrmpulygwvuhjn2c3jbalgqj",
         secret="bsky-app-password-prod",
     ),
     "stage": EnvironmentTarget(
-        handle="caterpie-internal.bsky.social",
+        handle="did:plc:s4tl2ajfsnstzuxtegl7r33g",
         secret="bsky-app-password-caterpie",
     ),
 }

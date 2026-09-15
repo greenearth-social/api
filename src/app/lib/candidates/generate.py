@@ -17,6 +17,8 @@ from ...models import (
     CandidatePost,
     GeneratorSpec,
 )
+from ..elasticsearch import fetch_post_embeddings_and_politics_scores
+from ..embeddings import encode_float32_b64
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
 from ..pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
@@ -27,9 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 try:
-    _GENERATOR_TIMEOUT_SEC: float = float(
-        os.environ.get("GE_CANDIDATE_GENERATOR_TIMEOUT_SEC", "4")
-    )
+    _GENERATOR_TIMEOUT_SEC: float = float(os.environ.get("GE_CANDIDATE_GENERATOR_TIMEOUT_SEC", "4"))
 except ValueError:
     _GENERATOR_TIMEOUT_SEC = 4.0
 
@@ -37,6 +37,7 @@ except ValueError:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def allocate_counts(specs: list[GeneratorSpec], total: int) -> list[int]:
     """Distribute *total* candidates across specs proportionally to their weights.
@@ -73,6 +74,7 @@ def dedup_candidates(candidates: list[CandidatePost]) -> list[CandidatePost]:
 # Errors
 # ---------------------------------------------------------------------------
 
+
 class GeneratorNotFoundError(Exception):
     """Raised when a requested generator name is not in the registry."""
 
@@ -95,6 +97,75 @@ class GeneratorError(Exception):
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
+
+
+try:
+    _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
+        os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5")
+    )
+except ValueError:
+    _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
+
+async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePost]:
+    """Fetch missing L12 embeddings and politics scores in a single batched ES call."""
+    missing = [
+        c.at_uri for c in candidates
+        if c.at_uri and (not c.minilm_l12_embedding or c.politics_score is None)
+    ]
+    if not missing:
+        return candidates
+
+    try:
+        async with timed(logger, "hydrate_posts", n_missing=len(missing)):
+            hydration_results = await asyncio.wait_for(
+                fetch_post_embeddings_and_politics_scores(es, missing, index="posts_recent"),
+                timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
+            )
+    except Exception as exc:
+        if isinstance(exc, TimeoutError):
+            logger.warning(
+                "Post hydration timed out after %.1fs; continuing without",
+                _EMBED_HYDRATION_TIMEOUT_SEC,
+            )
+        else:
+            logger.exception("Post hydration failed; continuing without")
+
+        ctx = current_pipeline_context()
+        if ctx is not None:
+            ctx.record(
+                DegradationEvent(
+                    stage=DegradationStage.EMBED_HYDRATION,
+                    component="fetch_post_embeddings_and_politics_scores",
+                    cause=exc,
+                )
+            )
+        return candidates
+
+    politics_scores: dict[str, float | None] = {}
+    encoded: dict[str, str] = {}
+    for uri, vec, politics_score in hydration_results:
+        politics_scores[uri] = politics_score
+        try:
+            encoded[uri] = encode_float32_b64(vec)
+        except Exception:
+            continue
+
+    if not encoded and not politics_scores:
+        return candidates
+
+    final_candidates = []
+    for c in candidates:
+        final_candidate = c
+        update_dict = {}
+        if c.at_uri and not c.minilm_l12_embedding and c.at_uri in encoded:
+            update_dict["minilm_l12_embedding"] = encoded[c.at_uri]
+        if c.at_uri and c.politics_score is None and c.at_uri in politics_scores:
+            update_dict["politics_score"] = politics_scores[c.at_uri]
+        if update_dict:
+            final_candidate = c.model_copy(update=update_dict)
+        final_candidates.append(final_candidate)
+    return final_candidates
+
 
 async def run_generate(
     request: CandidateGenerateRequest,
@@ -129,7 +200,13 @@ async def run_generate(
         spec: GeneratorSpec, count: int, gen: CandidateGenerator
     ) -> list[CandidateResult]:
         try:
-            async with timed(logger, "candidates.generate.duration_ms", record_metric=True, metric_attrs={"generator_name": spec.name}, count=count):
+            async with timed(
+                logger,
+                "candidates.generate.duration_ms",
+                record_metric=True,
+                metric_attrs={"generator_name": spec.name},
+                count=count,
+            ):
                 results = [
                     await asyncio.wait_for(
                         gen.generate(
@@ -160,16 +237,29 @@ async def run_generate(
                     generator_name=spec.name,
                     is_infill="false",
                 )
-            return [
-                result.model_copy(
-                    update={"status": "empty", "reason": result.reason or "no_candidates"}
-                )
-                if not result.candidates and result.status == "success"
-                else result
-                for result in results
-            ]
+            normalized: list[CandidateResult] = []
+            for result in results:
+                if not result.candidates and result.status == "success":
+                    reason = result.reason or "source_returned_no_candidates"
+                    logger.warning(
+                        "Candidate generator returned no candidates",
+                        extra={
+                            "generator_name": spec.name,
+                            "user_did": request.user_did,
+                            "requested_count": count,
+                            "max_age_hours": request.max_age_hours,
+                            "exclude_count": len(request.exclude_uris or []),
+                            "reason": reason,
+                        },
+                    )
+                    normalized.append(
+                        result.model_copy(update={"status": "empty", "reason": reason})
+                    )
+                else:
+                    normalized.append(result)
+            return normalized
         except Exception as exc:
-            if isinstance(exc, asyncio.TimeoutError):
+            if isinstance(exc, TimeoutError):
                 logger.warning(
                     "Candidate generator '%s' timed out after %.1fs",
                     spec.name,
@@ -189,17 +279,21 @@ async def run_generate(
                 )
             ctx = current_pipeline_context()
             if ctx is not None:
-                ctx.record(DegradationEvent(
-                    stage=DegradationStage.CANDIDATE_GEN,
-                    component=spec.name,
-                    cause=exc,
-                ))
-                return [CandidateResult(
-                    generator_name=spec.name,
-                    candidates=[],
-                    status=outcome,
-                    reason="generator_timeout" if outcome == "timeout" else "generator_error",
-                )]
+                ctx.record(
+                    DegradationEvent(
+                        stage=DegradationStage.CANDIDATE_GEN,
+                        component=spec.name,
+                        cause=exc,
+                    )
+                )
+                return [
+                    CandidateResult(
+                        generator_name=spec.name,
+                        candidates=[],
+                        status=outcome,
+                        reason="generator_timeout" if outcome == "timeout" else "generator_error",
+                    )
+                ]
             raise GeneratorError(spec.name, exc) from exc
 
     result_groups = await asyncio.gather(
@@ -254,7 +348,7 @@ async def run_generate(
                     is_infill="true",
                 )
         except Exception as exc:
-            if isinstance(exc, asyncio.TimeoutError):
+            if isinstance(exc, TimeoutError):
                 logger.warning(
                     "Infill generator '%s' timed out after %.1fs",
                     request.infill,
@@ -274,11 +368,13 @@ async def run_generate(
                 )
             ctx = current_pipeline_context()
             if ctx is not None:
-                ctx.record(DegradationEvent(
-                    stage=DegradationStage.CANDIDATE_GEN,
-                    component=f"{request.infill}:infill",
-                    cause=exc,
-                ))
+                ctx.record(
+                    DegradationEvent(
+                        stage=DegradationStage.CANDIDATE_GEN,
+                        component=f"{request.infill}:infill",
+                        cause=exc,
+                    )
+                )
                 infill_result = CandidateResult(
                     generator_name=request.infill,
                     candidates=[],
@@ -294,6 +390,8 @@ async def run_generate(
         deduped = dedup_candidates(deduped + infill_result.candidates)
 
     final = deduped[:request.num_candidates]
+    if getattr(request, 'hydrate_embeddings', False):
+        final = await hydrate_posts(es, final)
     if rec is not None:
         rec.record_final_candidates(final)
     return CandidateGenerateResult(candidates=final)

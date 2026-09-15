@@ -188,6 +188,40 @@ class TestTwoTowerCandidateGenerator:
         assert result.reason == "no_user_like_history"
 
     @pytest.mark.asyncio
+    async def test_generate_does_not_probe_again_when_exclusions_return_no_matches(self, generator):
+        es = object()
+        user_embedding = [0.5, 0.6]
+
+        with (
+            patch(GET_INFERENCE_SETTINGS, return_value=INFERENCE_SETTINGS),
+            patch(
+                GET_CACHED_POST_TOWER_UUID,
+                new_callable=AsyncMock,
+                return_value="post-tower-uuid",
+            ),
+            patch(
+                COMPUTE_USER_EMBEDDING,
+                new_callable=AsyncMock,
+                return_value=user_embedding,
+            ),
+            patch(
+                KNN_SEARCH_POSTS,
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as knn_search,
+        ):
+            result = await generator.generate(
+                es,
+                "did:plc:user1",
+                exclude_uris=["at://post/seen"],
+            )
+
+        assert knn_search.await_count == 1
+        assert knn_search.await_args_list[0].kwargs["exclude_uris"] == ["at://post/seen"]
+        assert result.candidates == []
+        assert result.reason == "no_recent_authors_topics_posts"
+
+    @pytest.mark.asyncio
     async def test_generate_uses_default_options(self, generator):
         es = object()
         user_embedding = [0.5, 0.6]
@@ -227,6 +261,7 @@ class TestTwoTowerCandidateGenerator:
         )
         assert result.generator_name == TWO_TOWER_GENERATOR_NAME
         assert result.candidates == []
+        assert result.reason == "no_recent_authors_topics_posts"
 
     @pytest.mark.asyncio
     async def test_generate_passes_max_age_hours_through_unclamped(self, generator):

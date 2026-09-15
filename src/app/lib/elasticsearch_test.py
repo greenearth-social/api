@@ -3,8 +3,8 @@
 import pytest
 
 from .elasticsearch import (
-    fetch_post_embeddings,
     fetch_post_embeddings_and_metadata,
+    fetch_post_embeddings_and_politics_scores,
     fetch_recent_liked_post_uris,
     fetch_recent_liked_post_uris_and_times,
 )
@@ -372,37 +372,45 @@ class TestFetchPostEmbeddingsAndMetadata:
         assert vecs == [("at://1", [0.1, 0.2], "did:plc:one", 0)]
 
 
-class TestFetchPostEmbeddings:
+class TestFetchPostEmbeddingsAndPoliticsScores:
     @pytest.mark.asyncio
-    async def test_returns_embeddings_in_requested_uri_order(self):
+    async def test_returns_embeddings_and_politics_scores_in_requested_uri_order(self):
         es = FakeEs(responses={
             "posts": {
                 "hits": {
                     "hits": [
                         {
-                            "_source": {"at_uri": "at://2", "content": "two"},
+                            "_source": {
+                                "at_uri": "at://2",
+                                "content": "two",
+                                "topic_scores": {"News & Social Concern": 0.8},
+                            },
                             "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
                         },
                         {
-                            "_source": {"at_uri": "at://1", "content": "one"},
+                            "_source": {
+                                "at_uri": "at://1",
+                                "content": "one",
+                                "topic_scores": {"News & Social Concern": 0.25},
+                            },
                             "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
                         },
                     ]
                 }
             }
         })
-        vecs = await fetch_post_embeddings(es, ["at://1", "at://2"])
+        vecs = await fetch_post_embeddings_and_politics_scores(es, ["at://1", "at://2"])
         assert vecs == [
-            ("at://1", [0.1, 0.2]),
-            ("at://2", [0.3, 0.4]),
+            ("at://1", [0.1, 0.2], 0.25),
+            ("at://2", [0.3, 0.4], 0.8),
         ]
-        assert es.calls[0]["_source"] == ["at_uri", "content"]
+        assert es.calls[0]["_source"] == ["at_uri", "content", "topic_scores"]
         assert es.calls[0]["docvalue_fields"] == [MINILM_L12_EMBEDDING_FIELD]
 
     @pytest.mark.asyncio
     async def test_returns_empty_for_empty_input(self):
         es = FakeEs()
-        vecs = await fetch_post_embeddings(es, [])
+        vecs = await fetch_post_embeddings_and_politics_scores(es, [])
         assert vecs == []
         assert len(es.calls) == 0
 
@@ -425,8 +433,10 @@ class TestFetchPostEmbeddings:
                 }
             }
         })
-        vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
-        assert vecs == [("at://1", [0.1, 0.2])]
+        vecs = await fetch_post_embeddings_and_politics_scores(
+            es, ["at://1", "at://2", "at://3"]
+        )
+        assert vecs == [("at://1", [0.1, 0.2], None)]
 
     @pytest.mark.asyncio
     async def test_skips_embeddings_without_source_text(self):
@@ -451,8 +461,60 @@ class TestFetchPostEmbeddings:
                 }
             }
         })
-        vecs = await fetch_post_embeddings(es, ["at://1", "at://2", "at://3"])
-        assert vecs == [("at://1", [0.1, 0.2])]
+        vecs = await fetch_post_embeddings_and_politics_scores(
+            es, ["at://1", "at://2", "at://3"]
+        )
+        assert vecs == [("at://1", [0.1, 0.2], None)]
+
+    @pytest.mark.asyncio
+    async def test_uses_none_for_missing_non_numeric_or_malformed_politics_scores(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "at_uri": "at://1",
+                                "content": "one",
+                                "topic_scores": {"News & Social Concern": 0.0},
+                            },
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.1, 0.2]]},
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://2",
+                                "content": "two",
+                                "topic_scores": {"News & Social Concern": "high"},
+                            },
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.3, 0.4]]},
+                        },
+                        {
+                            "_source": {"at_uri": "at://3", "content": "three"},
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.5, 0.6]]},
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://4",
+                                "content": "four",
+                                "topic_scores": [0.9],
+                            },
+                            "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.7, 0.8]]},
+                        },
+                    ]
+                }
+            }
+        })
+
+        results = await fetch_post_embeddings_and_politics_scores(
+            es, ["at://1", "at://2", "at://3", "at://4"]
+        )
+
+        assert results == [
+            ("at://1", [0.1, 0.2], 0.0),
+            ("at://2", [0.3, 0.4], None),
+            ("at://3", [0.5, 0.6], None),
+            ("at://4", [0.7, 0.8], None),
+        ]
 
 
 @pytest.mark.asyncio
@@ -469,7 +531,7 @@ async def test_fetch_recent_liked_post_uris_passes_likes_op():
 
 
 @pytest.mark.asyncio
-async def test_fetch_post_embeddings_passes_hydrate_op():
+async def test_fetch_post_embeddings_and_politics_scores_passes_hydrate_op():
     captured = {}
 
     class _FakeES:
@@ -477,5 +539,5 @@ async def test_fetch_post_embeddings_passes_hydrate_op():
             captured.update(kwargs)
             return {"took": 1, "hits": {"hits": []}}
 
-    await fetch_post_embeddings(_FakeES(), ["at://x"])
+    await fetch_post_embeddings_and_politics_scores(_FakeES(), ["at://x"])
     assert captured["op"] == "hydrate"

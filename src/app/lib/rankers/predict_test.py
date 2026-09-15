@@ -112,11 +112,17 @@ class TimingOutRanker:
         raise TimeoutError("simulated timeout")
 
 
-def _request(models: list[RankModelSpec], candidates: list[CandidatePost]) -> RankPredictRequest:
+def _request(
+    models: list[RankModelSpec],
+    candidates: list[CandidatePost],
+    *,
+    politics: float = 1.0,
+) -> RankPredictRequest:
     return RankPredictRequest(
         models=models,
         user_did="did:plc:user1",
         candidates=candidates,
+        politics=politics,
     )
 
 
@@ -186,6 +192,70 @@ def test_run_predict_normalizes_and_combines_with_weights(monkeypatch):
         ("at://post/a", 1, pytest.approx(0.875)),
         ("at://post/b", 2, pytest.approx(0.125)),
     ]
+
+
+@pytest.mark.parametrize(
+    ("politics", "expected"),
+    [
+        (
+            0.5,
+            [
+                ("at://post/non-political", 1, pytest.approx(0.4)),
+                ("at://post/partly-political", 2, pytest.approx(0.2625)),
+                ("at://post/political", 3, pytest.approx(0.15)),
+            ],
+        ),
+        (
+            1.0,
+            [
+                ("at://post/non-political", 1, pytest.approx(0.4)),
+                ("at://post/partly-political", 2, pytest.approx(0.35)),
+                ("at://post/political", 3, pytest.approx(0.3)),
+            ],
+        ),
+        (
+            2.0,
+            [
+                ("at://post/political", 1, pytest.approx(0.6)),
+                ("at://post/partly-political", 2, pytest.approx(0.525)),
+                ("at://post/non-political", 3, pytest.approx(0.4)),
+            ],
+        ),
+    ],
+)
+def test_run_predict_applies_politics_multiplier_after_combining_models(
+    monkeypatch, politics, expected
+):
+    candidates = [
+        CandidatePost(at_uri="at://post/non-political", politics_score=None),
+        CandidatePost(at_uri="at://post/political", politics_score=1.0),
+        CandidatePost(at_uri="at://post/partly-political", politics_score=0.5),
+    ]
+    ranker = StubRanker(
+        "x",
+        (0.0, 1.0),
+        {
+            "at://post/non-political": 0.4,
+            "at://post/political": 0.3,
+            "at://post/partly-political": 0.35,
+        },
+    )
+    monkeypatch.setattr(predict_module, "get_ranker", lambda _name: ranker)
+
+    result = asyncio.run(
+        predict_module.run_predict(
+            _request(
+                models=[RankModelSpec(name="x", weight=1.0)],
+                candidates=candidates,
+                politics=politics,
+            ),
+            es=object(),
+        )
+    )
+
+    assert [
+        (ranking.at_uri, ranking.rank, ranking.rank_score) for ranking in result.rankings
+    ] == expected
 
 
 def test_run_predict_drops_candidates_with_no_valid_scores(monkeypatch):
@@ -481,6 +551,44 @@ def test_run_predict_records_normalized_model_scores_and_weight(monkeypatch):
     assert rec.model_scores == [
         ("x", 2.0, {"at://post/a": pytest.approx(1.0), "at://post/b": pytest.approx(0.0)}),
         ("y", 1.0, {"at://post/a": pytest.approx(0.75), "at://post/b": pytest.approx(0.25)}),
+    ]
+
+
+def test_run_predict_records_politics_score_adjustments(monkeypatch):
+    candidates = [
+        CandidatePost(at_uri="at://post/missing", politics_score=None),
+        CandidatePost(at_uri="at://post/partial", politics_score=0.5),
+        CandidatePost(at_uri="at://post/full", politics_score=1.0),
+    ]
+    ranker = StubRanker(
+        "x",
+        (0.0, 1.0),
+        {
+            "at://post/missing": 0.4,
+            "at://post/partial": 0.3,
+            "at://post/full": 0.2,
+        },
+    )
+    monkeypatch.setattr(predict_module, "get_ranker", lambda _name: ranker)
+
+    rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+    with feed_debug_scope(rec):
+        asyncio.run(
+            predict_module.run_predict(
+                _request(
+                    models=[RankModelSpec(name="x", weight=1.0)],
+                    candidates=candidates,
+                    politics=1.5,
+                ),
+                es=object(),
+            )
+        )
+
+    assert rec.politics_setting == 1.5
+    assert rec.politics_adjustments == [
+        ("at://post/missing", None, 1.0, 0.4, 0.4),
+        ("at://post/partial", 0.5, 1.25, 0.3, pytest.approx(0.375)),
+        ("at://post/full", 1.0, 1.5, 0.2, pytest.approx(0.3)),
     ]
 
 
