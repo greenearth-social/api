@@ -49,7 +49,6 @@ def test_list_models(app):
     assert resp.json() == {
         "rankers": [
             "candidate_score",
-            "two_tower",
             "perspective",
             "heavy_ranker",
             "heavy_ranker_empty_history",
@@ -298,13 +297,13 @@ def test_predict_requires_auth():
 
 def test_rank_predict_maps_ranker_execution_error_to_502(monkeypatch):
     async def fake_run_predict(payload, es):
-        raise RankerExecutionError("two_tower", "downstream boom")
+        raise RankerExecutionError("heavy_ranker", "downstream boom")
 
     monkeypatch.setattr(rank_module, "run_predict", fake_run_predict)
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(es=object())))
     payload = RankPredictRequest(
-        models=[RankModelSpec(name="two_tower", weight=1.0)],
+        models=[RankModelSpec(name="heavy_ranker", weight=1.0)],
         user_did="did:plc:user1",
         candidates=[CandidatePost(at_uri="at://post/1", score=0.5)],
     )
@@ -313,4 +312,4 @@ def test_rank_predict_maps_ranker_execution_error_to_502(monkeypatch):
         asyncio.run(rank_module.rank_predict(request, payload))  # pyright: ignore[reportArgumentType]
 
     assert exc_info.value.status_code == 502
-    assert exc_info.value.detail == "Ranker 'two_tower' failed: downstream boom"
+    assert exc_info.value.detail == "Ranker 'heavy_ranker' failed: downstream boom"

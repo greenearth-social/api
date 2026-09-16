@@ -379,7 +379,7 @@ class FeedDebugModelScoreEntry(BaseModel):
     final politics-adjusted score is captured in ``ranking``.
     """
 
-    model_name: str = Field(..., description="Name of the rank model, e.g. 'two_tower'")
+    model_name: str = Field(..., description="Name of the rank model, e.g. 'heavy_ranker'")
     weight: float = Field(..., description="Configured relative weight for this model")
     scores: list[FeedDebugScoreEntry] = Field(
         default_factory=list,

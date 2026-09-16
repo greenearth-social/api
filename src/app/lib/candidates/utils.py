@@ -6,7 +6,7 @@ from ..topic_scores import politics_score_from_source
 
 # Fields every candidate generator should pull from ES via `_source`.
 # Critically, this does NOT include the 384-dim embedding array, even
-# though MMR and the two-tower ranker need it downstream. A kNN search
+# though MMR and the heavy ranker need it downstream. A kNN search
 # at k=250 with embeddings in _source returns ~1.8 MB; without them it
 # returns ~50 KB. We refetch embeddings in one batched call after
 # dedup, against the much smaller set of candidates that actually make
