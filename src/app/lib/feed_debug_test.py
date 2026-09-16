@@ -63,7 +63,7 @@ class TestRecorderScope:
 class TestBuildDocument:
     def _recorder(self) -> FeedDebugRecorder:
         rec = FeedDebugRecorder(feed_name="your-feed", regenerated=True)
-        rec.ranker_model = "two_tower"
+        rec.ranker_model = "heavy_ranker"
         rec.diversify = True
         rec.set_generate_request(_request())
         rec.record_generator_output(
@@ -109,7 +109,7 @@ class TestBuildDocument:
         assert doc.user_did == "did:plc:user"
         assert doc.feed_name == "your-feed"
         assert doc.regenerated is True
-        assert doc.ranker_model == "two_tower"
+        assert doc.ranker_model == "heavy_ranker"
         assert doc.diversify is True
         assert len(doc.generator_outputs) == 1
         assert doc.generator_outputs[0].generator_name == "popularity"
@@ -162,11 +162,11 @@ class TestBuildDocument:
 
     def test_includes_model_scores(self):
         rec = self._recorder()
-        rec.record_model_scores("two_tower", 1.0, {"at://p/1": 0.8, "at://p/2": 0.2})
+        rec.record_model_scores("heavy_ranker", 1.0, {"at://p/1": 0.8, "at://p/2": 0.2})
         rec.record_model_scores("perspective", 2.0, {"at://p/1": 0.25, "at://p/2": 0.1})
         doc = self._build(rec)
 
-        assert [e.model_name for e in doc.model_scores] == ["two_tower", "perspective"]
+        assert [e.model_name for e in doc.model_scores] == ["heavy_ranker", "perspective"]
         assert doc.model_scores[0].weight == 1.0
         assert {s.at_uri: s.score for s in doc.model_scores[0].scores} == {
             "at://p/1": 0.8,
@@ -251,18 +251,18 @@ class TestModelScoreCapture:
 
     def test_records_one_entry_per_model_in_order(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
-        rec.record_model_scores("two_tower", 1.0, {"at://p/1": 0.8})
+        rec.record_model_scores("heavy_ranker", 1.0, {"at://p/1": 0.8})
         rec.record_model_scores("perspective", 2.0, {"at://p/1": 0.25})
 
         assert rec.model_scores == [
-            ("two_tower", 1.0, {"at://p/1": 0.8}),
+            ("heavy_ranker", 1.0, {"at://p/1": 0.8}),
             ("perspective", 2.0, {"at://p/1": 0.25}),
         ]
 
     def test_copies_scores_dict_defensively(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
         scores = {"at://p/1": 0.8}
-        rec.record_model_scores("two_tower", 1.0, scores)
+        rec.record_model_scores("heavy_ranker", 1.0, scores)
         scores["at://p/1"] = 0.0
         scores["at://p/2"] = 1.0
 
@@ -467,20 +467,20 @@ class TestBuildPipelineMetadata:
                 ]
             )
         )
-        rec.record_model_scores("two_tower", 1.0, {"at://a": 0.92, "at://b": 0.88})
-        rec.ranker_model = "two_tower"
+        rec.record_model_scores("heavy_ranker", 1.0, {"at://a": 0.92, "at://b": 0.88})
+        rec.ranker_model = "heavy_ranker"
         rec.final_order = ["at://a", "at://b"]
         rec.order_after_rank = ["at://a", "at://b"]
 
         now = datetime(2026, 7, 12, tzinfo=timezone.utc)
         snap = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
 
-        assert snap.ranker_model == "two_tower"
+        assert snap.ranker_model == "heavy_ranker"
         item = snap.items_meta[0]
         assert item.rank == 1
         assert item.rank_score == 0.92
         assert len(item.model_scores) == 1
-        assert item.model_scores[0].name == "two_tower"
+        assert item.model_scores[0].name == "heavy_ranker"
         assert item.model_scores[0].weight == 1.0
         assert item.model_scores[0].score == 0.92
         assert item.politics_adjustment is None

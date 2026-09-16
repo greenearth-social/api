@@ -10,7 +10,7 @@ if [[ "$RAW_ENVIRONMENT" == "stage" || "$RAW_ENVIRONMENT" == "prod" ]]; then
 else
   ENVIRONMENT="stage"
 fi
-MODEL="${MODEL:-two_tower}"
+MODEL="${MODEL:-heavy_ranker}"
 NUM_CANDIDATES="${NUM_CANDIDATES:-5}"
 MAX_USERS_TO_TRY="${MAX_USERS_TO_TRY:-25}"
 CANDIDATE_GENERATOR="${CANDIDATE_GENERATOR:-post_similarity}"
@@ -243,7 +243,7 @@ fi
 RANK_PAYLOAD=$(echo "$FOUND_CANDIDATES" | jq -c \
   --arg model "$MODEL" \
   --arg did "$FOUND_USER" \
-  '{model:$model,user_did:$did,candidates:.candidates}')
+  '{models:[{name:$model,weight:1}],user_did:$did,candidates:.candidates}')
 
 log_info "Calling /rank/predict for user $FOUND_USER with model $MODEL"
 RANK_RESPONSE=$(curl -sS \

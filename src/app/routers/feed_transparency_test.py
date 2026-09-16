@@ -52,7 +52,7 @@ def _snapshot_doc(
     generated_at: datetime | None = None,
     items_meta: list[PipelineItemMeta] | None = None,
     generator_legend: list[GeneratorMeta] | None = None,
-    ranker_model: str | None = "two_tower",
+    ranker_model: str | None = "heavy_ranker",
     diversify: bool = True,
     **overrides,
 ) -> FeedSnapshotDocument:
@@ -64,7 +64,7 @@ def _snapshot_doc(
             rank_score=0.92,
             after_rank_position=1,
             generators=[GeneratorMeta(name="two_tower", score=0.85)],
-            model_scores=[ModelScoreMeta(name="two_tower", weight=1.0, score=0.92)],
+            model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92)],
             diversification=DiversificationMeta(
                 relevance=0.95, score=0.80, author_penalty=0.0, content_penalty=0.0
             ),
@@ -1032,7 +1032,7 @@ def test_get_feed_detail_returns_merged_data(mock_get_snapshot, mock_hydrate, cl
     assert item["generators"][0]["name"] == "two_tower"
     assert item["generators"][0]["score"] == 0.85
     assert len(item["model_scores"]) == 1
-    assert item["model_scores"][0]["name"] == "two_tower"
+    assert item["model_scores"][0]["name"] == "heavy_ranker"
     assert item["model_scores"][0]["score"] == 0.92
     assert item["politics_adjustment"] is None
     assert item["diversification"]["relevance"] == 0.95
@@ -1202,7 +1202,7 @@ def test_get_feed_detail_multiple_items(mock_get_snapshot, mock_hydrate, client)
                 rank_score=0.92,
                 after_rank_position=1,
                 generators=[GeneratorMeta(name="two_tower", score=0.85)],
-                model_scores=[ModelScoreMeta(name="two_tower", weight=1.0, score=0.92)],
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.92)],
             ),
             PipelineItemMeta(
                 at_uri=uri2,
@@ -1210,7 +1210,7 @@ def test_get_feed_detail_multiple_items(mock_get_snapshot, mock_hydrate, client)
                 rank_score=0.88,
                 after_rank_position=2,
                 generators=[GeneratorMeta(name="two_tower", score=0.80)],
-                model_scores=[ModelScoreMeta(name="two_tower", weight=1.0, score=0.88)],
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.88)],
             ),
         ],
         items=[uri1, uri2],
