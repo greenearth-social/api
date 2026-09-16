@@ -65,7 +65,7 @@ class TestRecord:
         ctx = PipelineContext(feed_name="your-feed", fail_fast=True)
         cause = RuntimeError("hard failure")
         with pytest.raises(RuntimeError, match="hard failure"):
-            ctx.record(DegradationEvent(DegradationStage.RANK, "two_tower", cause))
+            ctx.record(DegradationEvent(DegradationStage.RANK, "heavy_ranker", cause))
 
     def test_degradations_empty_on_init(self):
         ctx = PipelineContext(feed_name="your-feed")

@@ -110,7 +110,7 @@ def _diversification_relevance_contribution(div) -> float:
 
 
 def _model_specs_str(doc: FeedDebugDocument) -> str:
-    """Configured rank models with weights, e.g. 'two_tower(1), perspective(1)'.
+    """Configured rank models with weights, e.g. 'heavy_ranker(1), perspective(1)'.
 
     Prefers ``model_scores`` (captures the weight alongside each model name);
     falls back to the plain ``ranker_model`` name string for older records.

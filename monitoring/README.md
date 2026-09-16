@@ -177,11 +177,10 @@ a median line would only add series to read past.
 | 6 | Cluster health: JVM GC, circuit breakers and disk latency | 3 | mixed |
 
 Row 2's ranking gap chart pairs series across repos by `model_name`: api's
-`rank.model.duration_ms` values `two_tower` / `heavy_ranker` correspond to
-inference-service's `inference.predict.duration_ms` values `user-tower` /
-`ranker` respectively — the two services don't share a naming convention for
-the same model, so match the pairs by that mapping rather than by literal label
-equality.
+`rank.model.duration_ms` value `heavy_ranker` corresponds to inference-service's
+`inference.predict.duration_ms` value `ranker`. Match that pair by this mapping
+rather than by literal label equality. The `user-tower` inference call belongs
+to two-tower candidate generation, not the ranking stage.
 
 ### Smoothing
 

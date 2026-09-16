@@ -3232,7 +3232,7 @@ class TestSlateCutoffs:
 
 
 class TestBestOfFriendsFeed:
-    """Tests for the best-of-friends feed (followed_users candidates + two-tower ranking)."""
+    """Tests for the best-of-friends feed (followed_users candidates + personalized ranking)."""
 
     @pytest.fixture(autouse=True)
     def _mock_authenticated_user(self):
@@ -3275,7 +3275,7 @@ class TestBestOfFriendsFeed:
         return patch("app.lib.candidates.generate.get_generator", side_effect=fake_get)
 
     def test_ranking_applied_to_candidates(self):
-        """Candidates from followed_users are returned in two-tower ranked order."""
+        """Candidates from followed_users are returned in ranked order."""
         candidates = _make_candidates("p", 3, with_embedding=True)
         reversed_rankings = [
             RankedCandidate(at_uri=f"at://p/{i}", rank=r + 1, rank_score=float(3 - r))
@@ -3296,7 +3296,7 @@ class TestBestOfFriendsFeed:
         assert posts == ["at://p/2", "at://p/1", "at://p/0"]
 
     def test_ranking_failure_soft_fails_to_unranked(self):
-        """A two-tower failure returns candidates in unranked order."""
+        """A ranking failure returns candidates in unranked order."""
         candidates = _make_candidates("p", 3, with_embedding=True)
 
         with (
