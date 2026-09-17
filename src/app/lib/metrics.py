@@ -164,13 +164,6 @@ RATIO_BOUNDARIES: tuple[float, ...] = (
     1.0,
 )
 
-# Feed snapshot post counts. Dense at the alert threshold (MIN_FEED_POST_COUNT=5)
-# and at the default page size (30); exact boundaries at 5, 30, and 100 (the
-# max page size) so percentile estimates are precise where decisions are made.
-POST_SIZE_BOUNDARIES: tuple[float, ...] = (
-    1, 2, 3, 4, 5, 7, 10, 15, 20, 25, 30, 40, 50, 75, 100
-)
-
 _NEAR_ZERO_MS_METRICS = frozenset({"client.pool.wait_ms", "client.connect.duration_ms"})
 
 
@@ -182,8 +175,6 @@ def histogram_boundaries(name: str) -> tuple[float, ...] | None:
     """
     if name == "eventloop.lag_ms":
         return EVENTLOOP_LAG_MS_BOUNDARIES
-    if name.endswith(".post_size"):
-        return POST_SIZE_BOUNDARIES
     if name.endswith("in_flight") or name.endswith("_size"):
         return CONCURRENCY_BOUNDARIES
     if name.endswith("_share") or name.endswith("_score") or name.endswith("_ratio"):
