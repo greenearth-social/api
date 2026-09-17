@@ -1,5 +1,5 @@
-"""POST /llm-query-vectors/fit - fit and store a MiniLM query vector for a
-prompt (ingex#482).
+"""POST /api/feeds/llm-query-vectors/fit - fit and store a MiniLM query vector
+for the signed-in user's prompt (ingex#482, api#492).
 
 The pipeline lives in lib/llm_query_vector_fit.py; this router validates the
 request, runs it, writes the vector to Firestore (documents.LlmQueryVectorDocument,
@@ -14,9 +14,9 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import add_llm_query_vector
 from ..lib.llm_query_vector_fit import FitError, PoolTooSmallError, fit_query_vector
-from ..security import RequireAdminApiKey
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +29,6 @@ MAX_PROMPT_CHARS = 2000
 
 
 class QueryVectorFitRequest(BaseModel):
-    user_did: str = Field(
-        ...,
-        pattern=r"^did:",
-        description="AT Protocol DID of the user the vector belongs to (did:plc:...)",
-    )
     prompt: str = Field(
         ...,
         min_length=1,
@@ -71,7 +66,7 @@ class QueryVectorFitResponse(BaseModel):
 
 
 @router.post(
-    "/llm-query-vectors/fit",
+    "/api/feeds/llm-query-vectors/fit",
     response_model=QueryVectorFitResponse,
     responses={
         422: {
@@ -84,11 +79,13 @@ class QueryVectorFitResponse(BaseModel):
 async def fit_llm_query_vector(
     body: QueryVectorFitRequest,
     request: Request,
-    _key: RequireAdminApiKey,
+    user_doc_id: FirebaseUser,
 ) -> QueryVectorFitResponse:
     """Expand the prompt to keywords, sample and score posts, fit a query
     vector, store it under the user. Synchronous: ~10 s and ~$0.13 per call.
-    Every fit stores a new document; the feed uses the user's newest one."""
+    Every fit stores a new document; the feed uses the user's newest one.
+    The user is whoever the Firebase token belongs to."""
+    user_did = f"did:plc:{user_doc_id}"
     db = getattr(request.app.state, "firestore", None)
     if db is None:
         raise HTTPException(status_code=503, detail="Firestore unavailable")
@@ -101,28 +98,28 @@ async def fit_llm_query_vector(
     except PoolTooSmallError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except FitError as exc:
-        logger.warning("llm_qv_fit failed user_did=%s error=%s", body.user_did, exc)
+        logger.warning("llm_qv_fit failed user_did=%s error=%s", user_did, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("llm_qv_fit upstream failure", extra={"user_did": body.user_did})
+        logger.exception("llm_qv_fit upstream failure", extra={"user_did": user_did})
         raise HTTPException(
             status_code=502, detail="Elasticsearch or model request failed"
         ) from exc
 
-    stored = await add_llm_query_vector(db, body.user_did, result.query_vector, prompt)
+    stored = await add_llm_query_vector(db, user_did, result.query_vector, prompt)
     key = stored.prompt_key
     logger.info(
         "llm_qv_fit stored user_did=%s vector_id=%s n_pool=%d n_keyword=%d n_random=%d "
         "n_scored=%d n_cancelled=%d n_failed=%d train_r2=%s duration_s=%.1f cost_usd=%.3f "
         "tokens_in=%d tokens_out=%d",
-        body.user_did, key, result.n_pool, result.n_keyword_posts, result.n_random_posts,
+        user_did, key, result.n_pool, result.n_keyword_posts, result.n_random_posts,
         result.n_scored, result.n_cancelled, result.n_failed,
         "-" if result.train_r2 is None else f"{result.train_r2:.3f}",
         result.duration_s, result.cost_usd, result.input_tokens, result.output_tokens,
     )
     return QueryVectorFitResponse(
         vector_id=key,
-        user_did=body.user_did,
+        user_did=user_did,
         keywords=result.keywords,
         n_pool=result.n_pool,
         n_keyword_posts=result.n_keyword_posts,
