@@ -412,7 +412,9 @@ class _RecordingCollector:
         self.records.append((name, value, attributes))
 
 
-def _install_index_hydration(monkeypatch, *, failures=None, empty_indexes=()):
+def _install_index_hydration(
+    monkeypatch, *, failures=None, empty_indexes=(), stalled_indexes=(), cancelled_indexes=None
+):
     failures = failures if failures is not None else {}
     recent = AsyncMock(
         return_value=(
@@ -426,6 +428,13 @@ def _install_index_hydration(monkeypatch, *, failures=None, empty_indexes=()):
     }
 
     async def hydrate_index(_es, _uris, *, index):
+        if index in stalled_indexes:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if cancelled_indexes is not None:
+                    cancelled_indexes.add(index)
+                raise
         if index in failures:
             raise failures[index]
         return [] if index in empty_indexes else results[index]
@@ -749,6 +758,183 @@ async def test_partial_history_is_shared_within_request_and_retried_on_next_requ
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stalled_index", ["posts", "replies"])
+@pytest.mark.parametrize("empty_sibling", [False, True])
+async def test_slow_index_returns_partial_history_before_outer_deadline_and_recovers(
+    monkeypatch, caplog, stalled_index, empty_sibling
+):
+    cache = _FakeCache()
+    set_user_history_cache(cache)
+    stalled_indexes = {stalled_index}
+    empty_indexes = {"posts", "replies"} - stalled_indexes if empty_sibling else set()
+    cancelled_indexes: set[str] = set()
+    recent, hydrate = _install_index_hydration(
+        monkeypatch,
+        empty_indexes=empty_indexes,
+        stalled_indexes=stalled_indexes,
+        cancelled_indexes=cancelled_indexes,
+    )
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS", 0.01)
+    es = object()
+
+    async with request_cache_scope():
+        first, second = await asyncio.wait_for(
+            asyncio.gather(
+                fetch_user_history_features(es, "did:plc:user1"),
+                fetch_user_history_features(es, "did:plc:user1"),
+            ),
+            timeout=1,
+        )
+        assert await fetch_user_history_features(es, "did:plc:user1") is first
+
+    assert first is second
+    assert [item.at_uri for item in first.items] == recent.return_value[0]
+    assert [item.liked_at for item in first.items] == recent.return_value[1]
+    assert [item.embedding for item in first.items] == [
+        None if stalled_index == "replies" or empty_sibling else [2.0],
+        None,
+        None if stalled_index == "posts" or empty_sibling else [1.0],
+    ]
+    assert cancelled_indexes == {stalled_index}
+    recent.assert_awaited_once()
+    assert hydrate.await_count == 2
+    assert cache.value is None
+    assert cache.store_calls == []
+    assert cache._pending_histories == {}
+    assert cache._tasks == {}
+    warnings = [record for record in caplog.records if "hydration" in record.getMessage()]
+    assert len(warnings) == 1
+    assert stalled_index in warnings[0].getMessage()
+    assert isinstance(warnings[0].exc_info[1], TimeoutError)
+
+    stalled_indexes.clear()
+    empty_indexes.clear()
+    async with request_cache_scope():
+        recovered = await fetch_user_history_features(es, "did:plc:user1")
+    await cache.drain()
+
+    assert sum(item.embedding is not None for item in recovered.items) == 2
+    assert recent.await_count == 2
+    assert hydrate.await_count == 4
+    assert cache.store_calls == [("did:plc:user1", recovered)]
+    assert await fetch_user_history_features(es, "did:plc:user1") is recovered
+    assert recent.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_both_slow_indexes_raise_timeout_and_cancel_queries_without_caching(monkeypatch):
+    cache = _FakeCache()
+    set_user_history_cache(cache)
+    cancelled_indexes: set[str] = set()
+    _recent, hydrate = _install_index_hydration(
+        monkeypatch,
+        stalled_indexes={"posts", "replies"},
+        cancelled_indexes=cancelled_indexes,
+    )
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS", 0.01)
+
+    async with asyncio.timeout(1):
+        with pytest.raises(TimeoutError):
+            await fetch_user_history_features(object(), "did:plc:user1")
+
+    assert hydrate.await_count == 2
+    assert cancelled_indexes == {"posts", "replies"}
+    assert cache.value is None
+    assert cache.store_calls == []
+    assert cache._pending_histories == {}
+    assert cache._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_slow_recent_likes_times_out_before_hydration_and_can_be_retried(monkeypatch):
+    cache = _FakeCache()
+    set_user_history_cache(cache)
+    recent, hydrate = _install_index_hydration(monkeypatch)
+    cancelled = asyncio.Event()
+
+    async def hang(*_args, **_kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    recent.side_effect = hang
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS", 0.01)
+
+    async with request_cache_scope():
+        async with asyncio.timeout(1):
+            with pytest.raises(TimeoutError):
+                await fetch_user_history_features(object(), "did:plc:user1")
+
+    assert cancelled.is_set()
+    hydrate.assert_not_awaited()
+    assert cache.value is None
+    assert cache.store_calls == []
+    assert cache._pending_histories == {}
+    assert cache._tasks == {}
+
+    recent.side_effect = None
+    async with request_cache_scope():
+        recovered = await fetch_user_history_features(object(), "did:plc:user1")
+    await cache.drain()
+    assert recent.await_count == 2
+    assert hydrate.await_count == 2
+    assert cache.store_calls == [("did:plc:user1", recovered)]
+
+
+@pytest.mark.asyncio
+async def test_likes_and_hydration_share_one_deadline_including_likes_latency(monkeypatch):
+    recent, hydrate = _install_index_hydration(monkeypatch)
+    original_timeout_at = asyncio.timeout_at
+    deadlines: list[float] = []
+    remaining_budgets: list[float] = []
+
+    def record_timeout_at(deadline):
+        deadlines.append(deadline)
+        remaining_budgets.append(deadline - asyncio.get_running_loop().time())
+        return original_timeout_at(deadline)
+
+    async def fetch_recent(*_args, **_kwargs):
+        # Let time advance before hydration without relying on a sleep duration
+        # or asserting a narrow real-time scheduling window.
+        await asyncio.sleep(0)
+        return recent.return_value
+
+    recent.side_effect = fetch_recent
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(user_history_module.asyncio, "timeout_at", record_timeout_at)
+
+    history = await fetch_user_history_features(object(), "did:plc:user1")
+
+    assert sum(item.embedding is not None for item in history.items) == 2
+    assert hydrate.await_count == 2
+    assert len(deadlines) == 3
+    assert deadlines[0] == deadlines[1] == deadlines[2]
+    assert 0 < remaining_budgets[0] <= 0.5
+    assert all(0 < budget < remaining_budgets[0] for budget in remaining_budgets[1:])
+
+
+@pytest.mark.asyncio
+async def test_expired_history_budget_does_not_start_hydration(monkeypatch):
+    cache = _FakeCache()
+    set_user_history_cache(cache)
+    recent, hydrate = _install_index_hydration(monkeypatch)
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS", 0)
+
+    # The recent-likes mock completes without yielding, so the timeout callback
+    # cannot fire before the explicit deadline check ahead of hydration.
+    with pytest.raises(TimeoutError):
+        await fetch_user_history_features(object(), "did:plc:user1")
+
+    recent.assert_awaited_once()
+    hydrate.assert_not_awaited()
+    assert cache.store_calls == []
+    assert cache._pending_histories == {}
+    assert cache._tasks == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("empty_indexes", [("posts",), ("replies",), ("posts", "replies")])
 async def test_successful_indexes_with_no_matches_are_cached(monkeypatch, empty_indexes):
     cache = _FakeCache()
@@ -855,6 +1041,58 @@ async def test_stale_hydration_failure_keeps_cached_history_and_releases_failed_
     failures.clear()
     assert await fetch_user_history_features(object(), "did:plc:user1") is stale.history
     await cache.drain()
+    assert len(cache.store_calls) == 1
+    assert cache.value is not None
+    assert sum(item.embedding is not None for item in cache.value.history.items) == 2
+    assert cache.release_calls == [("did:plc:user1", True)]
+    assert ("user_history.cache.refresh_count", 1, {"outcome": "success"}) in collector.records
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stalled", [("posts",), ("replies",), ("posts", "replies")])
+async def test_stale_slow_hydration_uses_background_budget_and_preserves_cached_history(
+    monkeypatch, stalled
+):
+    stale = _entry(
+        UserHistory(items=[UserHistoryItem("at://old", "time-old", [9.0])]),
+        age_seconds=USER_HISTORY_CACHE_TTL_SEC + 1,
+    )
+    cache = _FakeCache(stale)
+    set_user_history_cache(cache)
+    collector = _RecordingCollector()
+    monkeypatch.setattr(user_history_module, "get_metric_collector", lambda: collector)
+    # Background refreshes must use their larger budget, independently of a
+    # foreground deadline that would expire before hydration can start.
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_CACHE_BACKGROUND_TIMEOUT_SECONDS", 0.01)
+    stalled_indexes = set(stalled)
+    cancelled_indexes: set[str] = set()
+    _recent, hydrate = _install_index_hydration(
+        monkeypatch, stalled_indexes=stalled_indexes, cancelled_indexes=cancelled_indexes
+    )
+
+    assert await fetch_user_history_features(object(), "did:plc:user1") is stale.history
+    await asyncio.wait_for(cache.drain(), timeout=1)
+
+    assert hydrate.await_count == 2
+    assert cancelled_indexes == stalled_indexes
+    assert cache.value is stale
+    assert cache.store_calls == []
+    assert cache._pending_histories == {}
+    assert cache._tasks == {}
+    assert cache.claim_calls == ["did:plc:user1"]
+    assert cache.release_calls == [("did:plc:user1", True)]
+    assert (
+        "user_history.cache.refresh_count",
+        1,
+        {"outcome": "timeout" if len(stalled) == 2 else "partial"},
+    ) in collector.records
+
+    stalled_indexes.clear()
+    assert await fetch_user_history_features(object(), "did:plc:user1") is stale.history
+    await cache.drain()
+
+    assert hydrate.await_count == 4
     assert len(cache.store_calls) == 1
     assert cache.value is not None
     assert sum(item.embedding is not None for item in cache.value.history.items) == 2

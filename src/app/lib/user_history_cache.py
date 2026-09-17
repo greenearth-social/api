@@ -52,6 +52,11 @@ USER_HISTORY_LIMIT = DEFAULT_LIKED_POSTS_LIMIT
 # while still preventing a stuck SDK call from delaying shutdown indefinitely.
 USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS = 0.5
 USER_HISTORY_CACHE_BACKGROUND_TIMEOUT_SECONDS = 5.0
+# One shared budget for recent likes plus both hydration searches. Together
+# with the cache-read bound, this leaves roughly 500ms for inference
+# inside the default 2.5-second ranker budget (generators have 4 seconds).
+# Background refreshes use the larger background-operation budget above.
+USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS = 2.0
 
 # This cache policy is intentionally fixed in code so every API revision uses
 # one consistent set of freshness and retry guarantees across environments.
@@ -507,7 +512,11 @@ async def _refresh_user_history(
             if not claimed:
                 outcome = "skipped"
                 return
-            result = await _fetch_user_history_from_es(es, user_did)
+            result = await _fetch_user_history_from_es(
+                es,
+                user_did,
+                timeout_seconds=USER_HISTORY_CACHE_BACKGROUND_TIMEOUT_SECONDS,
+            )
 
         if not result.complete:
             # Keep the existing history and apply the same retry cooldown as
@@ -541,19 +550,37 @@ def _schedule_user_history_refresh(cache: UserHistoryCache, es, user_did: str) -
     _register_user_history_task(cache, user_did, task, clears_pending=False)
 
 
-async def _fetch_user_history_from_es(es, user_did: str) -> _UserHistoryFetchResult:
-    liked_uris, liked_at_times = await fetch_recent_liked_post_uris_and_times(
-        es,
-        user_did,
-        limit=USER_HISTORY_LIMIT,
-    )
+async def _fetch_user_history_from_es(
+    es,
+    user_did: str,
+    *,
+    timeout_seconds: float,
+) -> _UserHistoryFetchResult:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    async with asyncio.timeout_at(deadline):
+        liked_uris, liked_at_times = await fetch_recent_liked_post_uris_and_times(
+            es,
+            user_did,
+            limit=USER_HISTORY_LIMIT,
+        )
 
     hydrated_by_uri: dict[str, tuple[list[float], str, int]] = {}
     errors: list[Exception] = []
     if liked_uris:
+        if loop.time() >= deadline:
+            raise TimeoutError("User-history fetch deadline expired")
+
+        async def hydrate(index: str) -> list[tuple[str, list[float], str, int]]:
+            # Bound each search independently so a stalled index becomes a
+            # TimeoutError result without discarding a successful sibling.
+            # Reuse the likes deadline rather than starting a fresh budget.
+            async with asyncio.timeout_at(deadline):
+                return await fetch_post_embeddings_and_metadata(es, liked_uris, index=index)
+
         results = await asyncio.gather(
-            fetch_post_embeddings_and_metadata(es, liked_uris, index="posts"),
-            fetch_post_embeddings_and_metadata(es, liked_uris, index="replies"),
+            hydrate("posts"),
+            hydrate("replies"),
             return_exceptions=True,
         )
         for index, result in zip(("posts", "replies"), results, strict=True):
@@ -638,7 +665,11 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
                         return cached.history
                 _record_cache_count("user_history.cache.lookup_count", "miss")
 
-        result = await _fetch_user_history_from_es(es, user_did)
+        result = await _fetch_user_history_from_es(
+            es,
+            user_did,
+            timeout_seconds=USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS,
+        )
 
         if cache is not None and result.complete:
             _schedule_user_history_write(cache, user_did, result.history)

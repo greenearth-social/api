@@ -441,12 +441,19 @@ def test_100_percent_following_and_best_of_friends_share_pipeline_configuration(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("failed_index", "expected_embedded_indices"),
-    [(None, [0, 2, 3]), ("posts", [0, 3]), ("replies", [2])],
+    ("failed_index", "failure_mode", "expected_embedded_indices"),
+    [
+        (None, None, [0, 2, 3]),
+        ("posts", "error", [0, 3]),
+        ("replies", "error", [2]),
+        ("posts", "timeout", [0, 3]),
+        ("replies", "timeout", [2]),
+    ],
 )
 async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     monkeypatch,
     failed_index,
+    failure_mode,
     expected_embedded_indices,
 ):
     from unittest.mock import call
@@ -534,8 +541,16 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         )
     )
 
+    cancelled_indexes: list[str] = []
+
     async def hydrate_history(es, liked_uris, *, index):
         if index == failed_index:
+            if failure_mode == "timeout":
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled_indexes.append(index)
+                    raise
             raise RuntimeError(f"{index} unavailable")
         indices = {"posts": [2], "replies": [3, 0]}[index]
         return [
@@ -575,6 +590,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         "fetch_post_embeddings_and_metadata",
         fetch_history_metadata,
     )
+    monkeypatch.setattr(user_history_module, "USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS", 0.02)
     monkeypatch.setattr(
         heavy_ranker_module,
         "get_inference_settings",
@@ -626,11 +642,14 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
 
     es = object()
     try:
-        result = await _run_ranking_pipeline(
-            feed_cfg,
-            gen_request,
-            es,
-            feed_name="cache-test",
+        result = await asyncio.wait_for(
+            _run_ranking_pipeline(
+                feed_cfg,
+                gen_request,
+                es,
+                feed_name="cache-test",
+            ),
+            timeout=1,
         )
     finally:
         await history_cache.drain()
@@ -639,6 +658,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     assert result.uris == [candidate_uri]
     assert history_cache.retrieve_calls == 1
     assert history_cache.store_calls == (1 if failed_index is None else 0)
+    assert cancelled_indexes == ([failed_index] if failure_mode == "timeout" else [])
     fetch_recent_likes.assert_awaited_once()
     assert fetch_history_metadata.await_count == 2
     fetch_history_metadata.assert_has_awaits(
