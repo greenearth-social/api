@@ -705,6 +705,7 @@ def _source_generators(
         ("followed_users", weights.following),
         ("two_tower", weights.authors_topics),
         ("popularity", weights.popular),
+        ("llm_query_vector", weights.llm),
     ]
     if include_network_likes:
         configured.append(("network_likes", weights.network_likes))
