@@ -3682,7 +3682,9 @@ class TestFeedDebugCapture:
         with patch(
             "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
         ) as merge:
-            await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
+            await _write_feed_snapshot_background(
+                MagicMock(), "did:plc:testuser", "r1", snapshot, limit=30
+            )
 
         merge.assert_awaited_once()
 
@@ -3698,12 +3700,100 @@ class TestFeedDebugCapture:
             ),
             patch("app.routers.xrpc.get_metric_collector", return_value=collector),
         ):
-            await _write_feed_snapshot_background(MagicMock(), "did:plc:testuser", "r1", snapshot)
+            await _write_feed_snapshot_background(
+                MagicMock(), "did:plc:testuser", "r1", snapshot, limit=30
+            )
 
-        collector.record.assert_called_once_with(
+        collector.record.assert_any_call(
             "feed.snapshot.truncated_count", 1, feed_name="your-feed"
         )
         assert "reached item limit" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_posts_returned_count_metric_emitted(self):
+        from ..routers.xrpc import _write_feed_snapshot_background
+
+        snapshot = MagicMock(items=["at://a", "at://b", "at://c"], feed_name="your-feed")
+        collector = MagicMock()
+        with (
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+            ),
+            patch("app.routers.xrpc.get_metric_collector", return_value=collector),
+        ):
+            await _write_feed_snapshot_background(
+                MagicMock(), "did:plc:testuser", "r1", snapshot, limit=30
+            )
+
+        collector.record.assert_any_call(
+            "feed.snapshot.posts_returned_count", 3, feed_name="your-feed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_posts_requested_count_metric_emitted(self):
+        from ..routers.xrpc import _write_feed_snapshot_background
+
+        snapshot = MagicMock(items=["at://a", "at://b", "at://c"], feed_name="your-feed")
+        collector = MagicMock()
+        with (
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+            ),
+            patch("app.routers.xrpc.get_metric_collector", return_value=collector),
+        ):
+            await _write_feed_snapshot_background(
+                MagicMock(), "did:plc:testuser", "r1", snapshot, limit=30
+            )
+
+        collector.record.assert_any_call(
+            "feed.snapshot.posts_requested_count", 30, feed_name="your-feed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_posts_fulfilled_ratio_metric_emitted(self):
+        from ..routers.xrpc import _write_feed_snapshot_background
+
+        snapshot = MagicMock(items=["at://a", "at://b", "at://c"], feed_name="your-feed")
+        collector = MagicMock()
+        with (
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+            ),
+            patch("app.routers.xrpc.get_metric_collector", return_value=collector),
+        ):
+            await _write_feed_snapshot_background(
+                MagicMock(), "did:plc:testuser", "r1", snapshot, limit=30
+            )
+
+        collector.record.assert_any_call(
+            "feed.snapshot.posts_fulfilled_ratio", 0.1, feed_name="your-feed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_posts_fulfilled_ratio_is_zero_on_empty_snapshot(self):
+        from ..routers.xrpc import _write_feed_snapshot_background
+
+        snapshot = MagicMock(items=[], feed_name="your-feed", generator_diagnostics=[])
+        collector = MagicMock()
+        with (
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+            ),
+            patch("app.routers.xrpc.get_metric_collector", return_value=collector),
+        ):
+            await _write_feed_snapshot_background(
+                MagicMock(), "did:plc:testuser", "r1", snapshot, limit=30
+            )
+
+        collector.record.assert_any_call(
+            "feed.snapshot.posts_fulfilled_ratio", 0.0, feed_name="your-feed"
+        )
+        collector.record.assert_any_call(
+            "feed.snapshot.posts_returned_count", 0, feed_name="your-feed"
+        )
+        collector.record.assert_any_call(
+            "feed.snapshot.posts_requested_count", 30, feed_name="your-feed"
+        )
 
     def test_snapshot_written_for_all_users(self):
         """Snapshot always written regardless of debug flag."""

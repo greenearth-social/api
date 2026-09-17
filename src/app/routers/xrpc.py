@@ -122,6 +122,12 @@ ACCEPTED_SLATE_CLAIM_GRACE_SECONDS = 5
 SURVEY_POST_POSITION = 6  # 1-indexed position in the first page where the survey post appears
 SURVEY_POST_MIN_VISITS = 3  # minimum initial loads before the survey is shown
 SURVEY_POST_COOLDOWN_DAYS = 7  # days between survey showings (triggered by interactionSeen)
+try:
+    _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
+        os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5")
+    )
+except ValueError:
+    _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
 
 
 
@@ -1382,6 +1388,7 @@ async def _write_feed_snapshot_background(
     request_id: str,
     snapshot,
     *,
+    limit: int,
     load_test: bool = False,
 ) -> None:
     """Create or extend the lightweight feed snapshot in a background task.
@@ -1397,16 +1404,19 @@ async def _write_feed_snapshot_background(
     transparency reader would have to filter on.
     """
     try:
-        if not snapshot.items:
-            logger.warning(
-                "Persisting empty feed snapshot",
-                extra={
-                    "request_id": request_id,
-                    "feed_name": snapshot.feed_name,
-                    "generator_diagnostics": [
-                        diagnostic.model_dump() for diagnostic in snapshot.generator_diagnostics
-                    ],
-                },
+        collector = get_metric_collector()
+        if collector is not None:
+            posts_returned = len(snapshot.items)
+            collector.record(
+                "feed.snapshot.posts_returned_count", posts_returned, feed_name=snapshot.feed_name
+            )
+            collector.record(
+                "feed.snapshot.posts_requested_count", limit, feed_name=snapshot.feed_name
+            )
+            collector.record(
+                "feed.snapshot.posts_fulfilled_ratio",
+                posts_returned / limit,
+                feed_name=snapshot.feed_name,
             )
         truncated = await merge_feed_snapshot(
             db,
@@ -2028,6 +2038,7 @@ async def get_feed_skeleton(
                             user_did,
                             replacement_request_id,
                             _snapshot_page(generated_snapshot, page),
+                            limit=limit,
                             load_test=is_load_test,
                         )
                     return FeedSkeletonResponse(
@@ -2071,6 +2082,7 @@ async def get_feed_skeleton(
                             user_did,
                             parsed.id,
                             _snapshot_page(cached_snapshot, page),
+                            limit=limit,
                             load_test=is_load_test,
                         )
                     return FeedSkeletonResponse(
@@ -2138,6 +2150,7 @@ async def get_feed_skeleton(
                                 user_did,
                                 parsed.id,
                                 _snapshot_page(generated_snapshot, page),
+                                limit=limit,
                                 load_test=is_load_test,
                             )
                         return FeedSkeletonResponse(
@@ -2154,6 +2167,7 @@ async def get_feed_skeleton(
                         user_did,
                         parsed.id,
                         _snapshot_page(generated_snapshot, []),
+                        limit=limit,
                         load_test=is_load_test,
                     )
 
@@ -2244,6 +2258,7 @@ async def get_feed_skeleton(
                             user_did,
                             accepted_request_id,
                             _snapshot_page(accepted_snapshot, generated_page),
+                            limit=limit,
                             load_test=False,
                         )
                         next_cursor = (
@@ -2348,6 +2363,7 @@ async def get_feed_skeleton(
                     user_did,
                     request_id,
                     _snapshot_page(generated_snapshot, generated_page),
+                    limit=limit,
                     load_test=is_load_test,
                 )
 
