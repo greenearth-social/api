@@ -440,9 +440,17 @@ def test_100_percent_following_and_best_of_friends_share_pipeline_configuration(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failed_index", "expected_embedded_indices"),
+    [(None, [0, 2, 3]), ("posts", [0, 3]), ("replies", [2])],
+)
 async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     monkeypatch,
+    failed_index,
+    expected_embedded_indices,
 ):
+    from unittest.mock import call
+
     from ..lib import inference as inference_module
     from ..lib import user_history_cache as user_history_module
     from ..lib.candidates import two_tower as candidate_two_tower_module
@@ -458,16 +466,34 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     from .xrpc import _run_ranking_pipeline
 
     test_user_did = "did:plc:cache-test-user"
-    history_embedding = [0.25] * 384
     expected_history = UserHistory(
         items=[
             UserHistoryItem(
+                at_uri="at://did:plc:reply-new/app.bsky.feed.post/1",
+                liked_at="2026-01-04T00:00:00+00:00",
+                embedding=[0.75] * 384,
+                author_did="did:plc:reply-new",
+                like_count=9,
+            ),
+            UserHistoryItem(
+                at_uri="at://did:plc:missing/app.bsky.feed.post/1",
+                liked_at="2026-01-03T00:00:00+00:00",
+                embedding=None,
+            ),
+            UserHistoryItem(
                 at_uri="at://did:plc:liked/app.bsky.feed.post/1",
-                liked_at="2026-01-01T00:00:00+00:00",
-                embedding=history_embedding,
+                liked_at="2026-01-02T00:00:00+00:00",
+                embedding=[0.25] * 384,
                 author_did="did:plc:liked",
                 like_count=5,
-            )
+            ),
+            UserHistoryItem(
+                at_uri="at://did:plc:reply-old/app.bsky.feed.post/1",
+                liked_at="2026-01-01T00:00:00+00:00",
+                embedding=[0.5] * 384,
+                author_did="did:plc:reply-old",
+                like_count=3,
+            ),
         ]
     )
 
@@ -503,20 +529,21 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     predict_heavy_ranker = AsyncMock(return_value=[0.9])
     fetch_recent_likes = AsyncMock(
         return_value=(
-            ["at://did:plc:liked/app.bsky.feed.post/1"],
-            ["2026-01-01T00:00:00+00:00"],
+            expected_history.liked_uris,
+            [item.liked_at for item in expected_history.items],
         )
     )
-    fetch_history_metadata = AsyncMock(
-        return_value=[
-            (
-                "at://did:plc:liked/app.bsky.feed.post/1",
-                history_embedding,
-                "did:plc:liked",
-                5,
-            )
+
+    async def hydrate_history(es, liked_uris, *, index):
+        if index == failed_index:
+            raise RuntimeError(f"{index} unavailable")
+        indices = {"posts": [2], "replies": [3, 0]}[index]
+        return [
+            (item.at_uri, item.embedding, item.author_did, item.like_count)
+            for item in (expected_history.items[i] for i in indices)
         ]
-    )
+
+    fetch_history_metadata = AsyncMock(side_effect=hydrate_history)
 
     monkeypatch.setattr(
         candidate_two_tower_module,
@@ -597,11 +624,12 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         avatar=None,
     )
 
+    es = object()
     try:
         result = await _run_ranking_pipeline(
             feed_cfg,
             gen_request,
-            object(),
+            es,
             feed_name="cache-test",
         )
     finally:
@@ -610,22 +638,32 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
 
     assert result.uris == [candidate_uri]
     assert history_cache.retrieve_calls == 1
-    assert history_cache.store_calls == 1
+    assert history_cache.store_calls == (1 if failed_index is None else 0)
     fetch_recent_likes.assert_awaited_once()
-    fetch_history_metadata.assert_awaited_once()
+    assert fetch_history_metadata.await_count == 2
+    fetch_history_metadata.assert_has_awaits(
+        [
+            call(es, expected_history.liked_uris, index="posts"),
+            call(es, expected_history.liked_uris, index="replies"),
+        ],
+        any_order=True,
+    )
+    expected_embedded = [expected_history.items[i] for i in expected_embedded_indices]
+    predict_user_tower.assert_awaited_once()
     user_tower_call = predict_user_tower.await_args
     assert user_tower_call is not None
     assert user_tower_call.args[:2] == (
-        [history_embedding],
-        ["did:plc:liked"],
+        [item.embedding for item in expected_embedded],
+        [item.author_did for item in expected_embedded],
     )
+    predict_heavy_ranker.assert_awaited_once()
     heavy_ranker_call = predict_heavy_ranker.await_args
     assert heavy_ranker_call is not None
     assert heavy_ranker_call.args[:4] == (
-        [history_embedding],
-        ["did:plc:liked"],
-        ["2026-01-01T00:00:00+00:00"],
-        [5],
+        [item.embedding for item in expected_embedded],
+        [item.author_did for item in expected_embedded],
+        [item.liked_at for item in expected_embedded],
+        [item.like_count for item in expected_embedded],
     )
 
 
