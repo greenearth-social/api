@@ -56,7 +56,7 @@ class FeedPreferencesDocument(BaseModel):
     # a social-radius preset.
     social_radius: int | None = Field(default=None, ge=0, le=4)
     freshness: int | None = Field(default=None, ge=0, le=5)
-    politics: float | None = Field(default=None, ge=0.5, le=1.5)
+    politics: float | None = Field(default=None, ge=0.0, le=2.0)
     purpose: float | None = Field(default=None, ge=0.2, le=0.8)
 
 
@@ -101,9 +101,9 @@ class UserDocument(BaseModel):
     )
     politics: float = Field(
         default=1.0,
-        ge=0.5,
-        le=1.5,
-        description="Politics multiplier: 0.5-1.5.  Applied to political content scores.",
+        ge=0.0,
+        le=2.0,
+        description="Politics multiplier: 0.0-2.0.  Applied to political content scores.",
     )
     purpose: float = Field(
         default=0.5,
@@ -375,8 +375,8 @@ class FeedDebugModelScoreEntry(BaseModel):
 
     Captures the model's normalized (to [0, 1]) per-candidate scores and its
     configured relative weight — i.e. the inputs to the weighted-average
-    combination — so the combined score in ``ranking`` can be explained.
-    The final combined score is intentionally *not* duplicated here.
+    combination — so the pre-politics combined score can be explained. The
+    final politics-adjusted score is captured in ``ranking``.
     """
 
     model_name: str = Field(..., description="Name of the rank model, e.g. 'two_tower'")
@@ -385,6 +385,25 @@ class FeedDebugModelScoreEntry(BaseModel):
         default_factory=list,
         description="Per-candidate scores after normalization to [0, 1]",
     )
+
+
+class FeedDebugPoliticsAdjustment(BaseModel):
+    """How the politics preference changed one candidate's combined score."""
+
+    at_uri: str = Field(..., description="AT URI of the post")
+    topic_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="News & Social Concern topic score; None when no inference was available",
+    )
+    score_multiplier: float = Field(
+        ge=0.0,
+        le=2.0,
+        description="Per-post multiplier derived from the user setting and topic score",
+    )
+    score_before: float = Field(description="Combined normalized score before politics adjustment")
+    score_after: float = Field(description="Combined score after politics adjustment")
 
 
 class FeedDebugDiversificationEntry(BaseModel):
@@ -469,6 +488,16 @@ class FeedDebugDocument(BaseModel):
         description="Per-model normalized ([0, 1]) scores and configured weight, "
         "in the order rank models ran (empty when no ranking ran)",
     )
+    politics_setting: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="User politics preference applied during ranking; None for older records",
+    )
+    politics_adjustments: list[FeedDebugPoliticsAdjustment] = Field(
+        default_factory=list,
+        description="Per-candidate politics score adjustment captured during ranking",
+    )
     order_after_rank: list[str] = Field(
         default_factory=list, description="AT URIs in order after ranking, before diversification"
     )
@@ -543,6 +572,16 @@ class ModelScoreMeta(BaseModel):
     score: float
 
 
+class PoliticsAdjustmentMeta(BaseModel):
+    """Politics setting and score adjustment recorded when an item was ranked."""
+
+    setting: float = Field(ge=0.0, le=2.0)
+    topic_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    score_multiplier: float = Field(ge=0.0, le=2.0)
+    score_before: float
+    score_after: float
+
+
 class PipelineItemMeta(BaseModel):
     """Per-URI pipeline metadata — already joined so readers don't need to."""
 
@@ -552,6 +591,10 @@ class PipelineItemMeta(BaseModel):
     after_rank_position: int | None = None
     generators: list[GeneratorMeta] = Field(default_factory=list)
     model_scores: list[ModelScoreMeta] = Field(default_factory=list)
+    politics_adjustment: PoliticsAdjustmentMeta | None = Field(
+        default=None,
+        description="Recorded politics adjustment; absent for older or unranked items",
+    )
     diversification: DiversificationMeta | None = None
 
 

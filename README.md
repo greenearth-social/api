@@ -539,19 +539,20 @@ curl https://your-machine.tail1234.ts.net/.well-known/did.json
 
 Use a dedicated dev Bluesky account (e.g. `caterpie-internal.bsky.social`).
 Get an [App Password](https://bsky.app/settings/app-passwords) for it and set
-`GE_BSKY_APP_PASSWORD` in `.env`. The `--handle` must include the full domain.
+`GE_BSKY_APP_PASSWORD` in `.env`. The `--handle` option accepts a DID or a handle
+including the full domain; use the account's stable DID to avoid handle changes.
 
 ```bash
 # Publish a single feed
 pipenv run python scripts/publish_feed.py \
-  --handle caterpie-internal.bsky.social \
+  --handle did:plc:s4tl2ajfsnstzuxtegl7r33g \
   --feed-name unranked-your-feed \
   --environment dev \
   --app-password $GE_BSKY_APP_PASSWORD
 
 # Or publish all feeds at once
 pipenv run python scripts/publish_feed.py \
-  --handle caterpie-internal.bsky.social \
+  --handle did:plc:s4tl2ajfsnstzuxtegl7r33g \
   --all \
   --environment dev \
   --app-password $GE_BSKY_APP_PASSWORD
@@ -630,9 +631,13 @@ The deployment lifecycle is deliberately change-aware:
   rollback may still reference them. A required pin-sync failure stops deployment
   before Cloud Run is changed.
 
-Production publishes pins under `greenearth.social`; stage/dev uses
-`caterpie-internal.bsky.social`. Feed generator metadata is synchronized later
-in the same deployment, but existing public descriptions are preserved. Managed
+Production authenticates publishing with the stable account DID
+`did:plc:wrmpulygwvuhjn2c3jbalgqj` (currently `mysky.social`); stage/dev uses
+`did:plc:s4tl2ajfsnstzuxtegl7r33g` (currently `caterpie-internal.bsky.social`).
+Deployments validate the required publisher credentials before changing Cloud Run.
+Feed generator metadata is synchronized later in the same deployment, but existing
+public descriptions are preserved;
+a failed post-deploy sync makes the deployment command exit nonzero. Managed
 pinned-post publication remains part of the deployment lifecycle described above.
 
 #### 6. View the feed in Bluesky
@@ -773,6 +778,22 @@ Conventions:
   property can never overwrite the partition key.
 - `scripts/backfill_posthog.py` stamps the same annotations, so historical
   API-origin events are not a gap in the partition.
+
+### Traffic source on `feedLoaded`
+
+Bluesky's AppView doesn't tell a feed generator which part of the app a request
+came from, but the surfaces ask for different page sizes, so `feedLoaded`
+carries the request shape:
+
+| Property | Purpose |
+|---|---|
+| `requested_limit` | The `limit` the client asked for. Distinct values cluster by surface, so this is the closest thing to a traffic source. |
+| `has_cursor` | Whether the request was paginated. Separates a first page from scroll-through within the same surface. |
+
+Both come straight from the `getFeedSkeleton` query parameters, not from the
+number of posts actually served. Requests that never reach the session record —
+logged-out callers, load-test traffic, and the AppView's one-item reachability
+check — emit no `feedLoaded` at all, so the distribution reflects real loads.
 
 ### User identity
 

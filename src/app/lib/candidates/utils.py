@@ -1,6 +1,7 @@
 from ...models import CandidatePost
 from ..elasticsearch import post_has_embedding_source, unwrap_es_response
 from ..embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
+from ..topic_scores import politics_score_from_source
 
 
 # Fields every candidate generator should pull from ES via `_source`.
@@ -19,7 +20,8 @@ CANDIDATE_SOURCE_FIELDS = [
     "image_count",          # media metadata (feed debugging)
     "video_count",          # media metadata (feed debugging)
     "external_embed",       # link embed metadata (feed debugging)
-    "like_count",
+    "like_count",           # used for popularity scoring
+    "topic_scores",         # used for politics multiplier
 ]
 
 
@@ -72,4 +74,5 @@ def candidate_post_from_hit(
         video_count=src.get("video_count"),
         external_uri=external_uri,
         like_count=src.get("like_count"),
+        politics_score=politics_score_from_source(src),
     )

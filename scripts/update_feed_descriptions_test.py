@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from update_feed_descriptions import (
+    ENVIRONMENT_TARGETS,
     LEGACY_ATTRIBUTIONS,
     NEW_ATTRIBUTION,
     _password_from_secret,
@@ -14,7 +15,7 @@ from update_feed_descriptions import (
 )
 
 PDS = "https://pds.example.com"
-HANDLE = "greenearth.social"
+HANDLE = "did:plc:wrmpulygwvuhjn2c3jbalgqj"
 PASSWORD = "password"
 REPO_DID = "did:plc:publisher"
 ACCESS_JWT = "jwt"
@@ -64,6 +65,10 @@ def test_does_not_append_when_legacy_text_is_absent():
 def test_prod_and_stage_target_only_public_feed_records():
     assert _target_rkeys("prod") == {"your-feed", "best-of-friends", "random"}
     assert _target_rkeys("stage") == {"a0-yf", "fd-bof", "67-r"}
+
+
+def test_prod_authentication_uses_stable_publisher_did():
+    assert ENVIRONMENT_TARGETS["prod"].handle == HANDLE
 
 
 @patch("update_feed_descriptions._put_record")

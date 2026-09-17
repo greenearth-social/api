@@ -57,6 +57,14 @@ class ModelScoreView(BaseModel):
     score: float
 
 
+class PoliticsAdjustmentView(BaseModel):
+    setting: float
+    topic_score: float | None = None
+    score_multiplier: float
+    score_before: float
+    score_after: float
+
+
 class DiversificationView(BaseModel):
     relevance: float
     score: float
@@ -89,6 +97,7 @@ class FeedItemView(BaseModel):
     content: str | None = None
     generators: list[GeneratorView] = Field(default_factory=list)
     model_scores: list[ModelScoreView] = Field(default_factory=list)
+    politics_adjustment: PoliticsAdjustmentView | None = None
     diversification: DiversificationView | None = None
     media: MediaView | None = None
     engagement: EngagementView | None = None
@@ -142,7 +151,7 @@ class FeedPreferences(BaseModel):
 
     source_weights: SourceWeights | None = None
     freshness: int | None = Field(default=None, ge=0, le=5)
-    politics: float | None = Field(default=None, ge=0.5, le=1.5)
+    politics: float | None = Field(default=None, ge=0.0, le=2.0)
     purpose: float | None = Field(default=None, ge=0.2, le=0.8)
 
 

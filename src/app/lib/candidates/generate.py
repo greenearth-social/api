@@ -17,6 +17,8 @@ from ...models import (
     CandidatePost,
     GeneratorSpec,
 )
+from ..elasticsearch import fetch_post_embeddings_and_politics_scores
+from ..embeddings import encode_float32_b64
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
 from ..pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
@@ -95,6 +97,74 @@ class GeneratorError(Exception):
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
+
+
+try:
+    _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
+        os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5")
+    )
+except ValueError:
+    _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
+
+async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePost]:
+    """Fetch missing L12 embeddings and politics scores in a single batched ES call."""
+    missing = [
+        c.at_uri for c in candidates
+        if c.at_uri and (not c.minilm_l12_embedding or c.politics_score is None)
+    ]
+    if not missing:
+        return candidates
+
+    try:
+        async with timed(logger, "hydrate_posts", n_missing=len(missing)):
+            hydration_results = await asyncio.wait_for(
+                fetch_post_embeddings_and_politics_scores(es, missing, index="posts_recent"),
+                timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
+            )
+    except Exception as exc:
+        if isinstance(exc, TimeoutError):
+            logger.warning(
+                "Post hydration timed out after %.1fs; continuing without",
+                _EMBED_HYDRATION_TIMEOUT_SEC,
+            )
+        else:
+            logger.exception("Post hydration failed; continuing without")
+
+        ctx = current_pipeline_context()
+        if ctx is not None:
+            ctx.record(
+                DegradationEvent(
+                    stage=DegradationStage.EMBED_HYDRATION,
+                    component="fetch_post_embeddings_and_politics_scores",
+                    cause=exc,
+                )
+            )
+        return candidates
+
+    politics_scores: dict[str, float | None] = {}
+    encoded: dict[str, str] = {}
+    for uri, vec, politics_score in hydration_results:
+        politics_scores[uri] = politics_score
+        try:
+            encoded[uri] = encode_float32_b64(vec)
+        except Exception:
+            continue
+
+    if not encoded and not politics_scores:
+        return candidates
+
+    final_candidates = []
+    for c in candidates:
+        final_candidate = c
+        update_dict = {}
+        if c.at_uri and not c.minilm_l12_embedding and c.at_uri in encoded:
+            update_dict["minilm_l12_embedding"] = encoded[c.at_uri]
+        if c.at_uri and c.politics_score is None and c.at_uri in politics_scores:
+            update_dict["politics_score"] = politics_scores[c.at_uri]
+        if update_dict:
+            final_candidate = c.model_copy(update=update_dict)
+        final_candidates.append(final_candidate)
+    return final_candidates
 
 
 async def run_generate(
@@ -189,7 +259,7 @@ async def run_generate(
                     normalized.append(result)
             return normalized
         except Exception as exc:
-            if isinstance(exc, asyncio.TimeoutError):
+            if isinstance(exc, TimeoutError):
                 logger.warning(
                     "Candidate generator '%s' timed out after %.1fs",
                     spec.name,
@@ -278,7 +348,7 @@ async def run_generate(
                     is_infill="true",
                 )
         except Exception as exc:
-            if isinstance(exc, asyncio.TimeoutError):
+            if isinstance(exc, TimeoutError):
                 logger.warning(
                     "Infill generator '%s' timed out after %.1fs",
                     request.infill,
@@ -319,7 +389,9 @@ async def run_generate(
             rec.record_generator_output(infill_result)
         deduped = dedup_candidates(deduped + infill_result.candidates)
 
-    final = deduped[: request.num_candidates]
+    final = deduped[:request.num_candidates]
+    if getattr(request, 'hydrate_embeddings', False):
+        final = await hydrate_posts(es, final)
     if rec is not None:
         rec.record_final_candidates(final)
     return CandidateGenerateResult(candidates=final)

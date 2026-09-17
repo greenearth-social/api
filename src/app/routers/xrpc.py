@@ -54,10 +54,9 @@ from ..feeds import (
 )
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.candidates import run_generate
+from ..lib.candidates.generate import hydrate_posts
 from ..lib.config import set_fail_fast_for_request
 from ..lib.diversify import mmr_rerank
-from ..lib.elasticsearch import fetch_post_embeddings
-from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
@@ -104,7 +103,6 @@ from ..lib.request_context import set_traffic
 from ..lib.telemetry import timed
 from ..models import (
     CandidateGenerateRequest,
-    CandidatePost,
     FeedConfig,
     FeedCursor,
     GeneratorSpec,
@@ -130,6 +128,13 @@ try:
     )
 except ValueError:
     _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
+
+
+
+@dataclass
+class _InitialRequestEntry:
+    created_at: float
+    future: Future[FeedSkeletonResponse]
 
 
 _initial_request_lock = Lock()
@@ -419,62 +424,6 @@ class SendInteractionsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _hydrate_embeddings(es, candidates: list[CandidatePost]) -> list[CandidatePost]:
-    """Fetch missing L12 embeddings in a single batched ES call.
-
-    Candidate generators skip the embedding when reading from ES — the
-    array is ~4-5 KB per doc and dominates response size for kNN
-    searches. We refetch embeddings here, after dedup, against just
-    the candidates that survived. The per-request cache means later
-    callers (e.g. the two-tower ranker re-asking for the same URIs)
-    pay no additional ES cost.
-    """
-    missing = [c.at_uri for c in candidates if c.at_uri and not c.minilm_l12_embedding]
-    if not missing:
-        return candidates
-
-    try:
-        async with timed(logger, "hydrate_embeddings", n_missing=len(missing)):
-            pairs = await asyncio.wait_for(
-                fetch_post_embeddings(es, missing, index="posts_recent"),
-                timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
-            )
-    except Exception as exc:
-        if isinstance(exc, TimeoutError):
-            logger.warning(
-                "Embedding hydration timed out after %.1fs; continuing without",
-                _EMBED_HYDRATION_TIMEOUT_SEC,
-            )
-        else:
-            logger.exception("Embedding hydration failed; continuing without")
-
-        ctx = current_pipeline_context()
-        if ctx is not None:
-            ctx.record(
-                DegradationEvent(
-                    stage=DegradationStage.EMBED_HYDRATION,
-                    component="fetch_post_embeddings",
-                    cause=exc,
-                )
-            )
-        return candidates
-
-    encoded: dict[str, str] = {}
-    for uri, vec in pairs:
-        try:
-            encoded[uri] = encode_float32_b64(vec)
-        except Exception:
-            continue
-
-    if not encoded:
-        return candidates
-
-    return [
-        c.model_copy(update={"minilm_l12_embedding": encoded[c.at_uri]})
-        if c.at_uri and not c.minilm_l12_embedding and c.at_uri in encoded
-        else c
-        for c in candidates
-    ]
 
 
 # When cutoffs empty a slate that still had candidates, serve the best pre-cutoff
@@ -566,10 +515,9 @@ async def _run_ranking_pipeline(
         if not candidates:
             return PipelineResult([], [])
 
-        # Generators fetch lightweight candidates (no embedding); ranker and
-        # MMR need embeddings, so backfill in one batched ES call now that
-        # the candidate set has been deduped down to the working size.
-        candidates = await _hydrate_embeddings(es, candidates)
+        # Generators fetch lightweight candidates. Backfill embeddings and topic
+        # scores in one batched ES call after deduping to the working set.
+        candidates = await hydrate_posts(es, candidates)
 
         low_score_uris: list[str] = []
         if feed_cfg.rank_request_template is not None:
@@ -727,6 +675,24 @@ def _with_purpose_weights(feed_cfg: FeedConfig, purpose: float) -> FeedConfig:
     )
 
 
+def _with_politics_multiplier(feed_cfg: FeedConfig, politics: float) -> FeedConfig:
+    """Return a request-local feed config with the user's politics multiplier.
+
+    The politics multiplier gets applied to the combined rank score.
+    """
+    rank_template = feed_cfg.rank_request_template
+    if rank_template is None:
+        return feed_cfg
+
+    return feed_cfg.model_copy(
+        update={
+            "rank_request_template": rank_template.model_copy(
+                update={"politics": politics}
+            )
+        }
+    )
+
+
 def _source_generators(
     weights: SourceWeightsDocument,
     *,
@@ -786,6 +752,9 @@ def _configured_generation(
     if "purpose" in controls:
         assert effective.purpose is not None
         feed_cfg = _with_purpose_weights(feed_cfg, effective.purpose)
+    if "politics" in controls:
+        assert effective.politics is not None
+        feed_cfg = _with_politics_multiplier(feed_cfg, effective.politics)
 
     generators_override: dict[str, list[GeneratorSpec]] = {}
     applied_social_radius: int | None = None
@@ -1320,6 +1289,7 @@ async def _record_session(
     feed_name: str,
     db,
     *,
+    requested_limit: int,
     is_load_test: bool = False,
     is_initial_load: bool = True,
 ) -> None:
@@ -1337,7 +1307,11 @@ async def _record_session(
 
     ``is_initial_load`` is False for cursor-based (paginated) requests; only
     initial loads increment the feed-activity load counter used for survey
-    post eligibility.
+    post eligibility, and it is what the ``has_cursor`` analytics property
+    reports.
+
+    ``requested_limit`` is the page size the client asked for, tracked because
+    the Bluesky app requests different sizes from different surfaces.
     """
     # Handle resolution goes over the network to the PLC directory, so it fails
     # for reasons that have nothing to do with this user existing — a directory
@@ -1372,7 +1346,15 @@ async def _record_session(
         )
 
     try:
-        track_session(get_posthog_client(), user_did, username, feed_name, now)
+        track_session(
+            get_posthog_client(),
+            user_did,
+            username,
+            feed_name,
+            now,
+            requested_limit=requested_limit,
+            has_cursor=not is_initial_load,
+        )
     except Exception:
         logger.exception("Failed to track PostHog session for user '%s'", user_did)
 
@@ -1839,6 +1821,7 @@ async def get_feed_skeleton(
                 user_did,
                 feed_name,
                 db,
+                requested_limit=limit,
                 is_load_test=is_load_test,
                 is_initial_load=cursor is None,
             )

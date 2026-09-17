@@ -74,6 +74,7 @@ def test_search_returns_embedding():
                 "video_count": None,
                 "external_uri": None,
                 "like_count": None,
+                "politics_score": None,
             }
         ]
     }
