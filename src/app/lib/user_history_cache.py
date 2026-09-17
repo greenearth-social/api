@@ -530,11 +530,17 @@ async def _fetch_user_history_from_es(es, user_did: str) -> UserHistory:
         user_did,
         limit=USER_HISTORY_LIMIT,
     )
-    hydrated = await fetch_post_embeddings_and_metadata(es, liked_uris) if liked_uris else []
-    hydrated_by_uri = {
-        at_uri: (embedding, author_did, like_count)
-        for at_uri, embedding, author_did, like_count in hydrated
-    }
+
+    hydrated_by_uri: dict[str, tuple[list[float], str, int]] = {}
+    if liked_uris:
+        hydrated_posts, hydrated_replies = await asyncio.gather(
+            fetch_post_embeddings_and_metadata(es, liked_uris, index="posts"),
+            fetch_post_embeddings_and_metadata(es, liked_uris, index="replies"),
+        )
+        for at_uri, embedding, author_did, like_count in hydrated_posts:
+            hydrated_by_uri[at_uri] = (embedding, author_did, like_count)
+        for at_uri, embedding, author_did, like_count in hydrated_replies:
+            hydrated_by_uri[at_uri] = (embedding, author_did, like_count)
 
     items: list[UserHistoryItem] = []
     for at_uri, liked_at in zip(liked_uris, liked_at_times, strict=True):
