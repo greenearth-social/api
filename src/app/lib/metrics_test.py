@@ -362,6 +362,16 @@ class TestHistogramBoundaries:
     def test_ratio_metrics(self, name):
         assert histogram_boundaries(name) == RATIO_BOUNDARIES
 
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "feed.snapshot.posts_fulfilled_ratio",
+            "any.metric.some_ratio",
+        ],
+    )
+    def test_ratio_suffix_metrics(self, name):
+        assert histogram_boundaries(name) == RATIO_BOUNDARIES
+
     def test_unknown_metric_falls_back_to_sdk_default(self):
         assert histogram_boundaries("something.unrecognised") is None
 
