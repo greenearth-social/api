@@ -18,7 +18,7 @@ from .topic_scores import politics_score_from_source
 logger = logging.getLogger(__name__)
 
 # How many recent likes to consider when building the query vector.
-DEFAULT_LIKED_POSTS_LIMIT = 50
+DEFAULT_LIKED_POSTS_LIMIT = 64
 
 # Index alias for KNN searches — targets only the last ~1 week of posts for speed.
 POSTS_KNN_INDEX = "posts_recent"

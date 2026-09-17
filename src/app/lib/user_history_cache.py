@@ -52,6 +52,11 @@ USER_HISTORY_LIMIT = DEFAULT_LIKED_POSTS_LIMIT
 # while still preventing a stuck SDK call from delaying shutdown indefinitely.
 USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS = 0.5
 USER_HISTORY_CACHE_BACKGROUND_TIMEOUT_SECONDS = 5.0
+# One shared budget for recent likes plus both hydration searches. Together
+# with the cache-read bound, this leaves roughly 500ms for inference
+# inside the default 2.5-second ranker budget (generators have 4 seconds).
+# Background refreshes use the larger background-operation budget above.
+USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS = 2.0
 
 # This cache policy is intentionally fixed in code so every API revision uses
 # one consistent set of freshness and retry guarantees across environments.
@@ -112,6 +117,18 @@ class UserHistory:
     @property
     def items_with_embeddings(self) -> list[UserHistoryItem]:
         return [item for item in self.items if item.embedding is not None]
+
+
+@dataclass(frozen=True)
+class _UserHistoryFetchResult:
+    """Fetched history and whether every hydration search succeeded.
+
+    Missing documents or embeddings do not make a successful search incomplete.
+    Only complete results may replace the shared cached history.
+    """
+
+    history: UserHistory
+    complete: bool
 
 
 @dataclass(frozen=True)
@@ -495,9 +512,18 @@ async def _refresh_user_history(
             if not claimed:
                 outcome = "skipped"
                 return
-            history = await _fetch_user_history_from_es(es, user_did)
+            result = await _fetch_user_history_from_es(
+                es,
+                user_did,
+                timeout_seconds=USER_HISTORY_CACHE_BACKGROUND_TIMEOUT_SECONDS,
+            )
 
-        if await _store_user_history(cache, user_did, history):
+        if not result.complete:
+            # Keep the existing history and apply the same retry cooldown as
+            # a failed refresh rather than persisting a degraded replacement.
+            outcome = "partial"
+            return
+        if await _store_user_history(cache, user_did, result.history):
             outcome = "success"
             return
         outcome = "write_error"
@@ -524,17 +550,57 @@ def _schedule_user_history_refresh(cache: UserHistoryCache, es, user_did: str) -
     _register_user_history_task(cache, user_did, task, clears_pending=False)
 
 
-async def _fetch_user_history_from_es(es, user_did: str) -> UserHistory:
-    liked_uris, liked_at_times = await fetch_recent_liked_post_uris_and_times(
-        es,
-        user_did,
-        limit=USER_HISTORY_LIMIT,
-    )
-    hydrated = await fetch_post_embeddings_and_metadata(es, liked_uris) if liked_uris else []
-    hydrated_by_uri = {
-        at_uri: (embedding, author_did, like_count)
-        for at_uri, embedding, author_did, like_count in hydrated
-    }
+async def _fetch_user_history_from_es(
+    es,
+    user_did: str,
+    *,
+    timeout_seconds: float,
+) -> _UserHistoryFetchResult:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    async with asyncio.timeout_at(deadline):
+        liked_uris, liked_at_times = await fetch_recent_liked_post_uris_and_times(
+            es,
+            user_did,
+            limit=USER_HISTORY_LIMIT,
+        )
+
+    hydrated_by_uri: dict[str, tuple[list[float], str, int]] = {}
+    errors: list[Exception] = []
+    if liked_uris:
+        if loop.time() >= deadline:
+            raise TimeoutError("User-history fetch deadline expired")
+
+        async def hydrate(index: str) -> list[tuple[str, list[float], str, int]]:
+            # Bound each search independently so a stalled index becomes a
+            # TimeoutError result without discarding a successful sibling.
+            # Reuse the likes deadline rather than starting a fresh budget.
+            async with asyncio.timeout_at(deadline):
+                return await fetch_post_embeddings_and_metadata(es, liked_uris, index=index)
+
+        results = await asyncio.gather(
+            hydrate("posts"),
+            hydrate("replies"),
+            return_exceptions=True,
+        )
+        for index, result in zip(("posts", "replies"), results, strict=True):
+            if isinstance(result, BaseException):
+                if not isinstance(result, Exception):
+                    # Cancellation must still propagate, not become a partial
+                    # success that could outlive the requesting task.
+                    raise result
+                errors.append(result)
+                logger.warning(
+                    "User-history hydration from %s failed for %s",
+                    index,
+                    user_did,
+                    exc_info=(type(result), result, result.__traceback__),
+                )
+                continue
+            for at_uri, embedding, author_did, like_count in result:
+                hydrated_by_uri[at_uri] = (embedding, author_did, like_count)
+        if len(errors) == len(results):
+            raise errors[0]
 
     items: list[UserHistoryItem] = []
     for at_uri, liked_at in zip(liked_uris, liked_at_times, strict=True):
@@ -558,7 +624,7 @@ async def _fetch_user_history_from_es(es, user_did: str) -> UserHistory:
                 like_count=like_count,
             )
         )
-    return UserHistory(items=items)
+    return _UserHistoryFetchResult(history=UserHistory(items=items), complete=not errors)
 
 
 async def fetch_user_history_features(es, user_did: str) -> UserHistory:
@@ -599,12 +665,16 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
                         return cached.history
                 _record_cache_count("user_history.cache.lookup_count", "miss")
 
-        history = await _fetch_user_history_from_es(es, user_did)
+        result = await _fetch_user_history_from_es(
+            es,
+            user_did,
+            timeout_seconds=USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS,
+        )
 
-        if cache is not None:
-            _schedule_user_history_write(cache, user_did, history)
+        if cache is not None and result.complete:
+            _schedule_user_history_write(cache, user_did, result.history)
 
-        return history
+        return result.history
 
     request_cache = get_request_cache()
     if request_cache is None:
