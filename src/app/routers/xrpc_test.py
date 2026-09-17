@@ -330,6 +330,16 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
             ),
             "two_tower",
         ),
+        (
+            SourceWeightsDocument(
+                following=0.0,
+                network_likes=0.0,
+                authors_topics=0.0,
+                popular=0.0,
+                llm=1.0,
+            ),
+            "llm_query_vector",
+        ),
     ],
 )
 def test_configured_generation_preserves_exact_single_source_weights(
