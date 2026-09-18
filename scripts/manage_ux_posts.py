@@ -135,6 +135,67 @@ def fetch_repo_posts(did: str) -> list[dict]:
                 return records
 
 
+def fetch_gate_rkeys(did: str, collection: str) -> set[str]:
+    """Return the rkeys that already have a gate record in *collection*."""
+    endpoint = pds_endpoint(did)
+    rkeys: set[str] = set()
+    cursor: str | None = None
+    with httpx.Client(timeout=20.0) as client:
+        while True:
+            params: dict[str, object] = {"repo": did, "collection": collection, "limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            response = client.get(f"{endpoint}/xrpc/com.atproto.repo.listRecords", params=params)
+            if response.status_code == 400:
+                # The collection has no records yet.
+                return rkeys
+            response.raise_for_status()
+            payload = response.json()
+            rkeys.update(r["uri"].rsplit("/", 1)[-1] for r in payload.get("records", []))
+            cursor = payload.get("cursor")
+            if not cursor:
+                return rkeys
+
+
+def ungated_posts(resolved: dict[str, str]) -> list[str]:
+    """Return managed posts missing a reply or quote gate.
+
+    UX posts are one-way notices, so replies and quotes are turned off. Likes cannot
+    be disabled -- atproto has no like-gating -- so this is as far as it goes.
+    """
+    threadgated = fetch_gate_rkeys(registry.PUBLISHER_DID, managed_posts.THREADGATE_COLLECTION)
+    postgated = fetch_gate_rkeys(registry.PUBLISHER_DID, managed_posts.POSTGATE_COLLECTION)
+    missing = []
+    for name, uri in sorted(resolved.items()):
+        rkey = uri.rsplit("/", 1)[-1]
+        if rkey not in threadgated or rkey not in postgated:
+            missing.append(name)
+    return missing
+
+
+def apply_gates(client, resolved: dict[str, str], names: list[str]) -> None:
+    """Create the reply and quote gates for *names*, overwriting any partial state."""
+    from atproto import models
+
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    for name in names:
+        uri = resolved[name]
+        rkey = uri.rsplit("/", 1)[-1]
+        for collection, record in (
+            (managed_posts.THREADGATE_COLLECTION, managed_posts.build_threadgate_record(uri, now)),
+            (managed_posts.POSTGATE_COLLECTION, managed_posts.build_postgate_record(uri, now)),
+        ):
+            client.com.atproto.repo.put_record(
+                models.ComAtprotoRepoPutRecord.Data(
+                    repo=registry.PUBLISHER_DID,
+                    collection=collection,
+                    rkey=rkey,
+                    record=record,
+                )
+            )
+        print(f"  gated {name} (replies and quotes disabled)")
+
+
 def signature_index(records: list[dict]) -> dict[tuple[str, tuple[str, ...]], str]:
     """Map each existing post's content signature to its URI.
 
@@ -204,9 +265,14 @@ def cmd_resolve(args) -> int:
         f"Wrote {registry.MANIFEST_PATH} ({len(resolved)}/{len(registry.MANAGED_POSTS)} resolved)"
     )
 
-    if missing and args.require_complete:
+    ungated = ungated_posts(resolved) if resolved else []
+    for name in ungated:
+        print(f"  UNGATED  {name} (replies/quotes not yet disabled)", file=sys.stderr)
+
+    if (missing or ungated) and args.require_complete:
         print(
-            "Unpublished UX posts remain. Run: pipenv run python scripts/manage_ux_posts.py sync",
+            "UX posts need publishing or gating. Run: "
+            "pipenv run python scripts/manage_ux_posts.py sync",
             file=sys.stderr,
         )
         return 1
@@ -240,15 +306,22 @@ def cmd_sync(args) -> int:
     for name in sorted(resolved):
         print(f"  unchanged {name} -> {resolved[name]}")
 
-    if not missing:
+    ungated = ungated_posts(resolved) if resolved else []
+
+    if not missing and not ungated:
         write_manifest(resolved)
-        print(f"All {len(resolved)} UX posts are published; wrote {registry.MANIFEST_PATH}")
+        print(
+            f"All {len(resolved)} UX posts are published and gated; "
+            f"wrote {registry.MANIFEST_PATH}"
+        )
         return 0
 
     if args.dry_run:
         for name in missing:
             print(f"  would publish {name}")
-        print(f"Dry run: {len(missing)} post(s) would be published.")
+        for name in ungated:
+            print(f"  would gate {name}")
+        print(f"Dry run: {len(missing)} post(s) would be published, {len(ungated)} gated.")
         return 0
 
     creds = _credentials(args)
@@ -265,6 +338,9 @@ def cmd_sync(args) -> int:
         result = client.send_post(builder)
         resolved[name] = result.uri
         print(f"  published {name} -> {result.uri}")
+
+    # Newly published posts are ungated by definition; pre-existing ones may be too.
+    apply_gates(client, resolved, missing + [n for n in ungated if n not in missing])
 
     write_manifest(resolved)
     print(f"Published {len(missing)} post(s); wrote {registry.MANIFEST_PATH}")

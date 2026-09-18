@@ -655,6 +655,22 @@ resolves against the account before uploading:
   changed rather than shipping a revision that would serve placeholders.
 - `./scripts/deploy.sh --skip-ux-post-sync` ships the current manifest as-is.
 
+#### Interactions are disabled
+
+UX posts are one-way notices, so publishing one also writes two gate records keyed by
+the post's rkey: an `app.bsky.feed.threadgate` with an empty `allow` list (nobody can
+reply) and an `app.bsky.feed.postgate` with `disableRule` (no quote posts). An empty
+`allow` means "nobody" -- omitting the field would mean "everybody", so it is
+load-bearing.
+
+**Likes cannot be disabled.** atproto has no like-gating; any public post can be liked
+by anyone, and that is not something we can opt out of.
+
+Gates are separate records, so they can be applied to an already-published post
+without changing its URI. Resolution reports a post whose gates are missing as
+`UNGATED`, and the deploy treats that exactly like an unpublished post: it syncs
+before shipping the revision.
+
 Locally, resolve without credentials:
 
 ```bash

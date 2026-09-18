@@ -220,13 +220,19 @@ class TestSync:
 
 class TestResolve:
     def test_require_complete_fails_when_a_post_is_unpublished(self, manifest_path):
-        with patch.object(manage_ux_posts, "fetch_repo_posts", return_value=[]):
+        with (
+            patch.object(manage_ux_posts, "fetch_repo_posts", return_value=[]),
+            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
+        ):
             rc = manage_ux_posts.cmd_resolve(SimpleNamespace(require_complete=True))
         assert rc == 1
 
     def test_resolve_writes_the_manifest_without_credentials(self, manifest_path):
         existing = [_record_for(name, f"at://{name}") for name in ux_posts.MANAGED_POSTS]
-        with patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing):
+        with (
+            patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
+            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
+        ):
             rc = manage_ux_posts.cmd_resolve(SimpleNamespace(require_complete=True))
         assert rc == 0
         assert len(json.loads(manifest_path.read_text())["posts"]) == len(ux_posts.MANAGED_POSTS)
@@ -279,3 +285,87 @@ class TestCleanup:
         ):
             assert manage_ux_posts.cmd_cleanup(self._args(yes=True)) == 0
         client.com.atproto.repo.delete_record.assert_called_once()
+
+
+# --- gating -----------------------------------------------------------------
+
+
+class TestGates:
+    """UX posts are one-way notices: replies and quotes are turned off. Likes
+    cannot be disabled -- atproto has no like-gating."""
+
+    def test_threadgate_allows_nobody(self):
+        record = managed_posts.build_threadgate_record("at://post", "2026-01-01T00:00:00Z")
+        # An empty list means "nobody"; omitting allow entirely would mean "everybody",
+        # so this assertion is guarding a real footgun.
+        assert record.allow == []
+        assert record.post == "at://post"
+
+    def test_postgate_disables_quotes(self):
+        record = managed_posts.build_postgate_record("at://post", "2026-01-01T00:00:00Z")
+        assert record.embedding_rules
+        dumped = record.model_dump(exclude_none=True)
+        assert dumped["embedding_rules"] == [{"py_type": "app.bsky.feed.postgate#disableRule"}]
+
+    def test_ungated_when_a_gate_is_missing(self):
+        resolved = {ux_posts.PIN_RANDOM: "at://did:plc:x/app.bsky.feed.post/abc"}
+        with patch.object(manage_ux_posts, "fetch_gate_rkeys", side_effect=[{"abc"}, set()]):
+            assert manage_ux_posts.ungated_posts(resolved) == [ux_posts.PIN_RANDOM]
+
+    def test_not_ungated_when_both_gates_exist(self):
+        resolved = {ux_posts.PIN_RANDOM: "at://did:plc:x/app.bsky.feed.post/abc"}
+        with patch.object(manage_ux_posts, "fetch_gate_rkeys", side_effect=[{"abc"}, {"abc"}]):
+            assert manage_ux_posts.ungated_posts(resolved) == []
+
+    def test_apply_gates_writes_both_records_at_the_post_rkey(self):
+        client = MagicMock()
+        resolved = {ux_posts.PIN_RANDOM: "at://did:plc:x/app.bsky.feed.post/abc"}
+        manage_ux_posts.apply_gates(client, resolved, [ux_posts.PIN_RANDOM])
+
+        calls = client.com.atproto.repo.put_record.call_args_list
+        assert len(calls) == 2
+        collections = {c.args[0].collection for c in calls}
+        assert collections == {
+            managed_posts.THREADGATE_COLLECTION,
+            managed_posts.POSTGATE_COLLECTION,
+        }
+        # The gate rkey must equal the post's rkey or it governs nothing.
+        assert {c.args[0].rkey for c in calls} == {"abc"}
+
+    def test_sync_gates_a_newly_published_post(self, manifest_path):
+        client = MagicMock()
+        client.send_post.return_value = SimpleNamespace(
+            uri="at://did:plc:x/app.bsky.feed.post/new"
+        )
+        with (
+            patch.object(manage_ux_posts, "fetch_repo_posts", return_value=[]),
+            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
+            patch.object(managed_posts, "login", return_value=client),
+            patch.object(manage_ux_posts, "apply_gates") as gates,
+        ):
+            args = SimpleNamespace(dry_run=False, handle=None, app_password="pw", project_id="p")
+            assert manage_ux_posts.cmd_sync(args) == 0
+        assert set(gates.call_args.args[2]) == set(ux_posts.MANAGED_POSTS)
+
+    def test_sync_gates_an_existing_ungated_post(self, manifest_path):
+        existing = [_record_for(name, f"at://{name}") for name in ux_posts.MANAGED_POSTS]
+        client = MagicMock()
+        with (
+            patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
+            patch.object(manage_ux_posts, "ungated_posts", return_value=[ux_posts.PIN_RANDOM]),
+            patch.object(managed_posts, "login", return_value=client),
+            patch.object(manage_ux_posts, "apply_gates") as gates,
+        ):
+            args = SimpleNamespace(dry_run=False, handle=None, app_password="pw", project_id="p")
+            assert manage_ux_posts.cmd_sync(args) == 0
+        client.send_post.assert_not_called()
+        assert gates.call_args.args[2] == [ux_posts.PIN_RANDOM]
+
+    def test_resolve_require_complete_fails_on_an_ungated_post(self, manifest_path):
+        existing = [_record_for(name, f"at://{name}") for name in ux_posts.MANAGED_POSTS]
+        with (
+            patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
+            patch.object(manage_ux_posts, "ungated_posts", return_value=[ux_posts.PIN_RANDOM]),
+        ):
+            rc = manage_ux_posts.cmd_resolve(SimpleNamespace(require_complete=True))
+        assert rc == 1

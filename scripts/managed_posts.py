@@ -26,6 +26,10 @@ import sys
 from atproto import Client, client_utils, models
 
 POST_COLLECTION = "app.bsky.feed.post"
+# Gates are separate records keyed by the rkey of the post they govern, so they can
+# be applied to an already-published post without changing its URI.
+THREADGATE_COLLECTION = "app.bsky.feed.threadgate"
+POSTGATE_COLLECTION = "app.bsky.feed.postgate"
 
 LINK_RE = re.compile(r"\[(\[[^\]]+\]|[^\]]+)\]\((https?://[^)]+)\)")
 
@@ -158,3 +162,25 @@ def password_from_secret(project_id: str, secret: str) -> str | None:
         print(f"Could not read secret {secret}: {exc}", file=sys.stderr)
         return None
     return result.stdout.strip() or None
+
+
+def build_threadgate_record(post_uri: str, created_at: str) -> models.AppBskyFeedThreadgate.Record:
+    """Build a threadgate that allows nobody to reply.
+
+    An empty ``allow`` list means "nobody"; omitting the field entirely would mean
+    "everybody", so the empty list is load-bearing.
+    """
+    return models.AppBskyFeedThreadgate.Record(
+        post=post_uri,
+        allow=[],
+        created_at=created_at,
+    )
+
+
+def build_postgate_record(post_uri: str, created_at: str) -> models.AppBskyFeedPostgate.Record:
+    """Build a postgate that disallows quote posts."""
+    return models.AppBskyFeedPostgate.Record(
+        post=post_uri,
+        embedding_rules=[models.AppBskyFeedPostgate.DisableRule()],
+        created_at=created_at,
+    )
