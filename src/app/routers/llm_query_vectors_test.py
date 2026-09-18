@@ -1,4 +1,4 @@
-"""Tests for POST /api/feeds/llm-query-vectors/fit (api#492)."""
+"""Tests for /api/feeds/llm-query-vectors/{fit,current} (api#492)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from ..lib.llm_query_vector_fit import FitResult, PoolTooSmallError
 from ..main import app
 
 PATH = "/api/feeds/llm-query-vectors/fit"
+CURRENT_PATH = "/api/feeds/llm-query-vectors/current"
 
 
 @pytest.fixture
@@ -92,3 +93,32 @@ def test_fit_requires_login(mock_fit):
 
     assert response.status_code == 401
     mock_fit.assert_not_awaited()
+
+
+@patch("app.routers.llm_query_vectors.get_latest_llm_query_vector", new_callable=AsyncMock)
+def test_current_returns_newest_prompt_without_vector(mock_latest, client):
+    mock_latest.return_value = LlmQueryVectorDocument(
+        prompt_key="v2",
+        user_did="did:plc:test-user",
+        query_vector=[0.1, 0.2],
+        prompt="hopeful science",
+    )
+
+    response = client.get(CURRENT_PATH)
+
+    assert response.status_code == 200
+    assert mock_latest.await_args.args[1] == "did:plc:test-user"
+    body = response.json()
+    assert body["prompt"] == "hopeful science"
+    assert body["prompt_key"] == "v2"
+    assert "query_vector" not in body
+
+
+@patch("app.routers.llm_query_vectors.get_latest_llm_query_vector", new_callable=AsyncMock)
+def test_current_is_204_when_nothing_fitted(mock_latest, client):
+    mock_latest.return_value = None
+
+    response = client.get(CURRENT_PATH)
+
+    assert response.status_code == 204
+    assert response.content == b""
