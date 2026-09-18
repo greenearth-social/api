@@ -2683,6 +2683,70 @@ class TestRankedFeed:
         assert rank_request.politics == 1.75
         assert rank_request.candidates[0].politics_score == 0.8
 
+    def test_cold_start_passes_fixed_average_mix_and_politics_through_pipeline(self):
+        generators = {}
+        for name in ("popularity", "average_two_tower"):
+            candidate = CandidatePost(
+                at_uri=f"at://{name}/0",
+                minilm_l12_embedding=TEST_EMBEDDING,
+                politics_score=0.8,
+                generator_name=name,
+            )
+            generators[name] = AsyncMock()
+            generators[name].generate.return_value = CandidateResult(
+                generator_name=name, candidates=[candidate]
+            )
+        user = UserDocument(
+            user_did="did:plc:testuser",
+            social_radius=0,
+            feed_preferences={
+                "cold-start": FeedPreferencesDocument(
+                    politics=2.0,
+                    source_weights=SourceWeightsDocument(
+                        following=1.0, network_likes=0.0, authors_topics=0.0, popular=0.0
+                    ),
+                ),
+            },
+        )
+        rank_result = RankPredictResult(
+            rankings=[
+                RankedCandidate(at_uri=f"at://{name}/0", rank=index + 1, rank_score=1.0)
+                for index, name in enumerate(generators)
+            ]
+        )
+
+        with (
+            patch("app.lib.candidates.generate.get_generator", side_effect=generators.get),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
+            patch(
+                "app.routers.xrpc.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
+            ) as mock_run,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": COLD_START_FEED_URI},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["feed"]
+        for generator in generators.values():
+            generator.generate.assert_awaited_once()
+            assert generator.generate.await_args.kwargs["num_candidates"] == 50
+        assert mock_run.await_count == 1
+        assert mock_run.await_args is not None
+        rank_request = mock_run.await_args.args[0]
+        assert rank_request.politics == 0.5
+        assert [(model.name, model.weight) for model in rank_request.models] == [
+            ("heavy_ranker_empty_history", 1.0),
+            ("perspective", 1.0),
+        ]
+        assert {candidate.generator_name for candidate in rank_request.candidates} == {
+            "popularity",
+            "average_two_tower",
+        }
+
     def test_hydrates_lightweight_candidates_before_ranking(self):
         """Embedding-free generated candidates are hydrated before ranking."""
         candidates = _make_candidates("p", 1)
@@ -4884,22 +4948,36 @@ class TestSourceWeightsOverride:
             ("network_likes", 0.2),
         ]
 
+    @pytest.mark.parametrize("social_radius", [0, 4])
+    @pytest.mark.parametrize("politics", [0.0, 2.0])
     @patch("app.routers.xrpc.evaluate_feature_flags")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
-    def test_cold_start_ignores_social_radius(
+    def test_cold_start_ignores_saved_preferences(
         self,
         mock_pipeline,
         mock_get_user,
         mock_feature_flags,
+        social_radius,
+        politics,
     ):
-        """Cold-start always uses popularity for a brand-new user."""
-        from ..documents import UserDocument
+        """The experiment's fixed settings override legacy and feed-scoped preferences."""
         from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
-            social_radius=4,
+            social_radius=social_radius,
+            politics=politics,
+            feed_preferences={
+                feed_name: FeedPreferencesDocument(
+                    social_radius=social_radius,
+                    politics=politics,
+                    source_weights=SourceWeightsDocument(
+                        following=1.0, network_likes=0.0, authors_topics=0.0, popular=0.0
+                    ),
+                )
+                for feed_name in ("cold-start", "your-feed")
+            },
         )
         mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
 
@@ -4911,8 +4989,12 @@ class TestSourceWeightsOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert [(generator.name, generator.weight) for generator in gen_request.generators] == [
-            ("popularity", 1.0),
+            ("popularity", 0.5),
+            ("average_two_tower", 0.5),
         ]
+        assert gen_request.infill is None
+        feed_cfg = mock_pipeline.call_args.args[0]
+        assert feed_cfg.rank_request_template.politics == 0.5
         mock_feature_flags.assert_not_called()
 
     @patch("app.routers.xrpc.get_user")

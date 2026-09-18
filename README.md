@@ -222,6 +222,77 @@ and HTTP 504 with `upstream_timeout`. The server uses its configured
 `GE_INFERENCE_BASE_URL` and `GE_INFERENCE_API_KEY`; callers only need their
 Green Earth API key.
 
+### Average-embedding cold-start experiment
+
+The private `cold-start` feed (`mf-cs`) retrieves equal allocations from
+`popularity` and `average_two_tower`, without infill. Its fixed `politics=0.5`
+setting applies during ranking; saved user preferences do not override this
+experiment. Ranking still uses `heavy_ranker_empty_history` and `perspective`,
+followed by the existing diversification and slate cutoffs. The 50/50 split is
+an allocation of retrieved candidates, not a guarantee about the final displayed
+mix after deduplication, filtering, and ranking. Public feeds are unchanged.
+
+`average_two_tower` searches the two-tower post embeddings directly using the
+unnormalized arithmetic mean computed offline. It does not load the requesting
+user's history or call inference. The asset is bundled at
+`src/app/lib/candidates/data/average_user_embedding.json`, so the local API
+container needs no additional mount or environment variable.
+
+The bundled average comes from
+`outputs/average_user_embedding_20260918T160051.631499Z.json` in the workspace:
+128 dimensions, with all 68 eligible users contributing. The compact asset
+contains only the vector, dimension, contributor count, source completion
+timestamp, and this model pair:
+
+| Tower | Model UUID |
+| --- | --- |
+| User | `1affd684bc7f45f895e488f83dd0a2fa` |
+| Post | `9b946f280fd84899a7f82246fbc34d17` |
+
+Both IDs were verified together in the active inference service's `/ready`
+response. The generator filters Elasticsearch by the **post** UUID; the average
+script's `model_uuid` identifies the **user** tower. The pair stays pinned even
+if the live inference service changes. Retrieval uses the same
+`GE_TWO_TOWER_KNN_INDEX` selection and filters as `two_tower`: the quality corpus
+by default, or the minimum-like filter when using the fallback index. The
+selected Elasticsearch corpus must contain post embeddings from the pinned pair.
+
+The asset is validated and cached once per API process. To replace it, copy the
+new average's vector unchanged, set its `dimension`, `user_model_uuid`,
+`source_completed_at`, and `contributing_users`, and obtain the corresponding
+`post_model_uuid` from the same serving manifest or a `/ready` response whose
+user-model ID matches the new average. Do not copy per-user data into the asset.
+This experiment requires a finite, nonzero, 128-dimensional vector. Restart the
+API after replacement; there is no automatic regeneration or hot reload of JSON.
+
+Verify the standalone generator against a local dev API (using a locally issued
+`GE_API_KEY`):
+
+```bash
+curl --fail-with-body http://127.0.0.1:8300/candidates/generate \
+  -H "X-API-Key: $GE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"user_did":"did:plc:YOUR_USER_DID","generators":[{"name":"average_two_tower","weight":1.0}],"num_candidates":10}'
+```
+
+From `internal-tools/devenv`, reload and inspect the feed with:
+
+```bash
+./devctl restart api
+./devctl feed cold-start --limit 30
+./devctl logs api
+```
+
+Add `--name YOUR_INSTANCE` for a named environment. Start without a pagination
+cursor to exercise the new mix. Logs identify the loaded model pair and requested
+and returned candidate counts; snapshots retain `average_two_tower` attribution
+and diagnostics. Empty searches report `no_recent_average_embedding_posts`.
+Invalid assets and retrieval errors follow normal generator error handling:
+standalone candidate requests fail, while feed requests record degradation and
+may still serve the popularity allocation. There is no replacement vector or
+automatic switch to a different post model. Inspect source diagnostics before
+interpreting an experiment with missing average-vector candidates.
+
 ## Deployment
 
 The API is deployed to Google Cloud Run using buildpacks.

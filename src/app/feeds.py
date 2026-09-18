@@ -396,7 +396,8 @@ FEEDS: dict[str, FeedConfig] = {
     "cold-start": FeedConfig(
         display_name="Cold Start",
         description=(
-            "Main MySky feed by GreenEarth for a user with no like history and no followed accounts."
+            "Development feed — popularity and average-user two-tower candidates, "
+            "ranked with no user history."
         ),
         public=False,
         internal_rkey="mf-cs",
@@ -408,7 +409,8 @@ FEEDS: dict[str, FeedConfig] = {
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="popularity", weight=1.0),
+                GeneratorSpec(name="popularity", weight=0.5),
+                GeneratorSpec(name="average_two_tower", weight=0.5),
             ],
             infill=None,
             num_candidates=30,
@@ -420,6 +422,7 @@ FEEDS: dict[str, FeedConfig] = {
                 RankModelSpec(name="heavy_ranker_empty_history", weight=1.0),
                 RankModelSpec(name="perspective", weight=1.0),
             ],
+            politics=0.5,
         ),
     ),
 }

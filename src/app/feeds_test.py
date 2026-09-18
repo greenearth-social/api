@@ -145,13 +145,18 @@ class TestFeedsRegistry:
             assert cfg.min_rank_score == pytest.approx(0.425)
             assert cfg.min_mmr_score is not None
 
-    def test_cold_start_feed_uses_empty_history_models(self):
+    def test_cold_start_feed_uses_fixed_average_user_mix_and_empty_history_ranking(self):
         cfg = FEEDS["cold-start"]
         assert cfg.public is False
+        assert cfg.controls == ()
+        assert cfg.preference_source is None
         assert [(spec.name, spec.weight) for spec in cfg.gen_request_template.generators] == [
-            ("popularity", 1.0),
+            ("popularity", 0.5),
+            ("average_two_tower", 0.5),
         ]
+        assert cfg.gen_request_template.infill is None
         assert cfg.rank_request_template is not None
+        assert cfg.rank_request_template.politics == 0.5
         assert [(spec.name, spec.weight) for spec in cfg.rank_request_template.models] == [
             ("heavy_ranker_empty_history", 1.0),
             ("perspective", 1.0),
