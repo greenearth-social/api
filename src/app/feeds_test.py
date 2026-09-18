@@ -1,12 +1,12 @@
 import pytest
-from manage_post import parse_content  # pyright: ignore[reportMissingImports]
 
+from app import ux_posts
 from app.feeds import (
     DEFAULT_SOCIAL_RADIUS,
     FEEDS,
+    LOGGED_OUT_POST_URI,
     SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
     SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
-    _pinned_post_uri,
     canonical_feed_name,
 )
 
@@ -39,39 +39,50 @@ GIT_SHA_SUFFIX_LEN = len(" ") + 7  # " " + 7-char short git sha
 
 
 class TestFeedsRegistry:
-    def test_public_feed_pins_are_repository_managed(self):
-        expected_text = {
-            "your-feed": (
-                "Click SETTINGS to personalize your MySky feed.\n\n"
-                "A feed you control, designed for constructive conversation."
-            ),
-            "best-of-friends": (
-                "Click SETTINGS to personalize your feed.\n\n"
-                "The best posts from your mutuals and people you follow. "
-                "Part of the GreenEarth Family."
-            ),
-            "random": (
-                "Click SETTINGS to personalize your feed.\n\n"
-                "A random slice of the ATProto universe. Still applies your moderation "
-                "settings. Part of the GreenEarth Family."
-            ),
-        }
-        for feed_name, text in expected_text.items():
-            content = FEEDS[feed_name].pinned_post_content
-            assert content is not None
-            segments = parse_content(content)
-            assert "".join(segment["text"] for segment in segments) == text
-            links = [segment["url"] for segment in segments if segment["type"] == "link"]
-            assert links == [f"https://app.greenearth.social/#/settings/{feed_name}"]
-            assert len(text) <= 300
+    # conftest.py seeds GE_UX_POST_URIS with a deterministic URI per managed post
+    # ("...post/test-<stem>"), because the real manifest is generated at deploy time
+    # and never present in a test run. That makes the wiring below assertable.
+    EXPECTED_PINS = {
+        "your-feed": ux_posts.PIN_YOUR_FEED,
+        "best-of-friends": ux_posts.PIN_BEST_OF_FRIENDS,
+        "random": ux_posts.PIN_RANDOM,
+    }
 
-    def test_pinned_post_environment_override(self, monkeypatch):
-        monkeypatch.setenv("GE_PINNED_POST_YOUR_FEED_URI", "at://managed")
-        assert _pinned_post_uri("your-feed", "at://fallback") == "at://managed"
+    def test_each_public_feed_pins_its_own_ux_post(self):
+        """Catches a feed wired to the wrong registry constant, or to none."""
+        for feed_name, post_name in self.EXPECTED_PINS.items():
+            uri = FEEDS[feed_name].pinned_post_uri
+            assert uri, f"{feed_name} has no pinned post"
+            assert uri.endswith(f"/test-{post_name.removesuffix('.md')}"), (
+                f"{feed_name} resolved to {uri}"
+            )
 
-    def test_blank_pinned_post_environment_override_uses_fallback(self, monkeypatch):
-        monkeypatch.setenv("GE_PINNED_POST_YOUR_FEED_URI", "")
-        assert _pinned_post_uri("your-feed", "at://fallback") == "at://fallback"
+    def test_your_feed_uses_the_survey_post(self):
+        uri = FEEDS["your-feed"].survey_post_uri
+        assert uri and uri.endswith("/test-survey-your-feed")
+
+    def test_logged_out_post_is_resolved(self):
+        assert LOGGED_OUT_POST_URI and LOGGED_OUT_POST_URI.endswith("/test-logged-out")
+
+    def test_ux_posts_come_from_the_notifications_account(self):
+        """Issue #404: UX posts must not live on the brand account, whose followers
+        would otherwise see every republished revision."""
+        uris = [FEEDS[name].pinned_post_uri for name in self.EXPECTED_PINS]
+        uris.append(FEEDS["your-feed"].survey_post_uri)
+        uris.append(LOGGED_OUT_POST_URI)
+        for uri in uris:
+            assert uri is not None
+            assert uri.startswith(f"at://{ux_posts.PUBLISHER_DID}/"), uri
+
+    def test_no_feed_resolves_to_the_placeholder(self):
+        """A misspelled post name would silently degrade to the placeholder."""
+        placeholder_suffix = f"/test-{ux_posts.PLACEHOLDER.removesuffix('.md')}"
+        for feed_name in self.EXPECTED_PINS:
+            uri = FEEDS[feed_name].pinned_post_uri
+            assert uri is not None
+            assert not uri.endswith(placeholder_suffix)
+        assert LOGGED_OUT_POST_URI is not None
+        assert not LOGGED_OUT_POST_URI.endswith(placeholder_suffix)
 
     def test_social_radius_splits_everyone_weight_evenly(self):
         for presets in (

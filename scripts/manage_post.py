@@ -22,48 +22,19 @@ Delete and re-publish instead.
 import argparse
 import getpass
 import os
-import re
 import sys
 
-from atproto import Client, client_utils
+from atproto import Client
 from dotenv import load_dotenv
 
-LINK_RE = re.compile(r'\[(\[[^\]]+\]|[^\]]+)\]\((https?://[^)]+)\)')
-
-
-def parse_content(text: str) -> list[dict]:
-    """Parse plain text with [label](url) markdown links into segments."""
-    segments = []
-    last = 0
-    for m in LINK_RE.finditer(text):
-        if m.start() > last:
-            segments.append({"type": "text", "text": text[last:m.start()]})
-        segments.append({"type": "link", "text": m.group(1), "url": m.group(2)})
-        last = m.end()
-    if last < len(text):
-        segments.append({"type": "text", "text": text[last:]})
-    return segments
-
-
-def build_text_builder(segments: list[dict]) -> client_utils.TextBuilder:
-    """Build a TextBuilder from parsed content segments.
-
-    Converts a list of text and link segments into an atproto TextBuilder
-    with proper rich text markup.
-
-    Args:
-        segments: List of dicts with type="text" or "link" from parse_content()
-
-    Returns:
-        client_utils.TextBuilder with all segments added
-    """
-    tb = client_utils.TextBuilder()
-    for seg in segments:
-        if seg["type"] == "text":
-            tb.text(seg["text"])
-        elif seg["type"] == "link":
-            tb.link(seg["text"], seg["url"])
-    return tb
+# Markdown parsing and record construction are shared with scripts/manage_ux_posts.py
+# so a hand-published post is built exactly like a managed one. Re-exported here
+# because existing callers import them from this module.
+from managed_posts import (  # noqa: F401
+    LINK_RE,
+    build_text_builder,
+    parse_content,
+)
 
 
 def _login(handle: str) -> Client:

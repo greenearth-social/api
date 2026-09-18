@@ -269,22 +269,14 @@ class FeedConfig(BaseModel):
     )
     pinned_post_uri: str | None = Field(
         None,
-        description="AT URI of a post to pin at the top of the first page of this feed.",
-    )
-    pinned_post_content: str | None = Field(
-        None,
-        description="Repository-managed pinned-post text. Markdown-style links are converted "
-        "to Bluesky rich-text facets by scripts/manage_pinned_posts.py during deployment.",
+        description="AT URI of a post to pin at the top of the first page of this feed. "
+        "Resolved by app.ux_posts.ux_post_uri() from the deploy-generated manifest.",
     )
     survey_post_uri: str | None = Field(
         None,
         description="AT URI of a post to inject at position 6 of the first page for users "
-        "who have loaded the feed at least 3 times and have not seen it in the past 7 days.",
-    )
-    survey_post_content: str | None = Field(
-        None,
-        description="Survey post text used to identify the post (for reference only; not "
-        "rendered by the API at runtime).",
+        "who have loaded the feed at least 3 times and have not seen it in the past 7 days. "
+        "Resolved by app.ux_posts.ux_post_uri() from the deploy-generated manifest.",
     )
     logged_out: LoggedOutBehavior = Field(
         "explain",
@@ -295,7 +287,7 @@ class FeedConfig(BaseModel):
     logged_out_post_uri: str | None = Field(
         None,
         description="AT URI of the post served on its own to logged-out callers. Only "
-        "read when logged_out is 'explain'; defaults to feeds.LOGGED_OUT_POST_URI.",
+        "read when logged_out is 'explain'; falls back to the shared logged-out UX post.",
     )
     max_render_share: float | None = Field(
         None,
