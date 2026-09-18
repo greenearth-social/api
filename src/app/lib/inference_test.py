@@ -404,6 +404,93 @@ async def test_compute_user_embedding_disallows_actual_history_without_embedding
     predict_user_tower.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"outputs": []},
+        {"outputs": [[], []]},
+        {"outputs": [[]]},
+        {"outputs": ["not a vector"]},
+        {"outputs": [["0.1"]]},
+        {"outputs": [[True]]},
+        {"outputs": [[float("nan")]]},
+        {"outputs": [[float("inf")]]},
+        {"outputs": [[10 ** 1000]]},
+        {"outputs": [[0.1]], "model_uuid": None},
+        {"outputs": [[0.1]], "model_uuid": ""},
+        {"outputs": [[0.1]], "model_uuid": "   "},
+        {"outputs": [[0.1]], "model_uuid": 42},
+        {"outputs": [[0.1]], "model_uuid": "user-uuid", "model_type": "post-tower"},
+    ],
+)
+def test_validated_user_prediction_rejects_malformed_output(payload):
+    with pytest.raises(inference_module.InferenceResponseFormatError):
+        inference_module._validated_user_prediction(payload)
+
+
+@pytest.mark.asyncio
+async def test_user_embedding_result_preserves_actual_model_and_history_counts(monkeypatch):
+    history = UserHistory(items=[
+        UserHistoryItem(
+            at_uri=f"at://post/{idx}",
+            liked_at="2026-09-17T00:00:00Z",
+            embedding=embedding,
+            author_did=f"did:plc:author{idx}",
+        )
+        for idx, embedding in enumerate(([1.0, 0.0], None, [0.0, 1.0]))
+    ])
+    fetch = AsyncMock(return_value=history)
+    monkeypatch.setattr(inference_module, "fetch_user_history_features", fetch)
+    prediction = AsyncMock(return_value={
+        "outputs": [[1, 0]], "model_uuid": "actual-user-model", "model_type": "user-tower"
+    })
+    monkeypatch.setattr(inference_module, "_request_user_tower_prediction", prediction)
+    es = object()
+
+    result = await inference_module.compute_user_embedding_result(
+        "did:plc:viewer", es, "https://inference.example", "test-key"
+    )
+
+    assert result == inference_module.UserEmbeddingResult([1.0, 0.0], "actual-user-model", 3, 2)
+    fetch.assert_awaited_once_with(es, "did:plc:viewer")
+    prediction.assert_awaited_once_with(
+        [[1.0, 0.0], [0.0, 1.0]],
+        ["did:plc:author0", "did:plc:author2"],
+        base_url="https://inference.example",
+        api_key="test-key",
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_user_tower_prediction_does_not_require_metadata(monkeypatch):
+    class FakeClient:
+        async def post(self, url, json, headers):
+            return httpx.Response(200, json={"outputs": [[0.1, 0.2]]})
+
+    monkeypatch.setattr(inference_module, "get_http_client", lambda: FakeClient())
+    assert await inference_module.predict_user_tower_single(
+        [[1.0, 0.0]], ["did:plc:author"], base_url="https://inference", api_key="test-key"
+    ) == [[0.1, 0.2]]
+
+
+@pytest.mark.asyncio
+async def test_user_embedding_result_propagates_history_lookup_failure(monkeypatch):
+    monkeypatch.setattr(
+        inference_module,
+        "fetch_user_history_features",
+        AsyncMock(side_effect=RuntimeError("history lookup failed")),
+    )
+    prediction = AsyncMock()
+    monkeypatch.setattr(inference_module, "_request_user_tower_prediction", prediction)
+    with pytest.raises(RuntimeError, match="history lookup failed"):
+        await inference_module.compute_user_embedding_result(
+            "did:plc:viewer", object(), "https://inference", "test-key"
+        )
+    prediction.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_cached_post_tower_uuid_reuses_successful_lookup(monkeypatch):
     calls = 0

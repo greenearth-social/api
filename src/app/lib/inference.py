@@ -6,8 +6,10 @@ towers of the two tower model, etc.
 
 import asyncio
 import logging
+import math
 import os
 import time
+from dataclasses import dataclass
 from typing import Literal, assert_never
 
 import httpx
@@ -49,6 +51,19 @@ _post_tower_uuid_cache: dict[tuple[str, str], tuple[str, float]] = {}
 _post_tower_uuid_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 HistoryMode = Literal["actual", "empty"]
+MissingUserHistoryReason = Literal["no_likes", "no_embedded_history"]
+
+
+@dataclass(frozen=True)
+class UserEmbeddingResult:
+    """A user vector and the metadata needed to combine vectors safely."""
+
+    embedding: list[float] | None
+    model_uuid: str | None
+    history_like_count: int
+    history_embedding_count: int
+    reason: MissingUserHistoryReason | None = None
+
 
 class InferenceResponseFormatError(RuntimeError):
     """Raised when inference-service returns a successful but malformed response."""
@@ -159,6 +174,20 @@ async def predict_user_tower_single(
     base_url: str,
     api_key: str,
 ) -> list[list[float]]:
+    payload = await _request_user_tower_prediction(
+        history_embeddings, history_author_dids, base_url=base_url, api_key=api_key
+    )
+    return _extract_inference_outputs("user-tower", payload)
+
+
+async def _request_user_tower_prediction(
+    history_embeddings: list[list[float]],
+    history_author_dids: list[str],
+    *,
+    base_url: str,
+    api_key: str,
+) -> object:
+    """Keep prediction metadata while sharing transport with the legacy helper."""
     url = f"{base_url}/models/user-tower/predict"
     headers = build_inference_headers(api_key)
     payload = {
@@ -183,8 +212,7 @@ async def predict_user_tower_single(
         if collector is not None:
             collector.record("rank.model.failure_count", 1, status_code=str(resp.status_code))
         raise_inference_response_error("user-tower", resp.status_code, resp.text)
-    payload = _decode_inference_json("user-tower", resp)
-    return _extract_inference_outputs("user-tower", payload)
+    return _decode_inference_json("user-tower", resp)
 
 
 async def predict_heavy_ranker_single_user(
@@ -308,6 +336,60 @@ async def compute_user_embedding(
                 f"user inference returned {len(output_user_embedding_list)} embeddings; expected 1",
             )
         return output_user_embedding_list[0]
+
+
+def _validated_user_prediction(payload: object) -> tuple[list[float], str]:
+    outputs = _extract_inference_outputs("user-tower", payload)
+    if len(outputs) != 1 or not isinstance(outputs[0], list) or not outputs[0]:
+        raise InferenceResponseFormatError("user-tower must return exactly one nonempty vector")
+    embedding = outputs[0]
+    try:
+        valid = all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            for value in embedding
+        )
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise InferenceResponseFormatError("user-tower vector must contain only finite numbers")
+    # The UUID must identify the exact model that produced this response, not a
+    # separately cached /ready value that can change during a rollout.
+    assert isinstance(payload, dict)  # checked by _extract_inference_outputs
+    model_uuid = payload.get("model_uuid")
+    if not isinstance(model_uuid, str) or not model_uuid.strip():
+        raise InferenceResponseFormatError("user-tower prediction missing model_uuid")
+    if payload.get("model_type") != "user-tower":
+        raise InferenceResponseFormatError("user-tower prediction has invalid model_type")
+    return [float(value) for value in embedding], model_uuid
+
+
+async def compute_user_embedding_result(
+    user_did: str,
+    es,
+    inference_base_url: str,
+    inference_api_key: str,
+) -> UserEmbeddingResult:
+    """Return a validated actual-history vector; never infer from empty history."""
+    async with timed(logger, "two_tower_user_side", user_did=user_did):
+        history = await fetch_user_history_features(es, user_did)
+        history_like_count = len(history.liked_uris)
+        embedded_history = history.items_with_embeddings
+        if not history_like_count:
+            return UserEmbeddingResult(None, None, 0, 0, "no_likes")
+        if not embedded_history:
+            return UserEmbeddingResult(
+                None, None, history_like_count, 0, "no_embedded_history"
+            )
+        payload = await _request_user_tower_prediction(
+            [item.embedding for item in embedded_history if item.embedding is not None],
+            [item.author_did for item in embedded_history],
+            base_url=inference_base_url,
+            api_key=inference_api_key,
+        )
+        embedding, model_uuid = _validated_user_prediction(payload)
+        return UserEmbeddingResult(
+            embedding, model_uuid, history_like_count, len(embedded_history)
+        )
 
 
 async def get_post_tower_uuid(

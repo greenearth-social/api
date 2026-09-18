@@ -37,7 +37,17 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-from .routers import candidates, diversify, feed_transparency, health, rank, redirect, skylight, xrpc
+from .routers import (
+    candidates,
+    diversify,
+    embeddings,
+    feed_transparency,
+    health,
+    rank,
+    redirect,
+    skylight,
+    xrpc,
+)
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
 from .lib.firebase_auth import init_firebase_auth
@@ -418,6 +428,7 @@ async def inflight_mw(request: Request, call_next):
 
 app.include_router(candidates.router)
 app.include_router(diversify.router)
+app.include_router(embeddings.router)
 app.include_router(feed_transparency.router)
 app.include_router(health.router)
 app.include_router(rank.router)
