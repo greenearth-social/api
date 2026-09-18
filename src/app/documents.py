@@ -36,10 +36,14 @@ class SourceWeightsDocument(BaseModel):
     network_likes: float = Field(default=0.0, ge=0.0, le=1.0)
     authors_topics: float = Field(ge=0.0, le=1.0)
     popular: float = Field(ge=0.0, le=1.0)
+    # Same reason: documents written before the prompt feature have no llm key.
+    llm: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def weights_sum_to_one(self) -> SourceWeightsDocument:
-        total = self.following + self.network_likes + self.authors_topics + self.popular
+        total = (
+            self.following + self.network_likes + self.authors_topics + self.popular + self.llm
+        )
         if abs(total - 1.0) > 1e-6:
             raise ValueError("source weights must sum to 1.0")
         return self
