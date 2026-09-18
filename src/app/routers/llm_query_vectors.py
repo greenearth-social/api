@@ -1,5 +1,7 @@
-"""POST /api/feeds/llm-query-vectors/fit - fit and store a MiniLM query vector
-for the signed-in user's prompt (ingex#482, api#492).
+"""Fit and read the signed-in user's MiniLM prompt vector (ingex#482, api#492).
+
+POST /api/feeds/llm-query-vectors/fit     fit a prompt and store its vector
+GET  /api/feeds/llm-query-vectors/current the newest fitted prompt, 204 if none
 
 The pipeline lives in lib/llm_query_vector_fit.py; this router validates the
 request, runs it, writes the vector to Firestore (documents.LlmQueryVectorDocument,
@@ -10,12 +12,13 @@ updated document, so the newest fit is the one that serves.
 """
 
 import logging
+from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..lib.firebase_auth import FirebaseUser
-from ..lib.firestore import add_llm_query_vector
+from ..lib.firestore import add_llm_query_vector, get_latest_llm_query_vector
 from ..lib.llm_query_vector_fit import FitError, PoolTooSmallError, fit_query_vector
 
 logger = logging.getLogger(__name__)
@@ -130,4 +133,35 @@ async def fit_llm_query_vector(
         train_r2=result.train_r2,
         duration_s=round(result.duration_s, 2),
         cost_usd=round(result.cost_usd, 4),
+    )
+
+
+class CurrentPromptResponse(BaseModel):
+    prompt_key: str = Field(..., description="Firestore document id of the serving vector")
+    prompt: str = Field(..., description="Prompt text the vector was fitted to")
+    created_at: datetime = Field(..., description="When it was fitted")
+
+
+@router.get(
+    "/api/feeds/llm-query-vectors/current",
+    response_model=CurrentPromptResponse,
+    responses={
+        204: {"description": "No prompt fitted yet"},
+        503: {"description": "Firestore unavailable"},
+    },
+)
+async def current_llm_prompt(
+    request: Request,
+    user_doc_id: FirebaseUser,
+) -> CurrentPromptResponse | Response:
+    """The prompt behind the vector the feed currently serves for this user,
+    which is the most recently updated one. The vector itself is not returned."""
+    db = getattr(request.app.state, "firestore", None)
+    if db is None:
+        raise HTTPException(status_code=503, detail="Firestore unavailable")
+    stored = await get_latest_llm_query_vector(db, f"did:plc:{user_doc_id}")
+    if stored is None:
+        return Response(status_code=204)
+    return CurrentPromptResponse(
+        prompt_key=stored.prompt_key, prompt=stored.prompt, created_at=stored.created_at
     )
