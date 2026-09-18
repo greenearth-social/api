@@ -116,7 +116,11 @@ def _get_anthropic_client() -> AsyncAnthropic:
     if _client is None:
         key = os.environ.get("GE_ANTHROPIC_API_KEY")
         if not key:
-            raise RuntimeError("GE_ANTHROPIC_API_KEY environment variable is not set")
+            raise RuntimeError(
+                "GE_ANTHROPIC_API_KEY is not set. Locally: put it in "
+                "internal-tools/devenv/devenv.local.env, then `devctl restart api`. "
+                "Deployed: Secret Manager, anthropic-api-key-stage / -prod."
+            )
         # The SDK's httpx2 layer builds its default TLS context with the
         # `truststore` package, which mutates the shared context on every
         # handshake and is not thread-safe under anyio's worker threads. With
