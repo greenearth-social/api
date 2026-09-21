@@ -52,7 +52,7 @@ GIT_SHA=""
 SKIP_UX_POST_SYNC=false
 
 # MySky's first-time and Explore posts are externally published native-video
-# records. Reuse configured values, or recover them from the deployed service.
+# records. Reuse configured values, or recover them from recent revisions.
 GE_PINNED_POST_YOUR_FEED_URI="${GE_PINNED_POST_YOUR_FEED_URI:-}"
 GE_PINNED_POST_YOUR_FEED_EXPLORE_URI="${GE_PINNED_POST_YOUR_FEED_EXPLORE_URI:-}"
 
@@ -583,26 +583,58 @@ prepare_ux_posts() {
     log_info "UX posts are ready."
 }
 
-load_deployed_video_post_uri() {
-    local env_name="$1"
-    gcloud run services describe "greenearth-api-$ENVIRONMENT" \
+load_deployed_video_post_uris() {
+    local revisions_json
+    if ! revisions_json=$(gcloud run revisions list \
+        --service="greenearth-api-$ENVIRONMENT" \
         --region="$REGION" \
         --project="$PROJECT_ID" \
-        --format="value(spec.template.spec.containers[0].env.filter(name=$env_name).value)" \
-        2>/dev/null || true
+        --limit=20 \
+        --format=json 2>/dev/null); then
+        return 0
+    fi
+
+    local env_values
+    if ! env_values=$(pipenv run python -c '
+import json
+import sys
+
+names = {
+    "GE_PINNED_POST_YOUR_FEED_URI",
+    "GE_PINNED_POST_YOUR_FEED_EXPLORE_URI",
+}
+found = {}
+for revision in json.load(sys.stdin):
+    containers = revision.get("spec", {}).get("containers", [])
+    for entry in containers[0].get("env", []) if containers else []:
+        name = entry.get("name")
+        value = entry.get("value")
+        if name in names and name not in found and isinstance(value, str) and value:
+            found[name] = value
+for name, value in found.items():
+    print(f"{name}\t{value}")
+' <<< "$revisions_json"); then
+        return 0
+    fi
+
+    local env_name
+    local env_value
+    while IFS=$'\t' read -r env_name env_value; do
+        case "$env_name" in
+            GE_PINNED_POST_YOUR_FEED_URI)
+                [ -n "$GE_PINNED_POST_YOUR_FEED_URI" ] \
+                    || GE_PINNED_POST_YOUR_FEED_URI="$env_value"
+                ;;
+            GE_PINNED_POST_YOUR_FEED_EXPLORE_URI)
+                [ -n "$GE_PINNED_POST_YOUR_FEED_EXPLORE_URI" ] \
+                    || GE_PINNED_POST_YOUR_FEED_EXPLORE_URI="$env_value"
+                ;;
+        esac
+    done <<< "$env_values"
 }
 
 prepare_video_post_uris() {
-    if [ -z "$GE_PINNED_POST_YOUR_FEED_URI" ]; then
-        GE_PINNED_POST_YOUR_FEED_URI=$(
-            load_deployed_video_post_uri GE_PINNED_POST_YOUR_FEED_URI
-        )
-    fi
-    if [ -z "$GE_PINNED_POST_YOUR_FEED_EXPLORE_URI" ]; then
-        GE_PINNED_POST_YOUR_FEED_EXPLORE_URI=$(
-            load_deployed_video_post_uri GE_PINNED_POST_YOUR_FEED_EXPLORE_URI
-        )
-    fi
+    load_deployed_video_post_uris
 
     if [ -z "$GE_PINNED_POST_YOUR_FEED_URI" ] \
         || [ -z "$GE_PINNED_POST_YOUR_FEED_EXPLORE_URI" ]; then
