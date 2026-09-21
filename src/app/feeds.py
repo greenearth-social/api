@@ -12,8 +12,6 @@ the codebase (e.g.  the ``publish_feed.py`` script) can import it without
 pulling in FastAPI.
 """
 
-import os
-
 from . import ux_posts
 from .models import (
     CandidateGenerateRequest,
@@ -49,23 +47,6 @@ LOGGED_OUT_POST_URI: str | None = ux_post_uri(ux_posts.LOGGED_OUT)
 def _settings_url(feed_name: str) -> str:
     """Build a Settings deep link for the frontend paired with this deployment."""
     return ux_posts.settings_url(feed_name)
-
-
-def _pinned_post_uri(feed_name: str, fallback: str) -> str:
-    """Resolve an externally published video pin with a local/dev fallback."""
-    env_name = f"GE_PINNED_POST_{feed_name.upper().replace('-', '_')}_URI"
-    configured = os.environ.get(env_name, "").strip()
-    return configured or fallback
-
-
-def _pinned_post_variant_uri(feed_name: str, variant: str, fallback: str) -> str:
-    """Resolve an externally published video variant with a safe fallback."""
-    env_name = (
-        f"GE_PINNED_POST_{feed_name.upper().replace('-', '_')}_{variant.upper()}_URI"
-    )
-    configured = os.environ.get(env_name, "").strip()
-    return configured or fallback
-
 
 
 # Social-radius preset generator weights for your-feed.
@@ -181,12 +162,8 @@ FEEDS: dict[str, FeedConfig] = {
         internal_display_name="a0 YF",
         avatar="assets/icons/mysky.png",
         controls=("source_weights", "freshness", "purpose", "politics"),
-        pinned_post_uri=_pinned_post_uri(
-            "your-feed", ux_post_uri(ux_posts.PIN_YOUR_FEED) or ""
-        ),
-        explore_pinned_post_uri=_pinned_post_variant_uri(
-            "your-feed", "explore", ux_post_uri(ux_posts.PIN_YOUR_FEED) or ""
-        ),
+        pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED),
+        explore_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_EXPLORE),
         returning_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_RETURNING),
         survey_post_uri=ux_post_uri(ux_posts.SURVEY_YOUR_FEED),
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share

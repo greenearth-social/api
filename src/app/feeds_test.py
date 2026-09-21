@@ -7,8 +7,6 @@ from app.feeds import (
     LOGGED_OUT_POST_URI,
     SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
     SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
-    _pinned_post_uri,
-    _pinned_post_variant_uri,
     _settings_url,
     canonical_feed_name,
 )
@@ -60,10 +58,6 @@ class TestFeedsRegistry:
                 f"{feed_name} resolved to {uri}"
             )
 
-    def test_pinned_post_environment_override(self, monkeypatch):
-        monkeypatch.setenv("GE_PINNED_POST_YOUR_FEED_URI", "at://managed")
-        assert _pinned_post_uri("your-feed", "at://fallback") == "at://managed"
-
     def test_your_feed_uses_the_survey_post(self):
         uri = FEEDS["your-feed"].survey_post_uri
         assert uri and uri.endswith("/test-survey-your-feed")
@@ -72,6 +66,10 @@ class TestFeedsRegistry:
         uri = FEEDS["your-feed"].returning_pinned_post_uri
         assert uri and uri.endswith("/test-pin-your-feed-returning")
 
+    def test_your_feed_uses_the_explore_video_ux_post(self):
+        uri = FEEDS["your-feed"].explore_pinned_post_uri
+        assert uri and uri.endswith("/test-pin-your-feed-explore")
+
     def test_logged_out_post_is_resolved(self):
         assert LOGGED_OUT_POST_URI and LOGGED_OUT_POST_URI.endswith("/test-logged-out")
 
@@ -79,6 +77,8 @@ class TestFeedsRegistry:
         """Issue #404: UX posts must not live on the brand account, whose followers
         would otherwise see every republished revision."""
         uris = [FEEDS[name].pinned_post_uri for name in self.EXPECTED_PINS]
+        uris.append(FEEDS["your-feed"].explore_pinned_post_uri)
+        uris.append(FEEDS["your-feed"].returning_pinned_post_uri)
         uris.append(FEEDS["your-feed"].survey_post_uri)
         uris.append(LOGGED_OUT_POST_URI)
         for uri in uris:
@@ -92,15 +92,12 @@ class TestFeedsRegistry:
             uri = FEEDS[feed_name].pinned_post_uri
             assert uri is not None
             assert not uri.endswith(placeholder_suffix)
+        assert FEEDS["your-feed"].explore_pinned_post_uri is not None
+        assert not FEEDS["your-feed"].explore_pinned_post_uri.endswith(placeholder_suffix)
+        assert FEEDS["your-feed"].returning_pinned_post_uri is not None
+        assert not FEEDS["your-feed"].returning_pinned_post_uri.endswith(placeholder_suffix)
         assert LOGGED_OUT_POST_URI is not None
         assert not LOGGED_OUT_POST_URI.endswith(placeholder_suffix)
-
-    def test_contextual_pinned_post_environment_override(self, monkeypatch):
-        monkeypatch.setenv("GE_PINNED_POST_YOUR_FEED_EXPLORE_URI", "at://explore")
-        assert (
-            _pinned_post_variant_uri("your-feed", "explore", "at://fallback")
-            == "at://explore"
-        )
 
     def test_settings_url_honors_deployment_origin(self, monkeypatch):
         monkeypatch.setenv(

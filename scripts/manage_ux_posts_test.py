@@ -10,25 +10,44 @@ import pytest
 from app import ux_posts
 
 
-def _record(uri: str, text: str, links: tuple[str, ...] = (), created: str | None = None) -> dict:
+def _record(
+    uri: str,
+    text: str,
+    links: tuple[str, ...] = (),
+    created: str | None = None,
+    video_cid: str | None = None,
+) -> dict:
     """Build a listRecords-shaped post record with link facets."""
     facets = [
         {"index": {"byteStart": 0, "byteEnd": 1}, "features": [{"uri": link}]} for link in links
     ]
+    value = {
+        "text": text,
+        "facets": facets,
+        "createdAt": created or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+    if video_cid:
+        value["embed"] = {
+            "$type": "app.bsky.embed.video",
+            "video": {
+                "$type": "blob",
+                "ref": {"$link": video_cid},
+                "mimeType": "video/mp4",
+                "size": 123,
+            },
+        }
     return {
         "uri": uri,
-        "value": {
-            "text": text,
-            "facets": facets,
-            "createdAt": created or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        },
+        "value": value,
     }
 
 
 def _record_for(name: str, uri: str, created: str | None = None) -> dict:
     """Build a record that exactly matches a managed post's content."""
-    text, links = managed_posts.content_signature(ux_posts.read_content(name))
-    return _record(uri, text, links, created)
+    text, links, video_cid = manage_ux_posts.managed_content_signature(
+        name, ux_posts.read_content(name)
+    )
+    return _record(uri, text, links, created, video_cid)
 
 
 @pytest.fixture
@@ -74,6 +93,17 @@ class TestContent:
             text, links = managed_posts.content_signature(ux_posts.read_content(name))
             assert text == expected
             assert links == (f"https://app.greenearth.social/#/settings/{feed_name}",)
+
+    def test_explore_post_renders_the_expected_text_without_a_link(self):
+        text, links = managed_posts.content_signature(
+            ux_posts.read_content(ux_posts.PIN_YOUR_FEED_EXPLORE)
+        )
+        assert text == (
+            "Own your algorithm!\n\n"
+            "MySky is a powerful feed YOU control, built by the community for the community.\n\n"
+            "To try it, click the 📌 just above this post."
+        )
+        assert links == ()
 
     def test_every_post_is_within_the_length_limit(self):
         for name in ux_posts.MANAGED_POSTS:
@@ -128,6 +158,11 @@ class TestContent:
 
 
 class TestMatching:
+    def test_blob_cid_matches_the_known_empty_raw_blob_cid(self):
+        assert managed_posts.blob_cid(b"") == (
+            "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"
+        )
+
     def test_exact_content_match_is_reused(self):
         """The whole point: unchanged content must not republish."""
         records = [_record_for(ux_posts.PIN_RANDOM, "at://existing")]
@@ -147,6 +182,20 @@ class TestMatching:
         records = [_record("at://wrong-link", text, ("https://example.com/elsewhere",))]
         _resolved, missing = manage_ux_posts.match_content(records)
         assert ux_posts.PIN_RANDOM in missing
+
+    def test_video_post_requires_the_registered_video(self):
+        content = ux_posts.read_content(ux_posts.PIN_YOUR_FEED)
+        text, links = managed_posts.content_signature(content)
+        records = [_record("at://text-only", text, links)]
+        _resolved, missing = manage_ux_posts.match_content(records)
+        assert ux_posts.PIN_YOUR_FEED in missing
+
+    def test_video_post_requires_the_exact_video_blob(self):
+        content = ux_posts.read_content(ux_posts.PIN_YOUR_FEED)
+        text, links = managed_posts.content_signature(content)
+        records = [_record("at://wrong-video", text, links, video_cid="bafkwrong")]
+        _resolved, missing = manage_ux_posts.match_content(records)
+        assert ux_posts.PIN_YOUR_FEED in missing
 
     def test_later_duplicate_wins(self):
         records = [
@@ -213,7 +262,33 @@ class TestSync:
         ):
             assert manage_ux_posts.cmd_sync(self._args()) == 0
         client.send_post.assert_not_called()
+        client.send_video.assert_not_called()
         assert len(json.loads(manifest_path.read_text())["posts"]) == len(ux_posts.MANAGED_POSTS)
+
+    def test_sync_publishes_a_missing_native_video_post(self, manifest_path):
+        video_name = ux_posts.PIN_YOUR_FEED_EXPLORE
+        existing = [
+            _record_for(name, f"at://{name}")
+            for name in ux_posts.MANAGED_POSTS
+            if name != video_name
+        ]
+        client = MagicMock()
+        client.send_video.return_value = SimpleNamespace(uri="at://fresh-video")
+
+        with (
+            patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
+            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
+            patch.object(managed_posts, "login", return_value=client),
+        ):
+            assert manage_ux_posts.cmd_sync(self._args()) == 0
+
+        client.send_post.assert_not_called()
+        client.send_video.assert_called_once()
+        args, kwargs = client.send_video.call_args
+        assert len(args[1]) == ux_posts.video_path(video_name).stat().st_size
+        assert kwargs["video_alt"] == ux_posts.VIDEO_POSTS[video_name].alt
+        posts = json.loads(manifest_path.read_text())["posts"]
+        assert posts[video_name] == "at://fresh-video"
 
     def test_dry_run_publishes_nothing(self, manifest_path):
         client = MagicMock()
@@ -379,8 +454,9 @@ class TestGates:
 
     def test_sync_gates_a_newly_published_post(self, manifest_path):
         client = MagicMock()
-        client.send_post.return_value = SimpleNamespace(
-            uri="at://did:plc:x/app.bsky.feed.post/new"
+        client.send_post.return_value = SimpleNamespace(uri="at://did:plc:x/app.bsky.feed.post/new")
+        client.send_video.return_value = SimpleNamespace(
+            uri="at://did:plc:x/app.bsky.feed.post/new-video"
         )
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=[]),

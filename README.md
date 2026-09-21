@@ -616,8 +616,9 @@ manual review because changing text would invalidate their byte offsets.
 "UX posts" are the posts we insert into feeds for product reasons rather than because
 they were ranked: the SETTINGS pin at the top of each public feed, the "you must be
 logged in" explainer, and the user-interview survey post. Their content is versioned
-in `assets/ux_posts/*.md` as plain text with `[label](url)` markdown links, which
-`scripts/manage_ux_posts.py` converts into Bluesky rich-text facets.
+in `assets/ux_posts/` as plain text with `[label](url)` markdown links and optional
+native-video assets. `scripts/manage_ux_posts.py` converts the links into Bluesky
+rich-text facets and uploads videos when a managed post declares one.
 
 Settings links in those files use the production URL as their checked-in
 canonical form. Production keeps that URL. Stage rewrites links to the stable
@@ -634,11 +635,9 @@ republished revision in their timeline (issue #404). Both environments share the
 account: the AppView hydrates any public URI regardless of which generator served the
 skeleton.
 
-MySky has three contextual top-post variants. The pre-Settings and Explore
-variants are native video posts published once outside the text-post workflow;
-their final AT URIs are supplied through `GE_PINNED_POST_YOUR_FEED_URI` and
-`GE_PINNED_POST_YOUR_FEED_EXPLORE_URI`. The returning-user variant is managed
-in the UX-post registry as `pin-your-feed-returning.md`.
+MySky has three contextual top-post variants. The pre-Settings and Explore variants
+are managed native-video posts; the returning-user variant is a managed text post.
+All three are published and resolved through the same UX-post registry.
 
 To change a post, edit the markdown and deploy. To add one, create the file and add
 it to `MANAGED_POSTS` in `src/app/ux_posts.py`, then reference it from `feeds.py` via
@@ -661,9 +660,10 @@ filename to URI therefore lives in `src/app/ux_posts_resolved.json`, which is
 resolves against the account before uploading:
 
 - Resolution matches each content file against the account's existing posts by exact
-  **signature** — the visible text plus its link targets. A match is reused, so
-  unchanged content never republishes. This needs no credentials, since it reads
-  public records.
+  **signature** — the visible text, link targets, and optional video blob CID. A match
+  is reused, so unchanged content never republishes. This needs no credentials,
+  since it reads public records and calculates the local video's content-addressed
+  CID offline.
 - Anything unmatched is new or edited, and is published with the
   `bsky-app-password-notify-prod` secret. Old records are never deleted, because an
   older revision may still reference them.

@@ -51,11 +51,6 @@ GIT_SHA=""
 # image -- which is what makes a rollback resolve the URIs it was built with.
 SKIP_UX_POST_SYNC=false
 
-# MySky's first-time and Explore posts are externally published native-video
-# records. Reuse configured values, or recover them from recent revisions.
-GE_PINNED_POST_YOUR_FEED_URI="${GE_PINNED_POST_YOUR_FEED_URI:-}"
-GE_PINNED_POST_YOUR_FEED_EXPLORE_URI="${GE_PINNED_POST_YOUR_FEED_EXPLORE_URI:-}"
-
 # Bluesky publishing identities. Use stable account DIDs for authentication so
 # account handle changes cannot break deployments. Caterpie's environment-specific
 # app-password secrets belong to the same account.
@@ -348,8 +343,6 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=4"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_RANK_MODEL_TIMEOUT_SEC=2.5"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_EMBED_HYDRATION_TIMEOUT_SEC=1.5"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_YOUR_FEED_URI=$GE_PINNED_POST_YOUR_FEED_URI"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_YOUR_FEED_EXPLORE_URI=$GE_PINNED_POST_YOUR_FEED_EXPLORE_URI"
     # Below the AppView's 10s abort on getFeedSkeleton calls (confirmed via
     # atproto source, see #291) so a hung downstream call (ES, ranker)
     # surfaces as a logged, metered 504 instead of losing the race against
@@ -583,68 +576,6 @@ prepare_ux_posts() {
     log_info "UX posts are ready."
 }
 
-load_deployed_video_post_uris() {
-    local revisions_json
-    if ! revisions_json=$(gcloud run revisions list \
-        --service="greenearth-api-$ENVIRONMENT" \
-        --region="$REGION" \
-        --project="$PROJECT_ID" \
-        --limit=20 \
-        --format=json 2>/dev/null); then
-        return 0
-    fi
-
-    local env_values
-    if ! env_values=$(pipenv run python -c '
-import json
-import sys
-
-names = {
-    "GE_PINNED_POST_YOUR_FEED_URI",
-    "GE_PINNED_POST_YOUR_FEED_EXPLORE_URI",
-}
-found = {}
-for revision in json.load(sys.stdin):
-    containers = revision.get("spec", {}).get("containers", [])
-    for entry in containers[0].get("env", []) if containers else []:
-        name = entry.get("name")
-        value = entry.get("value")
-        if name in names and name not in found and isinstance(value, str) and value:
-            found[name] = value
-for name, value in found.items():
-    print(f"{name}\t{value}")
-' <<< "$revisions_json"); then
-        return 0
-    fi
-
-    local env_name
-    local env_value
-    while IFS=$'\t' read -r env_name env_value; do
-        case "$env_name" in
-            GE_PINNED_POST_YOUR_FEED_URI)
-                [ -n "$GE_PINNED_POST_YOUR_FEED_URI" ] \
-                    || GE_PINNED_POST_YOUR_FEED_URI="$env_value"
-                ;;
-            GE_PINNED_POST_YOUR_FEED_EXPLORE_URI)
-                [ -n "$GE_PINNED_POST_YOUR_FEED_EXPLORE_URI" ] \
-                    || GE_PINNED_POST_YOUR_FEED_EXPLORE_URI="$env_value"
-                ;;
-        esac
-    done <<< "$env_values"
-}
-
-prepare_video_post_uris() {
-    load_deployed_video_post_uris
-
-    if [ -z "$GE_PINNED_POST_YOUR_FEED_URI" ] \
-        || [ -z "$GE_PINNED_POST_YOUR_FEED_EXPLORE_URI" ]; then
-        log_error "MySky's two native-video post URIs are required before deployment."
-        log_error "Export GE_PINNED_POST_YOUR_FEED_URI and GE_PINNED_POST_YOUR_FEED_EXPLORE_URI."
-        exit 1
-    fi
-    export GE_PINNED_POST_YOUR_FEED_URI GE_PINNED_POST_YOUR_FEED_EXPLORE_URI
-}
-
 _sync_feeds_to_account() {
     local account_label="$1"
     local publisher_id="$2"
@@ -732,7 +663,6 @@ main() {
 
     require_clean_worktree
     validate_config
-    prepare_video_post_uris
     prepare_ux_posts
     if ! preflight_bsky_publishers; then
         log_error "Bluesky publishing preflight failed; Cloud Run was not changed."
