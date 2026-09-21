@@ -3,6 +3,7 @@
 import io
 import json
 import logging
+import math
 import threading
 from collections import Counter
 from http.client import IncompleteRead
@@ -317,14 +318,17 @@ def average_users(client, users, workers=2):
     )
 
 
-def test_mean_is_equal_weight_unnormalized_and_returns_only_aggregate_metadata():
+def test_mean_is_equal_weight_then_normalized_and_returns_only_aggregate_metadata():
     responses = {
         "did:plc:a": embedding("did:plc:a", [2, 4]),
         "did:plc:b": embedding("did:plc:b", [6, 8]),
     }
     client = FakeClient(lambda _, payload: responses[payload["user_did"]])
     result = average_users(client, [user("did:plc:a", 50, 5), user("did:plc:b", 500, 50)])
-    assert result["embedding"] == [4, 6]
+    # Unequal input magnitudes distinguish normalizing the mean from averaging
+    # individually normalized inputs. Interaction and like counts do not weight it.
+    assert result["embedding"] == pytest.approx([4 / math.sqrt(52), 6 / math.sqrt(52)])
+    assert math.hypot(*result["embedding"]) == pytest.approx(1)
     assert result["dimension"] == 2
     assert result["user_model_uuid"] == USER_MODEL
     assert result["post_model_uuid"] == POST_MODEL
@@ -346,6 +350,14 @@ def test_mean_is_equal_weight_unnormalized_and_returns_only_aggregate_metadata()
     }
 
 
+def test_single_contributor_is_normalized():
+    result = average_users(
+        FakeClient(lambda *_: embedding("did:plc:a", [3, 4])), [user("did:plc:a")]
+    )
+    assert result["embedding"] == pytest.approx([0.6, 0.8])
+    assert result["contributing_users"] == 1
+
+
 def test_missing_history_updates_aggregate_counts_and_logs_without_retaining_dids(caplog):
     caplog.set_level(logging.INFO, logger=average.__name__)
     responses = {
@@ -355,7 +367,7 @@ def test_missing_history_updates_aggregate_counts_and_logs_without_retaining_did
     }
     client = FakeClient(lambda _, payload: responses[payload["user_did"]])
     result = average_users(client, [user(did) for did in responses])
-    assert result["embedding"] == [2, 4]
+    assert result["embedding"] == pytest.approx([2 / math.sqrt(20), 4 / math.sqrt(20)])
     assert result["contributing_users"] == 1
     assert result["skipped_users"] == 2
     assert "summary eligible=3 contributing=1 skipped=2 failed=0" in caplog.text
@@ -399,6 +411,17 @@ def test_zero_magnitude_mean_is_fatal():
     )
     with pytest.raises(average.RunError, match="nonzero"):
         average_users(client, [user("did:plc:a"), user("did:plc:b")])
+
+
+@pytest.mark.parametrize(
+    "vector,users",
+    [([1e308], ["a", "b"]), ([1.7e308, 1.7e308], ["a"])],
+    ids=["sum-overflow", "magnitude-overflow"],
+)
+def test_nonfinite_aggregation_is_fatal(vector, users):
+    client = FakeClient(lambda _, p: embedding(p["user_did"], vector))
+    with pytest.raises(average.RunError, match="finite"):
+        average_users(client, [user(f"did:plc:{name}") for name in users])
 
 
 def test_single_failed_user_prevents_partial_average_but_finishes_all_users(caplog):
@@ -491,7 +514,8 @@ def test_full_pipeline_publishes_only_compact_artifact_and_no_secrets(
     artifact_path = Path(summary["artifact_path"])
     artifact = json.loads(artifact_path.read_text())
     assert average.validate_artifact(artifact) == artifact
-    assert artifact["embedding"] == [5, 7]
+    assert artifact["format_version"] == 1
+    assert artifact["embedding"] == pytest.approx([5 / math.sqrt(74), 7 / math.sqrt(74)])
     assert artifact_path.name == f"average_user_embedding_{artifact['run_id']}.json"
     assert artifact["run_id"] == summary["run_id"]
     assert artifact["cohort"]["min_likes"] == 5
@@ -648,7 +672,7 @@ def test_embedding_and_retry_logs_are_aggregate_and_safe(monkeypatch, caplog):
         ],
     )
     result = average_users(client, [user("did:plc:a", interactions=75, likes=17)])
-    assert result["embedding"] == vector
+    assert result["embedding"] == pytest.approx([value / math.hypot(*vector) for value in vector])
     assert opener.open.call_count == 2
     sleep.assert_called_once_with(7.0)
     assert client.retry_count == 1
@@ -664,24 +688,27 @@ def test_embedding_and_retry_logs_are_aggregate_and_safe(monkeypatch, caplog):
     assert "attempt 1/3" not in caplog.text
     assert "private-key" not in caplog.text and "NEVER-PUBLISH" not in caplog.text
     assert all(str(value) not in caplog.text for value in vector)
+    assert all(str(value) not in caplog.text for value in result["embedding"])
+    assert "L2-normalized unweighted mean" in caplog.text
 
 
 def artifact_fixture():
     return json.loads(
-        (Path(__file__).parent / "fixtures/average_user_embedding_v2.json").read_text()
+        (Path(__file__).parent / "fixtures/average_user_embedding_v1.json").read_text()
     )
 
 
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda a: a.update(format_version=1),
+        lambda a: a.update(format_version=2),
         lambda a: a.update(format_version=True),
         lambda a: a.update(contributors=[{"user_did": "did:plc:private"}]),
         lambda a: a["cohort"].update(user_dids=["did:plc:private"]),
         lambda a: a["history_policy"].update(private="secret"),
         lambda a: a.update(embedding=[0, 0]),
         lambda a: a.update(embedding=[float("nan"), 1]),
+        lambda a: a.update(embedding=[float("inf"), 1]),
         lambda a: a.update(embedding=[True, 1]),
         lambda a: a.update(dimension=3),
         lambda a: a.update(user_model_uuid="invalid"),
@@ -697,6 +724,22 @@ def artifact_fixture():
 def test_artifact_validation_rejects_malformed_or_private_data(mutate):
     artifact = artifact_fixture()
     mutate(artifact)
+    with pytest.raises(average.RunError):
+        average.validate_artifact(artifact)
+
+
+@pytest.mark.parametrize("magnitude", [1.0, 1.0 - 0.999e-6, 1.0 + 0.999e-6])
+def test_artifact_validation_accepts_unit_magnitude_within_absolute_tolerance(magnitude):
+    artifact = artifact_fixture()
+    artifact["embedding"] = [magnitude, 0]
+    assert average.validate_artifact(artifact) == artifact
+    assert artifact["embedding"] == [magnitude, 0]
+
+
+@pytest.mark.parametrize("vector", [[4, 6], [1.0 - 1.001e-6, 0], [1.0 + 1.001e-6, 0]])
+def test_artifact_validation_rejects_nonunit_magnitude(vector):
+    artifact = artifact_fixture()
+    artifact["embedding"] = vector
     with pytest.raises(average.RunError):
         average.validate_artifact(artifact)
 
@@ -738,6 +781,20 @@ def artifact_file(tmp_path):
     path = tmp_path / "input.json"
     path.write_text(json.dumps(artifact_fixture(), separators=(",", ":")))
     return path
+
+
+def test_nonunit_artifact_is_rejected_before_cloud_access(tmp_path, monkeypatch):
+    from google.cloud import storage
+
+    artifact = artifact_fixture()
+    artifact["embedding"] = [4, 6]
+    path = tmp_path / "input.json"
+    path.write_text(json.dumps(artifact))
+    client = Mock(side_effect=AssertionError("must not access cloud"))
+    monkeypatch.setattr(storage, "Client", client)
+    with pytest.raises(average.RunError, match="unit L2 magnitude"):
+        average.publish_artifact(path, "gs://test-bucket/averages")
+    client.assert_not_called()
 
 
 @pytest.mark.parametrize(

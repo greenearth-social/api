@@ -527,7 +527,7 @@ def fetch_embedding(client, did, expected_source):
 
 
 def average_embeddings(client, dids, workers, expected_source):
-    """Average validated vectors, retaining only aggregate outcome counts."""
+    """L2-normalize the equal-weight mean, retaining only aggregate outcome counts."""
     started = time.monotonic()
     next_progress_at = started + 10
     skipped, failed = Counter(), Counter()
@@ -628,10 +628,16 @@ def average_embeddings(client, dids, workers, expected_source):
         mean = [math.fsum(column) / len(vectors) for column in zip(*vectors, strict=True)]
     except (OverflowError, ValueError):
         raise RunError("The average is not finite; no average was written") from None
-    if not all(is_finite_number(value) for value in mean) or not any(value != 0 for value in mean):
+    magnitude = math.hypot(*mean)
+    if (
+        not all(is_finite_number(value) for value in mean)
+        or not math.isfinite(magnitude)
+        or magnitude == 0
+    ):
         raise RunError("The average must be finite and nonzero; no average was written")
+    mean = [value / magnitude for value in mean]
     logger.info(
-        "Average: computed unweighted, unnormalized mean contributors=%d dimension=%d "
+        "Average: computed L2-normalized unweighted mean contributors=%d dimension=%d "
         "user_model_uuid=%s post_model_uuid=%s",
         len(vectors),
         dimension,
@@ -681,11 +687,11 @@ def validate_artifact(artifact):
         "history_policy",
     }
     if not isinstance(artifact, dict) or set(artifact) != keys:
-        raise RunError("Artifact does not match the version 2 compact schema")
+        raise RunError("Artifact does not match the version 1 compact schema")
     if (
         artifact["artifact_type"] != "average_user_embedding"
         or type(artifact["format_version"]) is not int
-        or artifact["format_version"] != 2
+        or artifact["format_version"] != 1
     ):
         raise RunError("Unsupported artifact type or version")
     vector, dimension = artifact["embedding"], artifact["dimension"]
@@ -698,6 +704,8 @@ def validate_artifact(artifact):
         or dimension != len(vector)
     ):
         raise RunError("Artifact requires a finite nonzero vector and matching dimension")
+    if not math.isclose(math.hypot(*vector), 1.0, rel_tol=0.0, abs_tol=1e-6):
+        raise RunError("Artifact embedding must have unit L2 magnitude within 1e-6")
     for key in ("user_model_uuid", "post_model_uuid"):
         if model_id(artifact[key]) != artifact[key]:
             raise RunError("Artifact model UUIDs must use lowercase 32-hex format")
@@ -974,7 +982,7 @@ def generate(args, run_id, started_at):
     skipped_users = result.pop("skipped_users")
     artifact = {
         "artifact_type": "average_user_embedding",
-        "format_version": 2,
+        "format_version": 1,
         "run_id": run_id,
         "source_completed_at": utc_string(datetime.now(UTC)),
         **result,

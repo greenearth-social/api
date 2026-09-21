@@ -702,7 +702,8 @@ pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --di
 `scripts/average_user_embedding.py` selects an active-user cohort from PostHog,
 counts those users' retained likes directly in Elasticsearch, and requests their
 two-tower user embeddings from this API. It computes an equally weighted
-coordinate-wise arithmetic mean with `math.fsum`, without normalizing the mean.
+coordinate-wise arithmetic mean with `math.fsum`, then L2-normalizes the mean
+to unit length before saving. Normalization is applied after averaging.
 Generation and cloud publication are manual operations; neither changes the
 candidate generator or activates an artifact in a feed.
 
@@ -809,11 +810,12 @@ with an eight-character random suffix. The script does not create separate
 reports or log files.
 
 The artifact has `artifact_type: "average_user_embedding"` and
-`format_version: 2`. It contains the exact unnormalized `embedding`, `dimension`,
+`format_version: 1`. It contains the L2-normalized mean `embedding`, `dimension`,
 `user_model_uuid`, `post_model_uuid`, `run_id`, `source_completed_at`,
 `contributing_users`, `cohort` provenance, and `history_policy`.
 See the [artifact schema](scripts/average_user_embedding.schema.json) and
-[small contract fixture](scripts/fixtures/average_user_embedding_v2.json).
+[small contract fixture](scripts/fixtures/average_user_embedding_v1.json).
+Artifact validation requires an L2 magnitude within `1e-6` of 1.
 The fixture is illustrative, not a model artifact to deploy.
 
 The artifact excludes DIDs, individual vectors, credentials, and service URLs,

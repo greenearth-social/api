@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Average user embedding artifact v2",
-  "description": "Consumer contract. In addition to this schema, validate finite coordinates, nonzero vector, dimension equal to vector length, valid run timestamp, cutoff <= run start <= completion, contributors + skips = eligible, and eligible + filtered = PostHog users.",
+  "title": "Average user embedding artifact v1",
+  "description": "Consumer contract. In addition to this schema, validate finite coordinates, L2 magnitude within 1e-6 of 1, dimension equal to vector length, valid run timestamp, cutoff <= run start <= completion, contributors + skips = eligible, and eligible + filtered = PostHog users.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -23,9 +23,10 @@
     },
     "format_version": {
       "type": "integer",
-      "const": 2
+      "const": 1
     },
     "embedding": {
+      "description": "L2-normalized, equally weighted arithmetic mean of the contributing user embeddings. Normalization is applied after averaging.",
       "type": "array",
       "minItems": 1,
       "items": {
