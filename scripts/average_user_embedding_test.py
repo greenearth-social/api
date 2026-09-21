@@ -4,6 +4,8 @@ import io
 import json
 import logging
 import math
+import subprocess
+import sys
 import threading
 from collections import Counter
 from http.client import IncompleteRead
@@ -13,6 +15,8 @@ from urllib.error import HTTPError, URLError
 
 import average_user_embedding as average
 import pytest
+
+from average_user_embedding_artifact import ArtifactValidationError
 
 
 class FakeClient:
@@ -398,6 +402,23 @@ def test_metadata_mismatch_is_global_failure(second, match):
         average_users(client, [user("did:plc:a"), user("did:plc:b")])
 
 
+@pytest.mark.parametrize(
+    "field,value,reason",
+    [
+        ("history_policy", None, "Invalid history policy metadata"),
+        ("history_policy", {**POLICY, "limit": True}, "Invalid history policy metadata"),
+        ("user_model_uuid", "invalid", "Model identifiers must be nonzero UUIDs"),
+        ("post_model_uuid", None, "Model identifiers must be nonzero UUIDs"),
+    ],
+)
+def test_shared_metadata_validation_preserves_fatal_failure_reasons(field, value, reason, caplog):
+    client = FakeClient(lambda *_: {**embedding("did:plc:a"), field: value})
+    with pytest.raises(average.RunError, match=reason):
+        average_users(client, [user("did:plc:a")])
+    assert f"failed reason={reason} count=1" in caplog.text
+    assert "unexpected_error" not in caplog.text
+
+
 def test_zero_contributors_is_fatal():
     with pytest.raises(average.RunError, match="No valid"):
         average_users(FakeClient(lambda *_: skipped("did:plc:a")), [user("did:plc:a")])
@@ -698,59 +719,6 @@ def artifact_fixture():
     )
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda a: a.update(format_version=2),
-        lambda a: a.update(format_version=True),
-        lambda a: a.update(contributors=[{"user_did": "did:plc:private"}]),
-        lambda a: a["cohort"].update(user_dids=["did:plc:private"]),
-        lambda a: a["history_policy"].update(private="secret"),
-        lambda a: a.update(embedding=[0, 0]),
-        lambda a: a.update(embedding=[float("nan"), 1]),
-        lambda a: a.update(embedding=[float("inf"), 1]),
-        lambda a: a.update(embedding=[True, 1]),
-        lambda a: a.update(dimension=3),
-        lambda a: a.update(user_model_uuid="invalid"),
-        lambda a: a.update(user_model_uuid=USER_MODEL.upper()),
-        lambda a: a.update(run_id="../../other.json"),
-        lambda a: a.update(run_id="20261321T163045.123456Z_a1b2c3d4"),
-        lambda a: a.update(contributing_users=0),
-        lambda a: a["cohort"].update(eligible_users=999),
-        lambda a: a["cohort"].update(cutoff="2099-01-01T00:00:00Z"),
-        lambda a: a.update(source_completed_at="2000-01-01T00:00:00Z"),
-    ],
-)
-def test_artifact_validation_rejects_malformed_or_private_data(mutate):
-    artifact = artifact_fixture()
-    mutate(artifact)
-    with pytest.raises(average.RunError):
-        average.validate_artifact(artifact)
-
-
-@pytest.mark.parametrize("magnitude", [1.0, 1.0 - 0.999e-6, 1.0 + 0.999e-6])
-def test_artifact_validation_accepts_unit_magnitude_within_absolute_tolerance(magnitude):
-    artifact = artifact_fixture()
-    artifact["embedding"] = [magnitude, 0]
-    assert average.validate_artifact(artifact) == artifact
-    assert artifact["embedding"] == [magnitude, 0]
-
-
-@pytest.mark.parametrize("vector", [[4, 6], [1.0 - 1.001e-6, 0], [1.0 + 1.001e-6, 0]])
-def test_artifact_validation_rejects_nonunit_magnitude(vector):
-    artifact = artifact_fixture()
-    artifact["embedding"] = vector
-    with pytest.raises(average.RunError):
-        average.validate_artifact(artifact)
-
-
-def test_json_duplicate_keys_are_rejected(tmp_path):
-    path = tmp_path / "invalid.json"
-    path.write_text('{"format_version":2,"format_version":1}')
-    with pytest.raises(average.RunError, match="duplicate JSON keys"):
-        average.load_artifact(path)
-
-
 def test_defaults_are_generic_and_local_only():
     args = average.build_parser().parse_args([])
     assert args.es_url == "https://localhost:9200"
@@ -758,6 +726,39 @@ def test_defaults_are_generic_and_local_only():
     assert args.api_url == "http://localhost:8300"
     assert args.output_dir == "./outputs/average_user_embeddings/"
     assert args.gcs_output_prefix is None
+
+
+def test_standalone_help_works_without_dependencies_or_dotenv_from_another_directory(tmp_path):
+    (tmp_path / ".env").write_text("AVERAGE_ARTIFACT_TEST_DOTENV=must-not-load\n")
+    script = """
+import os
+import runpy
+import sys
+
+before = dict(os.environ)
+sys.argv = [sys.argv[1], "--help"]
+try:
+    runpy.run_path(sys.argv[0], run_name="__main__")
+except SystemExit as error:
+    assert error.code == 0
+else:
+    raise AssertionError("--help should exit successfully")
+assert dict(os.environ) == before
+assert "average_user_embedding_artifact" in sys.modules
+assert not any(name == "app" or name.startswith("app.") for name in sys.modules)
+assert not any(name == "dotenv" or name.startswith("dotenv.") for name in sys.modules)
+assert not any("site-packages" in path for path in sys.path)
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", script, str(Path(average.__file__))],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--publish-artifact" in result.stdout
+    assert "--no-es-insecure" in result.stdout
 
 
 def setup_gcs(monkeypatch, *, existing=None, upload_failure=None):
@@ -792,9 +793,43 @@ def test_nonunit_artifact_is_rejected_before_cloud_access(tmp_path, monkeypatch)
     path.write_text(json.dumps(artifact))
     client = Mock(side_effect=AssertionError("must not access cloud"))
     monkeypatch.setattr(storage, "Client", client)
-    with pytest.raises(average.RunError, match="unit L2 magnitude"):
+    with pytest.raises(ArtifactValidationError, match="unit L2 magnitude"):
         average.publish_artifact(path, "gs://test-bucket/averages")
     client.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "data,reason",
+    [
+        (b'{"format_version": 1, "format_version": 1}', "Artifact contains duplicate JSON keys"),
+        (b'"\xff"', "Artifact is not valid JSON"),
+        (b"{}", "Artifact does not match the version 1 compact schema"),
+    ],
+)
+def test_publish_validation_keeps_cli_failure_summary_and_exit_code(
+    tmp_path, monkeypatch, capsys, data, reason
+):
+    path = tmp_path / "invalid.json"
+    path.write_bytes(data)
+    publish = Mock(side_effect=AssertionError("invalid artifacts must not reach publication"))
+    monkeypatch.setattr(average, "publish_artifact", publish)
+
+    assert (
+        average.main(
+            ["--publish-artifact", str(path), "--gcs-output-prefix", "gs://test-bucket/averages"]
+        )
+        == 1
+    )
+
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {
+        "status": "failed",
+        "artifact_path": None,
+        "publication": None,
+        "error": reason,
+    }
+    assert f"Run: failed: {reason}" in output.err
+    publish.assert_not_called()
 
 
 @pytest.mark.parametrize(

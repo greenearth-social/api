@@ -20,15 +20,27 @@ import time
 import uuid
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from http.client import HTTPException
 from pathlib import Path
 from threading import Lock
-from typing import TypeGuard
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+
+# Keep standalone execution independent of the working directory and app startup.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from average_user_embedding_artifact import (  # noqa: E402
+    ArtifactValidationError,
+    is_count,
+    is_finite_number,
+    load_artifact,
+    model_id,
+    validate_artifact,
+    validate_history_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -243,19 +255,6 @@ class JsonClient:
         raise AssertionError("unreachable")
 
 
-def is_count(value: object) -> TypeGuard[int]:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-
-
-def is_finite_number(value):
-    try:
-        return (
-            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-        )
-    except OverflowError:
-        return False
-
-
 def collect_posthog_users(client, project_id, minimum, cutoff):
     """Keyset-page complete user counts, including when responses cap rows early."""
     query = """
@@ -434,34 +433,6 @@ def collect_like_counts(client, index, dids):
     return counts
 
 
-def model_id(value):
-    """Normalize UUID spelling without inventing a model identity."""
-    try:
-        parsed = uuid.UUID(value) if isinstance(value, str) else None
-        if parsed is None or parsed.int == 0:
-            raise ValueError
-        return parsed.hex
-    except ValueError:
-        raise RunError("Model identifiers must be nonzero UUIDs") from None
-
-
-def validate_history_policy(policy):
-    if (
-        not isinstance(policy, dict)
-        or set(policy) != {"limit", "sources", "embedding_key"}
-        or not is_count(policy.get("limit"))
-        or policy["limit"] == 0
-        or not isinstance(policy.get("sources"), list)
-        or not policy["sources"]
-        or any(source not in ("posts", "replies") for source in policy["sources"])
-        or len(set(policy["sources"])) != len(policy["sources"])
-        or not isinstance(policy.get("embedding_key"), str)
-        or not re.fullmatch(r"[A-Za-z0-9_.-]+", policy["embedding_key"])
-    ):
-        raise RunError("Invalid history policy metadata")
-    return policy
-
-
 def fetch_embedding(client, did, expected_source):
     """Validate one response and return only what aggregation needs."""
     try:
@@ -574,8 +545,8 @@ def average_embeddings(client, dids, workers, expected_source):
                                 )
                             model_pair, dimension = current_pair, current_dimension
                             vectors.append(result["embedding"])
-                except RunError as error:
-                    fatal = fatal or error
+                except (RunError, ArtifactValidationError) as error:
+                    fatal = fatal or RunError(str(error))
                     failed[str(error)] += 1
                 except Exception as error:
                     fatal = fatal or RunError(
@@ -659,96 +630,6 @@ def utc_string(value):
     return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def utc_timestamp(value: object) -> datetime:
-    try:
-        if not isinstance(value, str) or not value.endswith("Z"):
-            raise ValueError
-        parsed = datetime.fromisoformat(value)
-        if parsed.utcoffset() != timedelta(0):
-            raise ValueError
-        return parsed
-    except ValueError:
-        raise RunError("Expected a UTC timestamp ending in Z") from None
-
-
-def validate_artifact(artifact):
-    """Strict allowlist protects publication from leaking prototype user reports."""
-    keys = {
-        "artifact_type",
-        "format_version",
-        "embedding",
-        "dimension",
-        "user_model_uuid",
-        "post_model_uuid",
-        "run_id",
-        "source_completed_at",
-        "contributing_users",
-        "cohort",
-        "history_policy",
-    }
-    if not isinstance(artifact, dict) or set(artifact) != keys:
-        raise RunError("Artifact does not match the version 1 compact schema")
-    if (
-        artifact["artifact_type"] != "average_user_embedding"
-        or type(artifact["format_version"]) is not int
-        or artifact["format_version"] != 1
-    ):
-        raise RunError("Unsupported artifact type or version")
-    vector, dimension = artifact["embedding"], artifact["dimension"]
-    if (
-        not isinstance(vector, list)
-        or not vector
-        or not all(is_finite_number(value) for value in vector)
-        or not any(value != 0 for value in vector)
-        or not is_count(dimension)
-        or dimension != len(vector)
-    ):
-        raise RunError("Artifact requires a finite nonzero vector and matching dimension")
-    if not math.isclose(math.hypot(*vector), 1.0, rel_tol=0.0, abs_tol=1e-6):
-        raise RunError("Artifact embedding must have unit L2 magnitude within 1e-6")
-    for key in ("user_model_uuid", "post_model_uuid"):
-        if model_id(artifact[key]) != artifact[key]:
-            raise RunError("Artifact model UUIDs must use lowercase 32-hex format")
-    run_id = artifact["run_id"]
-    if not isinstance(run_id, str) or not re.fullmatch(r"\d{8}T\d{6}\.\d{6}Z_[0-9a-f]{8}", run_id):
-        raise RunError("Invalid artifact run ID")
-    try:
-        started = datetime.strptime(run_id.split("_")[0], "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=UTC)
-    except ValueError:
-        raise RunError("Invalid artifact run timestamp") from None
-    completed = utc_timestamp(artifact["source_completed_at"])
-    if completed < started:
-        raise RunError("Artifact completion precedes its run timestamp")
-    count = artifact["contributing_users"]
-    if not is_count(count) or count == 0:
-        raise RunError("Artifact requires at least one contributor")
-    validate_history_policy(artifact["history_policy"])
-    cohort = artifact["cohort"]
-    count_keys = {
-        "min_interaction_seen",
-        "min_likes",
-        "posthog_users",
-        "below_min_likes",
-        "eligible_users",
-        "skipped_users",
-    }
-    if (
-        not isinstance(cohort, dict)
-        or set(cohort) != count_keys | {"posthog_project_id", "event", "scope", "cutoff"}
-        or any(not is_count(cohort.get(key)) for key in count_keys)
-        or not is_count(cohort.get("posthog_project_id"))
-        or cohort["posthog_project_id"] == 0
-        or cohort.get("event") != "interactionSeen"
-        or cohort.get("scope") != "all_history_all_feeds"
-        or count + cohort["skipped_users"] != cohort["eligible_users"]
-        or cohort["eligible_users"] + cohort["below_min_likes"] != cohort["posthog_users"]
-    ):
-        raise RunError("Invalid artifact cohort or coverage metadata")
-    if utc_timestamp(cohort["cutoff"]) > started:
-        raise RunError("Artifact cohort cutoff follows run start")
-    return artifact
-
-
 def atomic_json(destination, value):
     temporary = None
     try:
@@ -769,25 +650,6 @@ def atomic_json(destination, value):
         if temporary is not None:
             temporary.unlink(missing_ok=True)
     return destination
-
-
-def load_artifact(path):
-    # Duplicate fields are ambiguous across JSON readers; never publish them.
-    def unique_object(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise RunError("Artifact contains duplicate JSON keys")
-            result[key] = value
-        return result
-
-    data = path.read_bytes()
-    try:
-        artifact = json.loads(data, object_pairs_hook=unique_object)
-    except (ValueError, UnicodeError):
-        raise RunError("Artifact is not valid JSON") from None
-    validate_artifact(artifact)
-    return artifact, data
 
 
 def gcs_prefix(value):
@@ -1031,8 +893,8 @@ def run(args):
         if args.gcs_output_prefix:
             summary["publication"] = publish_artifact(artifact_path, args.gcs_output_prefix)
         summary["status"] = "success"
-    except (RunError, RequestError) as error:
-        reason = str(error) if isinstance(error, RunError) else error.reason
+    except (RunError, ArtifactValidationError, RequestError) as error:
+        reason = error.reason if isinstance(error, RequestError) else str(error)
         summary["error"] = reason
         logger.error("Run: failed: %s", reason)
     except KeyboardInterrupt:

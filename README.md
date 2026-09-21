@@ -818,6 +818,12 @@ See the [artifact schema](scripts/average_user_embedding.schema.json) and
 Artifact validation requires an L2 magnitude within `1e-6` of 1.
 The fixture is illustrative, not a model artifact to deploy.
 
+The producer and API consumers share the standard-library-only
+[`average_user_embedding_artifact`](src/average_user_embedding_artifact.py) module.
+Use `parse_artifact(data)` to validate downloaded bytes or `load_artifact(path)`
+to read a local file and retain its original bytes. Importing this module does
+not initialize the API or load `.env`.
+
 The artifact excludes DIDs, individual vectors, credentials, and service URLs,
 and is written atomically. A final JSON summary is printed to stdout with
 `status`, `artifact_path`, and `publication`, plus the original `run_id` once a
