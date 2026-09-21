@@ -280,8 +280,7 @@ class FeedConfig(BaseModel):
     )
     pinned_post_uri: str | None = Field(
         None,
-        description="AT URI of a post to pin at the top of the first page of this feed. "
-        "Resolved by app.ux_posts.ux_post_uri() from the deploy-generated manifest.",
+        description="AT URI of a post to pin at the top of the first page of this feed.",
     )
     explore_pinned_post_uri: str | None = Field(
         default=None,

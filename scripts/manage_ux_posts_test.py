@@ -48,8 +48,12 @@ class TestContent:
     EXPECTED_PINS = {
         "pin-your-feed.md": (
             "your-feed",
-            "Click SETTINGS to personalize your MySky feed.\n\n"
-            "A feed you control, designed for constructive conversation.",
+            "You're missing out on most of what MySky can do for you! Log in to your "
+            "SETTINGS to customize your algorithm.",
+        ),
+        "pin-your-feed-returning.md": (
+            "your-feed",
+            "Welcome back! Click SETTINGS to customize your MySky feed.",
         ),
         "pin-best-of-friends.md": (
             "best-of-friends",
@@ -75,6 +79,16 @@ class TestContent:
         for name in ux_posts.MANAGED_POSTS:
             text, _ = managed_posts.content_signature(ux_posts.read_content(name))
             assert len(text) <= ux_posts.MAX_POST_GRAPHEMES, name
+
+    def test_stage_settings_links_use_the_stable_redirect(self, monkeypatch):
+        monkeypatch.setenv("GE_SETTINGS_APP_ORIGIN", "https://preview.example")
+        monkeypatch.setenv("GE_SETTINGS_LINK_ORIGIN", "https://api-stage.example/")
+
+        _, links = managed_posts.content_signature(
+            ux_posts.read_content(ux_posts.PIN_YOUR_FEED_RETURNING)
+        )
+
+        assert links == ("https://api-stage.example/settings/your-feed",)
 
     def test_check_passes_on_the_real_content(self):
         assert manage_ux_posts.check_content() == []
@@ -179,6 +193,7 @@ class TestSync:
 
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
+            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
             patch.object(managed_posts, "login", return_value=client),
         ):
             assert manage_ux_posts.cmd_sync(self._args()) == 0
@@ -193,6 +208,7 @@ class TestSync:
         client = MagicMock()
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
+            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
             patch.object(managed_posts, "login", return_value=client),
         ):
             assert manage_ux_posts.cmd_sync(self._args()) == 0
