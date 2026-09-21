@@ -105,12 +105,18 @@ class TestFeedsRegistry:
     def test_settings_url_honors_deployment_origin(self, monkeypatch):
         monkeypatch.setenv(
             "GE_SETTINGS_APP_ORIGIN",
-            "https://greenearth-471522--stage-fjoqyn8a.web.app/",
+            "https://greenearth-471522--stage-4tnzb2wq.web.app/",
         )
 
         assert _settings_url("your-feed") == (
-            "https://greenearth-471522--stage-fjoqyn8a.web.app/#/settings/your-feed"
+            "https://greenearth-471522--stage-4tnzb2wq.web.app/#/settings/your-feed"
         )
+
+    def test_settings_url_prefers_stable_redirect_origin(self, monkeypatch):
+        monkeypatch.setenv("GE_SETTINGS_APP_ORIGIN", "https://preview.example")
+        monkeypatch.setenv("GE_SETTINGS_LINK_ORIGIN", "https://api-stage.example/")
+
+        assert _settings_url("your-feed") == "https://api-stage.example/settings/your-feed"
 
     def test_social_radius_splits_everyone_weight_evenly(self):
         for presets in (

@@ -1,10 +1,14 @@
+import os
 from urllib.parse import ParseResult, parse_qs, urlencode, urlparse, urlunparse
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from ..feeds import FEEDS
 from ..lib.firestore import create_redirect, delete_redirect, get_redirect, update_redirect
+from ..lib.http_client import get_http_client
 from ..lib.posthog_client import get_posthog_client, track_redirect
 from ..security import RequireAdminApiKey
 
@@ -43,6 +47,57 @@ def _extract_utm(
 # ---------------------------------------------------------------------------
 # Public redirect endpoints
 # ---------------------------------------------------------------------------
+
+
+def _valid_app_origin(value: object) -> str | None:
+    """Return a normalized HTTPS origin, rejecting paths and other URL parts."""
+    if not isinstance(value, str):
+        return None
+    parsed = urlparse(value.strip())
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return f"https://{parsed.netloc}"
+
+
+async def _current_settings_app_origin() -> str:
+    """Resolve the active preview-channel origin, falling back to deployment config."""
+    metadata_url = os.environ.get("GE_SETTINGS_APP_METADATA_URL", "").strip()
+    if metadata_url:
+        try:
+            response = await get_http_client().get(metadata_url, timeout=5.0)
+            response.raise_for_status()
+            resolved = _valid_app_origin(response.json().get("client_uri"))
+            if resolved:
+                return resolved
+        except (httpx.HTTPError, TypeError, ValueError):
+            pass
+
+    fallback = _valid_app_origin(os.environ.get("GE_SETTINGS_APP_ORIGIN"))
+    if fallback:
+        return fallback
+    raise HTTPException(status_code=503, detail="Settings app unavailable")
+
+
+@router.get("/settings/{feed_name}", status_code=302, include_in_schema=True)
+async def redirect_to_current_settings(feed_name: str) -> RedirectResponse:
+    """Redirect a stable feed link to the active environment's Settings release."""
+    feed = FEEDS.get(feed_name)
+    if feed is None or not feed.public:
+        raise HTTPException(status_code=404, detail=f"Feed '{feed_name}' not found")
+
+    origin = await _current_settings_app_origin()
+    destination = f"{origin}/#/settings/{feed_name}"
+    track_redirect(get_posthog_client(), f"settings:{feed_name}", destination, {})
+    return RedirectResponse(url=destination, status_code=302)
 
 
 @router.get("/r/{slug}", status_code=302, include_in_schema=True)
