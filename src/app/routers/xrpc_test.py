@@ -76,6 +76,36 @@ CANDIDATE_ONLY_FEEDS = (
 TEST_EMBEDDING = encode_float32_b64([1.0, 0.0, 0.0])
 
 
+class TestContextualPinnedPostSelection:
+    def test_uses_ranges_and_settings_visit_without_presumed_pinned(self):
+        from ..routers.xrpc import _select_pinned_post_uri
+
+        cfg = FEEDS["your-feed"].model_copy(
+            update={
+                "pinned_post_uri": "at://first-time",
+                "explore_pinned_post_uri": "at://explore",
+                "returning_pinned_post_uri": "at://returning",
+            }
+        )
+        new_user = UserDocument(user_did="did:plc:new", presumed_pinned=True)
+        returning_user = UserDocument(
+            user_did="did:plc:returning",
+            settings_visited_at=datetime(2026, 9, 20, tzinfo=UTC),
+        )
+
+        assert _select_pinned_post_uri("your-feed", cfg, 1, new_user) == "at://first-time"
+        assert _select_pinned_post_uri("your-feed", cfg, 2, returning_user) == "at://explore"
+        assert _select_pinned_post_uri("your-feed", cfg, 15, returning_user) == "at://explore"
+        assert _select_pinned_post_uri("your-feed", cfg, 16, new_user) == "at://first-time"
+        assert _select_pinned_post_uri("your-feed", cfg, 100, returning_user) == "at://returning"
+
+    def test_other_feeds_keep_their_existing_pin(self):
+        from ..routers.xrpc import _select_pinned_post_uri
+
+        cfg = FEEDS["random"].model_copy(update={"pinned_post_uri": "at://random"})
+        assert _select_pinned_post_uri("random", cfg, 8, None) == "at://random"
+
+
 def _make_candidates(
     prefix: str, n: int, generator_name: str = "test", with_embedding: bool = False
 ) -> list[CandidatePost]:
@@ -151,7 +181,7 @@ class FakeMetricCollector:
 
 @pytest.mark.asyncio
 async def test_preview_exclusions_ignore_seen_and_retain_discarded():
-    from .xrpc import _generation_exclusions
+    from .xrpc import _generation_exclusions, _pinned_post_uris
 
     feed_cfg = FEEDS["your-feed"].model_copy(
         update={"exclude_seen_posts": True, "min_rank_score": 0.1}
@@ -175,7 +205,7 @@ async def test_preview_exclusions_ignore_seen_and_retain_discarded():
             include_seen=False,
         )
 
-    assert exclusions == ["at://discarded"]
+    assert exclusions == [*sorted(_pinned_post_uris(feed_cfg)), "at://discarded"]
     seen.assert_not_awaited()
     discarded.assert_awaited_once()
 
@@ -1133,7 +1163,7 @@ class TestGetFeedSkeleton:
         assert record_session.await_args.kwargs["requested_limit"] == 12
         assert record_session.await_args.kwargs["is_initial_load"] is True
 
-    def test_other_one_item_requests_still_create_feed_history(self):
+    def test_all_one_item_requests_skip_feed_history(self):
         with (
             self._patch_generators(_make_candidates("p", 3)),
             patch(
@@ -1152,7 +1182,7 @@ class TestGetFeedSkeleton:
             )
 
         assert response.status_code == 200
-        write_snapshot.assert_awaited_once()
+        write_snapshot.assert_not_awaited()
 
     def test_accepted_slate_is_served_in_order_across_cursor_pages(self):
         from .xrpc import _configured_generation
@@ -1249,7 +1279,7 @@ class TestGetFeedSkeleton:
             ).json()
 
         assert [item["post"] for item in response["feed"]] == [
-            FEEDS["your-feed"].pinned_post_uri,
+            FEEDS["your-feed"].explore_pinned_post_uri,
             uris[0],
         ]
 
@@ -3482,12 +3512,16 @@ class TestSendInteractions:
         with (
             patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
             patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
+            patch(
+                "app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock
+            ) as classify,
         ):
             await _record_interactions(db, interactions)
 
         seen_rec.assert_called_once_with(
             db, "did:plc:u", ["at://post/1", "at://post/2"], load_test=False
         )
+        classify.assert_awaited_once_with(db, "did:plc:u")
 
     @pytest.mark.asyncio
     async def test_non_seen_events_do_not_record_seen_posts(self):
@@ -3522,11 +3556,15 @@ class TestSendInteractions:
         with (
             patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
             patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
+            patch(
+                "app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock
+            ) as classify,
         ):
             await _record_interactions(db, [ix])
 
         rec.assert_called_once()  # raw interaction is still stored
         seen_rec.assert_not_called()  # but not denormalized
+        classify.assert_awaited_once_with(db, "did:plc:interactor")
 
     @pytest.mark.asyncio
     async def test_load_test_interaction_is_tagged_and_skips_analytics(self):
@@ -3686,12 +3724,16 @@ class TestSendInteractions:
         with (
             patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
             patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
+            patch(
+                "app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock
+            ) as classify,
         ):
             await _record_interactions(db, interactions)
 
         seen_rec.assert_any_call(db, "did:plc:u", ["at://post/real"], load_test=False)
         seen_rec.assert_any_call(db, "did:plc:u", ["at://post/lt"], load_test=True)
         assert seen_rec.await_count == 2
+        classify.assert_awaited_once_with(db, "did:plc:u")
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from google.cloud.firestore import (  # type: ignore[import-untyped]
     ArrayUnion,
@@ -49,6 +49,7 @@ ACCEPTED_FEED_SLATES_COLLECTION = "accepted_feed_slates"
 MAX_FEED_SNAPSHOT_ITEMS = 500
 MAX_FEED_SNAPSHOT_DOCUMENTS = 100
 FIRESTORE_WRITE_BATCH_LIMIT = 500
+POST_SEEN_WINDOW_DAYS = 7
 
 # Suffix appended to a daily-bucket document ID (``YYYY-MM-DD``) for load-test
 # traffic. Test buckets live in the same subcollection as real ones so the
@@ -231,6 +232,169 @@ async def set_user_debug_flag(db: AsyncClient, user_did: str, enabled: bool) -> 
     if not doc.exists:
         raise ValueError(f"No user document for {user_did}")
     await ref.update({"debug_feeds": enabled, "updated_at": datetime.now(UTC)})
+
+
+def _parse_post_seen_days(values: object) -> set[date]:
+    """Return valid ISO calendar dates from a legacy/untrusted Firestore value."""
+    if not isinstance(values, list):
+        return set()
+    parsed: set[date] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed.add(datetime.strptime(value, "%Y-%m-%d").date())
+        except ValueError:
+            continue
+    return parsed
+
+
+def _has_two_post_seen_days_within_window(days: set[date]) -> bool:
+    """Whether two distinct dates occur in one inclusive seven-day window."""
+    ordered = sorted(days)
+    return any(
+        (later - earlier).days <= POST_SEEN_WINDOW_DAYS - 1
+        for earlier, later in zip(ordered, ordered[1:], strict=False)
+    )
+
+
+def _post_seen_classification_update(
+    existing: dict | None,
+    observed_days: set[date],
+    *,
+    last_seen_at: datetime,
+) -> dict[str, object]:
+    """Build the monotonic user fields for live updates and historical backfills."""
+    data = existing or {}
+    stored_days = _parse_post_seen_days(data.get("post_seen_days_utc"))
+    all_days = stored_days | observed_days
+    existing_last_seen = data.get("last_post_seen_at")
+    if isinstance(existing_last_seen, datetime):
+        if existing_last_seen.tzinfo is None:
+            existing_last_seen = existing_last_seen.replace(tzinfo=UTC)
+        existing_last_seen = existing_last_seen.astimezone(UTC)
+    effective_last_seen = max(
+        (timestamp for timestamp in (existing_last_seen, last_seen_at) if timestamp is not None),
+    )
+    latest_day = effective_last_seen.date()
+    cutoff = latest_day - timedelta(days=POST_SEEN_WINDOW_DAYS - 1)
+    recent_days = sorted(day for day in all_days if cutoff <= day <= latest_day)
+
+    return {
+        "precompute_artifacts": bool(data.get("precompute_artifacts")) or bool(observed_days),
+        "presumed_pinned": bool(data.get("presumed_pinned"))
+        or _has_two_post_seen_days_within_window(all_days),
+        "post_seen_days_utc": [day.isoformat() for day in recent_days],
+        "last_post_seen_at": effective_last_seen,
+        "updated_at": datetime.now(UTC),
+    }
+
+
+async def record_user_post_seen(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    seen_at: datetime | None = None,
+) -> None:
+    """Classify one real user's PostSeen activity, writing at most once per UTC day."""
+    observed_at = seen_at or datetime.now(UTC)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=UTC)
+    observed_at = observed_at.astimezone(UTC)
+    today = observed_at.date()
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _record(transaction) -> None:
+        snapshot = await ref.get(transaction=transaction)
+        data = snapshot.to_dict() if snapshot.exists else None
+        existing = data or {}
+        if (
+            today in _parse_post_seen_days(existing.get("post_seen_days_utc"))
+            and bool(existing.get("precompute_artifacts"))
+        ):
+            return
+        update = _post_seen_classification_update(existing, {today}, last_seen_at=observed_at)
+        transaction.set(
+            ref,
+            {
+                "user_did": user_did,
+                "created_by_load_test": False,
+                **update,
+            },
+            merge=True,
+        )
+
+    await _record(transaction)
+
+
+async def backfill_user_post_seen(
+    db: AsyncClient,
+    user_did: str,
+    observed_days: set[date],
+    *,
+    last_seen_at: datetime,
+) -> None:
+    """Merge historical PostSeen dates without clobbering concurrent live activity."""
+    if not observed_days:
+        return
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _backfill(transaction) -> None:
+        snapshot = await ref.get(transaction=transaction)
+        data = snapshot.to_dict() if snapshot.exists else None
+        update = _post_seen_classification_update(
+            data,
+            observed_days,
+            last_seen_at=last_seen_at,
+        )
+        transaction.set(
+            ref,
+            {
+                "user_did": user_did,
+                "created_by_load_test": False,
+                **update,
+            },
+            merge=True,
+        )
+
+    await _backfill(transaction)
+
+
+async def mark_settings_visited(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    visited_at: datetime | None = None,
+) -> None:
+    """Record the user's first authenticated Settings visit idempotently."""
+    now = visited_at or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    now = now.astimezone(UTC)
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _mark(transaction) -> None:
+        snapshot = await ref.get(transaction=transaction)
+        data = snapshot.to_dict() if snapshot.exists else None
+        if data and data.get("settings_visited_at") is not None:
+            return
+        values: dict[str, object] = {
+            "user_did": user_did,
+            "settings_visited_at": now,
+            "created_by_load_test": False,
+            "updated_at": now,
+        }
+        if not snapshot.exists:
+            values.update({"created_at": now, "last_seen_at": now})
+        transaction.set(ref, values, merge=True)
+
+    await _mark(transaction)
 
 
 async def set_user_social_radius(db: AsyncClient, user_did: str, social_radius: int) -> None:

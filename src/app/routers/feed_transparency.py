@@ -25,6 +25,7 @@ from ..lib.firestore import (
     get_feed_snapshot,
     get_recent_feed_snapshots,
     get_user,
+    mark_settings_visited,
     patch_user_feed_preferences,
 )
 from ..lib.metrics import get_metric_collector
@@ -268,6 +269,16 @@ async def list_feeds(
 # ---------------------------------------------------------------------------
 # GET/PATCH /api/feeds/preferences  (must precede /{request_id})
 # ---------------------------------------------------------------------------
+
+
+@router.post("/settings-visit", status_code=status.HTTP_204_NO_CONTENT)
+async def record_settings_visit(
+    request: Request,
+    user_doc_id: FirebaseUser,
+) -> None:
+    """Idempotently record the user's first authenticated Settings visit."""
+    db: AsyncClient = request.app.state.firestore
+    await mark_settings_visited(db, f"did:plc:{user_doc_id}")
 
 
 @router.get(

@@ -45,6 +45,7 @@ MAX_POST_GRAPHEMES = 300
 # Named constants rather than bare strings at call sites: a typo becomes an
 # AttributeError at import instead of a silently unresolved post.
 PIN_YOUR_FEED = "pin-your-feed.md"
+PIN_YOUR_FEED_RETURNING = "pin-your-feed-returning.md"
 PIN_BEST_OF_FRIENDS = "pin-best-of-friends.md"
 PIN_RANDOM = "pin-random.md"
 SURVEY_YOUR_FEED = "survey-your-feed.md"
@@ -56,6 +57,7 @@ MANAGED_POSTS: tuple[str, ...] = (
     PIN_BEST_OF_FRIENDS,
     PIN_RANDOM,
     PIN_YOUR_FEED,
+    PIN_YOUR_FEED_RETURNING,
     PLACEHOLDER,
     SURVEY_YOUR_FEED,
 )
