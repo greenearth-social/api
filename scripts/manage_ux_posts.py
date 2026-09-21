@@ -184,8 +184,9 @@ def misgated_posts(resolved: dict[str, str]) -> list[str]:
     left unwritten. Quote posts are disabled on every UX post. Likes cannot be
     disabled -- atproto has no like-gating.
     """
-    threadgated = fetch_gate_rkeys(registry.PUBLISHER_DID, managed_posts.THREADGATE_COLLECTION)
-    postgated = fetch_gate_rkeys(registry.PUBLISHER_DID, managed_posts.POSTGATE_COLLECTION)
+    publisher_did = registry.publisher_did()
+    threadgated = fetch_gate_rkeys(publisher_did, managed_posts.THREADGATE_COLLECTION)
+    postgated = fetch_gate_rkeys(publisher_did, managed_posts.POSTGATE_COLLECTION)
     wrong = []
     for name, uri in sorted(resolved.items()):
         rkey = uri.rsplit("/", 1)[-1]
@@ -206,7 +207,7 @@ def apply_gates(client, resolved: dict[str, str], names: list[str]) -> None:
         if _wants_threadgate(name):
             client.com.atproto.repo.put_record(
                 models.ComAtprotoRepoPutRecord.Data(
-                    repo=registry.PUBLISHER_DID,
+                    repo=registry.publisher_did(),
                     collection=managed_posts.THREADGATE_COLLECTION,
                     rkey=rkey,
                     record=managed_posts.build_threadgate_record(uri, now),
@@ -218,7 +219,7 @@ def apply_gates(client, resolved: dict[str, str], names: list[str]) -> None:
             # exist", so this is a no-op when the post was never gated.
             client.com.atproto.repo.delete_record(
                 models.ComAtprotoRepoDeleteRecord.Data(
-                    repo=registry.PUBLISHER_DID,
+                    repo=registry.publisher_did(),
                     collection=managed_posts.THREADGATE_COLLECTION,
                     rkey=rkey,
                 )
@@ -227,7 +228,7 @@ def apply_gates(client, resolved: dict[str, str], names: list[str]) -> None:
 
         client.com.atproto.repo.put_record(
             models.ComAtprotoRepoPutRecord.Data(
-                repo=registry.PUBLISHER_DID,
+                repo=registry.publisher_did(),
                 collection=managed_posts.POSTGATE_COLLECTION,
                 rkey=rkey,
                 record=managed_posts.build_postgate_record(uri, now),
@@ -286,7 +287,7 @@ def write_manifest(resolved: dict[str, str]) -> None:
     """Write the generated manifest the running API reads."""
     payload = {
         "schema_version": registry.MANIFEST_SCHEMA_VERSION,
-        "publisher": registry.PUBLISHER_DID,
+        "publisher": registry.publisher_did(),
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "posts": dict(sorted(resolved.items())),
     }
@@ -310,7 +311,7 @@ def cmd_check(_args) -> int:
 
 
 def cmd_resolve(args) -> int:
-    records = fetch_repo_posts(registry.PUBLISHER_DID)
+    records = fetch_repo_posts(registry.publisher_did())
     resolved, missing = match_content(records)
     write_manifest(resolved)
 
@@ -337,14 +338,14 @@ def cmd_resolve(args) -> int:
 
 
 def _credentials(args) -> tuple[str, str] | None:
-    handle = args.handle or registry.PUBLISHER_DID
+    handle = args.handle or registry.publisher_did()
     load_dotenv()
     password = args.app_password or os.environ.get("GE_UX_POST_APP_PASSWORD")
     if not password:
         password = managed_posts.password_from_secret(args.project_id, NOTIFY_SECRET)
     if not password:
         print(
-            f"No app password for {registry.PUBLISHER_HANDLE}. Pass --app-password, set "
+            f"No app password for {registry.publisher_handle()}. Pass --app-password, set "
             f"GE_UX_POST_APP_PASSWORD, or create the {NOTIFY_SECRET} secret.",
             file=sys.stderr,
         )
@@ -369,7 +370,7 @@ def cmd_sync(args) -> int:
     if problems:
         return cmd_check(args)
 
-    records = fetch_repo_posts(registry.PUBLISHER_DID)
+    records = fetch_repo_posts(registry.publisher_did())
     resolved, missing = match_content(records)
 
     for name in sorted(resolved):
@@ -424,7 +425,7 @@ def cmd_list(_args) -> int:
 
 def cmd_cleanup(args) -> int:
     """Delete posts on the account that no current content file resolves to."""
-    records = fetch_repo_posts(registry.PUBLISHER_DID)
+    records = fetch_repo_posts(registry.publisher_did())
     resolved, _missing = match_content(records)
     keep = set(resolved.values())
     cutoff = datetime.now(UTC) - timedelta(days=args.older_than_days)
@@ -466,7 +467,7 @@ def cmd_cleanup(args) -> int:
     for uri, _created, _text in candidates:
         client.com.atproto.repo.delete_record(
             models.ComAtprotoRepoDeleteRecord.Data(
-                repo=registry.PUBLISHER_DID,
+                repo=registry.publisher_did(),
                 collection=managed_posts.POST_COLLECTION,
                 rkey=uri.split("/")[-1],
             )

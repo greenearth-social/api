@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 # in their timeline (issue #404).
 PUBLISHER_DID = "did:plc:66mudnfk2p4olwpaskmrw2vq"
 PUBLISHER_HANDLE = "notify.mysky.social"
+PUBLISHER_DID_ENV_VAR = "GE_UX_POST_PUBLISHER_DID"
+PUBLISHER_HANDLE_ENV_VAR = "GE_UX_POST_PUBLISHER_HANDLE"
 
 # Content lives outside src/ because only the resolved URIs are needed at runtime;
 # `.gcloudignore` keeps assets/ out of the deployed image.
@@ -71,6 +73,7 @@ MANAGED_POSTS: tuple[str, ...] = (
 # threadgate allowing nobody. Quote posts are disabled on every UX post, and likes
 # cannot be disabled at all -- atproto has no like-gating.
 REPLIES_ALLOWED: frozenset[str] = frozenset({SURVEY_YOUR_FEED})
+
 
 @dataclass(frozen=True)
 class VideoSpec:
@@ -189,6 +192,19 @@ def video_path(name: str) -> Path | None:
     """Return the video asset for a managed post, if it has one."""
     spec = VIDEO_POSTS.get(name)
     return CONTENT_DIR / spec.filename if spec else None
+
+
+def publisher_did() -> str:
+    """Return the deploy-time UX-post publisher, defaulting to production."""
+    return os.environ.get(PUBLISHER_DID_ENV_VAR, "").strip() or PUBLISHER_DID
+
+
+def publisher_handle() -> str:
+    """Return a human-readable label for the deploy-time publisher."""
+    configured = os.environ.get(PUBLISHER_HANDLE_ENV_VAR, "").strip()
+    if configured:
+        return configured
+    return PUBLISHER_HANDLE if publisher_did() == PUBLISHER_DID else publisher_did()
 
 
 def settings_url(feed_name: str) -> str:

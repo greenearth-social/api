@@ -628,12 +628,12 @@ preview origin from `GE_SETTINGS_APP_METADATA_URL`, falling back to
 `GE_SETTINGS_APP_ORIGIN`, so weekly preview-channel URL changes do not require
 publishing new Bluesky posts.
 
-They publish to the **notifications account**, `notify.mysky.social`
+Production publishes them to the **notifications account**, `notify.mysky.social`
 (`did:plc:66mudnfk2p4olwpaskmrw2vq`), not the brand account. Editing a post publishes
 a new record, so keeping them off `mysky.social` means its followers never see a
-republished revision in their timeline (issue #404). Both environments share the
-account: the AppView hydrates any public URI regardless of which generator served the
-skeleton.
+republished revision in their timeline (issue #404). Stage publishes them to its
+existing `caterpie-internal.bsky.social` account so preview-only Settings links never
+appear on the public production notifications account.
 
 MySky has three contextual top-post variants. The pre-Settings and Explore variants
 are managed native-video posts; the returning-user variant is a managed text post.
