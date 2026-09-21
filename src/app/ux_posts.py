@@ -165,6 +165,9 @@ def content_path(name: str) -> Path:
 
 def settings_url(feed_name: str) -> str:
     """Build a Settings deep link for the frontend paired with this deployment."""
+    redirect_origin = os.environ.get("GE_SETTINGS_LINK_ORIGIN", "").strip().rstrip("/")
+    if redirect_origin:
+        return f"{redirect_origin}/settings/{feed_name}"
     origin = os.environ.get("GE_SETTINGS_APP_ORIGIN", DEFAULT_SETTINGS_APP_ORIGIN).strip()
     return f"{(origin or DEFAULT_SETTINGS_APP_ORIGIN).rstrip('/')}{SETTINGS_PATH_PREFIX}{feed_name}"
 
