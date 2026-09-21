@@ -222,7 +222,7 @@ class TestResolve:
     def test_require_complete_fails_when_a_post_is_unpublished(self, manifest_path):
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=[]),
-            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
+            patch.object(manage_ux_posts, "misgated_posts", return_value=[]),
         ):
             rc = manage_ux_posts.cmd_resolve(SimpleNamespace(require_complete=True))
         assert rc == 1
@@ -231,7 +231,7 @@ class TestResolve:
         existing = [_record_for(name, f"at://{name}") for name in ux_posts.MANAGED_POSTS]
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
-            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
+            patch.object(manage_ux_posts, "misgated_posts", return_value=[]),
         ):
             rc = manage_ux_posts.cmd_resolve(SimpleNamespace(require_complete=True))
         assert rc == 0
@@ -307,15 +307,44 @@ class TestGates:
         dumped = record.model_dump(exclude_none=True)
         assert dumped["embedding_rules"] == [{"py_type": "app.bsky.feed.postgate#disableRule"}]
 
-    def test_ungated_when_a_gate_is_missing(self):
+    def test_misgated_when_a_gate_is_missing(self):
         resolved = {ux_posts.PIN_RANDOM: "at://did:plc:x/app.bsky.feed.post/abc"}
         with patch.object(manage_ux_posts, "fetch_gate_rkeys", side_effect=[{"abc"}, set()]):
-            assert manage_ux_posts.ungated_posts(resolved) == [ux_posts.PIN_RANDOM]
+            assert manage_ux_posts.misgated_posts(resolved) == [ux_posts.PIN_RANDOM]
 
-    def test_not_ungated_when_both_gates_exist(self):
+    def test_not_misgated_when_both_gates_exist(self):
         resolved = {ux_posts.PIN_RANDOM: "at://did:plc:x/app.bsky.feed.post/abc"}
         with patch.object(manage_ux_posts, "fetch_gate_rkeys", side_effect=[{"abc"}, {"abc"}]):
-            assert manage_ux_posts.ungated_posts(resolved) == []
+            assert manage_ux_posts.misgated_posts(resolved) == []
+
+    def test_reply_allowed_post_is_misgated_while_it_still_has_a_threadgate(self):
+        """Exempting a post means removing a gate, not just declining to add one."""
+        resolved = {ux_posts.SURVEY_YOUR_FEED: "at://did:plc:x/app.bsky.feed.post/abc"}
+        with patch.object(manage_ux_posts, "fetch_gate_rkeys", side_effect=[{"abc"}, {"abc"}]):
+            assert manage_ux_posts.misgated_posts(resolved) == [ux_posts.SURVEY_YOUR_FEED]
+
+    def test_reply_allowed_post_is_correct_with_no_threadgate(self):
+        resolved = {ux_posts.SURVEY_YOUR_FEED: "at://did:plc:x/app.bsky.feed.post/abc"}
+        with patch.object(manage_ux_posts, "fetch_gate_rkeys", side_effect=[set(), {"abc"}]):
+            assert manage_ux_posts.misgated_posts(resolved) == []
+
+    def test_reply_allowed_post_still_needs_its_postgate(self):
+        resolved = {ux_posts.SURVEY_YOUR_FEED: "at://did:plc:x/app.bsky.feed.post/abc"}
+        with patch.object(manage_ux_posts, "fetch_gate_rkeys", side_effect=[set(), set()]):
+            assert manage_ux_posts.misgated_posts(resolved) == [ux_posts.SURVEY_YOUR_FEED]
+
+    def test_apply_gates_removes_the_threadgate_for_a_reply_allowed_post(self):
+        client = MagicMock()
+        resolved = {ux_posts.SURVEY_YOUR_FEED: "at://did:plc:x/app.bsky.feed.post/abc"}
+        manage_ux_posts.apply_gates(client, resolved, [ux_posts.SURVEY_YOUR_FEED])
+
+        client.com.atproto.repo.delete_record.assert_called_once()
+        deleted = client.com.atproto.repo.delete_record.call_args.args[0]
+        assert deleted.collection == managed_posts.THREADGATE_COLLECTION
+        assert deleted.rkey == "abc"
+        # Quotes stay disabled even when replies are allowed.
+        written = client.com.atproto.repo.put_record.call_args_list
+        assert [c.args[0].collection for c in written] == [managed_posts.POSTGATE_COLLECTION]
 
     def test_apply_gates_writes_both_records_at_the_post_rkey(self):
         client = MagicMock()
@@ -339,7 +368,7 @@ class TestGates:
         )
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=[]),
-            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
+            patch.object(manage_ux_posts, "misgated_posts", return_value=[]),
             patch.object(managed_posts, "login", return_value=client),
             patch.object(manage_ux_posts, "apply_gates") as gates,
         ):
@@ -352,7 +381,7 @@ class TestGates:
         client = MagicMock()
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
-            patch.object(manage_ux_posts, "ungated_posts", return_value=[ux_posts.PIN_RANDOM]),
+            patch.object(manage_ux_posts, "misgated_posts", return_value=[ux_posts.PIN_RANDOM]),
             patch.object(managed_posts, "login", return_value=client),
             patch.object(manage_ux_posts, "apply_gates") as gates,
         ):
@@ -365,7 +394,7 @@ class TestGates:
         existing = [_record_for(name, f"at://{name}") for name in ux_posts.MANAGED_POSTS]
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
-            patch.object(manage_ux_posts, "ungated_posts", return_value=[ux_posts.PIN_RANDOM]),
+            patch.object(manage_ux_posts, "misgated_posts", return_value=[ux_posts.PIN_RANDOM]),
         ):
             rc = manage_ux_posts.cmd_resolve(SimpleNamespace(require_complete=True))
         assert rc == 1

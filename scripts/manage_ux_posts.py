@@ -157,43 +157,69 @@ def fetch_gate_rkeys(did: str, collection: str) -> set[str]:
                 return rkeys
 
 
-def ungated_posts(resolved: dict[str, str]) -> list[str]:
-    """Return managed posts missing a reply or quote gate.
+def _wants_threadgate(name: str) -> bool:
+    """Whether *name* should be closed to replies."""
+    return name not in registry.REPLIES_ALLOWED
 
-    UX posts are one-way notices, so replies and quotes are turned off. Likes cannot
-    be disabled -- atproto has no like-gating -- so this is as far as it goes.
+
+def misgated_posts(resolved: dict[str, str]) -> list[str]:
+    """Return managed posts whose gate records don't match the intended policy.
+
+    Gates are persistent records, so this has to converge in both directions: a post
+    moved into ``REPLIES_ALLOWED`` needs its existing threadgate removed, not merely
+    left unwritten. Quote posts are disabled on every UX post. Likes cannot be
+    disabled -- atproto has no like-gating.
     """
     threadgated = fetch_gate_rkeys(registry.PUBLISHER_DID, managed_posts.THREADGATE_COLLECTION)
     postgated = fetch_gate_rkeys(registry.PUBLISHER_DID, managed_posts.POSTGATE_COLLECTION)
-    missing = []
+    wrong = []
     for name, uri in sorted(resolved.items()):
         rkey = uri.rsplit("/", 1)[-1]
-        if rkey not in threadgated or rkey not in postgated:
-            missing.append(name)
-    return missing
+        if (rkey in threadgated) != _wants_threadgate(name) or rkey not in postgated:
+            wrong.append(name)
+    return wrong
 
 
 def apply_gates(client, resolved: dict[str, str], names: list[str]) -> None:
-    """Create the reply and quote gates for *names*, overwriting any partial state."""
+    """Converge *names* on the intended gate records."""
     from atproto import models
 
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     for name in names:
         uri = resolved[name]
         rkey = uri.rsplit("/", 1)[-1]
-        for collection, record in (
-            (managed_posts.THREADGATE_COLLECTION, managed_posts.build_threadgate_record(uri, now)),
-            (managed_posts.POSTGATE_COLLECTION, managed_posts.build_postgate_record(uri, now)),
-        ):
+
+        if _wants_threadgate(name):
             client.com.atproto.repo.put_record(
                 models.ComAtprotoRepoPutRecord.Data(
                     repo=registry.PUBLISHER_DID,
-                    collection=collection,
+                    collection=managed_posts.THREADGATE_COLLECTION,
                     rkey=rkey,
-                    record=record,
+                    record=managed_posts.build_threadgate_record(uri, now),
                 )
             )
-        print(f"  gated {name} (replies and quotes disabled)")
+            replies = "replies off"
+        else:
+            # deleteRecord is defined as "delete a record, or ensure it doesn't
+            # exist", so this is a no-op when the post was never gated.
+            client.com.atproto.repo.delete_record(
+                models.ComAtprotoRepoDeleteRecord.Data(
+                    repo=registry.PUBLISHER_DID,
+                    collection=managed_posts.THREADGATE_COLLECTION,
+                    rkey=rkey,
+                )
+            )
+            replies = "replies ON"
+
+        client.com.atproto.repo.put_record(
+            models.ComAtprotoRepoPutRecord.Data(
+                repo=registry.PUBLISHER_DID,
+                collection=managed_posts.POSTGATE_COLLECTION,
+                rkey=rkey,
+                record=managed_posts.build_postgate_record(uri, now),
+            )
+        )
+        print(f"  gated {name} ({replies}, quotes off)")
 
 
 def signature_index(records: list[dict]) -> dict[tuple[str, tuple[str, ...]], str]:
@@ -265,11 +291,11 @@ def cmd_resolve(args) -> int:
         f"Wrote {registry.MANIFEST_PATH} ({len(resolved)}/{len(registry.MANAGED_POSTS)} resolved)"
     )
 
-    ungated = ungated_posts(resolved) if resolved else []
-    for name in ungated:
-        print(f"  UNGATED  {name} (replies/quotes not yet disabled)", file=sys.stderr)
+    misgated = misgated_posts(resolved) if resolved else []
+    for name in misgated:
+        print(f"  MISGATED {name} (reply/quote gates don't match policy)", file=sys.stderr)
 
-    if (missing or ungated) and args.require_complete:
+    if (missing or misgated) and args.require_complete:
         print(
             "UX posts need publishing or gating. Run: "
             "pipenv run python scripts/manage_ux_posts.py sync",
@@ -306,9 +332,9 @@ def cmd_sync(args) -> int:
     for name in sorted(resolved):
         print(f"  unchanged {name} -> {resolved[name]}")
 
-    ungated = ungated_posts(resolved) if resolved else []
+    misgated = misgated_posts(resolved) if resolved else []
 
-    if not missing and not ungated:
+    if not missing and not misgated:
         write_manifest(resolved)
         print(
             f"All {len(resolved)} UX posts are published and gated; "
@@ -319,9 +345,9 @@ def cmd_sync(args) -> int:
     if args.dry_run:
         for name in missing:
             print(f"  would publish {name}")
-        for name in ungated:
+        for name in misgated:
             print(f"  would gate {name}")
-        print(f"Dry run: {len(missing)} post(s) would be published, {len(ungated)} gated.")
+        print(f"Dry run: {len(missing)} post(s) would be published, {len(misgated)} gated.")
         return 0
 
     creds = _credentials(args)
@@ -339,8 +365,8 @@ def cmd_sync(args) -> int:
         resolved[name] = result.uri
         print(f"  published {name} -> {result.uri}")
 
-    # Newly published posts are ungated by definition; pre-existing ones may be too.
-    apply_gates(client, resolved, missing + [n for n in ungated if n not in missing])
+    # Newly published posts have no gates yet; existing ones may not match policy.
+    apply_gates(client, resolved, missing + [n for n in misgated if n not in missing])
 
     write_manifest(resolved)
     print(f"Published {len(missing)} post(s); wrote {registry.MANIFEST_PATH}")

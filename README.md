@@ -657,19 +657,26 @@ resolves against the account before uploading:
 
 #### Interactions are disabled
 
-UX posts are one-way notices, so publishing one also writes two gate records keyed by
-the post's rkey: an `app.bsky.feed.threadgate` with an empty `allow` list (nobody can
-reply) and an `app.bsky.feed.postgate` with `disableRule` (no quote posts). An empty
-`allow` means "nobody" -- omitting the field would mean "everybody", so it is
-load-bearing.
+Most UX posts are one-way notices, so publishing one also writes two gate records
+keyed by the post's rkey: an `app.bsky.feed.threadgate` with an empty `allow` list
+(nobody can reply) and an `app.bsky.feed.postgate` with `disableRule` (no quote
+posts). An empty `allow` means "nobody" -- omitting the field would mean "everybody",
+so it is load-bearing.
+
+Posts listed in `REPLIES_ALLOWED` in `src/app/ux_posts.py` keep replies open; the
+survey post is there, since a reply is a reasonable way to respond to it. Quote posts
+are disabled on every UX post regardless. Because gates are persistent records,
+reconciliation converges in both directions -- adding a post to `REPLIES_ALLOWED`
+deletes its existing threadgate rather than just declining to write one.
 
 **Likes cannot be disabled.** atproto has no like-gating; any public post can be liked
 by anyone, and that is not something we can opt out of.
 
 Gates are separate records, so they can be applied to an already-published post
-without changing its URI. Resolution reports a post whose gates are missing as
-`UNGATED`, and the deploy treats that exactly like an unpublished post: it syncs
-before shipping the revision.
+without changing its URI. Resolution reports a post whose gates don't match
+policy as `MISGATED`, and the deploy treats that exactly like an unpublished post: it
+syncs before shipping the revision, so a gate changed by hand heals on the next
+deploy.
 
 Locally, resolve without credentials:
 

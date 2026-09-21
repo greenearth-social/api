@@ -60,6 +60,11 @@ MANAGED_POSTS: tuple[str, ...] = (
     SURVEY_YOUR_FEED,
 )
 
+# Posts that accept replies. Everything else is a one-way notice and gets a
+# threadgate allowing nobody. Quote posts are disabled on every UX post, and likes
+# cannot be disabled at all -- atproto has no like-gating.
+REPLIES_ALLOWED: frozenset[str] = frozenset({SURVEY_YOUR_FEED})
+
 # Optional override, for pinning a URI by hand without a redeploy. Nothing sets this
 # in normal operation; the manifest is the usual source.
 URI_ENV_VAR = "GE_UX_POST_URIS"
