@@ -532,7 +532,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         like_count=10,
         generator_name="two_tower",
     )
-    predict_user_tower = AsyncMock(return_value=[[0.1, 0.2]])
+    predict_user_tower = AsyncMock(return_value={"outputs": [[0.1, 0.2]]})
     predict_heavy_ranker = AsyncMock(return_value=[0.9])
     fetch_recent_likes = AsyncMock(
         return_value=(

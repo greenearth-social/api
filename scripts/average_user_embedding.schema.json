@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Average user embedding artifact v2",
+  "description": "Consumer contract. In addition to this schema, validate finite coordinates, nonzero vector, dimension equal to vector length, valid run timestamp, cutoff <= run start <= completion, contributors + skips = eligible, and eligible + filtered = PostHog users.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_type",
+    "format_version",
+    "embedding",
+    "dimension",
+    "user_model_uuid",
+    "post_model_uuid",
+    "run_id",
+    "source_completed_at",
+    "contributing_users",
+    "cohort",
+    "history_policy"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "average_user_embedding"
+    },
+    "format_version": {
+      "type": "integer",
+      "const": 2
+    },
+    "embedding": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "number"
+      }
+    },
+    "dimension": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "user_model_uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "not": {
+        "const": "00000000000000000000000000000000"
+      }
+    },
+    "post_model_uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "not": {
+        "const": "00000000000000000000000000000000"
+      }
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^\\d{8}T\\d{6}\\.\\d{6}Z_[0-9a-f]{8}$"
+    },
+    "source_completed_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "contributing_users": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "cohort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "posthog_project_id",
+        "event",
+        "scope",
+        "cutoff",
+        "min_interaction_seen",
+        "min_likes",
+        "posthog_users",
+        "below_min_likes",
+        "eligible_users",
+        "skipped_users"
+      ],
+      "properties": {
+        "posthog_project_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "event": {
+          "const": "interactionSeen"
+        },
+        "scope": {
+          "const": "all_history_all_feeds"
+        },
+        "cutoff": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "Z$"
+        },
+        "min_interaction_seen": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "min_likes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "posthog_users": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "below_min_likes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eligible_users": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped_users": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "history_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "limit",
+        "sources",
+        "embedding_key"
+      ],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "posts",
+              "replies"
+            ]
+          }
+        },
+        "embedding_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        }
+      }
+    }
+  }
+}

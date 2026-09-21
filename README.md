@@ -697,6 +697,194 @@ Disable when done (full capture has storage/perf cost):
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --disable
 ```
 
+## Offline average user embedding
+
+`scripts/average_user_embedding.py` selects an active-user cohort from PostHog,
+counts those users' retained likes directly in Elasticsearch, and requests their
+two-tower user embeddings from this API. It computes an equally weighted
+coordinate-wise arithmetic mean with `math.fsum`, without normalizing the mean.
+Generation and cloud publication are manual operations; neither changes the
+candidate generator or activates an artifact in a feed.
+
+### Endpoint and inference prerequisite
+
+`POST /embeddings/user` accepts `{"user_did": "did:plc:..."}` and uses the existing
+`X-API-Key` authentication. An `ok` response includes the embedding, dimension,
+`user_model_uuid`, `post_model_uuid`, loaded-like and usable-history counts,
+`history_policy`, `es_cluster_uuid`, and `likes_index`. A `skipped` response
+identifies `no_likes` or `no_embedded_history` and contains no vector.
+
+Deploy inference-service's paired-model response support before using this
+endpoint. Its user-tower prediction must return `paired_post_model_uuid` from
+the **same loaded serving manifest** as its actual user-model UUID. Dimension is
+derived from the returned vector. Missing pairing fails
+explicitly; the producer does not infer it from a separate readiness request.
+The post tower itself does not need to be loaded by inference-service.
+
+The endpoint follows production's latest-64-like preparation, including posts
+and replies and their `all_MiniLM_L12_v2` content embeddings. It uses the same
+history loader and cache as the feed, including its best-effort handling when
+one hydration index fails. Missing documents or embeddings are excluded from
+the model input. No candidate search or empty-history inference is performed.
+
+The endpoint has one overall deadline of 55 seconds. The shared history loader
+and HTTP client retain their existing timeouts. Upstream failures return 502 and
+timeouts return 504 with sanitized machine-readable error codes. Use the request ID in API/inference
+logs to investigate failures.
+
+### Generate locally
+
+Run from the API checkout with these credentials available in the environment
+(`pipenv run` also follows the repository's normal `.env` loading behavior):
+
+- `POSTHOG_PERSONAL_API_KEY`: a personal key authorized to query the project.
+- `GE_ELASTICSEARCH_API_KEY`: a read-only key with cluster-monitor permission,
+  as granted by the existing ES key setup, for the source identity check.
+- `GE_API_KEY`: a key accepted by the running API's `X-API-Key` authentication.
+
+The API container must use the same Elasticsearch cluster and `likes` index.
+The script compares the cluster UUID and index against every endpoint response;
+host URLs can differ when a tunnel is involved. The API caches its first successful
+cluster identity lookup for the lifetime of its Elasticsearch client, so users
+share one lookup per API process. Restart the API if its Elasticsearch destination
+changes, including when repointing a local tunnel.
+
+```bash
+pipenv run python scripts/average_user_embedding.py --help
+
+# Self-signed local ES tunnels work with the defaults.
+pipenv run python scripts/average_user_embedding.py
+
+# Enable Elasticsearch TLS certificate verification.
+pipenv run python scripts/average_user_embedding.py --no-es-insecure
+
+# Explicit output location and cohort thresholds.
+pipenv run python scripts/average_user_embedding.py \
+  --output-dir ~/embedding-results \
+  --min-interaction-seen 100 \
+  --min-likes 10
+```
+
+| Argument | Default |
+| --- | --- |
+| `--posthog-project-id` | `509275` |
+| `--posthog-host` | `https://us.posthog.com` |
+| `--min-interaction-seen` | `50` |
+| `--es-url` | `https://localhost:9200` |
+| `--es-insecure` / `--no-es-insecure` | `True` (ES certificate verification disabled) |
+| `--likes-index` | `likes` |
+| `--min-likes` | `5` |
+| `--api-url` | `http://localhost:8300` |
+| `--workers` | `4` |
+| `--output-dir` | `./outputs/average_user_embeddings/` |
+
+`--no-es-insecure` enables TLS certificate verification for Elasticsearch.
+These flags affect only Elasticsearch requests; PostHog and embedding API TLS
+verification are unchanged.
+
+The output directory is relative to the **current working directory**, expands
+`~`, and is created automatically. Its absolute path is logged. Running from
+the API checkout writes into its ignored `outputs/` directory. Future scheduled
+commands should supply an explicit absolute `--output-dir`.
+
+PostHog selection covers all available history and feeds, with a fixed
+run-start cutoff, bound query parameters, and DID-ordered pages of 1,000.
+Counts must meet the inclusive threshold. ES like counts use batches of 500
+and represent likes **made by the user that remain in the index**, not a
+lifetime total; PostHog is not used to count likes. Missing aggregation buckets
+count as zero. The API separately loads up to 64 recent likes for inference.
+ES data can change during a run; the PostHog cutoff does not make ES reads a
+point-in-time snapshot.
+
+Transient HTTP/network failures receive up to three attempts with a 60-second
+socket timeout, 1/2-second backoff, and valid `Retry-After` delays up to 60 seconds.
+Longer requested delays fail explicitly. These are per-operation timeouts,
+not a deadline for the entire command.
+
+### Local artifact and diagnostics
+
+Successful generation writes one file, `average_user_embedding_<run_id>.json`,
+containing the deployable mean. The run ID combines a UTC microsecond timestamp
+with an eight-character random suffix. The script does not create separate
+reports or log files.
+
+The artifact has `artifact_type: "average_user_embedding"` and
+`format_version: 2`. It contains the exact unnormalized `embedding`, `dimension`,
+`user_model_uuid`, `post_model_uuid`, `run_id`, `source_completed_at`,
+`contributing_users`, `cohort` provenance, and `history_policy`.
+See the [artifact schema](scripts/average_user_embedding.schema.json) and
+[small contract fixture](scripts/fixtures/average_user_embedding_v2.json).
+The fixture is illustrative, not a model artifact to deploy.
+
+The artifact excludes DIDs, individual vectors, credentials, and service URLs,
+and is written atomically. A final JSON summary is printed to stdout with
+`status`, `artifact_path`, and `publication`, plus the original `run_id` once a
+valid artifact is available and `error` on failure. Aggregate progress, contributor,
+skipped and failed counts, and reason summaries go to stderr. Per-user request
+or outcome messages and diagnostic lists are not saved. Redirect stderr if you
+want to retain the logs, for example:
+
+```bash
+pipenv run python scripts/average_user_embedding.py \
+  2>average_user_embedding.log
+```
+
+Missing-history skips are summarized and may reduce coverage. Any exhausted user
+request failure, incomplete collection, authentication/configuration error,
+source mismatch, mixed model pair/dimension/history policy, zero contributors,
+or invalid/zero-magnitude mean prevents artifact publication and exits nonzero.
+There is no partial-publication override. A failed generation creates no artifact.
+
+### Optional cloud publication and retry
+
+Cloud upload uses `google-cloud-storage` with Application Default Credentials,
+for example `gcloud auth application-default login` for a local operator. The
+identity needs object-create and object-read permissions on the destination.
+The script does not create buckets or change IAM.
+
+```bash
+pipenv run python scripts/average_user_embedding.py \
+  --gcs-output-prefix gs://greenearth-471522-engagement-prediction-model-prod/average_user_embeddings
+```
+
+The prefix is an explicit user choice; omitting it keeps the run local. The
+script derives the rest of the object name from the verified models and run ID:
+
+```text
+<prefix>/<post_model_uuid>/<user_model_uuid>/average_user_embedding_<run_id>.json
+```
+
+It uploads only the exact compact artifact bytes, with a create-only precondition.
+An existing object is accepted only after identical bytes are verified at its
+specific generation. The stdout summary's `publication` field contains the URI,
+generation, and SHA-256. No `latest` pointer is updated.
+
+If upload fails, the valid local artifact remains available and the command
+exits nonzero. Retry that artifact without collecting data or running inference:
+
+```bash
+pipenv run python scripts/average_user_embedding.py \
+  --publish-artifact "./outputs/average_user_embeddings/average_user_embedding_<run_id>.json" \
+  --gcs-output-prefix gs://greenearth-471522-engagement-prediction-model-prod/average_user_embeddings
+```
+
+Replace `<run_id>` with the actual saved filename. Upload-only mode validates the
+complete version-2 contract, requires only cloud credentials, and reuses the
+artifact's original model IDs and run ID. Legacy combined reports are not valid
+publication inputs. Generation options such as `--workers` or `--es-url` cannot
+accompany `--publish-artifact`, including `--output-dir`. Upload-only mode creates
+no new local files or output directory.
+Invalid argument combinations print usage and exit before a run starts, without
+creating output files. Exit zero means generation and any requested upload
+succeeded; runtime failures exit nonzero with details on stderr and in the final
+stdout summary.
+
+The eventual consumer must select an exact artifact, validate this versioned
+contract, and use `post_model_uuid` for its candidate-search model filter. Artifact
+selection, activation, and rollback belong to the consumer change. A future
+weekly run can reuse a fixed cloud prefix while creating a new immutable object
+each time.
+
 ## User-History Feature Cache
 
 The two-tower generator and heavy ranker share a per-user Firestore document
@@ -902,6 +1090,7 @@ greenearth/api/
 │       │   └── ...                 # ES client, inference, metrics, etc.
 │       └── routers/
 │           ├── candidates.py       # POST /candidates/generate
+│           ├── embeddings.py       # POST /embeddings/user
 │           ├── rank.py             # POST /rank/predict
 │           ├── diversify.py        # POST /diversify
 │           ├── skylight.py         # /skylight/search, /skylight/similar
@@ -913,6 +1102,7 @@ greenearth/api/
 │   ├── rollback.sh                # Roll traffic back to a previous revision
 │   ├── gcp_setup.sh               # GCP environment setup
 │   ├── apikeys.py                 # API key management
+│   ├── average_user_embedding.py  # Offline average generation and publication
 │   ├── feed_debug.py              # CLI debug tool
 │   ├── manage_pinned_posts.py     # Change-aware public feed pin publication
 │   ├── update_feed_descriptions.py # One-time public description migration

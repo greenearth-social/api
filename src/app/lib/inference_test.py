@@ -89,6 +89,36 @@ def test_extract_inference_outputs_accepts_ranker_score_list():
 
 
 @pytest.mark.asyncio
+async def test_predict_user_tower_single_retains_prediction_metadata(monkeypatch):
+    payload = {
+        "outputs": [[0.1, 0.2]],
+        "model_type": "user-tower",
+        "model_uuid": "user-model-id",
+        "paired_post_model_uuid": "post-model-id",
+    }
+    client = AsyncMock()
+    client.post.return_value = httpx.Response(200, json=payload)
+    monkeypatch.setattr(inference_module, "get_http_client", lambda: client)
+
+    result = await inference_module.predict_user_tower_single(
+        [[1.0, 0.0]],
+        ["did:plc:history"],
+        base_url="https://inference.example",
+        api_key="secret",
+    )
+
+    assert result == payload
+    client.post.assert_awaited_once_with(
+        "https://inference.example/models/user-tower/predict",
+        json={
+            "history_embeddings": [[1.0, 0.0]],
+            "history_author_dids": ["did:plc:history"],
+        },
+        headers={"X-API-Key": "secret"},
+    )
+
+
+@pytest.mark.asyncio
 async def test_predict_heavy_ranker_single_user_posts_ranker_payload(monkeypatch):
     class FakeResponse:
         is_error = False
@@ -301,7 +331,7 @@ async def test_compute_user_embedding_with_empty_history_skips_elasticsearch(
     monkeypatch,
 ):
     fetch_history = AsyncMock()
-    predict_user_tower = AsyncMock(return_value=[[0.1, 0.2]])
+    predict_user_tower = AsyncMock(return_value={"outputs": [[0.1, 0.2]]})
     monkeypatch.setattr(
         inference_module,
         "fetch_user_history_features",
@@ -330,6 +360,34 @@ async def test_compute_user_embedding_with_empty_history_skips_elasticsearch(
         base_url="https://inference.example",
         api_key="secret",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload,message",
+    [
+        (None, "response was not an object"),
+        ({}, "missing outputs list"),
+        ({"outputs": []}, "returned 0 embeddings; expected 1"),
+        ({"outputs": [[0.1], [0.2]]}, "returned 2 embeddings; expected 1"),
+    ],
+)
+async def test_compute_user_embedding_validates_prediction_outputs(monkeypatch, payload, message):
+    monkeypatch.setattr(
+        inference_module,
+        "predict_user_tower_single",
+        AsyncMock(return_value=payload),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        await inference_module.compute_user_embedding(
+            "did:plc:user1",
+            es=object(),
+            inference_base_url="https://inference.example",
+            inference_api_key="secret",
+            source="two_tower_empty_history",
+            history_mode="empty",
+        )
 
 
 @pytest.mark.asyncio

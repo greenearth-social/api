@@ -1,0 +1,34 @@
+{
+  "artifact_type": "average_user_embedding",
+  "format_version": 2,
+  "embedding": [
+    4.0,
+    6.0
+  ],
+  "dimension": 2,
+  "user_model_uuid": "1affd684bc7f45f895e488f83dd0a2fa",
+  "post_model_uuid": "9b946f280fd84899a7f82246fbc34d17",
+  "run_id": "20260921T163045.123456Z_a1b2c3d4",
+  "source_completed_at": "2026-09-21T16:31:01.123456Z",
+  "contributing_users": 2,
+  "cohort": {
+    "posthog_project_id": 509275,
+    "event": "interactionSeen",
+    "scope": "all_history_all_feeds",
+    "cutoff": "2026-09-21T16:30:45.000000Z",
+    "min_interaction_seen": 50,
+    "min_likes": 5,
+    "posthog_users": 4,
+    "below_min_likes": 1,
+    "eligible_users": 3,
+    "skipped_users": 1
+  },
+  "history_policy": {
+    "limit": 64,
+    "sources": [
+      "posts",
+      "replies"
+    ],
+    "embedding_key": "all_MiniLM_L12_v2"
+  }
+}
