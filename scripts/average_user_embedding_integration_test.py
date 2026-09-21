@@ -3,6 +3,7 @@
 import io
 import json
 import logging
+import math
 from collections import Counter
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -199,7 +200,10 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
         artifact, data = producer.load_artifact(artifact_path)
         assert summary["artifact_path"] == str(artifact_path)
         assert list((tmp_path / "results").iterdir()) == [artifact_path]
-        assert artifact["embedding"] == [2.0, 4.0, 6.0]
+        assert artifact["format_version"] == 1
+        assert artifact["embedding"] == pytest.approx(
+            [2 / math.sqrt(56), 4 / math.sqrt(56), 6 / math.sqrt(56)]
+        )
         assert artifact["post_model_uuid"] == POST_MODEL
         assert artifact["user_model_uuid"] == USER_MODEL
         assert artifact["contributing_users"] == 2

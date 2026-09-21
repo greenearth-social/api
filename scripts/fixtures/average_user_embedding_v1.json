@@ -1,9 +1,9 @@
 {
   "artifact_type": "average_user_embedding",
-  "format_version": 2,
+  "format_version": 1,
   "embedding": [
-    4.0,
-    6.0
+    0.5547001962252291,
+    0.8320502943378437
   ],
   "dimension": 2,
   "user_model_uuid": "1affd684bc7f45f895e488f83dd0a2fa",
