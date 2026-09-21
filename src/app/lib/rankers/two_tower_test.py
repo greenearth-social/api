@@ -64,7 +64,7 @@ def test_predict_keeps_candidate_uris_aligned_with_embeddings(monkeypatch):
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
         assert history_embeddings == [[0.5, 0.5]]
         assert history_author_dids == ["did:plc:liked"]
-        return [[1.0, 0.0]]
+        return {"outputs": [[1.0, 0.0]]}
 
     async def fake_predict_post_tower_batch(post_embeddings, author_dids, *, base_url, api_key):
         assert post_embeddings == [[0.0, 1.0], [1.0, 0.0]]
@@ -115,7 +115,7 @@ def test_predict_calls_user_tower_with_empty_history_when_user_has_no_likes(monk
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
         seen["history_embeddings"] = history_embeddings
         seen["history_author_dids"] = history_author_dids
-        return [[1.0, 0.0]]
+        return {"outputs": [[1.0, 0.0]]}
 
     async def fake_predict_post_tower_batch(post_embeddings, author_dids, *, base_url, api_key):
         assert author_dids == ["did:plc:a"]
@@ -176,7 +176,7 @@ def test_predict_calls_user_tower_with_empty_history_when_likes_have_no_embeddin
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
         seen["history_embeddings"] = history_embeddings
         seen["history_author_dids"] = history_author_dids
-        return [[1.0, 0.0]]
+        return {"outputs": [[1.0, 0.0]]}
 
     async def fake_predict_post_tower_batch(post_embeddings, author_dids, *, base_url, api_key):
         assert author_dids == ["did:plc:a"]
@@ -228,7 +228,7 @@ def test_predict_returns_unscored_candidates_when_candidate_embeddings_are_missi
 
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
         assert history_author_dids == []
-        return [[1.0, 0.0]]
+        return {"outputs": [[1.0, 0.0]]}
 
     async def fake_predict_post_tower_batch(post_embeddings, author_dids, *, base_url, api_key):
         raise AssertionError("post tower should not be called without candidate embeddings")
@@ -288,7 +288,7 @@ def test_predict_raises_when_user_tower_returns_wrong_number_of_embeddings(monke
 
     async def fake_predict_user_tower_single(history_embeddings, history_author_dids, *, base_url, api_key):
         assert history_author_dids == ["did:plc:liked"]
-        return []
+        return {"outputs": []}
 
     async def fake_predict_post_tower_batch(post_embeddings, author_dids, *, base_url, api_key):
         assert author_dids == ["did:plc:a"]
