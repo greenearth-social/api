@@ -46,6 +46,11 @@ PERSONALIZED_RANK_REQUEST_TEMPLATE = RankPredictRequest.model_construct(
 LOGGED_OUT_POST_URI: str | None = ux_post_uri(ux_posts.LOGGED_OUT)
 
 
+def _settings_url(feed_name: str) -> str:
+    """Build a Settings deep link for the frontend paired with this deployment."""
+    return ux_posts.settings_url(feed_name)
+
+
 def _pinned_post_uri(feed_name: str, fallback: str) -> str:
     """Resolve an externally published video pin with a local/dev fallback."""
     env_name = f"GE_PINNED_POST_{feed_name.upper().replace('-', '_')}_URI"

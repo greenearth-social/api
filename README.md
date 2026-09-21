@@ -619,6 +619,11 @@ logged in" explainer, and the user-interview survey post. Their content is versi
 in `assets/ux_posts/*.md` as plain text with `[label](url)` markdown links, which
 `scripts/manage_ux_posts.py` converts into Bluesky rich-text facets.
 
+Settings links in those files use the production URL as their checked-in
+canonical form. During deployment, the UX-post registry rewrites that origin
+from `GE_SETTINGS_APP_ORIGIN`, so stage publishes links to the paired frontend
+while production continues to use `https://app.greenearth.social`.
+
 They publish to the **notifications account**, `notify.mysky.social`
 (`did:plc:66mudnfk2p4olwpaskmrw2vq`), not the brand account. Editing a post publishes
 a new record, so keeping them off `mysky.social` means its followers never see a

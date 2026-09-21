@@ -41,6 +41,8 @@ MANIFEST_SCHEMA_VERSION = 1
 
 # Bluesky's post length limit, counted in graphemes.
 MAX_POST_GRAPHEMES = 300
+DEFAULT_SETTINGS_APP_ORIGIN = "https://app.greenearth.social"
+SETTINGS_PATH_PREFIX = "/#/settings/"
 
 # Named constants rather than bare strings at call sites: a typo becomes an
 # AttributeError at import instead of a silently unresolved post.
@@ -161,9 +163,18 @@ def content_path(name: str) -> Path:
     return CONTENT_DIR / name
 
 
+def settings_url(feed_name: str) -> str:
+    """Build a Settings deep link for the frontend paired with this deployment."""
+    origin = os.environ.get("GE_SETTINGS_APP_ORIGIN", DEFAULT_SETTINGS_APP_ORIGIN).strip()
+    return f"{(origin or DEFAULT_SETTINGS_APP_ORIGIN).rstrip('/')}{SETTINGS_PATH_PREFIX}{feed_name}"
+
+
 def read_content(name: str) -> str:
     """Read a managed post's markdown source. Not available in the deployed image."""
-    return content_path(name).read_text(encoding="utf-8")
+    content = content_path(name).read_text(encoding="utf-8")
+    canonical_prefix = f"{DEFAULT_SETTINGS_APP_ORIGIN}{SETTINGS_PATH_PREFIX}"
+    configured_prefix = settings_url("")
+    return content.replace(canonical_prefix, configured_prefix)
 
 
 def resolved_uris() -> dict[str, str]:
