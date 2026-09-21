@@ -527,6 +527,15 @@ preflight_bsky_publishers() {
 }
 
 prepare_ux_posts() {
+    local ux_post_publisher_id="$NOTIFY_BSKY_PUBLISHER_ID"
+    local ux_post_publisher_handle="notify.mysky.social"
+    local ux_post_secret="$NOTIFY_BSKY_SECRET"
+    if [ "$ENVIRONMENT" != "prod" ]; then
+        ux_post_publisher_id="$CATERPIE_BSKY_PUBLISHER_ID"
+        ux_post_publisher_handle="caterpie-internal.bsky.social"
+        ux_post_secret="$CATERPIE_STAGE_BSKY_SECRET"
+    fi
+
     # Content validation is offline and instant, so it always runs.
     if ! pipenv run python scripts/manage_ux_posts.py check; then
         log_error "UX post content is invalid; Cloud Run was not changed."
@@ -542,26 +551,29 @@ prepare_ux_posts() {
     # Resolving needs no credentials: it matches content against the account's public
     # records. Only publishing a genuinely new or edited post needs the app password,
     # so fetch it lazily and fail loudly if something is actually missing.
-    log_info "Resolving UX posts against $NOTIFY_BSKY_PUBLISHER_ID..."
-    if pipenv run python scripts/manage_ux_posts.py resolve --require-complete; then
+    log_info "Resolving UX posts against $ux_post_publisher_handle ($ux_post_publisher_id)..."
+    if GE_UX_POST_PUBLISHER_DID="$ux_post_publisher_id" \
+        GE_UX_POST_PUBLISHER_HANDLE="$ux_post_publisher_handle" \
+        pipenv run python scripts/manage_ux_posts.py resolve --require-complete; then
         log_info "All UX posts are already published."
         return 0
     fi
 
     local bsky_password
     if ! bsky_password=$(gcloud secrets versions access latest \
-        --secret="$NOTIFY_BSKY_SECRET" --project="$PROJECT_ID" 2>/dev/null); then
+        --secret="$ux_post_secret" --project="$PROJECT_ID" 2>/dev/null); then
         bsky_password=""
     fi
     if [ -z "$bsky_password" ]; then
-        log_error "UX posts need publishing but '$NOTIFY_BSKY_SECRET' is unavailable."
-        log_error "Create it with scripts/gcp_setup.sh --notify-bsky-app-password ..."
+        log_error "UX posts need publishing but '$ux_post_secret' is unavailable."
         exit 1
     fi
 
     log_info "Publishing new or edited UX posts..."
-    if ! pipenv run python scripts/manage_ux_posts.py \
-        --handle "$NOTIFY_BSKY_PUBLISHER_ID" \
+    if ! GE_UX_POST_PUBLISHER_DID="$ux_post_publisher_id" \
+        GE_UX_POST_PUBLISHER_HANDLE="$ux_post_publisher_handle" \
+        pipenv run python scripts/manage_ux_posts.py \
+        --handle "$ux_post_publisher_id" \
         --app-password "$bsky_password" \
         sync; then
         log_error "UX post sync failed; Cloud Run was not changed."
@@ -569,7 +581,9 @@ prepare_ux_posts() {
     fi
 
     # The manifest must be complete, or the revision would serve placeholders.
-    if ! pipenv run python scripts/manage_ux_posts.py resolve --require-complete; then
+    if ! GE_UX_POST_PUBLISHER_DID="$ux_post_publisher_id" \
+        GE_UX_POST_PUBLISHER_HANDLE="$ux_post_publisher_handle" \
+        pipenv run python scripts/manage_ux_posts.py resolve --require-complete; then
         log_error "UX posts are still unresolved after syncing; Cloud Run was not changed."
         exit 1
     fi

@@ -217,6 +217,14 @@ class TestManifest:
         assert payload["publisher"] == ux_posts.PUBLISHER_DID
         assert payload["schema_version"] == ux_posts.MANIFEST_SCHEMA_VERSION
 
+    def test_manifest_records_the_selected_stage_publisher(self, manifest_path, monkeypatch):
+        monkeypatch.setenv(ux_posts.PUBLISHER_DID_ENV_VAR, "did:plc:stage")
+
+        manage_ux_posts.write_manifest({"a.md": "at://a"})
+
+        payload = json.loads(manifest_path.read_text())
+        assert payload["publisher"] == "did:plc:stage"
+
     def test_manifest_round_trips_into_the_registry(self, manifest_path, monkeypatch):
         """Ties the deploy-time producer to the runtime consumer."""
         manage_ux_posts.write_manifest({ux_posts.PIN_RANDOM: "at://written"})
@@ -242,7 +250,7 @@ class TestSync:
 
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
-            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
+            patch.object(manage_ux_posts, "misgated_posts", return_value=[]),
             patch.object(managed_posts, "login", return_value=client),
         ):
             assert manage_ux_posts.cmd_sync(self._args()) == 0
@@ -257,7 +265,7 @@ class TestSync:
         client = MagicMock()
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
-            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
+            patch.object(manage_ux_posts, "misgated_posts", return_value=[]),
             patch.object(managed_posts, "login", return_value=client),
         ):
             assert manage_ux_posts.cmd_sync(self._args()) == 0
@@ -277,7 +285,7 @@ class TestSync:
 
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
-            patch.object(manage_ux_posts, "ungated_posts", return_value=[]),
+            patch.object(manage_ux_posts, "misgated_posts", return_value=[]),
             patch.object(managed_posts, "login", return_value=client),
         ):
             assert manage_ux_posts.cmd_sync(self._args()) == 0

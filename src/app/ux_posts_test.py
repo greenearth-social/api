@@ -94,6 +94,25 @@ class TestEnvironmentOverride:
         assert ux_posts.ux_post_uri(ux_posts.PIN_RANDOM) == "at://from-manifest"
 
 
+# --- publisher --------------------------------------------------------------
+
+
+class TestPublisher:
+    def test_defaults_to_the_production_notifications_account(self, monkeypatch):
+        monkeypatch.delenv(ux_posts.PUBLISHER_DID_ENV_VAR, raising=False)
+        monkeypatch.delenv(ux_posts.PUBLISHER_HANDLE_ENV_VAR, raising=False)
+
+        assert ux_posts.publisher_did() == ux_posts.PUBLISHER_DID
+        assert ux_posts.publisher_handle() == ux_posts.PUBLISHER_HANDLE
+
+    def test_deployment_can_select_the_stage_account(self, monkeypatch):
+        monkeypatch.setenv(ux_posts.PUBLISHER_DID_ENV_VAR, "did:plc:stage")
+        monkeypatch.setenv(ux_posts.PUBLISHER_HANDLE_ENV_VAR, "stage.example")
+
+        assert ux_posts.publisher_did() == "did:plc:stage"
+        assert ux_posts.publisher_handle() == "stage.example"
+
+
 # --- catalog ----------------------------------------------------------------
 
 
