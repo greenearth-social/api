@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,7 +32,9 @@ from ..lib.firestore import (
     StaleFeedPreviewError,
     _accepted_preview_diagnostics,
     _merge_feed_snapshots,
+    _post_seen_classification_update,
     accept_feed_preview,
+    backfill_user_post_seen,
     claim_accepted_feed_slate,
     delete_feed_snapshot,
     get_feed_activity,
@@ -45,12 +47,14 @@ from ..lib.firestore import (
     get_user,
     get_user_by_username,
     init_firestore_client,
+    mark_settings_visited,
     merge_feed_snapshot,
     patch_user_feed_preferences,
     prune_feed_snapshots,
     record_discarded_posts,
     record_interaction,
     record_seen_posts,
+    record_user_post_seen,
     set_user_debug_flag,
     upsert_feed_activity,
     upsert_user,
@@ -929,6 +933,199 @@ class TestRecordInteraction:
         assert written["feed_name"] == FEED_NAME
         assert written["request_id"] == "req-1"
         assert "created_at" in written
+
+
+class TestPostSeenClassification:
+    def test_first_seen_day_enables_precomputation_only(self):
+        seen_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+
+        update = _post_seen_classification_update(None, {seen_at.date()}, last_seen_at=seen_at)
+
+        assert update["precompute_artifacts"] is True
+        assert update["presumed_pinned"] is False
+        assert update["post_seen_days_utc"] == ["2026-09-20"]
+        assert update["last_post_seen_at"] == seen_at
+
+    def test_second_distinct_day_within_seven_days_marks_presumed_pinned(self):
+        seen_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+        existing = {
+            "precompute_artifacts": True,
+            "post_seen_days_utc": ["2026-09-14"],
+        }
+
+        update = _post_seen_classification_update(
+            existing,
+            {seen_at.date()},
+            last_seen_at=seen_at,
+        )
+
+        assert update["presumed_pinned"] is True
+        assert update["post_seen_days_utc"] == ["2026-09-14", "2026-09-20"]
+
+    def test_days_seven_apart_do_not_qualify_and_old_days_are_pruned(self):
+        seen_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+        update = _post_seen_classification_update(
+            {"post_seen_days_utc": ["2026-09-13"]},
+            {seen_at.date()},
+            last_seen_at=seen_at,
+        )
+
+        assert update["presumed_pinned"] is False
+        assert update["post_seen_days_utc"] == ["2026-09-20"]
+
+    def test_backfill_detects_historical_window_while_retaining_only_recent_days(self):
+        seen_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+        update = _post_seen_classification_update(
+            {"presumed_pinned": False},
+            {date(2026, 1, 1), date(2026, 1, 7), seen_at.date()},
+            last_seen_at=seen_at,
+        )
+
+        assert update["presumed_pinned"] is True
+        assert update["post_seen_days_utc"] == ["2026-09-20"]
+
+    def test_true_flags_are_monotonic(self):
+        seen_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+        update = _post_seen_classification_update(
+            {"precompute_artifacts": True, "presumed_pinned": True},
+            {seen_at.date()},
+            last_seen_at=seen_at,
+        )
+
+        assert update["precompute_artifacts"] is True
+        assert update["presumed_pinned"] is True
+
+    def test_backfill_preserves_a_newer_live_window_and_timestamp(self):
+        live_seen_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+        historical_seen_at = datetime(2026, 1, 7, 10, 0, tzinfo=UTC)
+        update = _post_seen_classification_update(
+            {
+                "precompute_artifacts": True,
+                "post_seen_days_utc": ["2026-09-20"],
+                "last_post_seen_at": live_seen_at,
+            },
+            {date(2026, 1, 1), historical_seen_at.date()},
+            last_seen_at=historical_seen_at,
+        )
+
+        assert update["presumed_pinned"] is True
+        assert update["post_seen_days_utc"] == ["2026-09-20"]
+        assert update["last_post_seen_at"] == live_seen_at
+
+    def test_backfill_classification_is_idempotent(self):
+        last_seen_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+        observed_days = {date(2026, 9, 19), date(2026, 9, 20)}
+        first = _post_seen_classification_update(
+            None,
+            observed_days,
+            last_seen_at=last_seen_at,
+        )
+        second = _post_seen_classification_update(
+            first,
+            observed_days,
+            last_seen_at=last_seen_at,
+        )
+
+        for field in (
+            "precompute_artifacts",
+            "presumed_pinned",
+            "post_seen_days_utc",
+            "last_post_seen_at",
+        ):
+            assert second[field] == first[field]
+
+    @pytest.mark.asyncio
+    async def test_repeated_same_day_seen_avoids_a_transaction_write(self):
+        seen_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+        db = MagicMock()
+        ref = MagicMock()
+        ref.get = AsyncMock(
+            return_value=_mock_doc_snapshot(
+                True,
+                {
+                    "precompute_artifacts": True,
+                    "post_seen_days_utc": ["2026-09-20"],
+                },
+            )
+        )
+        db.collection.return_value.document.return_value = ref
+        transaction = MagicMock()
+        db.transaction.return_value = transaction
+
+        with patch("app.lib.firestore.async_transactional", side_effect=lambda func: func):
+            await record_user_post_seen(db, USER_DID, seen_at=seen_at)
+
+        transaction.set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_backfill_transaction_merges_with_live_values(self):
+        live_seen_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+        historical_seen_at = datetime(2026, 1, 7, 10, 0, tzinfo=UTC)
+        db = MagicMock()
+        ref = MagicMock()
+        ref.get = AsyncMock(
+            return_value=_mock_doc_snapshot(
+                True,
+                {
+                    "precompute_artifacts": True,
+                    "post_seen_days_utc": ["2026-09-20"],
+                    "last_post_seen_at": live_seen_at,
+                },
+            )
+        )
+        db.collection.return_value.document.return_value = ref
+        transaction = MagicMock()
+        db.transaction.return_value = transaction
+
+        with patch("app.lib.firestore.async_transactional", side_effect=lambda func: func):
+            await backfill_user_post_seen(
+                db,
+                USER_DID,
+                {date(2026, 1, 1), historical_seen_at.date()},
+                last_seen_at=historical_seen_at,
+            )
+
+        written = transaction.set.call_args.args[1]
+        assert written["precompute_artifacts"] is True
+        assert written["presumed_pinned"] is True
+        assert written["post_seen_days_utc"] == ["2026-09-20"]
+        assert written["last_post_seen_at"] == live_seen_at
+
+
+class TestSettingsVisit:
+    @pytest.mark.asyncio
+    async def test_existing_visit_is_idempotent(self):
+        visited_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+        db = MagicMock()
+        ref = MagicMock()
+        ref.get = AsyncMock(
+            return_value=_mock_doc_snapshot(True, {"settings_visited_at": visited_at})
+        )
+        db.collection.return_value.document.return_value = ref
+        transaction = MagicMock()
+        db.transaction.return_value = transaction
+
+        with patch("app.lib.firestore.async_transactional", side_effect=lambda func: func):
+            await mark_settings_visited(db, USER_DID, visited_at=visited_at + timedelta(days=1))
+
+        transaction.set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_first_visit_records_the_authenticated_timestamp(self):
+        visited_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+        db = MagicMock()
+        ref = MagicMock()
+        ref.get = AsyncMock(return_value=_mock_doc_snapshot(True, {"user_did": USER_DID}))
+        db.collection.return_value.document.return_value = ref
+        transaction = MagicMock()
+        db.transaction.return_value = transaction
+
+        with patch("app.lib.firestore.async_transactional", side_effect=lambda func: func):
+            await mark_settings_visited(db, USER_DID, visited_at=visited_at)
+
+        written = transaction.set.call_args.args[1]
+        assert written["settings_visited_at"] == visited_at
+        assert transaction.set.call_args.kwargs == {"merge": True}
 
 
 # ---------------------------------------------------------------------------

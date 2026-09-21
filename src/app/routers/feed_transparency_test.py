@@ -41,6 +41,15 @@ def client() -> Generator[TestClient]:
     app.dependency_overrides.pop(verify_firebase_auth, None)
 
 
+@patch("app.routers.feed_transparency.mark_settings_visited", new_callable=AsyncMock)
+def test_settings_visit_is_authenticated_and_idempotent_at_the_api_boundary(mock_mark, client):
+    response = client.post("/api/feeds/settings-visit")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    mock_mark.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

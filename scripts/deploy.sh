@@ -41,6 +41,11 @@ GIT_SHA=""
 # image -- which is what makes a rollback resolve the URIs it was built with.
 SKIP_UX_POST_SYNC=false
 
+# MySky's first-time and Explore posts are externally published native-video
+# records. Reuse configured values, or recover them from the deployed service.
+GE_PINNED_POST_YOUR_FEED_URI="${GE_PINNED_POST_YOUR_FEED_URI:-}"
+GE_PINNED_POST_YOUR_FEED_EXPLORE_URI="${GE_PINNED_POST_YOUR_FEED_EXPLORE_URI:-}"
+
 # Bluesky publishing identities. Use stable account DIDs for authentication so
 # account handle changes cannot break deployments. Caterpie's environment-specific
 # app-password secrets belong to the same account.
@@ -299,6 +304,8 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=4"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_RANK_MODEL_TIMEOUT_SEC=2.5"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_EMBED_HYDRATION_TIMEOUT_SEC=1.5"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_YOUR_FEED_URI=$GE_PINNED_POST_YOUR_FEED_URI"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_YOUR_FEED_EXPLORE_URI=$GE_PINNED_POST_YOUR_FEED_EXPLORE_URI"
     # Below the AppView's 10s abort on getFeedSkeleton calls (confirmed via
     # atproto source, see #291) so a hung downstream call (ES, ranker)
     # surfaces as a logged, metered 504 instead of losing the race against
@@ -532,6 +539,36 @@ prepare_ux_posts() {
     log_info "UX posts are ready."
 }
 
+load_deployed_video_post_uri() {
+    local env_name="$1"
+    gcloud run services describe "greenearth-api-$ENVIRONMENT" \
+        --region="$REGION" \
+        --project="$PROJECT_ID" \
+        --format="value(spec.template.spec.containers[0].env.filter(name=$env_name).value)" \
+        2>/dev/null || true
+}
+
+prepare_video_post_uris() {
+    if [ -z "$GE_PINNED_POST_YOUR_FEED_URI" ]; then
+        GE_PINNED_POST_YOUR_FEED_URI=$(
+            load_deployed_video_post_uri GE_PINNED_POST_YOUR_FEED_URI
+        )
+    fi
+    if [ -z "$GE_PINNED_POST_YOUR_FEED_EXPLORE_URI" ]; then
+        GE_PINNED_POST_YOUR_FEED_EXPLORE_URI=$(
+            load_deployed_video_post_uri GE_PINNED_POST_YOUR_FEED_EXPLORE_URI
+        )
+    fi
+
+    if [ -z "$GE_PINNED_POST_YOUR_FEED_URI" ] \
+        || [ -z "$GE_PINNED_POST_YOUR_FEED_EXPLORE_URI" ]; then
+        log_error "MySky's two native-video post URIs are required before deployment."
+        log_error "Export GE_PINNED_POST_YOUR_FEED_URI and GE_PINNED_POST_YOUR_FEED_EXPLORE_URI."
+        exit 1
+    fi
+    export GE_PINNED_POST_YOUR_FEED_URI GE_PINNED_POST_YOUR_FEED_EXPLORE_URI
+}
+
 _sync_feeds_to_account() {
     local account_label="$1"
     local publisher_id="$2"
@@ -619,6 +656,7 @@ main() {
 
     require_clean_worktree
     validate_config
+    prepare_video_post_uris
     prepare_ux_posts
     if ! preflight_bsky_publishers; then
         log_error "Bluesky publishing preflight failed; Cloud Run was not changed."

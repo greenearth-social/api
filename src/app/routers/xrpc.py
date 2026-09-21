@@ -73,6 +73,7 @@ from ..lib.firestore import (
     record_discarded_posts,
     record_interaction,
     record_seen_posts,
+    record_user_post_seen,
     update_survey_post_seen,
     upsert_feed_activity,
     upsert_user,
@@ -1039,6 +1040,39 @@ def _record_similarity_metric(
     )
 
 
+def _pinned_post_uris(feed_cfg: FeedConfig) -> set[str]:
+    """All top-post variants that must never leak into the organic slate."""
+    if feed_cfg.pinned_post_uri is None:
+        return set()
+    return {
+        uri
+        for uri in (
+            feed_cfg.pinned_post_uri,
+            feed_cfg.explore_pinned_post_uri,
+            feed_cfg.returning_pinned_post_uri,
+        )
+        if uri
+    }
+
+
+def _select_pinned_post_uri(
+    feed_name: str,
+    feed_cfg: FeedConfig,
+    requested_limit: int,
+    user_doc: UserDocument | None,
+) -> str | None:
+    """Choose the first-page top post for the Bluesky surface and user state."""
+    if feed_cfg.pinned_post_uri is None:
+        return None
+    if feed_name != "your-feed":
+        return feed_cfg.pinned_post_uri
+    if 2 <= requested_limit <= 15:
+        return feed_cfg.explore_pinned_post_uri or feed_cfg.pinned_post_uri
+    if user_doc is not None and user_doc.settings_visited_at is not None:
+        return feed_cfg.returning_pinned_post_uri or feed_cfg.pinned_post_uri
+    return feed_cfg.pinned_post_uri
+
+
 # ---------------------------------------------------------------------------
 # feedContext helpers
 # ---------------------------------------------------------------------------
@@ -1093,7 +1127,7 @@ async def _generation_exclusions(
 ) -> list[str]:
     """Fetch post URIs to exclude from candidate generation, de-duped.
 
-    Combines the user's recently-seen posts (for feeds with
+    Combines every contextual top-post URI, the user's recently-seen posts (for feeds with
     ``exclude_seen_posts``) and posts previously discarded for low rank score
     (for feeds with a ``min_rank_score`` floor).  Fail-soft on each source: a
     Firestore hiccup should degrade the feature (possible repeats) rather than
@@ -1119,7 +1153,9 @@ async def _generation_exclusions(
             return []
 
     seen_uris, discarded_uris = await asyncio.gather(_seen(), _discarded())
-    return list(dict.fromkeys(seen_uris + discarded_uris))
+    return list(
+        dict.fromkeys([*sorted(_pinned_post_uris(feed_cfg)), *seen_uris, *discarded_uris])
+    )
 
 
 async def generate_feed_preview(
@@ -1213,7 +1249,8 @@ async def generate_feed_preview(
         applied_social_radius=configured.applied_social_radius,
     )
 
-    cached_uris = snapshot.items
+    preview_pin_uris = _pinned_post_uris(configured.feed_cfg)
+    cached_uris = [uri for uri in snapshot.items if uri not in preview_pin_uris]
     meta_by_uri = {meta.at_uri: meta for meta in snapshot.items_meta}
     cached_meta = [meta_by_uri[uri] for uri in cached_uris if uri in meta_by_uri]
     expires_at = datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS)
@@ -1483,6 +1520,7 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
     # load-test session's seen posts land in that user's separate load-test
     # bucket instead of polluting their real exclusion data.
     seen_by_user: dict[tuple[str, bool], list[str]] = {}
+    post_seen_users: set[str] = set()
 
     # Handles for the PostHog identity properties, memoized so a batch of
     # interactions from one user costs one Firestore read rather than one per
@@ -1515,6 +1553,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
             logger.warning("Recording interaction with unrecognized event: %s", event)
 
         feed_cfg = FEEDS.get(payload.feed)
+        if event == "interactionSeen" and ix.item and not payload.lt:
+            post_seen_users.add(payload.did)
         if (
             event == "interactionSeen"
             and ix.item
@@ -1575,6 +1615,12 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
             await record_seen_posts(db, did, uris, load_test=load_test)
         except Exception:
             logger.exception("Failed to record seen posts for user '%s'", did)
+
+    for did in post_seen_users:
+        try:
+            await record_user_post_seen(db, did)
+        except Exception:
+            logger.exception("Failed to classify PostSeen activity for user '%s'", did)
 
 
 # ---------------------------------------------------------------------------
@@ -1709,16 +1755,10 @@ async def get_feed_skeleton(
         )
 
     feed_cfg = FEEDS[feed_name]
-    # AppView performs a one-item initial request to check that a generator is
-    # reachable. For feeds with a pinned post that response contains only the
-    # pin, so the organic page (and therefore its observability snapshot) is
-    # necessarily empty. It is not a feed slate the user viewed and must not
-    # consume an accepted Settings handoff or mutate user history.
-    is_appview_one_item_check = (
-        cursor is None
-        and limit == 1
-        and request.headers.get("user-agent", "").casefold().startswith("bskyappview")
-    )
+    # AppView performs one-item initial requests as freshness/reachability
+    # probes. Regardless of user agent, that response is not a viewed feed
+    # slate and must not consume a Settings handoff or mutate user history.
+    is_appview_one_item_check = cursor is None and limit == 1
 
     # Cloud Scheduler probe bypass: if GE_PROBE_SECRET is set and the request
     # carries the matching X-Probe-Secret header, skip AT Protocol auth and
@@ -1877,6 +1917,12 @@ async def get_feed_skeleton(
     applied_social_radius = configured.applied_social_radius
     max_age_hours = configured.max_age_hours
     preference_fingerprint = configured.preference_fingerprint
+    contextual_pin_uris = _pinned_post_uris(feed_cfg)
+    pinned_post_uri = (
+        _select_pinned_post_uri(feed_name, feed_cfg, limit, user_doc)
+        if cursor is None
+        else None
+    )
 
     feed_cache = _get_feed_cache(request)
 
@@ -1892,9 +1938,9 @@ async def get_feed_skeleton(
         return _make_feed_context(user_did, feed_name, request_id, load_test=is_load_test)
 
     async def generation_exclusions() -> list[str]:
-        """Post URIs to exclude — none for an anonymous caller, who has no history."""
+        """Post URIs to exclude, including static pins for anonymous callers."""
         if is_anonymous:
-            return []
+            return list(_pinned_post_uris(feed_cfg))
         return await _generation_exclusions(db, user_did, feed_cfg)
 
     async with timed(
@@ -1929,7 +1975,9 @@ async def get_feed_skeleton(
                         },
                     )
                     raise HTTPException(status_code=400, detail="Invalid cursor")
-                cached_uris = cache_doc.items
+                cached_uris = [
+                    uri for uri in cache_doc.items if uri not in contextual_pin_uris
+                ]
                 if (
                     preferences_read_succeeded
                     and cache_doc.preference_fingerprint != preference_fingerprint
@@ -1973,7 +2021,11 @@ async def get_feed_skeleton(
                                 load_test=is_load_test,
                             )
                         )
-                    replacement_uris = generated_snapshot.items
+                    replacement_uris = [
+                        uri
+                        for uri in generated_snapshot.items
+                        if uri not in contextual_pin_uris
+                    ]
                     page = replacement_uris[:limit]
                     next_cursor: str | None = None
                     if replacement_uris:
@@ -2114,13 +2166,21 @@ async def get_feed_skeleton(
                     _spawn_background(
                         _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
                     )
-                new_uris = generated_snapshot.items
+                new_uris = [
+                    uri for uri in generated_snapshot.items if uri not in contextual_pin_uris
+                ]
                 if new_uris:
                     async with timed(logger, "feedcache_append", cache_id=parsed.id):
+                        new_meta_by_uri = {
+                            meta.at_uri: meta for meta in generated_snapshot.items_meta
+                        }
+                        new_items_meta = [
+                            new_meta_by_uri[uri] for uri in new_uris if uri in new_meta_by_uri
+                        ]
                         updated = await feed_cache.append_document(
                             parsed.id,
                             new_uris,
-                            generated_snapshot.items_meta,
+                            new_items_meta,
                         )
                     if updated is not None:
                         page = new_uris[:limit]
@@ -2212,10 +2272,14 @@ async def get_feed_skeleton(
                         and accepted_cache.user_did == user_did
                         and accepted_cache.feed_name == feed_name
                     ):
-                        accepted_uris = accepted_cache.items
-                        if feed_cfg.pinned_post_uri:
+                        accepted_uris = [
+                            uri
+                            for uri in accepted_cache.items
+                            if uri not in contextual_pin_uris
+                        ]
+                        if pinned_post_uri:
                             generated_page = accepted_uris[: max(0, limit - 1)]
-                            page = [feed_cfg.pinned_post_uri, *generated_page]
+                            page = [pinned_post_uri, *generated_page]
                             consumed = len(generated_page)
                         else:
                             generated_page = accepted_uris[:limit]
@@ -2230,7 +2294,7 @@ async def get_feed_skeleton(
                             scores_by_uri,
                             feed_name,
                             batch=0,
-                            exclude_uri=feed_cfg.pinned_post_uri,
+                            exclude_uri=pinned_post_uri,
                         )
                         accepted_snapshot = FeedSnapshotDocument(
                             request_id=accepted_request_id,
@@ -2306,7 +2370,9 @@ async def get_feed_skeleton(
                 _spawn_background(
                     _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
                 )
-            all_uris = generated_snapshot.items
+            all_uris = [
+                uri for uri in generated_snapshot.items if uri not in contextual_pin_uris
+            ]
 
             # Survey post: eligible for users who loaded the feed at least 3 times
             # and haven't seen it in the past 7 days (tracked via interactionSeen).
@@ -2325,11 +2391,11 @@ async def get_feed_skeleton(
             # Pinned and survey posts are Bluesky presentation concerns and are
             # deliberately excluded from observability snapshots and source diagnostics.
             survey_uri = feed_cfg.survey_post_uri if show_survey else None
-            n_injected = (1 if feed_cfg.pinned_post_uri else 0) + (1 if survey_uri else 0)
-            if feed_cfg.pinned_post_uri:
-                cache_uris = [uri for uri in all_uris if uri != feed_cfg.pinned_post_uri]
+            n_injected = (1 if pinned_post_uri else 0) + (1 if survey_uri else 0)
+            if pinned_post_uri:
+                cache_uris = all_uris
                 generated_page = cache_uris[: max(0, limit - n_injected)]
-                page: list[str] = [feed_cfg.pinned_post_uri, *generated_page]
+                page: list[str] = [pinned_post_uri, *generated_page]
                 consumed = len(generated_page)
             else:
                 cache_uris = all_uris
@@ -2343,7 +2409,7 @@ async def get_feed_skeleton(
 
             scores_by_uri = _similarity_scores_from_items_meta(generated_snapshot.items_meta)
             _record_similarity_metric(
-                page, scores_by_uri, feed_name, batch=0, exclude_uri=feed_cfg.pinned_post_uri
+                page, scores_by_uri, feed_name, batch=0, exclude_uri=pinned_post_uri
             )
 
             if not is_probe and not is_anonymous and not is_appview_one_item_check:

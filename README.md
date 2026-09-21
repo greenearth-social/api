@@ -626,6 +626,12 @@ republished revision in their timeline (issue #404). Both environments share the
 account: the AppView hydrates any public URI regardless of which generator served the
 skeleton.
 
+MySky has three contextual top-post variants. The pre-Settings and Explore
+variants are native video posts published once outside the text-post workflow;
+their final AT URIs are supplied through `GE_PINNED_POST_YOUR_FEED_URI` and
+`GE_PINNED_POST_YOUR_FEED_EXPLORE_URI`. The returning-user variant is managed
+in the UX-post registry as `pin-your-feed-returning.md`.
+
 To change a post, edit the markdown and deploy. To add one, create the file and add
 it to `MANAGED_POSTS` in `src/app/ux_posts.py`, then reference it from `feeds.py` via
 `ux_post_uri()`.
@@ -707,6 +713,15 @@ Deployments validate the required publisher credentials before changing Cloud Ru
 Feed generator metadata is synchronized later in the same deployment, but existing
 public descriptions are preserved; a failed post-deploy sync makes the deployment
 command exit nonzero.
+
+PostSeen user classification is updated transactionally on the interaction
+serving path, so there is no scheduled job. Backfill existing interactions by
+reviewing the dry-run output and then explicitly executing it:
+
+```bash
+pipenv run python scripts/backfill_user_classification.py
+pipenv run python scripts/backfill_user_classification.py --execute
+```
 
 #### 6. View the feed in Bluesky
 

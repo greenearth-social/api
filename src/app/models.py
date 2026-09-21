@@ -151,7 +151,7 @@ class CandidateGenerateRequest(BaseModel):
             "the user in previous pages)."
         ),
     )
-    hydrate_embeddings: bool = Field(default=False, 
+    hydrate_embeddings: bool = Field(default=False,
 
         description="When true, refetches the 384-dim embedding arrays for the final candidates."
     )
@@ -282,6 +282,14 @@ class FeedConfig(BaseModel):
         None,
         description="AT URI of a post to pin at the top of the first page of this feed. "
         "Resolved by app.ux_posts.ux_post_uri() from the deploy-generated manifest.",
+    )
+    explore_pinned_post_uri: str | None = Field(
+        default=None,
+        description="AT URI of the top post used when this feed is embedded in Explore.",
+    )
+    returning_pinned_post_uri: str | None = Field(
+        default=None,
+        description="AT URI of the top post used after the user has visited Settings.",
     )
     survey_post_uri: str | None = Field(
         None,

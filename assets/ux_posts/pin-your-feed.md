@@ -1,3 +1,1 @@
-Click [SETTINGS](https://app.greenearth.social/#/settings/your-feed) to personalize your MySky feed.
-
-A feed you control, designed for constructive conversation.
+You're missing out on most of what MySky can do for you! Log in to your [SETTINGS](https://app.greenearth.social/#/settings/your-feed) to customize your algorithm.

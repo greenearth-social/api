@@ -7,6 +7,8 @@ from app.feeds import (
     LOGGED_OUT_POST_URI,
     SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
     SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
+    _pinned_post_uri,
+    _pinned_post_variant_uri,
     canonical_feed_name,
 )
 
@@ -57,9 +59,17 @@ class TestFeedsRegistry:
                 f"{feed_name} resolved to {uri}"
             )
 
+    def test_pinned_post_environment_override(self, monkeypatch):
+        monkeypatch.setenv("GE_PINNED_POST_YOUR_FEED_URI", "at://managed")
+        assert _pinned_post_uri("your-feed", "at://fallback") == "at://managed"
+
     def test_your_feed_uses_the_survey_post(self):
         uri = FEEDS["your-feed"].survey_post_uri
         assert uri and uri.endswith("/test-survey-your-feed")
+
+    def test_your_feed_uses_the_returning_ux_post(self):
+        uri = FEEDS["your-feed"].returning_pinned_post_uri
+        assert uri and uri.endswith("/test-pin-your-feed-returning")
 
     def test_logged_out_post_is_resolved(self):
         assert LOGGED_OUT_POST_URI and LOGGED_OUT_POST_URI.endswith("/test-logged-out")
@@ -83,6 +93,13 @@ class TestFeedsRegistry:
             assert not uri.endswith(placeholder_suffix)
         assert LOGGED_OUT_POST_URI is not None
         assert not LOGGED_OUT_POST_URI.endswith(placeholder_suffix)
+
+    def test_contextual_pinned_post_environment_override(self, monkeypatch):
+        monkeypatch.setenv("GE_PINNED_POST_YOUR_FEED_EXPLORE_URI", "at://explore")
+        assert (
+            _pinned_post_variant_uri("your-feed", "explore", "at://fallback")
+            == "at://explore"
+        )
 
     def test_social_radius_splits_everyone_weight_evenly(self):
         for presets in (
