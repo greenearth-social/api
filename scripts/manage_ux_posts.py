@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Publish and resolve the repository-managed UX posts injected into feeds.
 
-Content lives in ``assets/ux_posts/*.md`` and is versioned like any other source.
-This script reconciles it against what is actually posted on the notifications
-account and writes ``src/app/ux_posts_resolved.json``, the generated manifest the
-running API reads.
+Content lives in ``assets/ux_posts/`` and is versioned like any other source. This
+script reconciles text, links, and any attached native video against what is actually
+posted on the notifications account and writes ``src/app/ux_posts_resolved.json``,
+the generated manifest the running API reads.
 
 The manifest is gitignored on purpose. A pull request then carries only content and
 code, so concurrent branches cannot conflict on deployment state and nothing has to
@@ -28,9 +28,9 @@ Typical flows::
     pipenv run python scripts/manage_ux_posts.py check
     pipenv run python scripts/manage_ux_posts.py sync
 
-Matching is by exact content signature (visible text plus link targets), so editing
-a post publishes a new record and leaves the old one alone — an older Cloud Run
-revision keeps resolving to the post it shipped with.
+Matching is by exact content signature (visible text, link targets, and video blob
+CID), so editing copy or replacing a video publishes a new record and leaves the old
+one alone — an older Cloud Run revision keeps resolving to the post it shipped with.
 """
 
 from __future__ import annotations
@@ -84,6 +84,20 @@ def check_content() -> list[str]:
         )
     for missing in sorted(expected - present):
         problems.append(f"{missing} is in MANAGED_POSTS but missing from {registry.CONTENT_DIR}")
+
+    unknown_video_posts = set(registry.VIDEO_POSTS) - expected
+    for name in sorted(unknown_video_posts):
+        problems.append(f"{name} has a video but is not in MANAGED_POSTS")
+
+    expected_videos = {spec.filename for spec in registry.VIDEO_POSTS.values()}
+    present_videos = {p.name for p in registry.CONTENT_DIR.glob("*.mp4")}
+    for extra in sorted(present_videos - expected_videos):
+        problems.append(f"{extra} is in {registry.CONTENT_DIR.name}/ but is not registered")
+    for missing in sorted(expected_videos - present_videos):
+        problems.append(f"{missing} is registered but missing from {registry.CONTENT_DIR}")
+    for filename in sorted(expected_videos & present_videos):
+        if (registry.CONTENT_DIR / filename).stat().st_size == 0:
+            problems.append(f"{filename} is empty")
 
     for name in sorted(expected & present):
         content = managed_posts.normalize_content(registry.read_content(name))
@@ -222,15 +236,32 @@ def apply_gates(client, resolved: dict[str, str], names: list[str]) -> None:
         print(f"  gated {name} ({replies}, quotes off)")
 
 
-def signature_index(records: list[dict]) -> dict[tuple[str, tuple[str, ...]], str]:
+ManagedPostSignature = tuple[str, tuple[str, ...], str | None]
+
+
+def managed_post_signature(record: object) -> ManagedPostSignature:
+    """Return the text, links, and optional native-video CID from a live post."""
+    text, links = managed_posts.post_signature(record)
+    return text, links, managed_posts.video_blob_cid(record)
+
+
+def managed_content_signature(name: str, content: str) -> ManagedPostSignature:
+    """Return the signature expected for one repository-managed post."""
+    text, links = managed_posts.content_signature(content)
+    path = registry.video_path(name)
+    video_cid = managed_posts.blob_cid(path.read_bytes()) if path else None
+    return text, links, video_cid
+
+
+def signature_index(records: list[dict]) -> dict[ManagedPostSignature, str]:
     """Map each existing post's content signature to its URI.
 
     Later records win, so if the same content was published twice the newest URI is
     the one we adopt.
     """
-    index: dict[tuple[str, tuple[str, ...]], str] = {}
+    index: dict[ManagedPostSignature, str] = {}
     for record in records:
-        index[managed_posts.post_signature(record.get("value", {}))] = record["uri"]
+        index[managed_post_signature(record.get("value", {}))] = record["uri"]
     return index
 
 
@@ -240,7 +271,7 @@ def match_content(records: list[dict]) -> tuple[dict[str, str], list[str]]:
     resolved: dict[str, str] = {}
     missing: list[str] = []
     for name, content in content_files().items():
-        uri = index.get(managed_posts.content_signature(content))
+        uri = index.get(managed_content_signature(name, content))
         if uri:
             resolved[name] = uri
         else:
@@ -321,6 +352,18 @@ def _credentials(args) -> tuple[str, str] | None:
     return handle, password
 
 
+def publish_post(client, name: str, content: str):
+    """Publish one managed text or native-video post."""
+    builder = managed_posts.build_text_builder(
+        managed_posts.parse_content(managed_posts.normalize_content(content))
+    )
+    spec = registry.VIDEO_POSTS.get(name)
+    path = registry.video_path(name)
+    if spec and path:
+        return client.send_video(builder, path.read_bytes(), video_alt=spec.alt)
+    return client.send_post(builder)
+
+
 def cmd_sync(args) -> int:
     problems = check_content()
     if problems:
@@ -337,8 +380,7 @@ def cmd_sync(args) -> int:
     if not missing and not misgated:
         write_manifest(resolved)
         print(
-            f"All {len(resolved)} UX posts are published and gated; "
-            f"wrote {registry.MANIFEST_PATH}"
+            f"All {len(resolved)} UX posts are published and gated; wrote {registry.MANIFEST_PATH}"
         )
         return 0
 
@@ -358,10 +400,7 @@ def cmd_sync(args) -> int:
 
     for name in missing:
         content = registry.read_content(name)
-        builder = managed_posts.build_text_builder(
-            managed_posts.parse_content(managed_posts.normalize_content(content))
-        )
-        result = client.send_post(builder)
+        result = publish_post(client, name, content)
         resolved[name] = result.uri
         print(f"  published {name} -> {result.uri}")
 

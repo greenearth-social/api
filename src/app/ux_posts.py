@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ SETTINGS_PATH_PREFIX = "/#/settings/"
 # Named constants rather than bare strings at call sites: a typo becomes an
 # AttributeError at import instead of a silently unresolved post.
 PIN_YOUR_FEED = "pin-your-feed.md"
+PIN_YOUR_FEED_EXPLORE = "pin-your-feed-explore.md"
 PIN_YOUR_FEED_RETURNING = "pin-your-feed-returning.md"
 PIN_BEST_OF_FRIENDS = "pin-best-of-friends.md"
 PIN_RANDOM = "pin-random.md"
@@ -59,6 +61,7 @@ MANAGED_POSTS: tuple[str, ...] = (
     PIN_BEST_OF_FRIENDS,
     PIN_RANDOM,
     PIN_YOUR_FEED,
+    PIN_YOUR_FEED_EXPLORE,
     PIN_YOUR_FEED_RETURNING,
     PLACEHOLDER,
     SURVEY_YOUR_FEED,
@@ -68,6 +71,25 @@ MANAGED_POSTS: tuple[str, ...] = (
 # threadgate allowing nobody. Quote posts are disabled on every UX post, and likes
 # cannot be disabled at all -- atproto has no like-gating.
 REPLIES_ALLOWED: frozenset[str] = frozenset({SURVEY_YOUR_FEED})
+
+@dataclass(frozen=True)
+class VideoSpec:
+    """The native video attached to a managed UX post."""
+
+    filename: str
+    alt: str
+
+
+VIDEO_POSTS: dict[str, VideoSpec] = {
+    PIN_YOUR_FEED: VideoSpec(
+        filename="pin-your-feed.mp4",
+        alt="A demonstration of how to customize the MySky feed.",
+    ),
+    PIN_YOUR_FEED_EXPLORE: VideoSpec(
+        filename="pin-your-feed-explore.mp4",
+        alt="A demonstration of how to pin the MySky feed.",
+    ),
+}
 
 # Optional override, for pinning a URI by hand without a redeploy. Nothing sets this
 # in normal operation; the manifest is the usual source.
@@ -161,6 +183,12 @@ def ux_post_uri(name: str) -> str | None:
 def content_path(name: str) -> Path:
     """Return the on-disk content file for a managed post (publish time only)."""
     return CONTENT_DIR / name
+
+
+def video_path(name: str) -> Path | None:
+    """Return the video asset for a managed post, if it has one."""
+    spec = VIDEO_POSTS.get(name)
+    return CONTENT_DIR / spec.filename if spec else None
 
 
 def settings_url(feed_name: str) -> str:

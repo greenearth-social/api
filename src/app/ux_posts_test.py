@@ -102,9 +102,22 @@ class TestCatalog:
         for name in ux_posts.MANAGED_POSTS:
             assert ux_posts.content_path(name).is_file(), f"{name} is missing from assets/ux_posts"
 
+    def test_every_managed_video_post_has_its_asset(self):
+        for name in ux_posts.VIDEO_POSTS:
+            path = ux_posts.video_path(name)
+            assert path and path.is_file(), f"{name} is missing its video asset"
+
+    def test_video_assets_have_no_unregistered_files(self):
+        present = {p.name for p in ux_posts.CONTENT_DIR.glob("*.mp4")}
+        expected = {spec.filename for spec in ux_posts.VIDEO_POSTS.values()}
+        assert present == expected
+
     def test_content_directory_has_no_unregistered_files(self):
         present = {p.name for p in ux_posts.CONTENT_DIR.glob("*.md")}
         assert present == set(ux_posts.MANAGED_POSTS)
 
     def test_catalog_entries_are_unique(self):
         assert len(set(ux_posts.MANAGED_POSTS)) == len(ux_posts.MANAGED_POSTS)
+
+    def test_video_posts_are_managed(self):
+        assert set(ux_posts.VIDEO_POSTS) <= set(ux_posts.MANAGED_POSTS)

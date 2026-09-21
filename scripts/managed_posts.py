@@ -18,6 +18,7 @@ republishing it.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import re
 import subprocess
@@ -67,6 +68,29 @@ def normalize_content(text: str) -> str:
 def content_sha(text: str) -> str:
     """Fingerprint normalized post content."""
     return hashlib.sha256(normalize_content(text).encode()).hexdigest()
+
+
+def blob_cid(data: bytes) -> str:
+    """Return the CIDv1/raw/sha256 identifier AT Proto assigns to blob bytes."""
+    # CIDv1 + raw codec + sha2-256 multihash code/length + digest. AT Proto blob
+    # references use this content-addressed representation, which lets an offline
+    # deploy match a checked-in video to an existing post without uploading it.
+    cid = b"\x01\x55\x12\x20" + hashlib.sha256(data).digest()
+    return "b" + base64.b32encode(cid).decode("ascii").lower().rstrip("=")
+
+
+def video_blob_cid(record: object) -> str | None:
+    """Extract the video blob CID from a post record, if one is embedded."""
+    embed = _field(record, "embed")
+    if not embed:
+        return None
+    embed_type = _field(embed, "$type") or _field(embed, "py_type")
+    if embed_type != "app.bsky.embed.video":
+        return None
+    video = _field(embed, "video")
+    ref = _field(video, "ref")
+    link = _field(ref, "$link") or _field(ref, "link")
+    return link if isinstance(link, str) and link else None
 
 
 def build_post_record(content: str, created_at: str) -> models.AppBskyFeedPost.Record:
