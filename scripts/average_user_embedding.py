@@ -802,17 +802,8 @@ def gcs_prefix(value):
 def publish_artifact(path, prefix):
     artifact, data = load_artifact(path)
     parts = urlsplit(prefix)
-    name = "/".join(
-        filter(
-            None,
-            (
-                parts.path.strip("/"),
-                artifact["post_model_uuid"],
-                artifact["user_model_uuid"],
-                f"average_user_embedding_{artifact['run_id']}.json",
-            ),
-        )
-    )
+    filename = f"average_user_embedding_{artifact['run_id']}.json"
+    name = "/".join(filter(None, (parts.path.strip("/"), filename)))
     uri = f"gs://{parts.netloc}/{name}"
     logger.info("Publication: uploading immutable artifact to %s", uri)
     try:
