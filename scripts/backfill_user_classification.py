@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import pathlib
 import sys
 from dataclasses import dataclass, field
@@ -75,6 +76,13 @@ async def collect_histories(db) -> tuple[dict[str, UserPostSeenHistory], int, in
     return histories, scanned, accepted
 
 
+async def close_firestore_client(db) -> None:
+    """Close Firestore clients across library versions with sync or async close()."""
+    result = db.close()
+    if inspect.isawaitable(result):
+        await result
+
+
 async def run(*, execute: bool) -> None:
     db = init_firestore_client()
     try:
@@ -101,7 +109,7 @@ async def run(*, execute: bool) -> None:
             updated += 1
         print(f"Updated {updated} user documents.")
     finally:
-        await db.close()
+        await close_firestore_client(db)
 
 
 def main() -> None:

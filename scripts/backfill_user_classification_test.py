@@ -1,8 +1,14 @@
 """Tests for the one-time user-classification backfill."""
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, Mock
 
-from backfill_user_classification import UserPostSeenHistory, add_interaction
+import pytest
+from backfill_user_classification import (
+    UserPostSeenHistory,
+    add_interaction,
+    close_firestore_client,
+)
 
 
 def test_add_interaction_aggregates_distinct_utc_days_and_latest_time():
@@ -48,3 +54,13 @@ def test_add_interaction_rejects_load_tests_and_malformed_events():
     assert not add_interaction(histories, {**base, "event": "interactionLike"})
     assert not add_interaction(histories, {**base, "item_uri": None})
     assert histories == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close", [Mock(return_value=None), AsyncMock()])
+async def test_close_firestore_client_supports_sync_and_async_clients(close):
+    db = Mock(close=close)
+
+    await close_firestore_client(db)
+
+    close.assert_called_once_with()
