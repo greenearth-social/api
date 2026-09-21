@@ -75,6 +75,8 @@ def test_search_returns_embedding():
                 "external_uri": None,
                 "like_count": None,
                 "politics_score": None,
+                "combined_perspective_score": None,
+                "perspective_scored_at": None,
             }
         ]
     }
