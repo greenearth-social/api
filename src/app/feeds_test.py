@@ -9,6 +9,7 @@ from app.feeds import (
     SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
     _pinned_post_uri,
     _pinned_post_variant_uri,
+    _settings_url,
     canonical_feed_name,
 )
 
@@ -99,6 +100,16 @@ class TestFeedsRegistry:
         assert (
             _pinned_post_variant_uri("your-feed", "explore", "at://fallback")
             == "at://explore"
+        )
+
+    def test_settings_url_honors_deployment_origin(self, monkeypatch):
+        monkeypatch.setenv(
+            "GE_SETTINGS_APP_ORIGIN",
+            "https://greenearth-471522--stage-fjoqyn8a.web.app/",
+        )
+
+        assert _settings_url("your-feed") == (
+            "https://greenearth-471522--stage-fjoqyn8a.web.app/#/settings/your-feed"
         )
 
     def test_social_radius_splits_everyone_weight_evenly(self):
