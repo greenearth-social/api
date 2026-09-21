@@ -718,6 +718,21 @@ background and is drained during shutdown. Request-path cache reads fail open
 after 500 ms; background writes and lease releases have a separate 5-second
 timeout.
 
+Recent-like lookup and history hydration share a 1-second Elasticsearch deadline
+on the request path, after the bounded cache read. Background refreshes use a
+5-second Elasticsearch deadline within their overall 10-second refresh budget.
+Hydration searches posts and replies concurrently, with each search independently
+bounded by the same deadline. If one search fails or times out, the request can
+use the other result, keeping unhydrated likes without embeddings. The shared
+deadline includes time spent finding recent likes, leaving room for inference
+within the default model budgets. A recent-like lookup timeout fails the fetch
+because no history URIs are available yet. Request cancellation still propagates.
+This partial history is shared within the request but is not persisted or reused
+across requests. A partial background refresh preserves the existing cached
+history and applies the same 60-second retry cooldown as a failed refresh. If
+both searches fail, the fetch raises an error. Successful searches with no matches
+still count as complete and may be cached.
+
 Lookups record `user_history.cache.age_seconds` and
 `user_history.cache.lookup_count`; background work records `refresh_count` and
 `write_count`, each labelled by outcome. Firestore native TTL uses `expires_at`,
