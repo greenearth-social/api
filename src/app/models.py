@@ -97,6 +97,17 @@ class CandidatePost(BaseModel):
         allow_inf_nan=False,
         description="News & Social Concern topic score (0-1), when present",
     )
+    combined_perspective_score: float | None = Field(
+        default=None,
+        description="Perspective PRC score in [0, 1], precomputed at ingest. None when "
+        "the post has not been scored, or was found to be unscorable.",
+    )
+    perspective_scored_at: str | None = Field(
+        default=None,
+        description="When ingest last submitted this post to the Perspective API. Set "
+        "with no combined_perspective_score means the post is permanently unscorable "
+        "(no text, or an unsupported language); absent means it has never been scored.",
+    )
 
 
 class GeneratorSpec(BaseModel):
