@@ -848,11 +848,14 @@ pipenv run python scripts/average_user_embedding.py \
 ```
 
 The prefix is an explicit user choice; omitting it keeps the run local. The
-script derives the rest of the object name from the verified models and run ID:
+script places the artifact directly under that prefix, using its run ID:
 
 ```text
-<prefix>/<post_model_uuid>/<user_model_uuid>/average_user_embedding_<run_id>.json
+<prefix>/average_user_embedding_<run_id>.json
 ```
+
+Model identifiers remain in the artifact metadata. A bucket-only prefix writes
+the artifact at the bucket root.
 
 It uploads only the exact compact artifact bytes, with a create-only precondition.
 An existing object is accepted only after identical bytes are verified at its
@@ -869,8 +872,8 @@ pipenv run python scripts/average_user_embedding.py \
 ```
 
 Replace `<run_id>` with the actual saved filename. Upload-only mode validates the
-complete version-2 contract, requires only cloud credentials, and reuses the
-artifact's original model IDs and run ID. Legacy combined reports are not valid
+complete version-2 contract, requires only cloud credentials, and preserves the
+artifact's exact bytes and original run ID. Legacy combined reports are not valid
 publication inputs. Generation options such as `--workers` or `--es-url` cannot
 accompany `--publish-artifact`, including `--output-dir`. Upload-only mode creates
 no new local files or output directory.

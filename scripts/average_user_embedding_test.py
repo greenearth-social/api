@@ -740,14 +740,24 @@ def artifact_file(tmp_path):
     return path
 
 
-def test_gcs_upload_uses_exact_bytes_immutable_name_and_bounded_retries(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "prefix,object_prefix",
+    [
+        ("gs://test-bucket/averages/", "averages/"),
+        ("gs://test-bucket/averages", "averages/"),
+        ("gs://test-bucket", ""),
+        ("gs://test-bucket/", ""),
+        ("gs://test-bucket/team/averages", "team/averages/"),
+    ],
+)
+def test_gcs_upload_uses_exact_bytes_immutable_name_and_bounded_retries(
+    tmp_path, monkeypatch, prefix, object_prefix
+):
     path = artifact_file(tmp_path)
     client, blob, _ = setup_gcs(monkeypatch)
-    result = average.publish_artifact(path, "gs://test-bucket/averages/")
+    result = average.publish_artifact(path, prefix)
     artifact = artifact_fixture()
-    expected = (
-        f"averages/{POST_MODEL}/{USER_MODEL}/average_user_embedding_{artifact['run_id']}.json"
-    )
+    expected = f"{object_prefix}average_user_embedding_{artifact['run_id']}.json"
     assert result["uri"] == f"gs://test-bucket/{expected}"
     assert result["generation"] == "123"
     assert result["sha256"] == average.hashlib.sha256(path.read_bytes()).hexdigest()
@@ -818,7 +828,9 @@ def test_publish_only_needs_no_collection_credentials_and_preserves_original_id(
         == 0
     )
     summary = read_summary(capsys)
-    assert artifact_fixture()["run_id"] in summary["publication"]["uri"]
+    assert summary["publication"]["uri"] == (
+        f"gs://test-bucket/averages/average_user_embedding_{artifact_fixture()['run_id']}.json"
+    )
     assert summary["run_id"] == artifact_fixture()["run_id"]
     assert blob.upload_from_string.call_args.args == (path.read_bytes(),)
     assert summary["artifact_path"] == str(path)
