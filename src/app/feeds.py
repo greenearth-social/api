@@ -408,7 +408,8 @@ FEEDS: dict[str, FeedConfig] = {
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=[
-                GeneratorSpec(name="popularity", weight=1.0),
+                GeneratorSpec(name="popularity", weight=0.5),
+                GeneratorSpec(name="two_tower_empty_history", weight=0.5)
             ],
             infill=None,
             num_candidates=30,

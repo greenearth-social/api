@@ -11,16 +11,15 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Literal, assert_never
+from typing import Literal
 from uuid import UUID
 
 import httpx
 
-from .feed_debug import current_recorder
 from .http_client import get_http_client
 from .request_context import get_request_id
 from .telemetry import timed
-from .user_history_cache import UserHistory, fetch_user_history_features
+from .user_history_cache import UserHistory
 
 logger = logging.getLogger(__name__)
 

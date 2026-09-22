@@ -327,138 +327,92 @@ class TestPredictFailureCounters:
 
 
 @pytest.mark.asyncio
-async def test_compute_user_embedding_with_empty_history_skips_elasticsearch(
-    monkeypatch,
-):
-    fetch_history = AsyncMock()
-    predict_user_tower = AsyncMock(return_value={"outputs": [[0.1, 0.2]]})
-    monkeypatch.setattr(
-        inference_module,
-        "fetch_user_history_features",
-        fetch_history,
-    )
-    monkeypatch.setattr(
-        inference_module,
-        "predict_user_tower_single",
-        predict_user_tower,
-    )
-
-    result = await inference_module.compute_user_embedding(
-        "did:plc:user1",
-        es=object(),
-        inference_base_url="https://inference.example",
-        inference_api_key="secret",
-        source="two_tower_empty_history",
-        history_mode="empty",
-    )
-
-    assert result == [0.1, 0.2]
-    fetch_history.assert_not_awaited()
-    predict_user_tower.assert_awaited_once_with(
-        [],
-        [],
-        base_url="https://inference.example",
-        api_key="secret",
-    )
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "payload,message",
     [
         (None, "response was not an object"),
         ({}, "missing outputs list"),
-        ({"outputs": []}, "returned 0 embeddings; expected 1"),
-        ({"outputs": [[0.1], [0.2]]}, "returned 2 embeddings; expected 1"),
+        ({"outputs": []}, "Expected exactly one nonempty embedding"),
+        ({"outputs": [[0.1], [0.2]]}, "Expected exactly one nonempty embedding"),
     ],
 )
-async def test_compute_user_embedding_validates_prediction_outputs(monkeypatch, payload, message):
+async def test_predict_user_embedding_validates_prediction_outputs(monkeypatch, payload, message):
+    if isinstance(payload, dict):
+        payload = {
+            "model_type": "user-tower",
+            "model_uuid": "1" * 32,
+            "paired_post_model_uuid": "2" * 32,
+            **payload,
+        }
+    history = UserHistory(
+        items=[
+            UserHistoryItem(
+                at_uri="at://did:plc:author/app.bsky.feed.post/1",
+                liked_at="2026-01-01T00:00:00+00:00",
+                embedding=[0.1, 0.2],
+            )
+        ]
+    )
     monkeypatch.setattr(
         inference_module,
         "predict_user_tower_single",
         AsyncMock(return_value=payload),
     )
 
-    with pytest.raises(RuntimeError, match=message):
-        await inference_module.compute_user_embedding(
-            "did:plc:user1",
-            es=object(),
-            inference_base_url="https://inference.example",
-            inference_api_key="secret",
-            source="two_tower_empty_history",
-            history_mode="empty",
+    with pytest.raises(inference_module.InferenceResponseFormatError, match=message):
+        await inference_module.predict_user_embedding(
+            history,
+            base_url="https://inference.example",
+            api_key="secret",
         )
 
 
 @pytest.mark.asyncio
-async def test_compute_user_embedding_disallows_empty_actual_history(monkeypatch):
-    fetch_history = AsyncMock(return_value=UserHistory(items=[]))
+async def test_predict_user_embedding_skips_empty_history(monkeypatch):
     predict_user_tower = AsyncMock()
-    monkeypatch.setattr(
-        inference_module,
-        "fetch_user_history_features",
-        fetch_history,
-    )
     monkeypatch.setattr(
         inference_module,
         "predict_user_tower_single",
         predict_user_tower,
     )
 
-    result = await inference_module.compute_user_embedding(
-        "did:plc:user1",
-        es=object(),
-        inference_base_url="https://inference.example",
-        inference_api_key="secret",
-        source="two_tower",
-        history_mode="actual",
-        allow_empty_history=False,
+    result = await inference_module.predict_user_embedding(
+        UserHistory(items=[]),
+        base_url="https://inference.example",
+        api_key="secret",
     )
 
-    assert result is None
-    fetch_history.assert_awaited_once()
+    assert result == inference_module.UserEmbeddingResult(0, 0, reason="no_likes")
     predict_user_tower.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_compute_user_embedding_disallows_actual_history_without_embeddings(
+async def test_predict_user_embedding_skips_history_without_embeddings(
     monkeypatch,
 ):
-    fetch_history = AsyncMock(
-        return_value=UserHistory(
-            items=[
-                UserHistoryItem(
-                    at_uri="at://did:plc:author/app.bsky.feed.post/1",
-                    liked_at="2026-01-01T00:00:00+00:00",
-                    embedding=None,
-                )
-            ]
-        )
+    history = UserHistory(
+        items=[
+            UserHistoryItem(
+                at_uri="at://did:plc:author/app.bsky.feed.post/1",
+                liked_at="2026-01-01T00:00:00+00:00",
+                embedding=None,
+            )
+        ]
     )
     predict_user_tower = AsyncMock()
-    monkeypatch.setattr(
-        inference_module,
-        "fetch_user_history_features",
-        fetch_history,
-    )
     monkeypatch.setattr(
         inference_module,
         "predict_user_tower_single",
         predict_user_tower,
     )
 
-    result = await inference_module.compute_user_embedding(
-        "did:plc:user1",
-        es=object(),
-        inference_base_url="https://inference.example",
-        inference_api_key="secret",
-        source="two_tower",
-        history_mode="actual",
-        allow_empty_history=False,
+    result = await inference_module.predict_user_embedding(
+        history,
+        base_url="https://inference.example",
+        api_key="secret",
     )
 
-    assert result is None
-    fetch_history.assert_awaited_once()
+    assert result == inference_module.UserEmbeddingResult(1, 0, reason="no_embedded_history")
     predict_user_tower.assert_not_awaited()
 
 
