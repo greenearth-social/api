@@ -532,7 +532,12 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         like_count=10,
         generator_name="two_tower",
     )
-    predict_user_tower = AsyncMock(return_value={"outputs": [[0.1, 0.2]]})
+    predict_user_tower = AsyncMock(return_value={
+        "outputs": [[0.1, 0.2]],
+        "model_type": "user-tower",
+        "model_uuid": "1" * 32,
+        "paired_post_model_uuid": "2" * 32,
+    })
     predict_heavy_ranker = AsyncMock(return_value=[0.9])
     fetch_recent_likes = AsyncMock(
         return_value=(
@@ -567,8 +572,8 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     )
     monkeypatch.setattr(
         candidate_two_tower_module,
-        "get_cached_post_tower_uuid",
-        AsyncMock(return_value="post-tower-v1"),
+        "get_average_user_embedding",
+        lambda: None,
     )
     monkeypatch.setattr(
         candidate_two_tower_module,

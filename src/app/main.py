@@ -42,6 +42,10 @@ from .routers import (
 )
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
+from .lib.average_user_embedding import (  # noqa: E402 - configure logging before app imports
+    init_average_user_embedding,
+    set_average_user_embedding,
+)
 from .lib.firebase_auth import init_firebase_auth
 from .lib.es_client import SlowQueryLoggingES
 from .lib.eventloop_monitor import start_eventloop_monitor, stop_eventloop_monitor
@@ -167,9 +171,11 @@ async def lifespan(app: FastAPI):
             "Firebase Admin SDK initialization failed; feed-transparency endpoints will return 500"
         )
     init_http_client()
+    await init_average_user_embedding()
     try:
         yield
     finally:
+        set_average_user_embedding(None)
         # Let in-flight popularity refreshes finish before the clients they
         # write through are closed.
         set_popularity_cache(None)

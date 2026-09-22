@@ -27,6 +27,9 @@ GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 # (ingex ingest/cmd/backfill_quality_index).
 GE_TWO_TOWER_KNN_INDEX="${GE_TWO_TOWER_KNN_INDEX:-posts_recent_quality}"
 
+# Optional exact average-embedding artifact; unset preserves actual-only retrieval.
+GE_AVERAGE_USER_EMBEDDING_URI="${GE_AVERAGE_USER_EMBEDDING_URI:-}"
+
 # Inference configuration
 GE_INFERENCE_BASE_URL=""
 
@@ -289,6 +292,7 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$GE_ELASTICSEARCH_URL"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_TWO_TOWER_KNN_INDEX=$GE_TWO_TOWER_KNN_INDEX"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_AVERAGE_USER_EMBEDDING_URI=$GE_AVERAGE_USER_EMBEDDING_URI"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_PROBE_USER_DID=did:plc:s4tl2ajfsnstzuxtegl7r33g"

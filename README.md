@@ -880,7 +880,7 @@ pipenv run python scripts/average_user_embedding.py \
 ```
 
 Replace `<run_id>` with the actual saved filename. Upload-only mode validates the
-complete version-2 contract, requires only cloud credentials, and preserves the
+complete version-1 contract, requires only cloud credentials, and preserves the
 artifact's exact bytes and original run ID. Legacy combined reports are not valid
 publication inputs. Generation options such as `--workers` or `--es-url` cannot
 accompany `--publish-artifact`, including `--output-dir`. Upload-only mode creates
@@ -890,11 +890,91 @@ creating output files. Exit zero means generation and any requested upload
 succeeded; runtime failures exit nonzero with details on stderr and in the final
 stdout summary.
 
-The eventual consumer must select an exact artifact, validate this versioned
-contract, and use `post_model_uuid` for its candidate-search model filter. Artifact
-selection, activation, and rollback belong to the consumer change. A future
-weekly run can reuse a fixed cloud prefix while creating a new immutable object
-each time.
+The two-tower consumer below selects an exact artifact. A future weekly producer
+run can reuse a fixed cloud prefix while creating a new immutable object each time.
+
+## Average-embedding prior for two-tower candidates
+
+`two_tower` combines the normalized average artifact with the requesting user's
+actual embedding. `AVG_USER_EMBEDDING_WEIGHT = 2.0` is a code constant:
+
+```python
+query_embedding = (
+    AVG_USER_EMBEDDING_WEIGHT * average_embedding + num_likes * actual_embedding
+) / (AVG_USER_EMBEDDING_WEIGHT + num_likes)
+```
+
+`num_likes` counts usable history embeddings passed to the user tower, up to the
+existing 64-like limit; it is not the user's retained or lifetime like count.
+The final blend is not normalized, since retrieval uses cosine similarity.
+This changes candidate retrieval only; the offline endpoint and rankers still
+compute actual user embeddings.
+
+| Prior | Usable user history | Retrieval |
+| --- | --- | --- |
+| Valid and matching model pair/dimension | Yes | Blended embedding |
+| Missing, invalid, or incompatible | Yes | Actual embedding only |
+| Valid | No | Average embedding only |
+| Unavailable | No | No candidates |
+
+An invalid blend also falls back to the valid actual embedding. Inference and
+Elasticsearch failures keep the existing generator error handling. The
+`two_tower_empty_history` variant uses the average alone and never loads history
+or calls inference; without a prior it returns no candidates. Source allocations
+and explicit zero source weights continue to apply.
+
+Blended and actual-only searches use the paired post-model UUID returned with
+the actual prediction. Average-only searches use the artifact's post-model UUID.
+The generator makes no `/ready` request. A prior from an older model searches
+only that model's indexed posts; it is never relabeled with a newer model UUID.
+
+### Selecting and replacing the prior
+
+Set `GE_AVERAGE_USER_EMBEDDING_URI` to one exact GCS object or local path:
+
+```bash
+export GE_AVERAGE_USER_EMBEDDING_URI="gs://your-bucket/average_user_embeddings/average_user_embedding_<run_id>.json"
+# Or a local file, with ~ expansion supported:
+export GE_AVERAGE_USER_EMBEDDING_URI="./outputs/average_user_embeddings/average_user_embedding_<run_id>.json"
+```
+
+The API validates the normalized version-1 contract and current history policy,
+then retains an immutable copy for the process lifetime. It loads during startup,
+off the event loop, with a single GCS download attempt and a 30-second request
+timeout. GCS uses Application Default Credentials. Give the API service account
+bucket-scoped `roles/storage.objectViewer` on the selected bucket; producer upload
+permissions alone do not grant the API read access.
+
+Unset configuration or load failure keeps the API available with the fallback
+behavior above. There are no feed-request downloads or automatic refreshes.
+To activate or roll back an artifact, select its URI and restart/redeploy the API.
+Restart also retries a failed startup load. `scripts/deploy.sh` forwards the
+variable; IAM grants and deployment are separate operational steps.
+
+For devctl, set `GE_DEV_AVERAGE_USER_EMBEDDING_URI` in
+`internal-tools/devenv/devenv.local.env` to a container-visible path such as
+`/app/outputs/average_user_embeddings/average_user_embedding_<run_id>.json`, then
+run `devctl restart api`. The API checkout is mounted at `/app`; local file usage
+needs no cloud credentials. With a worktree, use the dev environment's repository
+root override so it mounts the intended API checkout.
+
+### Local verification
+
+After restarting with an artifact matching the inference model pair, call the
+existing interface with a DID that has usable history:
+
+```bash
+curl --fail-with-body http://localhost:8300/candidates/generate \
+  -H "X-API-Key: $GE_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"user_did":"did:plc:YOUR_DID","num_candidates":10,"generators":[{"name":"two_tower","weight":1}]}'
+```
+
+Repeat with a DID without usable history to exercise average-only retrieval.
+Unset the artifact setting and restart to check actual-only fallback and empty
+results for the same two users. Startup logs identify the artifact, model pair,
+dimension, and contributor count; generator logs report retrieval mode, fallback
+reason, and result counts. Existing generator-result diagnostics retain fallback
+and empty-search reasons. Vectors are not logged.
 
 ## User-History Feature Cache
 

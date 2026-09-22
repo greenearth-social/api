@@ -1,9 +1,13 @@
 """Tests for app-level middleware in main.py."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from fastapi import Request
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
+from . import main
+from .lib import average_user_embedding as prior_module
 from .lib import inflight
 from .main import _es_connections_per_node, _is_deployed_environment, _resolve_endpoint, app
 
@@ -116,3 +120,60 @@ def test_inflight_middleware_releases_on_handler_exception():
         ]
 
     assert inflight.current() == 0
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_lifespan_loads_prior_once_and_keeps_api_available_on_failure(
+    monkeypatch, tmp_path, configured
+):
+    """Optional prior loading cannot take unrelated API routes offline."""
+    from pathlib import Path
+
+    monkeypatch.setenv("GE_ELASTICSEARCH_API_KEY", "test-key")
+    monkeypatch.setenv("GE_FEED_CONTEXT_SECRET", "test-secret")
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    monkeypatch.delenv("GE_POSTHOG_API_KEY", raising=False)
+    monkeypatch.delenv("GE_DEV_SESSION_SECRET", raising=False)
+    if configured:
+        uri = (
+            Path(__file__).resolve().parents[2] / "scripts/fixtures/average_user_embedding_v1.json"
+        )
+    else:
+        uri = tmp_path / "missing.json"
+    monkeypatch.setenv("GE_AVERAGE_USER_EMBEDDING_URI", str(uri))
+
+    load = MagicMock(wraps=prior_module._load_average_user_embedding)
+    monkeypatch.setattr(prior_module, "_load_average_user_embedding", load)
+    monkeypatch.setattr(main, "AsyncElasticsearch", MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr(main, "SlowQueryLoggingES", lambda es: es)
+    metrics = MagicMock(shutdown=AsyncMock())
+    monkeypatch.setattr(main, "MetricCollector", MagicMock(return_value=metrics))
+    for name in (
+        "init_id_resolver",
+        "init_firestore_client",
+        "init_firebase_auth",
+        "init_http_client",
+        "start_eventloop_monitor",
+        "set_metric_collector",
+        "set_popularity_cache",
+        "set_followed_users_cache",
+        "set_user_history_cache",
+        "set_posthog_client",
+        "FirestoreFeedCache",
+    ):
+        monkeypatch.setattr(main, name, MagicMock())
+    for name in ("PopularityCache", "FollowedUsersCache", "FirestoreUserHistoryCache"):
+        monkeypatch.setattr(main, name, MagicMock(return_value=MagicMock(drain=AsyncMock())))
+    for name in ("close_http_client", "close_perspective_client", "stop_eventloop_monitor"):
+        monkeypatch.setattr(main, name, AsyncMock())
+    monkeypatch.setattr(main, "get_posthog_client", lambda: None)
+
+    local_app = FastAPI(lifespan=main.lifespan)
+    local_app.include_router(main.health.router)
+    with TestClient(local_app) as client:
+        assert (prior_module.get_average_user_embedding() is not None) is configured
+        assert client.get("/health").status_code == 200
+        assert client.get("/health").status_code == 200
+        load.assert_called_once_with(str(uri))
+
+    assert prior_module.get_average_user_embedding() is None
