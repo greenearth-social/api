@@ -25,7 +25,7 @@ REQUEST_TIMEOUT = 60
 
 
 class PublicationError(Exception):
-    """A safe, credential-free publication or promotion failure."""
+    """A safe, credential-free publication, promotion, or resolution failure."""
 
 
 def environment_prefix(environment: str, project_id: str = DEFAULT_PROJECT_ID) -> str:
@@ -204,3 +204,34 @@ def promote_artifact(
         raise PublicationError(
             f"Promotion failed ({type(error).__name__}); default selection was not confirmed"
         ) from None
+
+
+def resolve_artifact(
+    environment: str,
+    project_id: str = DEFAULT_PROJECT_ID,
+    artifact_uri: str | None = None,
+) -> dict[str, Any]:
+    """Validate a default or explicit deployment artifact without changing GCS objects."""
+    prefix = environment_prefix(environment, project_id)
+    if artifact_uri is not None:
+        _gcs_parts(artifact_uri)
+    try:
+        client = storage.Client()
+        try:
+            uri = artifact_uri
+            if uri is None:
+                uri, _ = _read_default(client, prefix)
+                if uri is None:
+                    raise PublicationError(
+                        f"No default artifact for {environment}; promote an artifact first"
+                    )
+            data, _ = _download(client, uri)
+            artifact = parse_artifact(data)
+            _require_artifact_name(uri, artifact)
+            return _identity(artifact, uri)
+        finally:
+            client.close()
+    except (PublicationError, ArtifactValidationError):
+        raise
+    except Exception as error:
+        raise PublicationError(f"Artifact resolution failed ({type(error).__name__})") from None

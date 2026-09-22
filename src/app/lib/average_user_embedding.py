@@ -7,12 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from src.average_user_embedding_artifact import (
+from .average_user_embedding_artifact import (
     ArtifactValidationError,
     load_artifact,
     parse_artifact,
 )
-
 from .embeddings import MINILM_L12_EMBEDDING_KEY
 from .user_history_cache import USER_HISTORY_LIMIT
 
