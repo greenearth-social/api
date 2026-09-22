@@ -29,10 +29,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
-# Keep standalone execution independent of the working directory and app startup.
+# Add the repo's src/ directory so the script can import app.* from any working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from average_user_embedding_artifact import (  # noqa: E402
+from app.lib.average_user_embedding_artifact import (  # noqa: E402
     ArtifactValidationError,
     is_count,
     is_finite_number,

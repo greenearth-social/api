@@ -735,8 +735,10 @@ logs to investigate failures.
 
 ### Generate locally
 
-Run from the API checkout with these credentials available in the environment
-(`pipenv run` also follows the repository's normal `.env` loading behavior):
+Run from the API checkout using its Pipenv environment. Like other API scripts,
+this imports `app` helpers and loads the repository's `.env` outside Cloud Run;
+existing environment variables take precedence. Supply these credentials through
+the environment or `.env`:
 
 - `POSTHOG_PERSONAL_API_KEY`: a personal key authorized to query the project.
 - `GE_ELASTICSEARCH_API_KEY`: a read-only key with cluster-monitor permission,
@@ -818,11 +820,11 @@ See the [artifact schema](scripts/average_user_embedding.schema.json) and
 Artifact validation requires an L2 magnitude within `1e-6` of 1.
 The fixture is illustrative, not a model artifact to deploy.
 
-The producer and API consumers share the standard-library-only
-[`average_user_embedding_artifact`](src/average_user_embedding_artifact.py) module.
+The producer and API consumers share the
+[`app.lib.average_user_embedding_artifact`](src/app/lib/average_user_embedding_artifact.py) module.
 Use `parse_artifact(data)` to validate downloaded bytes or `load_artifact(path)`
-to read a local file and retain its original bytes. Importing this module does
-not initialize the API or load `.env`.
+to read a local file and retain its original bytes. The script adds the repository's
+`src/` directory to its import path, following the other scripts' `app.lib` imports.
 
 The artifact excludes DIDs, individual vectors, credentials, and service URLs,
 and is written atomically. A final JSON summary is printed to stdout with
@@ -880,7 +882,7 @@ pipenv run python scripts/average_user_embedding.py \
 ```
 
 Replace `<run_id>` with the actual saved filename. Upload-only mode validates the
-complete version-2 contract, requires only cloud credentials, and preserves the
+complete version-1 contract, requires only cloud credentials, and preserves the
 artifact's exact bytes and original run ID. Legacy combined reports are not valid
 publication inputs. Generation options such as `--workers` or `--es-url` cannot
 accompany `--publish-artifact`, including `--output-dir`. Upload-only mode creates

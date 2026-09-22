@@ -16,7 +16,7 @@ from urllib.error import HTTPError, URLError
 import average_user_embedding as average
 import pytest
 
-from average_user_embedding_artifact import ArtifactValidationError
+from app.lib.average_user_embedding_artifact import ArtifactValidationError
 
 
 class FakeClient:
@@ -728,29 +728,9 @@ def test_defaults_are_generic_and_local_only():
     assert args.gcs_output_prefix is None
 
 
-def test_standalone_help_works_without_dependencies_or_dotenv_from_another_directory(tmp_path):
-    (tmp_path / ".env").write_text("AVERAGE_ARTIFACT_TEST_DOTENV=must-not-load\n")
-    script = """
-import os
-import runpy
-import sys
-
-before = dict(os.environ)
-sys.argv = [sys.argv[1], "--help"]
-try:
-    runpy.run_path(sys.argv[0], run_name="__main__")
-except SystemExit as error:
-    assert error.code == 0
-else:
-    raise AssertionError("--help should exit successfully")
-assert dict(os.environ) == before
-assert "average_user_embedding_artifact" in sys.modules
-assert not any(name == "app" or name.startswith("app.") for name in sys.modules)
-assert not any(name == "dotenv" or name.startswith("dotenv.") for name in sys.modules)
-assert not any("site-packages" in path for path in sys.path)
-"""
+def test_help_works_from_another_directory(tmp_path):
     result = subprocess.run(
-        [sys.executable, "-I", "-S", "-c", script, str(Path(average.__file__))],
+        [sys.executable, str(Path(average.__file__).resolve()), "--help"],
         cwd=tmp_path,
         capture_output=True,
         text=True,

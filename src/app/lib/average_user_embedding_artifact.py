@@ -1,4 +1,4 @@
-"""Standard-library validation and loading for normalized average-embedding artifacts."""
+"""Shared validation and loading for normalized average-embedding artifacts."""
 
 import json
 import math
