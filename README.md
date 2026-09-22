@@ -704,8 +704,11 @@ counts those users' retained likes directly in Elasticsearch, and requests their
 two-tower user embeddings from this API. It computes an equally weighted
 coordinate-wise arithmetic mean with `math.fsum`, then L2-normalizes the mean
 to unit length before saving. Normalization is applied after averaging.
-Generation and cloud publication are manual operations; neither changes the
-candidate generator or activates an artifact in a feed.
+Generation saves a local artifact for inspection. A separate promotion command
+uploads the selected artifact and prepares an environment's default selection.
+Neither command activates an artifact in a feed. The two-tower consumer below
+loads an explicitly configured artifact; automatic selection of the promoted
+default during deployment is not yet implemented.
 
 ### Endpoint and inference prerequisite
 
@@ -828,8 +831,8 @@ to read a local file and retain its original bytes. The script adds the reposito
 
 The artifact excludes DIDs, individual vectors, credentials, and service URLs,
 and is written atomically. A final JSON summary is printed to stdout with
-`status`, `artifact_path`, and `publication`, plus the original `run_id` once a
-valid artifact is available and `error` on failure. Aggregate progress, contributor,
+`status` and `artifact_path`, plus the original `run_id` once a valid artifact is
+available and `error` on failure. Aggregate progress, contributor,
 skipped and failed counts, and reason summaries go to stderr. Per-user request
 or outcome messages and diagnostic lists are not saved. Redirect stderr if you
 want to retain the logs, for example:
@@ -842,58 +845,108 @@ pipenv run python scripts/average_user_embedding.py \
 Missing-history skips are summarized and may reduce coverage. Any exhausted user
 request failure, incomplete collection, authentication/configuration error,
 source mismatch, mixed model pair/dimension/history policy, zero contributors,
-or invalid/zero-magnitude mean prevents artifact publication and exits nonzero.
-There is no partial-publication override. A failed generation creates no artifact.
+or invalid/zero-magnitude mean prevents saving the artifact and exits nonzero.
+There is no partial-result override. A failed generation creates no artifact.
+Exit zero means the local artifact was saved successfully; runtime failures exit
+nonzero with details on stderr and in the final stdout summary.
 
-### Optional cloud publication and retry
+### Inspect and promote an artifact
 
-Cloud upload uses `google-cloud-storage` with Application Default Credentials,
-for example `gcloud auth application-default login` for a local operator. The
-identity needs object-create and object-read permissions on the destination.
-The script does not create buckets or change IAM.
+Keep generation and promotion separate. Generate locally with the command above,
+then inspect the saved JSON's model pair, dimension, contributor count, cohort,
+and history policy. The test bucket is an optional place to share draft artifacts;
+there is no requirement to upload there before promotion.
 
-```bash
-pipenv run python scripts/average_user_embedding.py \
-  --gcs-output-prefix gs://greenearth-471522-engagement-prediction-model-prod/average_user_embeddings
-```
+`scripts/promote_average_user_embedding.py` takes a local file or an exact GCS
+artifact URI and requires an explicit destination environment. It validates the
+artifact, publishes its **original bytes** under its original timestamped filename
+in that environment's bucket, then updates `average_user_embeddings/default.json`.
+The command prints the previous and new selections. It does not generate a new
+embedding, deploy the API, or change traffic. Its JSON stdout summary includes
+the selected artifact URI and a `publication` field with the uploaded object's
+URI, generation, and SHA-256. Progress and selection details go to stderr;
+failures exit nonzero with an error summary.
 
-The prefix is an explicit user choice; omitting it keeps the run local. The
-script places the artifact directly under that prefix, using its run ID:
+| Destination | Default bucket |
+| --- | --- |
+| Stage | `greenearth-471522-engagement-prediction-model-stage` |
+| Production | `greenearth-471522-engagement-prediction-model-prod` |
+| Optional draft storage | `greenearth-471522-engagement-prediction-test` |
+
+Both environment buckets use the same flat layout:
 
 ```text
-<prefix>/average_user_embedding_<run_id>.json
+average_user_embeddings/
+    average_user_embedding_<run_id>.json
+    average_user_embedding_<another_run_id>.json
+    default.json
 ```
 
-Model identifiers remain in the artifact metadata. A bucket-only prefix writes
-the artifact at the bucket root.
+The default is a small pointer to an artifact in that **same bucket and prefix**:
 
-It uploads only the exact compact artifact bytes, with a create-only precondition.
-An existing object is accepted only after identical bytes are verified at its
-specific generation. The stdout summary's `publication` field contains the URI,
-generation, and SHA-256. No `latest` pointer is updated.
+```json
+{
+  "artifact_uri": "gs://greenearth-471522-engagement-prediction-model-stage/average_user_embeddings/average_user_embedding_<run_id>.json"
+}
+```
 
-If upload fails, the valid local artifact remains available and the command
-exits nonzero. Retry that artifact without collecting data or running inference:
+For example, after inspecting a generated file:
 
 ```bash
-pipenv run python scripts/average_user_embedding.py \
-  --publish-artifact "./outputs/average_user_embeddings/average_user_embedding_<run_id>.json" \
-  --gcs-output-prefix gs://greenearth-471522-engagement-prediction-model-prod/average_user_embeddings
+pipenv run python scripts/promote_average_user_embedding.py \
+  ./outputs/average_user_embeddings/average_user_embedding_<run_id>.json \
+  --environment stage
 ```
 
-Replace `<run_id>` with the actual saved filename. Upload-only mode validates the
-complete version-1 contract, requires only cloud credentials, and preserves the
-artifact's exact bytes and original run ID. Legacy combined reports are not valid
-publication inputs. Generation options such as `--workers` or `--es-url` cannot
-accompany `--publish-artifact`, including `--output-dir`. Upload-only mode creates
-no new local files or output directory.
-Invalid argument combinations print usage and exit before a run starts, without
-creating output files. Exit zero means generation and any requested upload
-succeeded; runtime failures exit nonzero with details on stderr and in the final
-stdout summary.
+Once satisfied with the staged artifact, copy the selected immutable artifact to
+production and promote it there:
 
-The two-tower consumer below selects an exact artifact. A future weekly producer
-run can reuse a fixed cloud prefix while creating a new immutable object each time.
+```bash
+pipenv run python scripts/promote_average_user_embedding.py \
+  gs://greenearth-471522-engagement-prediction-model-stage/average_user_embeddings/average_user_embedding_<run_id>.json \
+  --environment prod
+```
+
+Use a timestamped artifact URI as the source, not `default.json`. Promotion keeps
+the model identifiers unchanged: use the same artifact across environments only
+when the target model pair is compatible. Otherwise generate an artifact for the
+target environment. The command validates the artifact contract but does not query
+the inference service to check which models are deployed.
+
+`--project-id` overrides `greenearth-471522` for promotion; the
+destination bucket is derived as `<project-id>-engagement-prediction-model-<environment>`.
+Promotion uses create-only uploads, accepting an existing artifact only if its bytes
+match. It updates the default with a generation precondition so a concurrent
+promotion fails instead of silently overwriting another selection. A failed upload
+leaves the default unchanged. If the upload succeeds but the pointer update fails,
+the uploaded artifact remains available but unselected; inspect the current default
+before retrying. The local source file is retained, so retry promotion with that
+same artifact without collecting data or running inference again.
+
+Promotion uses `google-cloud-storage` with Application Default Credentials,
+for example `gcloud auth application-default login` for a local operator.
+The promoting identity needs source-object read access for GCS input and destination
+read/create/overwrite permissions. The promotion command does not create buckets
+or change IAM; arrange those permissions separately.
+
+### Deployment handoff
+
+Promotion prepares `default.json` and the immutable artifacts it references.
+The runtime consumer below loads an exact artifact URI supplied through
+`GE_AVERAGE_USER_EMBEDDING_URI`; `scripts/deploy.sh` currently forwards that
+setting but does not resolve `default.json`. Promotion alone therefore does not
+change the artifact selected by a deployment.
+
+A future deployment update should resolve and validate the environment's default,
+then pin its timestamped artifact URI on the revision. The runtime should continue
+loading that exact artifact at process startup, rather than following the mutable
+pointer, so promotion cannot change an existing revision's selection.
+
+Retain timestamped artifacts for reproducibility and future revision rollbacks.
+To restore an earlier default selection, promote its immutable artifact again.
+
+A future weekly job can generate local draft artifacts independently of promotion.
+Promotion can remain manual until automatic selection is desired.
 
 ## Average-embedding prior for two-tower candidates
 
@@ -944,7 +997,7 @@ The API validates the normalized version-1 contract and current history policy,
 then retains an immutable copy for the process lifetime. It loads during startup,
 off the event loop, with a single GCS download attempt and a 30-second request
 timeout. GCS uses Application Default Credentials. Give the API service account
-bucket-scoped `roles/storage.objectViewer` on the selected bucket; producer upload
+bucket-scoped `roles/storage.objectViewer` on the selected bucket; promotion
 permissions alone do not grant the API read access.
 
 Unset configuration or load failure keeps the API available with the fallback
@@ -1195,7 +1248,8 @@ greenearth/api/
 │   ├── rollback.sh                # Roll traffic back to a previous revision
 │   ├── gcp_setup.sh               # GCP environment setup
 │   ├── apikeys.py                 # API key management
-│   ├── average_user_embedding.py  # Offline average generation and publication
+│   ├── average_user_embedding.py  # Offline average generation
+│   ├── promote_average_user_embedding.py # Select an artifact for stage or prod
 │   ├── feed_debug.py              # CLI debug tool
 │   ├── manage_pinned_posts.py     # Change-aware public feed pin publication
 │   ├── update_feed_descriptions.py # One-time public description migration
