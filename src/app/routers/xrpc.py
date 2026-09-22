@@ -463,7 +463,7 @@ async def _run_ranking_pipeline(
 
     Runs inside a per-request cache scope so that identical ES queries
     issued by different stages (e.g. ``fetch_recent_liked_post_uris`` in
-    both the two-tower generator and the two-tower ranker) collapse to a
+    both the two-tower generator and the heavy ranker) collapse to a
     single round-trip.
     """
     rec = current_recorder()

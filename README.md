@@ -373,7 +373,7 @@ Inference endpoint resolution order during deploy:
 
 1. Explicit `GE_INFERENCE_BASE_URL` / `--inference-base-url` (best for local overrides)
 2. Mapped domain from `GE_INFERENCE_DOMAIN` (or env default)
-3. If mapping is disabled and no base URL is provided, two_tower calls will fail
+3. If mapping is disabled and no base URL is provided, two-tower candidate generation and heavy ranking calls will fail
 
 Default mapped inference domains:
 
