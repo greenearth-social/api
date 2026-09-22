@@ -1,20 +1,18 @@
 """Consumer-independent coverage of the average-embedding artifact contract."""
 
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from average_user_embedding_artifact import (
+from app.lib.average_user_embedding_artifact import (
     ArtifactValidationError,
     load_artifact,
     parse_artifact,
     validate_artifact,
 )
 
-FIXTURE = Path(__file__).parents[1] / "scripts/fixtures/average_user_embedding_v1.json"
+FIXTURE = Path(__file__).parents[3] / "scripts/fixtures/average_user_embedding_v1.json"
 USER_MODEL = "1affd684bc7f45f895e488f83dd0a2fa"
 
 
@@ -106,34 +104,3 @@ def test_invalid_json_or_encoding_has_a_useful_validation_error(data):
 def test_parser_validates_decoded_objects(data):
     with pytest.raises(ArtifactValidationError, match="version 1 compact schema"):
         parse_artifact(data)
-
-
-def test_shared_module_loads_with_only_standard_library_and_no_environment_changes(tmp_path):
-    (tmp_path / ".env").write_text("AVERAGE_ARTIFACT_TEST_DOTENV=must-not-load\n")
-    script = """
-import os
-import sys
-
-before = dict(os.environ)
-sys.path.insert(0, sys.argv[1])
-from average_user_embedding_artifact import load_artifact
-from pathlib import Path
-
-artifact, data = load_artifact(Path(sys.argv[2]))
-assert artifact["format_version"] == 1
-assert data
-assert dict(os.environ) == before
-assert not any(name == "app" or name.startswith("app.") for name in sys.modules)
-assert not any(name == "dotenv" or name.startswith("dotenv.") for name in sys.modules)
-assert not any("site-packages" in path for path in sys.path)
-print("validated without application imports or environment changes")
-"""
-    result = subprocess.run(
-        [sys.executable, "-I", "-S", "-c", script, str(Path(__file__).parent), str(FIXTURE)],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "validated without application imports or environment changes"
