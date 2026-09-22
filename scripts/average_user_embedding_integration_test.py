@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.lib import inference, user_history_cache
+from app.lib.average_user_embedding_artifact import load_artifact
 from app.lib.embeddings import MINILM_L12_EMBEDDING_DIM, MINILM_L12_EMBEDDING_FIELD
 from app.routers import embeddings
 from app.security import verify_api_key
@@ -197,7 +198,7 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
     else:
         assert summary["status"] == "success"
         artifact_path = tmp_path / "results" / f"average_user_embedding_{summary['run_id']}.json"
-        artifact, data = producer.load_artifact(artifact_path)
+        artifact, data = load_artifact(artifact_path)
         assert summary["artifact_path"] == str(artifact_path)
         assert list((tmp_path / "results").iterdir()) == [artifact_path]
         assert artifact["format_version"] == 1

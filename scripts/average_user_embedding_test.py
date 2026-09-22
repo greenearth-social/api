@@ -1,4 +1,4 @@
-"""Offline coverage of cohort completeness, failure policy, and published means."""
+"""Offline coverage of cohort completeness, failure policy, and saved means."""
 
 import io
 import json
@@ -15,8 +15,6 @@ from urllib.error import HTTPError, URLError
 
 import average_user_embedding as average
 import pytest
-
-from app.lib.average_user_embedding_artifact import ArtifactValidationError
 
 
 class FakeClient:
@@ -526,7 +524,7 @@ def read_summary(capsys):
 @pytest.mark.parametrize(
     "tls_args,insecure", [([], True), (["--es-insecure"], True), (["--no-es-insecure"], False)]
 )
-def test_full_pipeline_publishes_only_compact_artifact_and_no_secrets(
+def test_full_pipeline_saves_only_compact_artifact_and_no_secrets(
     tmp_path, monkeypatch, capsys, tls_args, insecure
 ):
     clients = install_pipeline_fakes(monkeypatch)
@@ -541,8 +539,7 @@ def test_full_pipeline_publishes_only_compact_artifact_and_no_secrets(
     assert artifact["run_id"] == summary["run_id"]
     assert artifact["cohort"]["min_likes"] == 5
     assert summary["status"] == "success"
-    assert set(summary) == {"status", "artifact_path", "publication", "run_id"}
-    assert summary["publication"] is None
+    assert set(summary) == {"status", "artifact_path", "run_id"}
     assert artifact["contributing_users"] == 4
     assert {
         key: artifact["cohort"][key]
@@ -577,7 +574,7 @@ def test_full_pipeline_publishes_only_compact_artifact_and_no_secrets(
 @pytest.mark.parametrize(
     "failure", ["zero", "auth", "mixed", "request", "malformed", "collection", "interrupt"]
 )
-def test_failed_generation_returns_error_without_output_or_upload(
+def test_failed_generation_returns_error_without_output(
     tmp_path, monkeypatch, capsys, caplog, failure
 ):
     caplog.set_level(logging.INFO, logger=average.__name__)
@@ -598,23 +595,14 @@ def test_failed_generation_returns_error_without_output_or_upload(
         )
 
     install_pipeline_fakes(monkeypatch, respond, collection_failure=failure == "collection")
-    publish = Mock(side_effect=AssertionError("must not publish"))
-    monkeypatch.setattr(average, "publish_artifact", publish)
-    assert (
-        average.main(
-            ["--output-dir", str(tmp_path), "--gcs-output-prefix", "gs://test-bucket/averages"]
-        )
-        == 1
-    )
+    assert average.main(["--output-dir", str(tmp_path)]) == 1
     summary = read_summary(capsys)
     assert summary["artifact_path"] is None
     assert summary["status"] == "failed" and summary["error"]
-    assert summary["publication"] is None
-    assert set(summary) == {"status", "artifact_path", "publication", "error"}
+    assert set(summary) == {"status", "artifact_path", "error"}
     assert not list(tmp_path.iterdir())
     assert "did:" not in caplog.text
     assert "SECRET-" not in caplog.text
-    publish.assert_not_called()
 
 
 @pytest.mark.parametrize("override", [None, "custom/output", "~/embedding-results"])
@@ -639,15 +627,15 @@ def test_output_paths_expand_from_cwd_or_home(tmp_path, monkeypatch, capsys, cap
     assert list(expected.iterdir()) == [Path(summary["artifact_path"])]
 
 
-def test_publication_is_atomic_and_cleans_failed_write(tmp_path, monkeypatch):
+def test_local_output_is_atomic_and_cleans_failed_write(tmp_path, monkeypatch):
     target = tmp_path / "artifact.json"
 
-    def fail_publish(source, destination):
+    def fail_write(source, destination):
         assert json.loads(source.read_text()) == {"embedding": [1, 2]}
         assert not destination.exists()
         raise OSError("simulated failure")
 
-    monkeypatch.setattr(average.os, "replace", fail_publish)
+    monkeypatch.setattr(average.os, "replace", fail_write)
     with pytest.raises(OSError):
         average.atomic_json(target, {"embedding": [1, 2]})
     assert list(tmp_path.iterdir()) == []
@@ -713,19 +701,12 @@ def test_embedding_and_retry_logs_are_aggregate_and_safe(monkeypatch, caplog):
     assert "L2-normalized unweighted mean" in caplog.text
 
 
-def artifact_fixture():
-    return json.loads(
-        (Path(__file__).parent / "fixtures/average_user_embedding_v1.json").read_text()
-    )
-
-
 def test_defaults_are_generic_and_local_only():
     args = average.build_parser().parse_args([])
     assert args.es_url == "https://localhost:9200"
     assert args.es_insecure is True
     assert args.api_url == "http://localhost:8300"
     assert args.output_dir == "./outputs/average_user_embeddings/"
-    assert args.gcs_output_prefix is None
 
 
 def test_help_works_from_another_directory(tmp_path):
@@ -737,201 +718,25 @@ def test_help_works_from_another_directory(tmp_path):
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert "--publish-artifact" in result.stdout
+    assert "--output-dir" in result.stdout
+    assert "--publish-artifact" not in result.stdout
+    assert "--gcs-output-prefix" not in result.stdout
     assert "--no-es-insecure" in result.stdout
 
 
-def setup_gcs(monkeypatch, *, existing=None, upload_failure=None):
-    from google.api_core.exceptions import PreconditionFailed
-    from google.cloud import storage
-
-    blob, pinned, bucket, client = Mock(), Mock(), Mock(), Mock()
-    blob.generation = 123
-    pinned.download_as_bytes.return_value = existing
-    if existing is not None:
-        blob.upload_from_string.side_effect = PreconditionFailed("SECRET BODY")
-    elif upload_failure:
-        blob.upload_from_string.side_effect = upload_failure
-    bucket.blob.side_effect = lambda name, generation=None: pinned if generation else blob
-    client.bucket.return_value = bucket
-    monkeypatch.setattr(storage, "Client", lambda: client)
-    return client, blob, pinned
-
-
-def artifact_file(tmp_path):
-    path = tmp_path / "input.json"
-    path.write_text(json.dumps(artifact_fixture(), separators=(",", ":")))
-    return path
-
-
-def test_nonunit_artifact_is_rejected_before_cloud_access(tmp_path, monkeypatch):
-    from google.cloud import storage
-
-    artifact = artifact_fixture()
-    artifact["embedding"] = [4, 6]
-    path = tmp_path / "input.json"
-    path.write_text(json.dumps(artifact))
-    client = Mock(side_effect=AssertionError("must not access cloud"))
-    monkeypatch.setattr(storage, "Client", client)
-    with pytest.raises(ArtifactValidationError, match="unit L2 magnitude"):
-        average.publish_artifact(path, "gs://test-bucket/averages")
-    client.assert_not_called()
-
-
 @pytest.mark.parametrize(
-    "data,reason",
-    [
-        (b'{"format_version": 1, "format_version": 1}', "Artifact contains duplicate JSON keys"),
-        (b'"\xff"', "Artifact is not valid JSON"),
-        (b"{}", "Artifact does not match the version 1 compact schema"),
-    ],
+    "flag,value",
+    [("--publish-artifact", "artifact.json"), ("--gcs-output-prefix", "gs://test-bucket/averages")],
 )
-def test_publish_validation_keeps_cli_failure_summary_and_exit_code(
-    tmp_path, monkeypatch, capsys, data, reason
-):
-    path = tmp_path / "invalid.json"
-    path.write_bytes(data)
-    publish = Mock(side_effect=AssertionError("invalid artifacts must not reach publication"))
-    monkeypatch.setattr(average, "publish_artifact", publish)
-
-    assert (
-        average.main(
-            ["--publish-artifact", str(path), "--gcs-output-prefix", "gs://test-bucket/averages"]
-        )
-        == 1
-    )
-
-    output = capsys.readouterr()
-    assert json.loads(output.out) == {
-        "status": "failed",
-        "artifact_path": None,
-        "publication": None,
-        "error": reason,
-    }
-    assert f"Run: failed: {reason}" in output.err
-    publish.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "prefix,object_prefix",
-    [
-        ("gs://test-bucket/averages/", "averages/"),
-        ("gs://test-bucket/averages", "averages/"),
-        ("gs://test-bucket", ""),
-        ("gs://test-bucket/", ""),
-        ("gs://test-bucket/team/averages", "team/averages/"),
-    ],
-)
-def test_gcs_upload_uses_exact_bytes_immutable_name_and_bounded_retries(
-    tmp_path, monkeypatch, prefix, object_prefix
-):
-    path = artifact_file(tmp_path)
-    client, blob, _ = setup_gcs(monkeypatch)
-    result = average.publish_artifact(path, prefix)
-    artifact = artifact_fixture()
-    expected = f"{object_prefix}average_user_embedding_{artifact['run_id']}.json"
-    assert result["uri"] == f"gs://test-bucket/{expected}"
-    assert result["generation"] == "123"
-    assert result["sha256"] == average.hashlib.sha256(path.read_bytes()).hexdigest()
-    client.bucket.assert_called_once_with("test-bucket")
-    client.bucket.return_value.blob.assert_called_once_with(expected)
-    args, kwargs = blob.upload_from_string.call_args
-    assert args == (path.read_bytes(),)
-    assert kwargs["if_generation_match"] == 0 and kwargs["timeout"] == 60
-    assert kwargs["retry"].deadline == 180
-
-
-def test_gcs_existing_identical_generation_is_idempotent(tmp_path, monkeypatch):
-    path = artifact_file(tmp_path)
-    client, blob, pinned = setup_gcs(monkeypatch, existing=path.read_bytes())
-    assert average.publish_artifact(path, "gs://test-bucket/averages")["generation"] == "123"
-    blob.reload.assert_called_once()
-    assert client.bucket.return_value.blob.call_args.kwargs == {"generation": 123}
-    assert pinned.download_as_bytes.call_args.kwargs["if_generation_match"] == 123
-    assert pinned.download_as_bytes.call_args.kwargs["timeout"] == 60
-
-
-def test_gcs_existing_different_bytes_refuses_overwrite(tmp_path, monkeypatch):
-    path = artifact_file(tmp_path)
-    _, blob, _ = setup_gcs(monkeypatch, existing=b"different")
-    with pytest.raises(average.RunError, match="different bytes"):
-        average.publish_artifact(path, "gs://test-bucket/averages")
-    assert blob.upload_from_string.call_count == 1
-
-
-def test_upload_failure_preserves_only_local_artifact(tmp_path, monkeypatch, capsys):
-    install_pipeline_fakes(monkeypatch)
-    setup_gcs(monkeypatch, upload_failure=RuntimeError("SECRET-RAW-ERROR"))
-    assert (
-        average.main(
-            ["--output-dir", str(tmp_path), "--gcs-output-prefix", "gs://test-bucket/averages"]
-        )
-        == 1
-    )
-    summary = read_summary(capsys)
-    artifact_path = Path(summary["artifact_path"])
-    assert list(tmp_path.iterdir()) == [artifact_path]
-    assert json.loads(artifact_path.read_text())["run_id"] == summary["run_id"]
-    assert summary["publication"] is None
-    assert summary["status"] == "failed"
-    assert summary["error"]
-    for path in tmp_path.iterdir():
-        assert "SECRET-RAW-ERROR" not in path.read_text()
-
-
-def test_publish_only_needs_no_collection_credentials_and_preserves_original_id(
-    tmp_path, monkeypatch, capsys
-):
-    path = artifact_file(tmp_path)
-    for name in ("POSTHOG_PERSONAL_API_KEY", "GE_ELASTICSEARCH_API_KEY", "GE_API_KEY"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(average, "JsonClient", Mock(side_effect=AssertionError("no collection")))
-    monkeypatch.chdir(tmp_path)
-    _, blob, _ = setup_gcs(monkeypatch)
-    assert (
-        average.main(
-            [
-                "--publish-artifact",
-                str(path),
-                "--gcs-output-prefix",
-                "gs://test-bucket/averages",
-            ]
-        )
-        == 0
-    )
-    summary = read_summary(capsys)
-    assert summary["publication"]["uri"] == (
-        f"gs://test-bucket/averages/average_user_embedding_{artifact_fixture()['run_id']}.json"
-    )
-    assert summary["run_id"] == artifact_fixture()["run_id"]
-    assert blob.upload_from_string.call_args.args == (path.read_bytes(),)
-    assert summary["artifact_path"] == str(path)
-    assert set(summary) == {"status", "artifact_path", "publication", "run_id"}
-    assert list(tmp_path.iterdir()) == [path]
-
-
-def test_publish_only_requires_explicit_destination(tmp_path, capsys):
-    path = artifact_file(tmp_path)
+def test_removed_upload_options_fail_before_generation(tmp_path, monkeypatch, capsys, flag, value):
+    generate = Mock(side_effect=AssertionError("generation must not start"))
+    monkeypatch.setattr(average, "generate", generate)
     with pytest.raises(SystemExit) as error:
-        average.main(["--publish-artifact", str(path)])
+        average.main(["--output-dir", str(tmp_path), flag, value])
     assert error.value.code == 2
-    assert "required: --gcs-output-prefix" in capsys.readouterr().err
-    assert list(tmp_path.iterdir()) == [path]
-
-
-@pytest.mark.parametrize(
-    "prefix",
-    [
-        "https://bucket/path",
-        "gs://user:secret@bucket/path",
-        "gs://bucket/path?secret=a",
-        "gs://bucket/../x",
-        "gs://bucket/path#secret",
-    ],
-)
-def test_gcs_prefix_cannot_contain_credentials_or_traversal(prefix):
-    with pytest.raises(SystemExit):
-        average.build_parser().parse_args(["--gcs-output-prefix", prefix])
+    assert "unrecognized arguments" in capsys.readouterr().err
+    generate.assert_not_called()
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize(
@@ -977,39 +782,3 @@ def test_interrupt_stops_submissions_and_drains_active_requests(monkeypatch, int
     with pytest.raises(KeyboardInterrupt):
         average_users(client, [user(f"did:plc:u{i}") for i in range(10)], workers=2)
     assert len(client.requests) == 2
-
-
-@pytest.mark.parametrize(
-    "flag,value",
-    [
-        ("--posthog-project-id", "509275"),
-        ("--posthog-host", "https://us.posthog.com"),
-        ("--min-interaction-seen", "50"),
-        ("--es-url", "https://localhost:9200"),
-        ("--likes-index", "likes"),
-        ("--min-likes", "5"),
-        ("--api-url", "http://localhost:8300"),
-        ("--workers", "4"),
-        ("--output-dir", "ignored"),
-        ("--es-insecure", None),
-        ("--no-es-insecure", None),
-        ("--min-likes=5", None),
-    ],
-)
-def test_publish_only_rejects_explicit_generation_options(tmp_path, capsys, flag, value):
-    arguments = [
-        "--publish-artifact",
-        "irrelevant.json",
-        "--gcs-output-prefix",
-        "gs://test-bucket/averages",
-        flag,
-    ]
-    if value is not None:
-        arguments.append(value)
-    with pytest.raises(SystemExit) as error:
-        average.main(arguments)
-    assert error.value.code == 2
-    message = capsys.readouterr().err
-    assert "unrecognized arguments" in message
-    assert flag in message
-    assert not list(tmp_path.iterdir())

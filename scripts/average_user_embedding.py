@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Average two-tower embeddings for active feed users with indexed likes.
+"""Average two-tower embeddings for active feed users and save a local artifact.
 
 Run ``pipenv run python scripts/average_user_embedding.py --help`` for configuration. Credentials
 are read only from POSTHOG_PERSONAL_API_KEY, GE_ELASTICSEARCH_API_KEY, and
@@ -7,7 +7,6 @@ GE_API_KEY. The embedding API must read the same Elasticsearch environment.
 """
 
 import argparse
-import hashlib
 import json
 import logging
 import math
@@ -36,7 +35,6 @@ from app.lib.average_user_embedding_artifact import (  # noqa: E402
     ArtifactValidationError,
     is_count,
     is_finite_number,
-    load_artifact,
     model_id,
     validate_artifact,
     validate_history_policy,
@@ -56,7 +54,7 @@ REASON_HINTS = {
 
 
 class RunError(Exception):
-    """A collection or configuration error that prevents publishing an average."""
+    """A collection or configuration error that prevents saving an average."""
 
 
 class RequestError(Exception):
@@ -652,80 +650,6 @@ def atomic_json(destination, value):
     return destination
 
 
-def gcs_prefix(value):
-    parts = urlsplit(value)
-    if (
-        parts.scheme != "gs"
-        or not parts.netloc
-        or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*[a-z0-9]", parts.netloc)
-        or parts.query
-        or parts.fragment
-        or any(part in (".", "..") for part in parts.path.split("/"))
-        or not re.fullmatch(r"[A-Za-z0-9/_.-]*", parts.path)
-    ):
-        raise argparse.ArgumentTypeError(
-            "use gs://bucket/prefix without credentials, query, or fragment"
-        )
-    return value.rstrip("/")
-
-
-def publish_artifact(path, prefix):
-    artifact, data = load_artifact(path)
-    parts = urlsplit(prefix)
-    filename = f"average_user_embedding_{artifact['run_id']}.json"
-    name = "/".join(filter(None, (parts.path.strip("/"), filename)))
-    uri = f"gs://{parts.netloc}/{name}"
-    logger.info("Publication: uploading immutable artifact to %s", uri)
-    try:
-        from google.api_core.exceptions import Conflict, PreconditionFailed
-        from google.cloud import storage
-        from google.cloud.storage.retry import DEFAULT_RETRY
-    except ImportError:
-        raise RunError(
-            "Cloud publication requires google-cloud-storage; install the API dependencies"
-        ) from None
-    try:
-        retry = DEFAULT_RETRY.with_deadline(180)
-        client = storage.Client()
-        blob = client.bucket(parts.netloc).blob(name)
-        try:
-            blob.upload_from_string(
-                data,
-                content_type="application/json",
-                if_generation_match=0,
-                timeout=60,
-                retry=retry,
-            )
-            generation = blob.generation
-            if generation is None:
-                raise RunError("Cloud publication returned no object generation")
-        except (PreconditionFailed, Conflict):
-            blob.reload(timeout=60, retry=retry)
-            generation = blob.generation
-            if generation is None:
-                raise RunError("Existing cloud object has no generation") from None
-            pinned = client.bucket(parts.netloc).blob(name, generation=generation)
-            existing = pinned.download_as_bytes(
-                if_generation_match=int(generation), timeout=60, retry=retry
-            )
-            if existing != data:
-                raise RunError(
-                    "Cloud object already exists with different bytes; refusing overwrite"
-                ) from None
-            logger.info("Publication: existing generation has identical bytes; idempotent success")
-        return {
-            "uri": uri,
-            "generation": str(generation),
-            "sha256": hashlib.sha256(data).hexdigest(),
-        }
-    except RunError:
-        raise
-    except Exception as error:
-        raise RunError(
-            f"Cloud publication failed ({type(error).__name__}); local artifact retained"
-        ) from None
-
-
 def nonnegative_int(value):
     try:
         number = int(value)
@@ -763,35 +687,23 @@ def base_url(value):
     return value.rstrip("/")
 
 
-def build_parser(*, publish_only=False):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    if not publish_only:
-        parser.add_argument("--posthog-project-id", type=positive_int, default=509275)
-        parser.add_argument("--posthog-host", type=base_url, default="https://us.posthog.com")
-        parser.add_argument("--min-interaction-seen", type=nonnegative_int, default=50)
-        parser.add_argument("--es-url", type=base_url, default="https://localhost:9200")
-        parser.add_argument("--likes-index", default="likes")
-        parser.add_argument("--min-likes", type=nonnegative_int, default=5)
-        parser.add_argument("--api-url", type=base_url, default="http://localhost:8300")
-        parser.add_argument("--workers", type=positive_int, default=4)
-        parser.add_argument(
-            "--es-insecure",
-            action=argparse.BooleanOptionalAction,
-            default=True,
-            help="skip Elasticsearch TLS certificate verification (default: %(default)s)",
-        )
-        parser.add_argument("--output-dir", default="./outputs/average_user_embeddings/")
+    parser.add_argument("--posthog-project-id", type=positive_int, default=509275)
+    parser.add_argument("--posthog-host", type=base_url, default="https://us.posthog.com")
+    parser.add_argument("--min-interaction-seen", type=nonnegative_int, default=50)
+    parser.add_argument("--es-url", type=base_url, default="https://localhost:9200")
+    parser.add_argument("--likes-index", default="likes")
+    parser.add_argument("--min-likes", type=nonnegative_int, default=5)
+    parser.add_argument("--api-url", type=base_url, default="http://localhost:8300")
+    parser.add_argument("--workers", type=positive_int, default=4)
     parser.add_argument(
-        "--gcs-output-prefix",
-        type=gcs_prefix,
-        required=publish_only,
-        help="explicit optional destination gs://bucket/prefix",
+        "--es-insecure",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="skip Elasticsearch TLS certificate verification (default: %(default)s)",
     )
-    parser.add_argument(
-        "--publish-artifact",
-        type=Path,
-        help="validate and upload an existing artifact without collection/inference",
-    )
+    parser.add_argument("--output-dir", default="./outputs/average_user_embeddings/")
     return parser
 
 
@@ -866,32 +778,24 @@ def generate(args, run_id, started_at):
 
 
 def run(args):
-    """Write or upload one artifact and return a small status summary."""
+    """Generate one local artifact and return a small status summary."""
     clock_started = time.monotonic()
     summary = {
         "status": "failed",
         "artifact_path": None,
-        "publication": None,
     }
     try:
-        if args.publish_artifact:
-            artifact_path = args.publish_artifact.expanduser().resolve()
-            logger.info("Run: publishing existing artifact %s", artifact_path)
-            artifact, _ = load_artifact(artifact_path)
-        else:
-            started = datetime.now(UTC)
-            run_id = started.strftime("%Y%m%dT%H%M%S.%fZ_") + uuid.uuid4().hex[:8]
-            directory = Path(args.output_dir).expanduser().resolve()
-            logger.info("Run: started run_id=%s output_dir=%s", run_id, directory)
-            directory.mkdir(parents=True, exist_ok=True)
-            artifact = generate(args, run_id, started)
-            artifact_path = directory / f"average_user_embedding_{run_id}.json"
-            atomic_json(artifact_path, artifact)
+        started = datetime.now(UTC)
+        run_id = started.strftime("%Y%m%dT%H%M%S.%fZ_") + uuid.uuid4().hex[:8]
+        directory = Path(args.output_dir).expanduser().resolve()
+        logger.info("Run: started run_id=%s output_dir=%s", run_id, directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        artifact = generate(args, run_id, started)
+        artifact_path = directory / f"average_user_embedding_{run_id}.json"
+        atomic_json(artifact_path, artifact)
         summary["artifact_path"] = str(artifact_path)
         summary["run_id"] = artifact["run_id"]
         logger.info("Artifact: %s", artifact_path)
-        if args.gcs_output_prefix:
-            summary["publication"] = publish_artifact(artifact_path, args.gcs_output_prefix)
         summary["status"] = "success"
     except (RunError, ArtifactValidationError, RequestError) as error:
         reason = error.reason if isinstance(error, RequestError) else str(error)
@@ -913,8 +817,6 @@ def run(args):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.publish_artifact:
-        args = build_parser(publish_only=True).parse_args(argv)
     handler = logging.StreamHandler()
     formatter = logging.Formatter(
         "%(asctime)s.%(msecs)03dZ %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"
