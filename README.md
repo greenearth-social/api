@@ -199,14 +199,27 @@ The API is deployed to Google Cloud Run using buildpacks.
 
 ### First-Time Setup
 
-Run the setup script once per environment to configure GCP resources:
+Run inference setup first for the target environment. It owns creation of
+`gs://<project-id>-engagement-prediction-model-<environment>` and configures the
+stable inference hostname. From the API checkout:
+
+```bash
+# Stage
+(cd ../inference-service && GE_ENVIRONMENT=stage ./scripts/gcp_setup.sh)
+
+# Production
+(cd ../inference-service && GE_ENVIRONMENT=prod ./scripts/gcp_setup.sh)
+```
+
+Then run the API setup script once per environment. It requires the model bucket
+to exist; it grants read access but does not create the bucket:
 
 ```bash
 # For staging environment (default)
 ./scripts/gcp_setup.sh
 
 # For production environment
-ENVIRONMENT=prod ./scripts/gcp_setup.sh
+./scripts/gcp_setup.sh --environment prod
 
 # With explicit Elasticsearch configuration
 GE_ELASTICSEARCH_URL="https://custom-es:9200" \
@@ -218,6 +231,8 @@ This script will:
 
 - Enable required GCP APIs (Cloud Run, Secret Manager, etc.)
 - Create a service account with appropriate IAM roles
+- Grant `api-runner-<environment>@<project-id>.iam.gserviceaccount.com` bucket-scoped
+  `roles/storage.objectViewer` on that environment's existing model bucket
 - Configure the Elasticsearch connection using `GE_ELASTICSEARCH_URL` as non-secret config and `GE_ELASTICSEARCH_API_KEY` as a Secret Manager secret
 - Create Secret Manager secrets for `GE_FEED_CONTEXT_SECRET` (auto-generated), `GE_POSTHOG_API_KEY`, `GE_PERSPECTIVE_API_KEY`, and `GE_BSKY_APP_PASSWORD`
 - Verify VPC connector for internal network access
@@ -231,18 +246,6 @@ once before the next frontend deployment. This grants the frontend deployment
 service account the index-administrator permission required for composite indexes
 and TTL policies. The role is project-wide, so either environment's setup is
 sufficient.
-
-Before API deployment in stage/prod, run the inference setup script so domain mapping
-and DNS are in place for stable inference hostnames:
-
-```bash
-# stage
-cd ../engagement-prediction/inference_service
-GE_ENVIRONMENT=stage ./gcp_setup.sh
-
-# prod
-GE_ENVIRONMENT=prod ./gcp_setup.sh
-```
 
 > **Note**: The API uses a separate readonly Elasticsearch API key (`elasticsearch-api-key-readonly`)
 > that only has read access. This key is created by running `scripts/k8s_recreate_api_key.sh` in the
@@ -962,9 +965,10 @@ pipenv run python scripts/resolve_average_user_embedding.py --environment stage
 
 The resolver prints only the selected URI to stdout and diagnostics to stderr.
 It uses Application Default Credentials, so the deploying identity needs read access
-to the default and referenced artifact. The API runtime service account separately
-needs read access to the artifact; deployer's access does not confer runtime access.
-Bucket and IAM setup remain separate operational steps.
+to the default and referenced artifact. The API runtime uses its own service account;
+the deployer's access does not confer runtime access. API setup grants the runtime
+account read access to the standard model bucket. An override in another bucket
+also needs an explicit read grant for that runtime account.
 
 For an experiment, provide an explicit immutable GCS artifact to bypass the default:
 
@@ -1048,15 +1052,32 @@ export GE_AVERAGE_USER_EMBEDDING_URI="./outputs/average_user_embeddings/average_
 The API validates the normalized version-1 contract and current history policy,
 then retains an immutable copy for the process lifetime. It loads during startup,
 off the event loop, with a single GCS download attempt and a 30-second request
-timeout. GCS uses Application Default Credentials. Give the API service account
-bucket-scoped `roles/storage.objectViewer` on the selected bucket; promotion
-permissions alone do not grant the API read access.
+timeout. GCS uses Application Default Credentials: on Cloud Run, this is the
+`api-runner-<environment>@<project-id>.iam.gserviceaccount.com` service account.
+`scripts/gcp_setup.sh` grants it bucket-scoped `roles/storage.objectViewer` on the
+standard model bucket. Promotion or deployment permissions alone do not grant the
+API read access, and custom-bucket overrides need an explicit read grant on that bucket.
+
+For an existing staging environment, grant only the missing bucket permission
+without rerunning the full setup script:
+
+```bash
+gcloud storage buckets add-iam-policy-binding \
+  gs://greenearth-471522-engagement-prediction-model-stage \
+  --member="serviceAccount:api-runner-stage@greenearth-471522.iam.gserviceaccount.com" \
+  --role="roles/storage.objectViewer" \
+  --condition=None
+```
+
+Use the corresponding production bucket and `api-runner-prod` account for production.
 
 Unset configuration or load failure keeps the API available with the fallback
 behavior above. There are no feed-request downloads or automatic refreshes.
 To activate or roll back an artifact locally, select its URI and restart the API.
-Restart also retries a failed startup load. For Cloud Run, use the deployment
-selection and rollback workflow above; IAM grants remain a separate operational step.
+Restart also retries a failed startup load. After fixing bucket permissions, restart
+the local API or redeploy Cloud Run so each process retries the load; an IAM grant
+does not refresh an already running process. For Cloud Run, use the deployment
+selection and rollback workflow above.
 
 For devctl, set `GE_DEV_AVERAGE_USER_EMBEDDING_URI` in
 `internal-tools/devenv/devenv.local.env` to a container-visible path such as
