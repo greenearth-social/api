@@ -100,7 +100,7 @@ class UserDocument(BaseModel):
         "Used to filter posts by age.",
     )
     politics: float = Field(
-        default=1.0,
+        default=0.5,
         ge=0.0,
         le=2.0,
         description="Politics multiplier: 0.0-2.0.  Applied to political content scores.",

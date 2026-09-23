@@ -363,7 +363,7 @@ def test_configured_generation_preserves_exact_single_source_weights(
     assert configured.preference_fingerprint
 
 
-@pytest.mark.parametrize("politics", [0.0, 2.0])
+@pytest.mark.parametrize("politics", [0.0, 1.0, 2.0])
 def test_configured_generation_applies_politics_to_request_local_rank_template(politics):
     from .xrpc import _configured_generation
 
@@ -381,7 +381,7 @@ def test_configured_generation_applies_politics_to_request_local_rank_template(p
         network_likes_enabled=True,
     )
 
-    neutral = _configured_generation(
+    defaults = _configured_generation(
         "your-feed",
         None,
         network_likes_enabled=True,
@@ -390,7 +390,9 @@ def test_configured_generation_applies_politics_to_request_local_rank_template(p
     assert configured.effective_preferences.politics == politics
     assert configured.feed_cfg.rank_request_template is not None
     assert configured.feed_cfg.rank_request_template.politics == politics
-    assert configured.preference_fingerprint != neutral.preference_fingerprint
+    assert defaults.feed_cfg.rank_request_template is not None
+    assert defaults.feed_cfg.rank_request_template.politics == 0.5
+    assert configured.preference_fingerprint != defaults.preference_fingerprint
     assert FEEDS["your-feed"].rank_request_template is original_rank_template
     assert original_rank_template is not None
     assert original_rank_template.politics == 1.0
@@ -4956,7 +4958,7 @@ class TestSourceWeightsOverride:
         mock_get_user,
         mock_feature_flags,
     ):
-        """Cold-start always uses popularity for a brand-new user."""
+        """Cold-start keeps its fixed popularity and average-embedding mix."""
         from ..documents import UserDocument
         from .xrpc import PipelineResult
 
@@ -4974,7 +4976,8 @@ class TestSourceWeightsOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert [(generator.name, generator.weight) for generator in gen_request.generators] == [
-            ("popularity", 1.0),
+            ("popularity", 0.5),
+            ("two_tower_empty_history", 0.5),
         ]
         mock_feature_flags.assert_not_called()
 
