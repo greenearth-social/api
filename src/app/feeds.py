@@ -44,11 +44,6 @@ PERSONALIZED_RANK_REQUEST_TEMPLATE = RankPredictRequest.model_construct(
 LOGGED_OUT_POST_URI: str | None = ux_post_uri(ux_posts.LOGGED_OUT)
 
 
-def _settings_url(feed_name: str) -> str:
-    """Build a Settings deep link for the frontend paired with this deployment."""
-    return ux_posts.settings_url(feed_name)
-
-
 # Social-radius preset generator weights for your-feed.
 # Index 3 (balanced) matches the default weights defined in the "your-feed"
 # FeedConfig below — keep them in sync when tuning.
