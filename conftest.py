@@ -21,8 +21,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
 
 from app import ux_posts  # noqa: E402
 
-# An empty value counts as unset, matching ux_posts itself: the devenv's compose file
-# passes the variable through with an empty default, and setdefault would keep that.
+# An empty value counts as unset, matching ux_posts itself (setdefault would keep it).
 if not os.environ.get(ux_posts.URI_ENV_VAR, "").strip():
     os.environ[ux_posts.URI_ENV_VAR] = json.dumps(
         {
