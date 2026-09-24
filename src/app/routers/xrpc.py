@@ -122,13 +122,6 @@ ACCEPTED_SLATE_CLAIM_GRACE_SECONDS = 5
 SURVEY_POST_POSITION = 6  # 1-indexed position in the first page where the survey post appears
 SURVEY_POST_MIN_VISITS = 3  # minimum initial loads before the survey is shown
 SURVEY_POST_COOLDOWN_DAYS = 7  # days between survey showings (triggered by interactionSeen)
-try:
-    _EMBED_HYDRATION_TIMEOUT_SEC: float = float(
-        os.environ.get("GE_EMBED_HYDRATION_TIMEOUT_SEC", "1.5")
-    )
-except ValueError:
-    _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
-
 
 
 @dataclass
