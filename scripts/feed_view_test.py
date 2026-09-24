@@ -81,9 +81,7 @@ class TestWaitForPipelineMeta:
         monkeypatch.setattr(feed_view, "load_pipeline_meta", load)
 
         result = asyncio.run(
-            feed_view.wait_for_pipeline_meta(
-                "did:plc:test", "request-1", timeout=1, interval=0
-            )
+            feed_view.wait_for_pipeline_meta("did:plc:test", "request-1", timeout=1, interval=0)
         )
 
         assert result == {"items": {}}
@@ -96,9 +94,7 @@ class TestWaitForPipelineMeta:
         monkeypatch.setattr(feed_view, "load_pipeline_meta", load)
 
         result = asyncio.run(
-            feed_view.wait_for_pipeline_meta(
-                "did:plc:test", "request-1", timeout=0, interval=0
-            )
+            feed_view.wait_for_pipeline_meta("did:plc:test", "request-1", timeout=0, interval=0)
         )
 
         assert result is None
@@ -178,6 +174,51 @@ class TestRenderPost:
             position=1, uri="at://x", source=self._source(), meta=None
         ).plain
         assert "via" not in text
+
+
+class TestUxPosts:
+    # conftest.py resolves every managed post to at://<publisher>/.../test-<name>.
+    def _uri(self, name):
+        return feed_view.ux_posts.resolved_uris()[name]
+
+    def test_maps_resolved_uris_to_names(self):
+        by_uri = feed_view.ux_posts_by_uri()
+        assert by_uri[self._uri(feed_view.ux_posts.PIN_YOUR_FEED)] == "pin-your-feed.md"
+        assert by_uri[self._uri(feed_view.ux_posts.SURVEY_YOUR_FEED)] == "survey-your-feed.md"
+
+    def test_rendered_from_content_not_flagged_missing(self):
+        name = feed_view.ux_posts.PIN_YOUR_FEED
+        text = feed_view.render_post(
+            position=1, uri=self._uri(name), source=None, meta=None, ux_post=name
+        ).plain
+        assert "UX post: pin-your-feed" in text
+        assert "SETTINGS" in text
+        assert "not in Elasticsearch" not in text
+
+    def test_placeholder_says_what_it_stands_in_for(self):
+        name = feed_view.ux_posts.PLACEHOLDER
+        text = feed_view.render_post(
+            position=1, uri=self._uri(name), source=None, meta=None, ux_post=name
+        ).plain
+        assert "isn't published yet" in text
+
+    def test_page_does_not_count_ux_posts_as_unhydrated(self, monkeypatch):
+        printed = []
+        monkeypatch.setattr(feed_view.console, "print", lambda *a, **k: printed.append(a))
+        pin = self._uri(feed_view.ux_posts.PIN_YOUR_FEED)
+        dangling = "at://did:plc:gone/app.bsky.feed.post/xyz"
+        feed_view.render_page(
+            feed="your-feed",
+            user_did="did:plc:abc",
+            skeleton={"feed": [{"post": pin}, {"post": dangling}]},
+            hydrated={},
+            pipeline=None,
+            start_position=1,
+            ux_post_names=feed_view.ux_posts_by_uri(),
+        )
+        summary = [str(a[0]) for a in printed if a and "could not be hydrated" in str(a[0])]
+        assert len(summary) == 1
+        assert summary[0].startswith("[yellow]1 post could not be hydrated")
 
 
 class TestBuildParser:
