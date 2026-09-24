@@ -21,13 +21,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent / "src"))
 
 from app import ux_posts  # noqa: E402
 
-os.environ.setdefault(
-    ux_posts.URI_ENV_VAR,
-    json.dumps(
+# An empty value counts as unset, matching ux_posts itself: the devenv's compose file
+# passes the variable through with an empty default, and setdefault would keep that.
+if not os.environ.get(ux_posts.URI_ENV_VAR, "").strip():
+    os.environ[ux_posts.URI_ENV_VAR] = json.dumps(
         {
             name: f"at://{ux_posts.PUBLISHER_DID}/app.bsky.feed.post/test-{name.removesuffix('.md')}"
             for name in ux_posts.MANAGED_POSTS
         }
-    ),
-)
+    )
 ux_posts._reset_cache_for_tests()
