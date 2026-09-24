@@ -732,23 +732,24 @@ class TestSyncFeeds:
         assert "Deleted stale" not in captured.out
         assert f"{feed_count} published, 0 deleted" in captured.out
 
+    @pytest.mark.parametrize("environment", ["stage", "prod"])
+    @pytest.mark.parametrize("description_matches", [False, True])
     @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_preserves_existing_description_and_facets(
-        self, MockClient, mock_upload_blob
+    def test_syncs_configured_description_and_keeps_only_matching_facets(
+        self, MockClient, mock_upload_blob, environment, description_matches
     ):
-        """Routine sync must not overwrite separately managed description copy."""
+        """Existing public copy follows FEEDS; facets must refer to the same text."""
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
         MockClient.return_value.__exit__ = MagicMock(return_value=False)
 
-        existing_description = (
-            "Account-managed copy.\n"
-            "Built by Green Earth (https://www.greenearth.social)."
-        )
+        feed = FEEDS["best-of-friends"]
+        published_rkey = "best-of-friends" if environment == "prod" else feed.internal_rkey
+        existing_description = feed.description if description_matches else "Outdated copy."
         existing_facets = [{"index": {"byteStart": 0, "byteEnd": 7}, "features": []}]
         existing = {
-            "uri": f"at://{REPO_DID}/app.bsky.feed.generator/best-of-friends",
+            "uri": f"at://{REPO_DID}/app.bsky.feed.generator/{published_rkey}",
             "value": {
                 "$type": "app.bsky.feed.generator",
                 "description": existing_description,
@@ -766,8 +767,9 @@ class TestSyncFeeds:
             handle=HANDLE,
             password=PASSWORD,
             generator_did=GENERATOR_DID,
-            environment="prod",
+            environment=environment,
             visibility="public",
+            git_sha="e9f07f5",
             pds=PDS,
         )
 
@@ -777,10 +779,20 @@ class TestSyncFeeds:
             if call.args[0].endswith("com.atproto.repo.putRecord")
         ]
         best_of_friends = next(
-            item for item in published_records if item["rkey"] == "best-of-friends"
+            item for item in published_records if item["rkey"] == published_rkey
         )
-        assert best_of_friends["record"]["description"] == existing_description
-        assert best_of_friends["record"]["descriptionFacets"] == existing_facets
+        assert best_of_friends["record"]["description"] == feed.description
+        if description_matches:
+            assert best_of_friends["record"]["descriptionFacets"] == existing_facets
+        else:
+            assert "descriptionFacets" not in best_of_friends["record"]
+        # Newly created public records use the same exact config copy, too.
+        for name, config in FEEDS.items():
+            if not config.public:
+                continue
+            rkey = name if environment == "prod" else config.internal_rkey
+            record = next(item["record"] for item in published_records if item["rkey"] == rkey)
+            assert record["description"] == config.description
 
     @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
@@ -840,8 +852,7 @@ class TestResolveFeedPublishParams:
         rkey, name, desc = _resolve_feed_publish_params("best-of-friends", feed, "prod")
         assert rkey == "best-of-friends"
         assert name == feed.display_name
-        assert "Built by Green Earth (https://www.greenearth.social)." in desc
-        assert "Built by GreenEarth" not in desc
+        assert desc == feed.description
 
     def test_prod_internal_uses_caterpie_path(self):
         feed = self._internal_feed()
@@ -855,7 +866,7 @@ class TestResolveFeedPublishParams:
         rkey, name, desc = _resolve_feed_publish_params("best-of-friends", feed, "dev")
         assert rkey == feed.internal_rkey
         assert name.startswith("GE ")
-        assert desc == "Built by Caterpie"
+        assert desc == feed.description
 
     def test_stage_any_uses_caterpie_with_ge_prefix(self):
         feed = self._internal_feed()
@@ -875,7 +886,7 @@ class TestSearchability:
         feed = FEEDS["best-of-friends"]
         _, name, desc = _resolve_feed_publish_params("best-of-friends", feed, "prod")
         assert name == feed.display_name
-        assert "greenearth" in desc.lower()
+        assert desc == feed.description
 
     def test_caterpie_display_name_excludes_original(self):
         feed = FEEDS["unranked-your-feed"]
@@ -887,7 +898,7 @@ class TestSearchability:
         feed = FEEDS["random"]
         _, name, desc = _resolve_feed_publish_params("random", feed, "dev")
         assert feed.display_name not in name
-        assert desc == "Built by Caterpie"
+        assert desc == feed.description
 
 
 # ---------------------------------------------------------------------------

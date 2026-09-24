@@ -107,6 +107,9 @@ SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
 # feeds are published as "GE <internal_display_name> <git_sha>" (see issue #228),
 # so keep internal_display_name to 13 chars or fewer. feeds_test.py enforces this.
 #
+# Public descriptions are published verbatim in production and staging. Include
+# the full desired copy here, including any attribution; publishing adds no footer.
+#
 # NOTE: every private (development) feed sets logged_out="deny" — a feed nobody
 # is meant to see has nothing to say to a logged-out visitor. Public feeds take
 # the "explain" default, or "serve" when they work without a user. feeds_test.py

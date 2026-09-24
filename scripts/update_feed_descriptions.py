@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""One-time migration for the public Green Earth feed descriptions.
+"""Synchronize public feed descriptions from feeds.py without deploying.
 
-This script reads each existing generator record and replaces only the legacy
-attribution text. It does not append a footer or reconstruct the rest of the
-description. Normal deployments preserve the resulting description.
+Each existing generator record receives the complete configured description.
+Other metadata is preserved, except for description facets whose byte offsets
+would become stale when the description changes.
 """
 
 from __future__ import annotations
@@ -24,14 +24,6 @@ from publish_feed import (
     _list_records,
     _put_record,
     _resolve_feed_publish_params,
-)
-
-NEW_ATTRIBUTION = (
-    "Part of the Green Earth feed family. Built by GreenEarth (https://www.greenearth.social)."
-)
-LEGACY_ATTRIBUTIONS = (
-    "Built by GreenEarth (www.greenearth.social).",
-    "Built by GreenEarth (https://www.greenearth.social).",
 )
 
 
@@ -58,39 +50,30 @@ ENVIRONMENT_TARGETS = {
 class UpdateSummary:
     updated: int
     already_current: int
-    no_legacy_text: int
+    skipped: int
     missing: int
 
     @property
     def needs_attention(self) -> bool:
-        return self.no_legacy_text > 0 or self.missing > 0
+        return self.skipped > 0 or self.missing > 0
 
 
-def replace_legacy_attribution(description: str) -> tuple[str, str]:
-    """Return the migrated text and ``updated``/``current``/``not_found``."""
-    # The current copy intentionally contains one of the legacy attribution
-    # strings. Recognize the complete current value before looking for a legacy
-    # substring so the migration remains idempotent and never nests its prefix.
-    if NEW_ATTRIBUTION in description:
-        return description, "current"
-    for legacy in LEGACY_ATTRIBUTIONS:
-        if legacy in description:
-            return description.replace(legacy, NEW_ATTRIBUTION), "updated"
-    return description, "not_found"
-
-
-def _target_rkeys(environment: str) -> set[str]:
-    rkeys: set[str] = set()
+def _target_descriptions(environment: str, feed_name: str | None = None) -> dict[str, str]:
+    if environment not in ENVIRONMENT_TARGETS:
+        raise ValueError(f"Unknown environment: {environment}")
+    if feed_name is not None and (feed_name not in FEEDS or not FEEDS[feed_name].public):
+        raise ValueError(f"Not a public feed: {feed_name}")
+    descriptions: dict[str, str] = {}
     for canonical_rkey, feed_config in FEEDS.items():
-        if not feed_config.public:
+        if not feed_config.public or (feed_name is not None and canonical_rkey != feed_name):
             continue
         published_rkey, _, _ = _resolve_feed_publish_params(
             canonical_rkey,
             feed_config,
             environment,
         )
-        rkeys.add(published_rkey)
-    return rkeys
+        descriptions[published_rkey] = feed_config.description
+    return descriptions
 
 
 def update_feed_descriptions(
@@ -98,67 +81,53 @@ def update_feed_descriptions(
     handle: str,
     password: str,
     environment: str,
+    feed_name: str | None = None,
     pds: str = DEFAULT_PDS,
     dry_run: bool = False,
 ) -> UpdateSummary:
-    """Replace the legacy attribution on existing public generator records."""
-    targets = _target_rkeys(environment)
+    """Apply configured descriptions to existing public generator records."""
+    targets = _target_descriptions(environment, feed_name)
     updated = 0
     already_current = 0
-    no_legacy_text = 0
+    skipped = 0
 
     with httpx.Client(timeout=30) as client:
         session = _create_session(client, pds, handle, password)
         access_jwt = session["accessJwt"]
         repo_did = session["did"]
         records = {
-            record["uri"].split("/")[-1]: record.get("value", {})
+            record["uri"].split("/")[-1]: record.get("value")
             for record in _list_records(client, pds, access_jwt, repo_did)
         }
 
-        missing_rkeys = targets - records.keys()
+        missing_rkeys = targets.keys() - records.keys()
         for rkey in sorted(missing_rkeys):
             print(f"  Missing: {rkey}", file=sys.stderr)
 
-        for rkey in sorted(targets & records.keys()):
+        for rkey in sorted(targets.keys() & records.keys()):
             value = records[rkey]
             if not isinstance(value, dict):
                 print(f"  No valid record value: {rkey}", file=sys.stderr)
-                no_legacy_text += 1
+                skipped += 1
                 continue
-            description = value.get("description")
+            description = value.get("description", "")
             if not isinstance(description, str):
-                print(f"  No description: {rkey}", file=sys.stderr)
-                no_legacy_text += 1
+                print(f"  Invalid description; left unchanged: {rkey}", file=sys.stderr)
+                skipped += 1
                 continue
 
-            migrated, outcome = replace_legacy_attribution(description)
-            if outcome == "current":
+            configured_description = targets[rkey]
+            if description == configured_description:
                 print(f"  Already current: {rkey}")
                 already_current += 1
                 continue
-            if outcome == "not_found":
-                print(
-                    f"  Legacy attribution not found; left unchanged: {rkey}",
-                    file=sys.stderr,
-                )
-                no_legacy_text += 1
-                continue
-
-            # This repository has never created description facets. Refuse to
-            # shift unknown byte offsets rather than silently corrupting them.
-            if value.get("descriptionFacets"):
-                print(
-                    f"  Description facets require manual migration: {rkey}",
-                    file=sys.stderr,
-                )
-                no_legacy_text += 1
-                continue
-
             record = dict(value)
-            record["description"] = migrated
+            record["description"] = configured_description
+            record.pop("descriptionFacets", None)
             if dry_run:
                 print(f"  Would update: {rkey}")
+                print(f"    Before: {description!r}")
+                print(f"    After: {configured_description!r}")
             else:
                 _put_record(client, pds, access_jwt, repo_did, rkey, record)
                 print(f"  Updated: {rkey}")
@@ -167,7 +136,7 @@ def update_feed_descriptions(
     return UpdateSummary(
         updated=updated,
         already_current=already_current,
-        no_legacy_text=no_legacy_text,
+        skipped=skipped,
         missing=len(missing_rkeys),
     )
 
@@ -202,15 +171,19 @@ def _password_from_secret(project_id: str, secret: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Replace the legacy GreenEarth attribution in existing public feed "
-            "descriptions without changing any other description text."
+            "Synchronize existing public feed descriptions from feeds.py without deploying."
         )
     )
     parser.add_argument(
         "--environment",
         required=True,
         choices=["stage", "prod"],
-        help="Environment/account whose public feed records should be migrated.",
+        help="Environment/account whose public feed records should be updated.",
+    )
+    parser.add_argument(
+        "--feed-name",
+        choices=sorted(rkey for rkey, config in FEEDS.items() if config.public),
+        help="Update only this public feed's canonical key (default: all public feeds).",
     )
     parser.add_argument(
         "--project-id",
@@ -251,14 +224,15 @@ def main() -> None:
         handle=args.handle or target.handle,
         password=password,
         environment=args.environment,
+        feed_name=args.feed_name,
         pds=args.pds,
         dry_run=args.dry_run,
     )
-    mode = "dry run" if args.dry_run else "migration"
+    mode = "dry run" if args.dry_run else "sync"
     print(
         f"{args.environment} {mode} complete: {summary.updated} updated, "
         f"{summary.already_current} already current, "
-        f"{summary.no_legacy_text} unmatched, {summary.missing} missing."
+        f"{summary.skipped} skipped, {summary.missing} missing."
     )
     if summary.needs_attention:
         raise SystemExit(2)

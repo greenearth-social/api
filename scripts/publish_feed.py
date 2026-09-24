@@ -463,17 +463,16 @@ def _resolve_feed_publish_params(
 ) -> tuple[str, str, str]:
     """Return (published_rkey, display_name, description) for a feed based on routing rules.
 
+    Public feed descriptions come verbatim from FEEDS in every environment.
     Internal ("debug") feeds are stamped with *git_sha* in both the display name
-    and description so testers can tell exactly which deployed code produced a
-    feed. The public prod GreenEarth records are left unstamped — real users see
-    them and the sha would be noise there.
+    and description. Staging copies of public feeds keep the sha in their name.
     """
     is_greenearth = normalized_env == "prod" and feed_cfg.public
     if is_greenearth:
         return (
             rkey,
             feed_cfg.display_name,
-            f"{feed_cfg.description}\nBuilt by Green Earth (https://www.greenearth.social).",
+            feed_cfg.description,
         )
     published_rkey = feed_cfg.internal_rkey
     base_display_name = feed_cfg.internal_display_name
@@ -482,7 +481,10 @@ def _resolve_feed_publish_params(
     else:
         published_display_name = base_display_name
     published_display_name = _with_git_sha(published_display_name, git_sha)
-    description = f"Built by Caterpie · {git_sha}" if git_sha else "Built by Caterpie"
+    if feed_cfg.public:
+        description = feed_cfg.description
+    else:
+        description = f"Built by Caterpie · {git_sha}" if git_sha else "Built by Caterpie"
     return published_rkey, published_display_name, description
 
 
@@ -506,11 +508,9 @@ def sync_feeds(
     *git_sha*, when provided, is stamped onto internal (debug) feed records so
     testers can identify the deployed code behind a feed.
 
-    Existing public-feed descriptions are deliberately preserved. Their
-    description migrations are separate, explicit operations so an ordinary
-    API deployment cannot overwrite account-managed copy or reapply a one-time
-    migration. Internal debug descriptions remain deployment-owned because
-    they carry the deployed git sha.
+    Public-feed descriptions are synchronized verbatim from FEEDS, including
+    existing records and staging copies. Existing description facets are retained
+    only when their corresponding text is unchanged.
     """
     feed_items = list(FEEDS.items())
     if visibility == "public":
@@ -556,16 +556,14 @@ def sync_feeds(
             existing_value = (
                 existing_by_rkey.get(published_rkey) if feed_cfg.public else None
             )
-            if isinstance(existing_value, dict):
-                existing_description = existing_value.get("description")
-                if isinstance(existing_description, str):
-                    record["description"] = existing_description
-                    # Facet byte offsets are coupled to the description.
-                    # Preserve them only with their corresponding text.
-                    if "descriptionFacets" in existing_value:
-                        record["descriptionFacets"] = existing_value[
-                            "descriptionFacets"
-                        ]
+            # Facets contain byte offsets into the old text. They are safe to
+            # reuse only when the configured description is exactly unchanged.
+            if (
+                isinstance(existing_value, dict)
+                and existing_value.get("description") == description
+                and "descriptionFacets" in existing_value
+            ):
+                record["descriptionFacets"] = existing_value["descriptionFacets"]
             if avatar_blob is not None:
                 record["avatar"] = avatar_blob
             _put_record(client, pds, access_jwt, repo_did, published_rkey, record)
