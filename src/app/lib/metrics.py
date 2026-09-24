@@ -177,7 +177,7 @@ def histogram_boundaries(name: str) -> tuple[float, ...] | None:
         return EVENTLOOP_LAG_MS_BOUNDARIES
     if name.endswith("in_flight") or name.endswith("_size"):
         return CONCURRENCY_BOUNDARIES
-    if name.endswith("_share") or name.endswith("_score"):
+    if name.endswith("_share") or name.endswith("_score") or name.endswith("_ratio"):
         return RATIO_BOUNDARIES
     if name in _NEAR_ZERO_MS_METRICS:
         return FAST_MS_BOUNDARIES
