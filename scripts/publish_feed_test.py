@@ -732,21 +732,24 @@ class TestSyncFeeds:
         assert "Deleted stale" not in captured.out
         assert f"{feed_count} published, 0 deleted" in captured.out
 
-    @pytest.mark.parametrize("environment", ["stage", "prod"])
+    @pytest.mark.parametrize("environment", ["dev", "stage", "prod"])
     @pytest.mark.parametrize("description_matches", [False, True])
     @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
-    def test_syncs_configured_description_and_keeps_only_matching_facets(
+    def test_syncs_environment_description_and_keeps_only_matching_facets(
         self, MockClient, mock_upload_blob, environment, description_matches
     ):
-        """Existing public copy follows FEEDS; facets must refer to the same text."""
+        """Sync applies the environment's copy and keeps facets only for unchanged text."""
         client = MagicMock()
         MockClient.return_value.__enter__ = MagicMock(return_value=client)
         MockClient.return_value.__exit__ = MagicMock(return_value=False)
 
         feed = FEEDS["best-of-friends"]
         published_rkey = "best-of-friends" if environment == "prod" else feed.internal_rkey
-        existing_description = feed.description if description_matches else "Outdated copy."
+        expected_description = (
+            feed.description if environment == "prod" else "Built by Caterpie · e9f07f5"
+        )
+        existing_description = expected_description if description_matches else "Outdated copy."
         existing_facets = [{"index": {"byteStart": 0, "byteEnd": 7}, "features": []}]
         existing = {
             "uri": f"at://{REPO_DID}/app.bsky.feed.generator/{published_rkey}",
@@ -781,18 +784,19 @@ class TestSyncFeeds:
         best_of_friends = next(
             item for item in published_records if item["rkey"] == published_rkey
         )
-        assert best_of_friends["record"]["description"] == feed.description
+        assert best_of_friends["record"]["description"] == expected_description
         if description_matches:
             assert best_of_friends["record"]["descriptionFacets"] == existing_facets
         else:
             assert "descriptionFacets" not in best_of_friends["record"]
-        # Newly created public records use the same exact config copy, too.
+        # Newly created records obey the same environment-specific policy.
         for name, config in FEEDS.items():
             if not config.public:
                 continue
             rkey = name if environment == "prod" else config.internal_rkey
             record = next(item["record"] for item in published_records if item["rkey"] == rkey)
-            assert record["description"] == config.description
+            expected = config.description if environment == "prod" else "Built by Caterpie · e9f07f5"
+            assert record["description"] == expected
 
     @patch("publish_feed._upload_blob", return_value=None)
     @patch("publish_feed.httpx.Client")
@@ -866,7 +870,7 @@ class TestResolveFeedPublishParams:
         rkey, name, desc = _resolve_feed_publish_params("best-of-friends", feed, "dev")
         assert rkey == feed.internal_rkey
         assert name.startswith("GE ")
-        assert desc == feed.description
+        assert desc == "Built by Caterpie"
 
     def test_stage_any_uses_caterpie_with_ge_prefix(self):
         feed = self._internal_feed()
@@ -898,7 +902,7 @@ class TestSearchability:
         feed = FEEDS["random"]
         _, name, desc = _resolve_feed_publish_params("random", feed, "dev")
         assert feed.display_name not in name
-        assert desc == feed.description
+        assert desc == "Built by Caterpie"
 
 
 # ---------------------------------------------------------------------------
@@ -924,10 +928,12 @@ class TestDisplayNameLength:
 
 
 class TestGitShaStamping:
-    def test_internal_name_and_description_carry_sha(self):
-        feed = FEEDS["unranked-your-feed"]
+    @pytest.mark.parametrize("environment", ["stage", "dev"])
+    @pytest.mark.parametrize("feed_name", ["unranked-your-feed", "your-feed"])
+    def test_nonproduction_name_and_description_carry_sha(self, environment, feed_name):
+        feed = FEEDS[feed_name]
         _, name, desc = _resolve_feed_publish_params(
-            "unranked-your-feed", feed, "stage", "e9f07f5"
+            feed_name, feed, environment, "e9f07f5"
         )
         assert name.endswith(" e9f07f5")
         assert desc == "Built by Caterpie · e9f07f5"

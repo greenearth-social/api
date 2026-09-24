@@ -1,4 +1,4 @@
-"""Tests for synchronizing public feed descriptions from the feed catalog."""
+"""Tests for synchronizing environment-specific public feed descriptions."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ HANDLE = "did:plc:wrmpulygwvuhjn2c3jbalgqj"
 PASSWORD = "password"
 REPO_DID = "did:plc:publisher"
 ACCESS_JWT = "jwt"
+GIT_SHA = "abc1234"
+STAGE_DESCRIPTION = f"Built by Caterpie · {GIT_SHA}"
 FACETS = [{"index": {"byteStart": 0, "byteEnd": 4}, "features": [{"uri": "https://test.org"}]}]
 
 
@@ -59,12 +61,14 @@ def publisher_mocks():
         ("stage", {"a0-yf", "fd-bof", "67-r"}),
     ],
 )
-def test_targets_public_records_with_exact_catalog_descriptions(environment, published_keys):
-    targets = _target_descriptions(environment)
+def test_targets_public_records_with_environment_descriptions(environment, published_keys):
+    targets = _target_descriptions(environment, git_sha=GIT_SHA)
 
     assert targets.keys() == published_keys
     assert targets == {
-        rkey if environment == "prod" else config.internal_rkey: config.description
+        rkey if environment == "prod" else config.internal_rkey: (
+            config.description if environment == "prod" else STAGE_DESCRIPTION
+        )
         for rkey, config in FEEDS.items()
         if config.public
     }
@@ -72,7 +76,8 @@ def test_targets_public_records_with_exact_catalog_descriptions(environment, pub
 
 @pytest.mark.parametrize(("environment", "rkey"), [("prod", "your-feed"), ("stage", "a0-yf")])
 def test_single_feed_uses_canonical_name_and_environment_rkey(environment, rkey):
-    assert _target_descriptions(environment, "your-feed") == {rkey: FEEDS["your-feed"].description}
+    expected = FEEDS["your-feed"].description if environment == "prod" else STAGE_DESCRIPTION
+    assert _target_descriptions(environment, "your-feed", GIT_SHA) == {rkey: expected}
 
 
 @pytest.mark.parametrize(
@@ -99,11 +104,15 @@ def test_environment_authentication_uses_stable_publisher_dids():
 @pytest.mark.parametrize("environment", ["prod", "stage"])
 def test_updates_exact_copy_and_preserves_other_metadata(environment, publisher_mocks):
     client, mock_session, mock_list, mock_put = publisher_mocks
-    targets = _target_descriptions(environment)
+    targets = _target_descriptions(environment, git_sha=GIT_SHA)
     records = [
         _record(
             rkey,
-            "Old copy.\nBuilt by GreenEarth (https://www.greenearth.social).",
+            (
+                "Old copy.\nBuilt by GreenEarth (https://www.greenearth.social)."
+                if environment == "prod"
+                else FEEDS["your-feed"].description
+            ),
             avatar={"ref": {"$link": "avatar-blob"}},
             acceptsInteractions=True,
             descriptionFacets=FACETS,
@@ -115,7 +124,7 @@ def test_updates_exact_copy_and_preserves_other_metadata(environment, publisher_
     mock_list.return_value = records
 
     summary = update_feed_descriptions(
-        handle=HANDLE, password=PASSWORD, environment=environment, pds=PDS
+        handle=HANDLE, password=PASSWORD, environment=environment, git_sha=GIT_SHA, pds=PDS
     )
 
     assert summary == UpdateSummary(updated=3, already_current=0, skipped=0, missing=0)
@@ -134,16 +143,19 @@ def test_updates_exact_copy_and_preserves_other_metadata(environment, publisher_
     assert records == original_records
 
 
-def test_unchanged_descriptions_and_facets_are_idempotent(publisher_mocks):
+@pytest.mark.parametrize("environment", ["prod", "stage"])
+def test_unchanged_descriptions_and_facets_are_idempotent(environment, publisher_mocks):
     _, _, mock_list, mock_put = publisher_mocks
     records = [
         _record(rkey, description, descriptionFacets=FACETS)
-        for rkey, description in _target_descriptions("prod").items()
+        for rkey, description in _target_descriptions(environment, git_sha=GIT_SHA).items()
     ]
     original_records = deepcopy(records)
     mock_list.return_value = records
 
-    summary = update_feed_descriptions(handle=HANDLE, password=PASSWORD, environment="prod")
+    summary = update_feed_descriptions(
+        handle=HANDLE, password=PASSWORD, environment=environment, git_sha=GIT_SHA
+    )
 
     assert summary == UpdateSummary(updated=0, already_current=3, skipped=0, missing=0)
     mock_put.assert_not_called()
@@ -162,6 +174,7 @@ def test_dry_run_reports_before_and_after_for_only_selected_feed(publisher_mocks
         password=PASSWORD,
         environment="stage",
         feed_name="your-feed",
+        git_sha=GIT_SHA,
         dry_run=True,
     )
 
@@ -170,7 +183,7 @@ def test_dry_run_reports_before_and_after_for_only_selected_feed(publisher_mocks
     output = capsys.readouterr().out
     assert "Would update: a0-yf" in output
     assert "Before: 'Existing stage copy.'" in output
-    assert f"After: {FEEDS['your-feed'].description!r}" in output
+    assert f"After: {STAGE_DESCRIPTION!r}" in output
     assert "67-r" not in output
 
 
@@ -226,9 +239,10 @@ def test_missing_target_is_reported_without_creating_it(publisher_mocks, capsys)
 @pytest.mark.parametrize("environment", ["prod", "stage"])
 @patch("update_feed_descriptions.load_dotenv")
 @patch("update_feed_descriptions._password_from_secret")
+@patch("update_feed_descriptions._git_short_sha", return_value=GIT_SHA)
 @patch("update_feed_descriptions.update_feed_descriptions")
 def test_cli_uses_environment_account_and_secret(
-    mock_update, mock_secret, mock_dotenv, environment, monkeypatch
+    mock_update, mock_git_sha, mock_secret, mock_dotenv, environment, monkeypatch
 ):
     monkeypatch.delenv("GE_BSKY_APP_PASSWORD", raising=False)
     monkeypatch.setattr(
@@ -256,9 +270,43 @@ def test_cli_uses_environment_account_and_secret(
         password=PASSWORD,
         environment=environment,
         feed_name="your-feed",
+        git_sha=GIT_SHA if environment == "stage" else None,
         pds="https://bsky.social",
         dry_run=True,
     )
+    if environment == "stage":
+        mock_git_sha.assert_called_once_with()
+    else:
+        mock_git_sha.assert_not_called()
+
+
+@patch("update_feed_descriptions.load_dotenv")
+@patch("update_feed_descriptions._password_from_secret")
+@patch("update_feed_descriptions._git_short_sha")
+@patch("update_feed_descriptions.update_feed_descriptions")
+def test_cli_explicit_stage_sha_overrides_default(
+    mock_update, mock_git_sha, mock_secret, mock_dotenv, monkeypatch
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "update_feed_descriptions.py",
+            "--environment",
+            "stage",
+            "--app-password",
+            PASSWORD,
+            "--git-sha",
+            GIT_SHA,
+            "--dry-run",
+        ],
+    )
+    mock_update.return_value = UpdateSummary(updated=3, already_current=0, skipped=0, missing=0)
+
+    main()
+
+    assert mock_update.call_args.kwargs["git_sha"] == GIT_SHA
+    mock_git_sha.assert_not_called()
+    mock_secret.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -275,7 +323,7 @@ def test_cli_returns_attention_exit_code_for_skipped_or_missing(
 ):
     monkeypatch.setattr(
         "sys.argv",
-        ["update_feed_descriptions.py", "--environment", "stage", "--app-password", PASSWORD],
+        ["update_feed_descriptions.py", "--environment", "prod", "--app-password", PASSWORD],
     )
     mock_update.return_value = summary
 

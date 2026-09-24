@@ -463,9 +463,9 @@ def _resolve_feed_publish_params(
 ) -> tuple[str, str, str]:
     """Return (published_rkey, display_name, description) for a feed based on routing rules.
 
-    Public feed descriptions come verbatim from FEEDS in every environment.
-    Internal ("debug") feeds are stamped with *git_sha* in both the display name
-    and description. Staging copies of public feeds keep the sha in their name.
+    Production public feed descriptions come verbatim from FEEDS. All stage/dev
+    feeds and production internal feeds use the Caterpie description and are
+    stamped with *git_sha* in both the display name and description.
     """
     is_greenearth = normalized_env == "prod" and feed_cfg.public
     if is_greenearth:
@@ -481,10 +481,7 @@ def _resolve_feed_publish_params(
     else:
         published_display_name = base_display_name
     published_display_name = _with_git_sha(published_display_name, git_sha)
-    if feed_cfg.public:
-        description = feed_cfg.description
-    else:
-        description = f"Built by Caterpie · {git_sha}" if git_sha else "Built by Caterpie"
+    description = f"Built by Caterpie · {git_sha}" if git_sha else "Built by Caterpie"
     return published_rkey, published_display_name, description
 
 
@@ -508,9 +505,9 @@ def sync_feeds(
     *git_sha*, when provided, is stamped onto internal (debug) feed records so
     testers can identify the deployed code behind a feed.
 
-    Public-feed descriptions are synchronized verbatim from FEEDS, including
-    existing records and staging copies. Existing description facets are retained
-    only when their corresponding text is unchanged.
+    Production public-feed descriptions are synchronized verbatim from FEEDS.
+    Stage/dev and production internal descriptions use the Caterpie text and git
+    sha. Existing description facets are retained only when their text is unchanged.
     """
     feed_items = list(FEEDS.items())
     if visibility == "public":
@@ -557,7 +554,7 @@ def sync_feeds(
                 existing_by_rkey.get(published_rkey) if feed_cfg.public else None
             )
             # Facets contain byte offsets into the old text. They are safe to
-            # reuse only when the configured description is exactly unchanged.
+            # reuse only when the resolved description is exactly unchanged.
             if (
                 isinstance(existing_value, dict)
                 and existing_value.get("description") == description

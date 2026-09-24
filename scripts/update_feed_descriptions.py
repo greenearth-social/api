@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Synchronize public feed descriptions from feeds.py without deploying.
+"""Synchronize public feed descriptions using publishing rules without deploying.
 
-Each existing generator record receives the complete configured description.
+Production records receive the complete configured description from feeds.py;
+staging records receive the Caterpie description with the selected git SHA.
 Other metadata is preserved, except for description facets whose byte offsets
 would become stale when the description changes.
 """
@@ -21,6 +22,7 @@ from publish_feed import (
     DEFAULT_PDS,
     FEEDS,
     _create_session,
+    _git_short_sha,
     _list_records,
     _put_record,
     _resolve_feed_publish_params,
@@ -58,7 +60,9 @@ class UpdateSummary:
         return self.skipped > 0 or self.missing > 0
 
 
-def _target_descriptions(environment: str, feed_name: str | None = None) -> dict[str, str]:
+def _target_descriptions(
+    environment: str, feed_name: str | None = None, git_sha: str | None = None
+) -> dict[str, str]:
     if environment not in ENVIRONMENT_TARGETS:
         raise ValueError(f"Unknown environment: {environment}")
     if feed_name is not None and (feed_name not in FEEDS or not FEEDS[feed_name].public):
@@ -67,12 +71,13 @@ def _target_descriptions(environment: str, feed_name: str | None = None) -> dict
     for canonical_rkey, feed_config in FEEDS.items():
         if not feed_config.public or (feed_name is not None and canonical_rkey != feed_name):
             continue
-        published_rkey, _, _ = _resolve_feed_publish_params(
+        published_rkey, _, description = _resolve_feed_publish_params(
             canonical_rkey,
             feed_config,
             environment,
+            git_sha,
         )
-        descriptions[published_rkey] = feed_config.description
+        descriptions[published_rkey] = description
     return descriptions
 
 
@@ -82,11 +87,12 @@ def update_feed_descriptions(
     password: str,
     environment: str,
     feed_name: str | None = None,
+    git_sha: str | None = None,
     pds: str = DEFAULT_PDS,
     dry_run: bool = False,
 ) -> UpdateSummary:
-    """Apply configured descriptions to existing public generator records."""
-    targets = _target_descriptions(environment, feed_name)
+    """Apply environment-specific descriptions to existing public generator records."""
+    targets = _target_descriptions(environment, feed_name, git_sha)
     updated = 0
     already_current = 0
     skipped = 0
@@ -171,7 +177,8 @@ def _password_from_secret(project_id: str, secret: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Synchronize existing public feed descriptions from feeds.py without deploying."
+            "Synchronize existing public feed descriptions using publishing rules "
+            "without deploying."
         )
     )
     parser.add_argument(
@@ -184,6 +191,13 @@ def main() -> None:
         "--feed-name",
         choices=sorted(rkey for rkey, config in FEEDS.items() if config.public),
         help="Update only this public feed's canonical key (default: all public feeds).",
+    )
+    parser.add_argument(
+        "--git-sha",
+        help=(
+            "Short git SHA for staging descriptions. Falls back to GE_GIT_SHA, "
+            "then to the local HEAD SHA. Ignored for production descriptions."
+        ),
     )
     parser.add_argument(
         "--project-id",
@@ -225,6 +239,7 @@ def main() -> None:
         password=password,
         environment=args.environment,
         feed_name=args.feed_name,
+        git_sha=(args.git_sha or _git_short_sha()) if args.environment == "stage" else None,
         pds=args.pds,
         dry_run=args.dry_run,
     )
