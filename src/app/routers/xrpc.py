@@ -125,7 +125,6 @@ SURVEY_POST_MIN_VISITS = 3  # minimum initial loads before the survey is shown
 SURVEY_POST_COOLDOWN_DAYS = 7  # days between survey showings (triggered by interactionSeen)
 
 
-
 @dataclass
 class _InitialRequestEntry:
     created_at: float
@@ -419,8 +418,6 @@ class SendInteractionsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-
-
 # When cutoffs empty a slate that still had candidates, serve the best pre-cutoff
 # posts anyway (fail open) rather than a blank feed. Flip to False to strictly
 # honor the thresholds and return an empty slate instead.
@@ -680,11 +677,7 @@ def _with_politics_multiplier(feed_cfg: FeedConfig, politics: float) -> FeedConf
         return feed_cfg
 
     return feed_cfg.model_copy(
-        update={
-            "rank_request_template": rank_template.model_copy(
-                update={"politics": politics}
-            )
-        }
+        update={"rank_request_template": rank_template.model_copy(update={"politics": politics})}
     )
 
 
@@ -1153,9 +1146,7 @@ async def _generation_exclusions(
             return []
 
     seen_uris, discarded_uris = await asyncio.gather(_seen(), _discarded())
-    return list(
-        dict.fromkeys([*sorted(_pinned_post_uris(feed_cfg)), *seen_uris, *discarded_uris])
-    )
+    return list(dict.fromkeys([*sorted(_pinned_post_uris(feed_cfg)), *seen_uris, *discarded_uris]))
 
 
 async def generate_feed_preview(
@@ -1919,9 +1910,7 @@ async def get_feed_skeleton(
     preference_fingerprint = configured.preference_fingerprint
     contextual_pin_uris = _pinned_post_uris(feed_cfg)
     pinned_post_uri = (
-        _select_pinned_post_uri(feed_name, feed_cfg, limit, user_doc)
-        if cursor is None
-        else None
+        _select_pinned_post_uri(feed_name, feed_cfg, limit, user_doc) if cursor is None else None
     )
 
     feed_cache = _get_feed_cache(request)
@@ -1975,9 +1964,7 @@ async def get_feed_skeleton(
                         },
                     )
                     raise HTTPException(status_code=400, detail="Invalid cursor")
-                cached_uris = [
-                    uri for uri in cache_doc.items if uri not in contextual_pin_uris
-                ]
+                cached_uris = [uri for uri in cache_doc.items if uri not in contextual_pin_uris]
                 if (
                     preferences_read_succeeded
                     and cache_doc.preference_fingerprint != preference_fingerprint
@@ -2022,9 +2009,7 @@ async def get_feed_skeleton(
                             )
                         )
                     replacement_uris = [
-                        uri
-                        for uri in generated_snapshot.items
-                        if uri not in contextual_pin_uris
+                        uri for uri in generated_snapshot.items if uri not in contextual_pin_uris
                     ]
                     page = replacement_uris[:limit]
                     next_cursor: str | None = None
@@ -2273,9 +2258,7 @@ async def get_feed_skeleton(
                         and accepted_cache.feed_name == feed_name
                     ):
                         accepted_uris = [
-                            uri
-                            for uri in accepted_cache.items
-                            if uri not in contextual_pin_uris
+                            uri for uri in accepted_cache.items if uri not in contextual_pin_uris
                         ]
                         if pinned_post_uri:
                             generated_page = accepted_uris[: max(0, limit - 1)]
@@ -2370,20 +2353,27 @@ async def get_feed_skeleton(
                 _spawn_background(
                     _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
                 )
-            all_uris = [
-                uri for uri in generated_snapshot.items if uri not in contextual_pin_uris
-            ]
+            all_uris = [uri for uri in generated_snapshot.items if uri not in contextual_pin_uris]
 
             # Survey post: eligible for users who loaded the feed at least 3 times
             # and haven't seen it in the past 7 days (tracked via interactionSeen).
             show_survey = False
-            if feed_cfg.survey_post_uri and not is_anonymous and not is_probe and not is_load_test:
+            if (
+                feed_cfg.survey_post_uri
+                and not is_anonymous
+                and not is_probe
+                and not is_load_test
+                and not is_appview_one_item_check
+            ):
                 try:
                     feed_activity_doc = await get_feed_activity(db, user_did, feed_name)
                 except Exception:
                     logger.exception("Failed to read feed activity for user '%s'", user_did)
                     feed_activity_doc = None
-                if feed_activity_doc is not None and feed_activity_doc.load_count >= SURVEY_POST_MIN_VISITS:  # noqa: E501
+                if (
+                    feed_activity_doc is not None
+                    and feed_activity_doc.load_count >= SURVEY_POST_MIN_VISITS
+                ):  # noqa: E501
                     cutoff = datetime.now(UTC) - timedelta(days=SURVEY_POST_COOLDOWN_DAYS)
                     last_seen = user_doc.survey_post_last_seen_at if user_doc else None
                     show_survey = last_seen is None or last_seen < cutoff

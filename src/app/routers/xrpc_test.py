@@ -3512,9 +3512,7 @@ class TestSendInteractions:
         with (
             patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
             patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
-            patch(
-                "app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock
-            ) as classify,
+            patch("app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock) as classify,
         ):
             await _record_interactions(db, interactions)
 
@@ -3556,9 +3554,7 @@ class TestSendInteractions:
         with (
             patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
             patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
-            patch(
-                "app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock
-            ) as classify,
+            patch("app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock) as classify,
         ):
             await _record_interactions(db, [ix])
 
@@ -3724,9 +3720,7 @@ class TestSendInteractions:
         with (
             patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
             patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
-            patch(
-                "app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock
-            ) as classify,
+            patch("app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock) as classify,
         ):
             await _record_interactions(db, interactions)
 
@@ -4683,13 +4677,60 @@ class TestSurveyPost:
             expires_at=datetime.now(UTC) + timedelta(days=1),
         )
 
-    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch(
+        "app.routers.xrpc.verify_auth_header",
+        new_callable=AsyncMock,
+        return_value="did:plc:testuser",
+    )
     @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
     @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
-    def test_survey_post_injected_at_position_6(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+    def test_one_item_probe_skips_survey(
+        self,
+        mock_get_user,
+        mock_get_activity,
+        mock_pipeline,
+        *_,
+    ):
+        """A freshness probe returns only its standalone pin and has no survey side effects."""
+        from app.routers import xrpc as xrpc_mod
+
+        mock_get_user.return_value = self._eligible_user()
+        mock_get_activity.return_value = self._eligible_activity()
+        mock_pipeline.return_value = (
+            self._make_snapshot(["at://did:plc:a/0"]),
+            [],
+        )
+        patched = self._patched_feeds()
+        patched["your-feed"] = patched["your-feed"].model_copy(
+            update={"pinned_post_uri": "at://first-time"}
+        )
+
+        with patch.object(xrpc_mod, "FEEDS", patched):
+            resp = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": 1},
+            )
+
+        assert resp.status_code == 200
+        assert [item["post"] for item in resp.json()["feed"]] == ["at://first-time"]
+        mock_get_activity.assert_not_awaited()
+
+    @patch(
+        "app.routers.xrpc.verify_auth_header",
+        new_callable=AsyncMock,
+        return_value="did:plc:testuser",
+    )
+    @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
+    @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
+    def test_survey_post_injected_at_position_6(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
         """Survey post appears at position 6 for eligible users."""
         from app.routers import xrpc as xrpc_mod
 
@@ -4711,15 +4752,22 @@ class TestSurveyPost:
         assert self.SURVEY_URI not in posts[:5]
         assert self.SURVEY_URI not in posts[6:]
 
-    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch(
+        "app.routers.xrpc.verify_auth_header",
+        new_callable=AsyncMock,
+        return_value="did:plc:testuser",
+    )
     @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
     @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
-    def test_survey_not_shown_when_load_count_below_threshold(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+    def test_survey_not_shown_when_load_count_below_threshold(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
         """Survey post is suppressed when the user has fewer than 3 loads."""
         from app.routers import xrpc as xrpc_mod
+
         from ..documents import FeedActivityDocument
 
         mock_get_user.return_value = self._eligible_user()
@@ -4742,15 +4790,22 @@ class TestSurveyPost:
         posts = [item["post"] for item in resp.json()["feed"]]
         assert self.SURVEY_URI not in posts
 
-    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch(
+        "app.routers.xrpc.verify_auth_header",
+        new_callable=AsyncMock,
+        return_value="did:plc:testuser",
+    )
     @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
     @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
-    def test_survey_not_shown_when_seen_within_7_days(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+    def test_survey_not_shown_when_seen_within_7_days(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
         """Survey post is suppressed if the user saw it within the past 7 days."""
         from app.routers import xrpc as xrpc_mod
+
         from ..documents import UserDocument
 
         recently = datetime.now(UTC) - timedelta(days=3)
@@ -4771,15 +4826,22 @@ class TestSurveyPost:
         posts = [item["post"] for item in resp.json()["feed"]]
         assert self.SURVEY_URI not in posts
 
-    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch(
+        "app.routers.xrpc.verify_auth_header",
+        new_callable=AsyncMock,
+        return_value="did:plc:testuser",
+    )
     @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
     @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
-    def test_survey_shown_after_cooldown_expires(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+    def test_survey_shown_after_cooldown_expires(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
         """Survey post reappears after the 7-day cooldown."""
         from app.routers import xrpc as xrpc_mod
+
         from ..documents import UserDocument
 
         long_ago = datetime.now(UTC) - timedelta(days=8)
@@ -4800,13 +4862,19 @@ class TestSurveyPost:
         posts = [item["post"] for item in resp.json()["feed"]]
         assert posts[5] == self.SURVEY_URI
 
-    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch(
+        "app.routers.xrpc.verify_auth_header",
+        new_callable=AsyncMock,
+        return_value="did:plc:testuser",
+    )
     @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
     @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
-    def test_survey_not_in_observability_snapshot(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+    def test_survey_not_in_observability_snapshot(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
         """Survey URI is excluded from the feed snapshot written for the transparency API."""
         from app.routers import xrpc as xrpc_mod
 
@@ -4817,7 +4885,9 @@ class TestSurveyPost:
 
         with (
             patch.object(xrpc_mod, "FEEDS", self._patched_feeds()),
-            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False) as snap,
+            patch(
+                "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+            ) as snap,
         ):
             resp = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -4829,13 +4899,19 @@ class TestSurveyPost:
         snapshot = snap.await_args.args[3]
         assert self.SURVEY_URI not in snapshot.items
 
-    @patch("app.routers.xrpc.verify_auth_header", new_callable=AsyncMock, return_value="did:plc:testuser")
+    @patch(
+        "app.routers.xrpc.verify_auth_header",
+        new_callable=AsyncMock,
+        return_value="did:plc:testuser",
+    )
     @patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
     @patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
-    def test_survey_cursor_offset_excludes_survey_uri(self, mock_get_user, mock_get_activity, mock_pipeline, *_):
+    def test_survey_cursor_offset_excludes_survey_uri(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
         """Cursor offset counts only generated posts so page 2 continues correctly."""
         from app.routers import xrpc as xrpc_mod
 
