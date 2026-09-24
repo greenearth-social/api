@@ -49,23 +49,23 @@ def test_no_trailing_empty_text():
 
 
 def test_build_text_builder_plain():
-    from manage_post import build_text_builder
+    from managed_posts import build_text_builder
     segments = [{"type": "text", "text": "hello world"}]
     tb = MagicMock()
-    with patch("manage_post.client_utils.TextBuilder", return_value=tb):
+    with patch("managed_posts.client_utils.TextBuilder", return_value=tb):
         build_text_builder(segments)
     tb.text.assert_called_once_with("hello world")
     tb.link.assert_not_called()
 
 
 def test_build_text_builder_with_link():
-    from manage_post import build_text_builder
+    from managed_posts import build_text_builder
     segments = [
         {"type": "text", "text": "visit "},
         {"type": "link", "text": "site", "url": "https://example.com"},
     ]
     tb = MagicMock()
-    with patch("manage_post.client_utils.TextBuilder", return_value=tb):
+    with patch("managed_posts.client_utils.TextBuilder", return_value=tb):
         build_text_builder(segments)
     tb.text.assert_called_once_with("visit ")
     tb.link.assert_called_once_with("site", "https://example.com")

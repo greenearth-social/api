@@ -1777,9 +1777,13 @@ async def get_feed_skeleton(
                 # Nothing to personalize, so skip the pipeline entirely and say
                 # why the feed is empty. No cursor: this is the whole feed.
                 set_traffic("logged_out")
-                return FeedSkeletonResponse(
-                    feed=[SkeletonItem(post=feed_cfg.logged_out_post_uri or LOGGED_OUT_POST_URI)]
-                )
+                explain_uri = feed_cfg.logged_out_post_uri or LOGGED_OUT_POST_URI
+                if not explain_uri:
+                    # Only reachable in a checkout with no UX post manifest;
+                    # deployment validation refuses to ship one.
+                    logger.warning("No logged-out UX post resolved for feed %s", feed_name)
+                    return FeedSkeletonResponse(feed=[])
+                return FeedSkeletonResponse(feed=[SkeletonItem(post=explain_uri)])
 
             is_anonymous = True
             user_did = ANONYMOUS_DID
