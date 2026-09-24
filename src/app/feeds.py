@@ -133,7 +133,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "random": FeedConfig(
         display_name="Random",
-        description="A random selection of recent posts from the community.",
+        description="A random selection of recent posts from the community.\nPart of the MySky feed family.",
         public=True,
         internal_rkey="67-r",
         internal_display_name="67 R",
@@ -154,7 +154,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "your-feed": FeedConfig(
         display_name="MySky",
-        description="A feed you control, designed for constructive conversation.",
+        description="Own your algorithm.\nA personalized feed with a control panel.",
         public=True,
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
@@ -185,7 +185,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "best-of-friends": FeedConfig(
         display_name="Best of Friends",
-        description="The best posts from people you follow, curated just for you.",
+        description="The best posts from people you follow, curated just for you.\nPart of the MySky feed family.",
         public=True,
         internal_rkey="fd-bof",
         internal_display_name="fd BOF",
