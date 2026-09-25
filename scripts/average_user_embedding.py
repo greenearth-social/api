@@ -28,7 +28,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..src.app.lib.average_user_embedding_artifact import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from app.lib.average_user_embedding_artifact import (  # noqa: E402
     ArtifactValidationError,
     is_count,
     is_finite_number,
