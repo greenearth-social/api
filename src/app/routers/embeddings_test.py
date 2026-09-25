@@ -65,8 +65,7 @@ def _search(hits, **changes):
 def client(monkeypatch):
     # Repository conftest.py bypasses API-key auth for ordinary tests. Replace the
     # external clients/history here, but exercise real routing and inference parsing.
-    es = Mock()
-    es.info = AsyncMock(return_value={"cluster_uuid": "cluster-1"})
+    es = Mock(spec=["search"])
     monkeypatch.setattr(app.state, "es", es, raising=False)
     monkeypatch.setattr(app.state, "firestore", object(), raising=False)
     monkeypatch.setattr(
@@ -105,7 +104,6 @@ def test_export_propagates_actual_pair_source_and_history_without_candidate_sear
         "dimension": 2,
         "history_like_count": 1,
         "history_embedding_count": 1,
-        "es_cluster_uuid": "cluster-1",
         "likes_index": "likes",
         "history_policy": {
             "limit": 64,
@@ -129,42 +127,6 @@ def test_export_propagates_actual_pair_source_and_history_without_candidate_sear
     app.state.es.search.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_cluster_identity_shared_across_concurrent_users(client):
-    async def lookup():
-        # Yield once so requests overlap while the identity lock is held.
-        await asyncio.sleep(0)
-        return {"cluster_uuid": "cluster-1"}
-
-    app.state.es.info.side_effect = lookup
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as concurrent_client:
-        responses = await asyncio.gather(
-            *(
-                concurrent_client.post("/embeddings/user", json={"user_did": f"did:plc:user{i}"})
-                for i in range(4)
-            )
-        )
-        responses.append(
-            await concurrent_client.post("/embeddings/user", json={"user_did": DID})
-        )
-    assert all(response.status_code == 200 for response in responses)
-    assert all(response.json()["es_cluster_uuid"] == "cluster-1" for response in responses)
-    app.state.es.info.assert_awaited_once()
-
-
-def test_replacing_es_client_refreshes_cluster_identity(client, monkeypatch):
-    response = client.post("/embeddings/user", json={"user_did": DID})
-    assert response.json()["es_cluster_uuid"] == "cluster-1"
-    replacement = Mock(info=AsyncMock(return_value={"cluster_uuid": "cluster-2"}))
-    monkeypatch.setattr(app.state, "es", replacement)
-    response = client.post("/embeddings/user", json={"user_did": DID})
-    assert response.status_code == 200
-    assert response.json()["es_cluster_uuid"] == "cluster-2"
-    replacement.info.assert_awaited_once()
-
-
 @pytest.mark.parametrize(
     "history,reason",
     [
@@ -183,7 +145,6 @@ def test_missing_history_skips_inference_and_excludes_vectors(client, monkeypatc
     assert body["reason"] == reason
     assert body["history_like_count"] == len(history.items)
     assert body["history_embedding_count"] == 0
-    assert body["es_cluster_uuid"] == "cluster-1"
     assert not {"embedding", "dimension", "user_model_uuid", "post_model_uuid"} & body.keys()
     _mock_prediction_request().assert_not_called()
 
@@ -195,7 +156,8 @@ def test_authentication_uses_existing_api_key_header(client, monkeypatch):
     monkeypatch.setattr(security, "authenticate_api_key", authenticate)
     response = client.post("/embeddings/user", json={"user_did": DID})
     assert response.status_code == 401
-    app.state.es.info.assert_not_called()
+    cast(AsyncMock, embeddings.fetch_user_history_features).assert_not_called()
+    _mock_prediction_request().assert_not_called()
     authenticate.return_value = SimpleNamespace(key_id="valid")
     response = client.post(
         "/embeddings/user", json={"user_did": DID}, headers={"X-API-Key": "a-key"}
@@ -209,7 +171,8 @@ def test_authentication_uses_existing_api_key_header(client, monkeypatch):
 )
 def test_invalid_did_rejected_before_upstream_calls(client, did):
     assert client.post("/embeddings/user", json={"user_did": did}).status_code == 422
-    app.state.es.info.assert_not_called()
+    cast(AsyncMock, embeddings.fetch_user_history_features).assert_not_called()
+    _mock_prediction_request().assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -295,18 +258,16 @@ def test_history_failures_prevent_inference(client, monkeypatch, caplog, excepti
     _mock_prediction_request().assert_not_called()
 
 
-@pytest.mark.parametrize("stage", ["source_identity", "history", "inference"])
+@pytest.mark.parametrize("stage", ["history", "inference"])
 def test_overall_deadline_covers_all_stages(client, monkeypatch, stage):
     # A short injected deadline avoids a real 55-second wait while exercising
-    # cancellation during each of the three awaited stages.
+    # cancellation during history loading and inference.
     monkeypatch.setattr(embeddings, "REQUEST_TIMEOUT_SECONDS", 0.01)
 
     async def slow_operation(*args, **kwargs):
         await asyncio.sleep(10)
 
-    if stage == "source_identity":
-        app.state.es.info.side_effect = slow_operation
-    elif stage == "history":
+    if stage == "history":
         cast(AsyncMock, embeddings.fetch_user_history_features).side_effect = slow_operation
     else:
         _mock_prediction_request().side_effect = slow_operation
@@ -331,21 +292,8 @@ def test_missing_inference_configuration_is_explicit(client, monkeypatch):
     response = client.post("/embeddings/user", json={"user_did": DID})
     assert response.status_code == 502
     assert response.json()["detail"]["code"] == "inference_not_configured"
-    app.state.es.info.assert_not_called()
-
-
-@pytest.mark.parametrize("cluster_uuid", [None, "", " ", "_na_", 12])
-def test_missing_cluster_identity_is_not_exported(client, cluster_uuid):
-    app.state.es.info.return_value = {"cluster_uuid": cluster_uuid}
-    response = client.post("/embeddings/user", json={"user_did": DID})
-    assert response.status_code == 502
-    assert response.json()["detail"]["code"] == "upstream_error"
+    cast(AsyncMock, embeddings.fetch_user_history_features).assert_not_called()
     _mock_prediction_request().assert_not_called()
-    app.state.es.info.return_value = {"cluster_uuid": "cluster-1"}
-    response = client.post("/embeddings/user", json={"user_did": DID})
-    assert response.status_code == 200
-    assert response.json()["es_cluster_uuid"] == "cluster-1"
-    assert app.state.es.info.await_count == 2
 
 
 @pytest.mark.parametrize("vector", [[0.6, 0.8], [1.0, 2.0, 3.0]])

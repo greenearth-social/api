@@ -42,9 +42,6 @@ def search_response(hits):
 class HistoryES:
     """Reply history must participate; any candidate search fails the test."""
 
-    async def info(self):
-        return {"cluster_uuid": "same-cluster"}
-
     async def search(self, *, index, query, **kwargs):
         if index == "likes":
             did = query["bool"]["filter"][0]["terms"]["author_did"][0]
@@ -139,23 +136,20 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
                         ],
                     }
                 elif url.hostname == "es.test":
-                    if url.path == "/":
-                        result = {"cluster_uuid": "same-cluster"}
-                    else:
-                        assert url.path == "/likes/_search"
-                        batch = body["query"]["terms"]["author_did"]
-                        result = {
-                            **search_response([]),
-                            "aggregations": {
-                                "users": {
-                                    "sum_other_doc_count": 0,
-                                    "doc_count_error_upper_bound": 0,
-                                    "buckets": [
-                                        {"key": did, "doc_count": LIKE_COUNTS[did]} for did in batch
-                                    ],
-                                }
-                            },
-                        }
+                    assert url.path == "/likes/_search"
+                    batch = body["query"]["terms"]["author_did"]
+                    result = {
+                        **search_response([]),
+                        "aggregations": {
+                            "users": {
+                                "sum_other_doc_count": 0,
+                                "doc_count_error_upper_bound": 0,
+                                "buckets": [
+                                    {"key": did, "doc_count": LIKE_COUNTS[did]} for did in batch
+                                ],
+                            }
+                        },
+                    }
                 else:
                     assert url.hostname == "api.test"
                     endpoint_calls.append(body["user_did"])

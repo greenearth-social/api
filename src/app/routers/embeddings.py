@@ -11,7 +11,6 @@ from elasticsearch import ApiError
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..lib.elasticsearch import unwrap_es_response
 from ..lib.embeddings import MINILM_L12_EMBEDDING_KEY
 from ..lib.inference import (
     InferenceModelMetadataError,
@@ -58,39 +57,12 @@ class UserEmbeddingResponse(BaseModel):
     history_like_count: int = Field(ge=0)
     history_embedding_count: int = Field(ge=0)
     history_policy: HistoryPolicy = Field(default_factory=HistoryPolicy)
-    es_cluster_uuid: str
     likes_index: str = "likes"
     embedding: list[float] | None = None
     user_model_uuid: str | None = None
     post_model_uuid: str | None = None
     dimension: int | None = None
     reason: Literal["no_likes", "no_embedded_history"] | None = None
-
-
-async def _get_es_cluster_uuid(request: Request) -> str:
-    """Cache the first successful identity lookup for this app's ES client."""
-    state = request.app.state
-    es = state.es
-    # Cache identity with the client, not globally: replacing the client must not
-    # leave a stale cluster UUID that could hide a producer/API environment mismatch.
-    if getattr(state, "embedding_es_client", None) is not es:
-        state.embedding_es_client = es
-        state.embedding_es_cluster_uuid = None
-        state.embedding_es_cluster_lock = asyncio.Lock()
-    async with state.embedding_es_cluster_lock:
-        # Concurrent exports share one successful lookup. A failed lookup is not
-        # cached, so a later request can try again after the upstream recovers.
-        if state.embedding_es_cluster_uuid is None:
-            info = unwrap_es_response(await es.info())
-            cluster_uuid = info.get("cluster_uuid")
-            if (
-                not isinstance(cluster_uuid, str)
-                or not cluster_uuid.strip()
-                or cluster_uuid == "_na_"
-            ):
-                raise ValueError("Elasticsearch cluster identity is unavailable")
-            state.embedding_es_cluster_uuid = cluster_uuid
-        return state.embedding_es_cluster_uuid
 
 
 def _failure(
@@ -135,14 +107,12 @@ async def user_embedding(request: Request, payload: UserEmbeddingRequest) -> Use
             "inference_not_configured", started=started, stage="configuration", exception=exc
         ) from None
 
-    stage = "source_identity"
+    stage = "history"
     try:
-        # One deadline covers identity, cached/loaded history, and inference together,
+        # One deadline covers cached/loaded history and inference together,
         # rather than granting each operation a fresh 55-second budget.
         async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
             history_started = time.monotonic()
-            cluster_uuid = await _get_es_cluster_uuid(request)
-            stage = "history"
             # Reuse the production loader and cache so offline vectors reflect the
             # same latest-like preparation as feed requests, including reply history.
             history = await fetch_user_history_features(request.app.state.es, payload.user_did)
@@ -209,7 +179,6 @@ async def user_embedding(request: Request, payload: UserEmbeddingRequest) -> Use
         status="skipped" if result.reason else "ok",
         history_like_count=result.history_like_count,
         history_embedding_count=result.history_embedding_count,
-        es_cluster_uuid=cluster_uuid,
         embedding=result.embedding,
         user_model_uuid=result.user_model_uuid,
         post_model_uuid=result.post_model_uuid,

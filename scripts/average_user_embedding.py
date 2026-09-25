@@ -124,9 +124,6 @@ class JsonClient:
         if self.service != "Embedding API":
             logger.log(level, message, *args)
 
-    def get(self, path):
-        return self.request("GET", path)
-
     def post(self, path, payload):
         return self.request("POST", path, payload)
 
@@ -461,17 +458,14 @@ def collect_like_counts(client, dids):
     return counts
 
 
-def fetch_embedding(client, did, expected_source):
+def fetch_embedding(client, did):
     """Validate one response and return only what aggregation needs."""
     try:
         result = client.post("/embeddings/user", {"user_did": did})
         if result.get("user_did") != did:
             raise RequestError("mismatched_user_did", "response DID differs from request")
-        # A local ES tunnel and a remote API can accidentally target different
-        # environments. Compare data-source identity before trusting any vector.
-        for key, value in expected_source.items():
-            if result.get(key) != value:
-                raise RunError(f"Embedding API: Elasticsearch source mismatch ({key})")
+        if result.get("likes_index") != LIKES_INDEX:
+            raise RunError("Embedding API: Elasticsearch source mismatch (likes_index)")
         policy = validate_history_policy(result.get("history_policy"))
         for key in ("history_like_count", "history_embedding_count"):
             if not is_count(result.get(key)):
@@ -531,7 +525,7 @@ def fetch_embedding(client, did, expected_source):
         return {"status": "failed", "reason": error.reason}
 
 
-def average_embeddings(client, dids, workers, expected_source):
+def average_embeddings(client, dids, workers):
     """L2-normalize the equal-weight mean, retaining only aggregate outcome counts."""
     started = time.monotonic()
     next_progress_at = started + 10
@@ -551,7 +545,7 @@ def average_embeddings(client, dids, workers, expected_source):
         for _ in range(workers):
             did = next(remaining, None)
             if did is not None:
-                pending.add(executor.submit(fetch_embedding, client, did, expected_source))
+                pending.add(executor.submit(fetch_embedding, client, did))
         while pending:
             done, pending = wait(pending, timeout=10, return_when=FIRST_COMPLETED)
             for future in done:
@@ -611,7 +605,7 @@ def average_embeddings(client, dids, workers, expected_source):
                 for _ in done:
                     did = next(remaining, None)
                     if did is not None:
-                        pending.add(executor.submit(fetch_embedding, client, did, expected_source))
+                        pending.add(executor.submit(fetch_embedding, client, did))
     logger.info(
         "Embeddings: summary eligible=%d contributing=%d skipped=%d failed=%d retries=%d",
         len(dids),
@@ -782,15 +776,6 @@ def generate(args, run_id, started_at):
     # Freeze the PostHog cutoff once, rounded down to whole seconds, for every page.
     cutoff = utc_string(started_at.replace(microsecond=0))
     try:
-        identity = es.get("/")
-        cluster = identity.get("cluster_uuid")
-        if (
-            not isinstance(cluster, str)
-            or not re.fullmatch(r"[A-Za-z0-9_-]+", cluster)
-            or cluster == "_na_"
-        ):
-            raise RunError("Elasticsearch did not return a valid cluster UUID")
-        source = {"es_cluster_uuid": cluster, "likes_index": LIKES_INDEX}
         users = collect_posthog_users(
             posthog, args.posthog_project_id, args.min_interaction_seen, cutoff
         )
@@ -804,7 +789,7 @@ def generate(args, run_id, started_at):
         args.min_likes,
         len(users) - len(eligible),
     )
-    result = average_embeddings(api, eligible, args.workers, source)
+    result = average_embeddings(api, eligible, args.workers)
     skipped_users = result.pop("skipped_users")
     # The consumer receives one mean plus provenance/coverage, never individual
     # DIDs, activity records, credentials, or individual user vectors.

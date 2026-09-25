@@ -49,7 +49,6 @@ def user(did, interactions=50, likes=5):
 
 USER_MODEL = "1affd684bc7f45f895e488f83dd0a2fa"
 POST_MODEL = "9b946f280fd84899a7f82246fbc34d17"
-SOURCE = {"es_cluster_uuid": "es-cluster-A", "likes_index": "likes"}
 POLICY = {"limit": 64, "sources": ["posts", "replies"], "embedding_key": "all_MiniLM_L12_v2"}
 
 
@@ -64,7 +63,7 @@ def embedding(did, vector=None, model=USER_MODEL):
         "user_model_uuid": model,
         "post_model_uuid": POST_MODEL,
         "history_policy": POLICY.copy(),
-        **SOURCE,
+        "likes_index": "likes",
         "history_like_count": 5,
         "history_embedding_count": 3,
         "reason": None,
@@ -77,7 +76,7 @@ def skipped(did, reason="no_embedded_history"):
         "status": "skipped",
         "reason": reason,
         "history_policy": POLICY.copy(),
-        **SOURCE,
+        "likes_index": "likes",
         "history_like_count": 0 if reason == "no_likes" else 5,
         "history_embedding_count": 0,
     }
@@ -275,14 +274,14 @@ def test_long_retry_after_fails_without_sleep(monkeypatch, delay):
     assert opener.open.call_count == 1
 
 
-def test_http_get_and_stable_request_id_across_attempts(monkeypatch):
+def test_stable_request_id_across_attempts(monkeypatch):
     client, opener, _ = client_with_responses(
-        monkeypatch, [http_error(502), io.BytesIO(b'{"cluster_uuid":"abc"}')]
+        monkeypatch, [http_error(502), io.BytesIO(b'{"ok": true}')]
     )
-    assert client.get("/") == {"cluster_uuid": "abc"}
+    assert client.post("/embeddings/user", {"user_did": "did:plc:a"}) == {"ok": True}
     requests = [call.args[0] for call in opener.open.call_args_list]
-    assert requests[0].method == "GET"
-    assert requests[0].data is None
+    assert requests[0].method == "POST"
+    assert json.loads(requests[0].data) == {"user_did": "did:plc:a"}
     assert requests[0].get_header("X-request-id") == requests[1].get_header("X-request-id")
     assert len(requests[0].get_header("X-request-id")) == 32
 
@@ -292,7 +291,7 @@ def test_http_get_and_stable_request_id_across_attempts(monkeypatch):
 )
 def test_invalid_vectors_are_rejected(vector):
     result = average.fetch_embedding(
-        FakeClient(lambda *_: embedding("did:plc:a", vector)), "did:plc:a", SOURCE
+        FakeClient(lambda *_: embedding("did:plc:a", vector)), "did:plc:a"
     )
     assert result["status"] == "failed"
     assert result["reason"] == "invalid_embedding_response"
@@ -302,7 +301,7 @@ def test_invalid_vectors_are_rejected(vector):
 @pytest.mark.parametrize("reason", ["no_likes", "no_embedded_history"])
 def test_missing_history_is_explicitly_skipped(reason):
     result = average.fetch_embedding(
-        FakeClient(lambda *_: skipped("did:plc:a", reason)), "did:plc:a", SOURCE
+        FakeClient(lambda *_: skipped("did:plc:a", reason)), "did:plc:a"
     )
     assert result == {"status": "skipped", "reason": reason, "history_policy": POLICY}
 
@@ -317,16 +316,14 @@ def test_missing_history_is_explicitly_skipped(reason):
     ],
 )
 def test_inconsistent_history_counts_do_not_contribute(response):
-    result = average.fetch_embedding(FakeClient(lambda *_: response), "did:plc:a", SOURCE)
+    result = average.fetch_embedding(FakeClient(lambda *_: response), "did:plc:a")
     assert result["status"] == "failed"
     assert "embedding" not in result
 
 
 def average_users(client, users, workers=2):
     # Activity/like counts qualify users upstream; only DIDs enter the mean stage.
-    return average.average_embeddings(
-        client, [record["user_did"] for record in users], workers, SOURCE
-    )
+    return average.average_embeddings(client, [record["user_did"] for record in users], workers)
 
 
 def test_mean_is_equal_weight_then_normalized_and_returns_only_aggregate_metadata():
@@ -397,7 +394,6 @@ def test_missing_history_updates_aggregate_counts_and_logs_without_retaining_did
         ),
         (embedding("did:plc:b", [1, 2, 3]), "mixed model"),
         ({**embedding("did:plc:b"), "history_policy": {**POLICY, "limit": 50}}, "mixed history"),
-        ({**embedding("did:plc:b"), "es_cluster_uuid": "wrong-cluster"}, "source mismatch"),
         ({**skipped("did:plc:b"), "likes_index": "other-index"}, "source mismatch"),
     ],
 )
@@ -498,10 +494,6 @@ def install_pipeline_fakes(monkeypatch, responder=None, collection_failure=False
             self.service, self.headers, self.insecure = service, headers, insecure
             self.requests = []
             clients.append(self)
-
-        def get(self, path):
-            assert self.service == "Elasticsearch" and path == "/"
-            return {"cluster_uuid": SOURCE["es_cluster_uuid"]}
 
         def post(self, path, payload):
             self.requests.append((path, payload))

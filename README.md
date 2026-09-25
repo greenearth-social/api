@@ -714,7 +714,7 @@ an artifact in a feed. Deployment and runtime integration are deferred to Part 2
 `POST /embeddings/user` accepts `{"user_did": "did:plc:..."}` and uses the existing
 `X-API-Key` authentication. An `ok` response includes the embedding, dimension,
 `user_model_uuid`, `post_model_uuid`, loaded-like and usable-history counts,
-`history_policy`, `es_cluster_uuid`, and `likes_index`. A `skipped` response
+`history_policy`, and `likes_index`. A `skipped` response
 identifies `no_likes` or `no_embedded_history` and contains no vector.
 
 Deploy inference-service's paired-model response support before using this
@@ -743,16 +743,12 @@ existing environment variables take precedence. Supply these credentials through
 the environment or `.env`:
 
 - `POSTHOG_PERSONAL_API_KEY`: a personal key authorized to query the project.
-- `GE_ELASTICSEARCH_API_KEY`: a read-only key with cluster-monitor permission,
-  as granted by the existing ES key setup, for the source identity check.
+- `GE_ELASTICSEARCH_API_KEY`: a key with read access to the `likes` index.
 - `GE_API_KEY`: a key accepted by the running API's `X-API-Key` authentication.
 
-The API container must use the same Elasticsearch cluster and `likes` index.
-The script compares the cluster UUID and index against every endpoint response;
-host URLs can differ when a tunnel is involved. The API caches its first successful
-cluster identity lookup for the lifetime of its Elasticsearch client, so users
-share one lookup per API process. Restart the API if its Elasticsearch destination
-changes, including when repointing a local tunnel.
+The script assumes the API container uses the same Elasticsearch cluster and
+checks that endpoint responses name the `likes` index. Host URLs can differ when
+a tunnel is involved.
 
 ```bash
 pipenv run python scripts/average_user_embedding.py --help
@@ -842,7 +838,7 @@ pipenv run python scripts/average_user_embedding.py \
 
 Missing-history skips are summarized and may reduce coverage. Any exhausted user
 request failure, incomplete collection, authentication/configuration error,
-source mismatch, mixed model pair/dimension/history policy, zero contributors,
+likes-index mismatch, mixed model pair/dimension/history policy, zero contributors,
 or invalid/zero-magnitude mean prevents saving the artifact and exits nonzero.
 There is no partial-result override. A failed generation creates no artifact.
 Exit zero means the local artifact was saved successfully; runtime failures exit
