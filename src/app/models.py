@@ -151,7 +151,7 @@ class CandidateGenerateRequest(BaseModel):
             "the user in previous pages)."
         ),
     )
-    hydrate_embeddings: bool = Field(default=False,
+    hydrate_embeddings: bool = Field(default=False, 
 
         description="When true, refetches the 384-dim embedding arrays for the final candidates."
     )
@@ -230,6 +230,8 @@ class RankPredictResult(BaseModel):
 
 
 class UserEmbeddingRequest(BaseModel):
+    # Body for POST /embeddings/user. The offline averaging script sends one
+    # user's DID; the endpoint loads their history and runs the user tower.
     model_config = ConfigDict(extra="forbid")
 
     user_did: str = Field(
@@ -241,6 +243,9 @@ class UserEmbeddingRequest(BaseModel):
 
 
 class UserEmbeddingResponse(BaseModel):
+    # An "ok" response exports the actual user embedding and its model pair for
+    # the averaging script. A "skipped" response reports missing usable history
+    # through reason and omits the vector and model metadata.
     user_did: str
     status: Literal["ok", "skipped"]
     # Loaded likes are capped by the history window; usable embeddings may be fewer
