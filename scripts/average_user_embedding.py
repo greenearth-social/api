@@ -810,7 +810,6 @@ def generate(args, run_id, started_at):
     # The consumer receives one mean plus provenance/coverage, never individual
     # DIDs, activity records, credentials, or individual user vectors.
     artifact = {
-        "artifact_type": "average_user_embedding",
         "format_version": 1,
         "run_id": run_id,
         "source_completed_at": utc_string(datetime.now(UTC)),

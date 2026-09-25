@@ -813,8 +813,7 @@ containing the deployable mean. The run ID combines a UTC microsecond timestamp
 with an eight-character random suffix. The script does not create separate
 reports or log files.
 
-The artifact has `artifact_type: "average_user_embedding"` and
-`format_version: 1`. It contains the L2-normalized mean `embedding`, `dimension`,
+The artifact has `format_version: 1`. It contains the L2-normalized mean `embedding`, `dimension`,
 `user_model_uuid`, `post_model_uuid`, `run_id`, `source_completed_at`,
 `contributing_users`, `cohort` provenance, and `history_policy`.
 See the [artifact schema](scripts/average_user_embedding.schema.json) and

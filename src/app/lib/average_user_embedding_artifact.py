@@ -78,7 +78,6 @@ def utc_timestamp(value: object) -> datetime:
 def validate_artifact(artifact):
     """Strict allowlist protects publication from leaking prototype user reports."""
     keys = {
-        "artifact_type",
         "format_version",
         "embedding",
         "dimension",
@@ -92,12 +91,8 @@ def validate_artifact(artifact):
     }
     if not isinstance(artifact, dict) or set(artifact) != keys:
         raise ArtifactValidationError("Artifact does not match the version 1 compact schema")
-    if (
-        artifact["artifact_type"] != "average_user_embedding"
-        or type(artifact["format_version"]) is not int
-        or artifact["format_version"] != 1
-    ):
-        raise ArtifactValidationError("Unsupported artifact type or version")
+    if type(artifact["format_version"]) is not int or artifact["format_version"] != 1:
+        raise ArtifactValidationError("Unsupported artifact version")
     vector, dimension = artifact["embedding"], artifact["dimension"]
     # Version 1 stores the normalized mean. Loading must reject malformed data,
     # not renormalize it and silently change the artifact's original coordinates.

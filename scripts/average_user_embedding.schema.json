@@ -5,7 +5,6 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "artifact_type",
     "format_version",
     "embedding",
     "dimension",
@@ -18,9 +17,6 @@
     "history_policy"
   ],
   "properties": {
-    "artifact_type": {
-      "const": "average_user_embedding"
-    },
     "format_version": {
       "type": "integer",
       "const": 1
