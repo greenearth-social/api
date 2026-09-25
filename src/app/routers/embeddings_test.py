@@ -63,6 +63,8 @@ def _search(hits, **changes):
 
 @pytest.fixture
 def client(monkeypatch):
+    # Repository conftest.py bypasses API-key auth for ordinary tests. Replace the
+    # external clients/history here, but exercise real routing and inference parsing.
     es = Mock()
     es.info = AsyncMock(return_value={"cluster_uuid": "cluster-1"})
     monkeypatch.setattr(app.state, "es", es, raising=False)
@@ -82,6 +84,8 @@ def client(monkeypatch):
 def test_export_propagates_actual_pair_source_and_history_without_candidate_search(
     client, monkeypatch
 ):
+    # The serving prediction is authoritative for its paired model. Deliberately
+    # fail any readiness lookup or candidate search to enforce this export boundary.
     monkeypatch.setattr(
         inference,
         "get_cached_post_tower_uuid",
@@ -128,6 +132,7 @@ def test_export_propagates_actual_pair_source_and_history_without_candidate_sear
 @pytest.mark.asyncio
 async def test_cluster_identity_shared_across_concurrent_users(client):
     async def lookup():
+        # Yield once so requests overlap while the identity lock is held.
         await asyncio.sleep(0)
         return {"cluster_uuid": "cluster-1"}
 
@@ -184,6 +189,7 @@ def test_missing_history_skips_inference_and_excludes_vectors(client, monkeypatc
 
 
 def test_authentication_uses_existing_api_key_header(client, monkeypatch):
+    # Remove the shared test bypass only here; verify auth runs before upstream I/O.
     app.dependency_overrides.pop(verify_api_key)
     authenticate = AsyncMock(return_value=None)
     monkeypatch.setattr(security, "authenticate_api_key", authenticate)
@@ -231,6 +237,8 @@ def test_invalid_predictions_return_sanitized_error(client, changes, code):
 def test_nonfinite_vectors_rejected(client, value):
     import json
 
+    # Use raw JSON bytes because the HTTP test helper would reject nonfinite numbers
+    # before the application's own parser/validator gets a chance to inspect them.
     body = json.dumps(_prediction()).replace("[0.6, 0.8]", f"[{value}, 1]")
     _mock_prediction_request().return_value = httpx.Response(200, content=body)
     response = client.post("/embeddings/user", json={"user_did": DID})
@@ -252,6 +260,8 @@ def test_nonfinite_vectors_rejected(client, value):
 def test_upstream_http_errors_use_existing_inference_handling(
     client, caplog, status, code, error_class
 ):
+    # Preserve the shared helper's current HTTP-error behavior: inference HTTP
+    # errors become RuntimeError, which this route translates to upstream_error.
     _mock_prediction_request().return_value = httpx.Response(
         status, text="secret-upstream-body"
     )
@@ -287,6 +297,8 @@ def test_history_failures_prevent_inference(client, monkeypatch, caplog, excepti
 
 @pytest.mark.parametrize("stage", ["source_identity", "history", "inference"])
 def test_overall_deadline_covers_all_stages(client, monkeypatch, stage):
+    # A short injected deadline avoids a real 55-second wait while exercising
+    # cancellation during each of the three awaited stages.
     monkeypatch.setattr(embeddings, "REQUEST_TIMEOUT_SECONDS", 0.01)
 
     async def slow_operation(*args, **kwargs):
@@ -352,6 +364,8 @@ def test_dimension_comes_from_vector_and_uuid_format_is_canonical(client, vector
 def test_real_history_path_uses_production_preparation_and_best_effort_hydration(
     client, monkeypatch, failed_index
 ):
+    # Restore the real history loader for this test. It uses the latest 64 likes,
+    # hydrates posts and replies, and can continue with one failed hydration index.
     monkeypatch.setattr(
         embeddings,
         "fetch_user_history_features",

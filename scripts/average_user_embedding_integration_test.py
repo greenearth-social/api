@@ -25,6 +25,8 @@ USER_MODEL = "1affd684bc7f45f895e488f83dd0a2fa"
 POST_MODEL = "9b946f280fd84899a7f82246fbc34d17"
 OTHER_POST_MODEL = "2" * 32
 DIDS = [f"did:plc:{name}" for name in ("a", "b", "c", "d")]
+# a and b contribute equally despite very different retained like counts; c has
+# no usable history and d falls below the like threshold before any endpoint call.
 INTERACTIONS = dict(zip(DIDS, (50, 100, 70, 60), strict=True))
 LIKE_COUNTS = dict(zip(DIDS, (5, 500, 5, 4), strict=True))
 
@@ -84,6 +86,8 @@ class HistoryES:
 def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_changes):
     caplog.set_level(logging.INFO, logger=producer.__name__)
     app = FastAPI()
+    # Use the real router, response models, history loader, and prediction helper.
+    # Only authentication and external services are replaced in this isolated app.
     app.include_router(embeddings.router)
     app.dependency_overrides[verify_api_key] = lambda: "test-key-id"
     app.state.es = HistoryES()
@@ -93,6 +97,8 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
     inference_calls = []
 
     async def predict(url, *, json, headers):
+        # History markers identify contributors without relying on request ordering.
+        # Changing b's paired model simulates a rollout during artifact generation.
         assert url.endswith("/models/user-tower/predict")
         marker = json["history_embeddings"][0][0]
         inference_calls.append(marker)
@@ -119,6 +125,8 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
     with TestClient(app) as endpoint:
 
         class OfflineTransport:
+            # Bridge urllib requests to the in-process FastAPI app. This keeps the
+            # producer's real JSON parsing/retry path while avoiding all network I/O.
             def open(self, request, *, timeout):
                 assert timeout == 60
                 url = urlsplit(request.full_url)
@@ -178,6 +186,8 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
                 "--api-url",
                 "https://api.test",
                 "--workers",
+                # Make the model-change failure deterministic rather than racing
+                # which user's response establishes the expected model pair first.
                 "1",
                 "--output-dir",
                 str(tmp_path / "results"),
@@ -190,12 +200,15 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
     assert DIDS[3] not in endpoint_calls
     assert not {"report_path", "log_path", "output_dir", "counts"} & summary.keys()
     if model_changes:
+        # Even valid individual vectors must not produce an artifact across models.
         assert summary["status"] == "failed"
         assert summary["artifact_path"] is None
         assert "mixed model" in summary["error"]
         assert "failed=1" in caplog.text
         assert not list((tmp_path / "results").glob("*"))
     else:
+        # Validate what a consumer would load from disk, including coverage and the
+        # normalized equal-weight mean; the test also checks no user data is saved.
         assert summary["status"] == "success"
         artifact_path = tmp_path / "results" / f"average_user_embedding_{summary['run_id']}.json"
         artifact, data = load_artifact(artifact_path)

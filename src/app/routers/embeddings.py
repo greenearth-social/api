@@ -24,8 +24,10 @@ from ..lib.user_history_cache import USER_HISTORY_LIMIT, fetch_user_history_feat
 from ..security import verify_api_key
 
 logger = logging.getLogger(__name__)
+# Router-level authentication runs before any history or inference work.
 router = APIRouter(tags=["embeddings"], dependencies=[Depends(verify_api_key)])
 
+# Leave time to return a structured 504 before the producer's 60-second HTTP timeout.
 REQUEST_TIMEOUT_SECONDS = 55.0
 
 
@@ -41,6 +43,8 @@ class UserEmbeddingRequest(BaseModel):
 
 
 class HistoryPolicy(BaseModel):
+    # Record how actual history was prepared, so the saved mean can later be checked
+    # against the history policy used by its consumer.
     limit: int = USER_HISTORY_LIMIT
     sources: list[str] = Field(default_factory=lambda: ["posts", "replies"])
     embedding_key: str = MINILM_L12_EMBEDDING_KEY
@@ -49,6 +53,8 @@ class HistoryPolicy(BaseModel):
 class UserEmbeddingResponse(BaseModel):
     user_did: str
     status: Literal["ok", "skipped"]
+    # Loaded likes are capped by the history window; usable embeddings may be fewer
+    # when liked posts/replies are missing or lack content embeddings.
     history_like_count: int = Field(ge=0)
     history_embedding_count: int = Field(ge=0)
     history_policy: HistoryPolicy = Field(default_factory=HistoryPolicy)
@@ -65,11 +71,15 @@ async def _get_es_cluster_uuid(request: Request) -> str:
     """Cache the first successful identity lookup for this app's ES client."""
     state = request.app.state
     es = state.es
+    # Cache identity with the client, not globally: replacing the client must not
+    # leave a stale cluster UUID that could hide a producer/API environment mismatch.
     if getattr(state, "embedding_es_client", None) is not es:
         state.embedding_es_client = es
         state.embedding_es_cluster_uuid = None
         state.embedding_es_cluster_lock = asyncio.Lock()
     async with state.embedding_es_cluster_lock:
+        # Concurrent exports share one successful lookup. A failed lookup is not
+        # cached, so a later request can try again after the upstream recovers.
         if state.embedding_es_cluster_uuid is None:
             info = unwrap_es_response(await es.info())
             cluster_uuid = info.get("cluster_uuid")
@@ -91,6 +101,8 @@ def _failure(
     exception: Exception,
     status_code: int = 502,
 ) -> HTTPException:
+    # The stable code is consumed by the offline script. Request ID and stage help
+    # correlate server logs without returning raw exceptions in the HTTP response.
     logger.warning(
         "User embedding export failed code=%s stage=%s exception_class=%s "
         "upstream_status=%s duration_ms=%.1f request_id=%s",
@@ -125,14 +137,21 @@ async def user_embedding(request: Request, payload: UserEmbeddingRequest) -> Use
 
     stage = "source_identity"
     try:
+        # One deadline covers identity, cached/loaded history, and inference together,
+        # rather than granting each operation a fresh 55-second budget.
         async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
             history_started = time.monotonic()
             cluster_uuid = await _get_es_cluster_uuid(request)
             stage = "history"
+            # Reuse the production loader and cache so offline vectors reflect the
+            # same latest-like preparation as feed requests, including reply history.
             history = await fetch_user_history_features(request.app.state.es, payload.user_did)
             history_ms = (time.monotonic() - history_started) * 1000
             prediction_started = time.monotonic()
             stage = "inference"
+            # The helper returns skip reasons for unusable history without inference.
+            # Otherwise its prediction supplies the actual user/post model pair;
+            # no readiness lookup or candidate search participates in this export.
             result = await predict_user_embedding(
                 history,
                 base_url=inference_base_url,
@@ -152,6 +171,8 @@ async def user_embedding(request: Request, payload: UserEmbeddingRequest) -> Use
             "invalid_inference_response", started=started, stage=stage, exception=exc
         ) from None
     except ApiError as exc:
+        # ES authentication/configuration errors are actionable without retrying
+        # every user; other upstream failures keep the generic retryable code.
         status = exc.status_code
         if status in (401, 403):
             code = "upstream_authentication_error"
@@ -182,6 +203,8 @@ async def user_embedding(request: Request, payload: UserEmbeddingRequest) -> Use
         get_request_id(),
     )
     return UserEmbeddingResponse(
+        # None fields are omitted by the route's response configuration, so skipped
+        # users have no vector or model identity that a producer could mistake for data.
         user_did=payload.user_did,
         status="skipped" if result.reason else "ok",
         history_like_count=result.history_like_count,

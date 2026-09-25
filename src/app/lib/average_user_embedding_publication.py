@@ -1,5 +1,9 @@
 """Immutable artifact publication and environment-specific default selection."""
 
+# Each environment has immutable, timestamped artifact objects and one mutable
+# default.json containing only an artifact URI. Promotion copies an inspected
+# artifact first, then conditionally updates that pointer; it never deploys an API.
+
 import hashlib
 import json
 import logging
@@ -29,6 +33,8 @@ class PublicationError(Exception):
 
 
 def environment_prefix(environment: str, project_id: str = DEFAULT_PROJECT_ID) -> str:
+    # Experiments may originate elsewhere, but promoted defaults live in the
+    # selected environment's model bucket with no per-model subdirectories.
     if environment not in ("stage", "prod"):
         raise PublicationError("Environment must be stage or prod")
     if not re.fullmatch(r"[a-z][a-z0-9-]*[a-z0-9]", project_id):
@@ -66,6 +72,7 @@ def _require_artifact_name(uri: str, artifact: dict[str, Any]) -> None:
 
 
 def _identity(artifact: dict[str, Any], uri: str) -> dict[str, Any]:
+    # Selection summaries need enough identity to audit a promotion, not its vector.
     return {
         "artifact_uri": uri,
         **{
@@ -90,6 +97,8 @@ def _download(client: storage.Client, uri: str) -> tuple[bytes, int]:
     if blob.generation is None:
         raise PublicationError("Cloud object has no generation")
     generation = int(blob.generation)
+    # A GCS generation identifies one object version. Download exactly the version
+    # we inspected, rather than whatever a concurrent writer might replace it with.
     data = bucket.blob(name, generation=generation).download_as_bytes(
         if_generation_match=generation, timeout=REQUEST_TIMEOUT, retry=RETRY
     )
@@ -100,6 +109,7 @@ def _read_default(client: storage.Client, prefix: str) -> tuple[str | None, int]
     try:
         data, generation = _download(client, f"{prefix}/default.json")
     except NotFound:
+        # Generation zero means "create only if still absent" on the first promotion.
         return None, 0
 
     def unique_object(pairs):
@@ -139,6 +149,7 @@ def _upload_immutable(client: storage.Client, uri: str, data: bytes) -> dict[str
         blob.upload_from_string(
             data,
             content_type="application/json",
+            # A run's artifact is write-once; only default.json may be replaced.
             if_generation_match=0,
             timeout=REQUEST_TIMEOUT,
             retry=RETRY,
@@ -147,6 +158,8 @@ def _upload_immutable(client: storage.Client, uri: str, data: bytes) -> dict[str
         if generation is None:
             raise PublicationError("Cloud publication returned no object generation")
     except (PreconditionFailed, Conflict):
+        # Retrying a completed upload is safe only when its exact bytes match.
+        # A reused run ID with different contents must not overwrite the old artifact.
         existing, generation = _download(client, uri)
         if existing != data:
             raise PublicationError(
@@ -165,6 +178,8 @@ def promote_artifact(
     # Validate local artifacts before creating a cloud client or attempting any writes.
     local = None if source_uri.startswith("gs://") else load_artifact(Path(source).expanduser())
     try:
+        # Authentication comes from Application Default Credentials; this command
+        # neither embeds service-account keys nor changes bucket permissions.
         client = storage.Client()
         try:
             if local is None:
@@ -176,12 +191,16 @@ def promote_artifact(
             previous_uri, previous_generation = _read_default(client, prefix)
             uri = f"{prefix}/{_artifact_filename(artifact)}"
             publication = _upload_immutable(client, uri, data)
+            # Upload must succeed before the default can refer to the new object.
+            # If the pointer update fails, the immutable object may remain for retry.
             default_uri = f"{prefix}/default.json"
             bucket_name, name = _gcs_parts(default_uri)
             try:
                 client.bucket(bucket_name).blob(name).upload_from_string(
                     (json.dumps({"artifact_uri": uri}, indent=2) + "\n").encode(),
                     content_type="application/json",
+                    # Compare-and-swap: fail if another promotion changed the default
+                    # since _read_default, instead of silently overwriting its choice.
                     if_generation_match=previous_generation,
                     timeout=REQUEST_TIMEOUT,
                     retry=RETRY,
@@ -201,6 +220,8 @@ def promote_artifact(
     except (PublicationError, ArtifactValidationError):
         raise
     except Exception as error:
+        # A transport failure can leave the server-side outcome uncertain. Do not
+        # claim the default is unchanged, and do not expose raw SDK exception text.
         raise PublicationError(
             f"Promotion failed ({type(error).__name__}); default selection was not confirmed"
         ) from None

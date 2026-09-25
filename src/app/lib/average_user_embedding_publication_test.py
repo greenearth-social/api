@@ -14,6 +14,8 @@ FIXTURE = Path(__file__).resolve().parents[3] / "scripts/fixtures/average_user_e
 
 
 class MemoryBlob:
+    # Model the GCS generation preconditions, not just successful uploads. That is
+    # what makes overwrite prevention and concurrent-promotion tests meaningful.
     def __init__(self, store, bucket, name, generation=None):
         self.store, self.key, self.generation = store, (bucket, name), generation
 
@@ -35,6 +37,8 @@ class MemoryBlob:
             raise PreconditionFailed("secret raw error")
         if not self.key[1].endswith("/default.json") and self.store.upload_failure:
             raise Forbidden("secret raw error")
+        # Zero represents a missing object; existing objects require their current
+        # generation. Every accepted write advances the fake generation counter.
         expected = self.store.objects.get(self.key, (None, 0))[1]
         if expected != kwargs["if_generation_match"]:
             raise PreconditionFailed("secret raw error")
@@ -44,6 +48,8 @@ class MemoryBlob:
 
 
 class MemoryCloud:
+    # Store exact bytes and record read/write options so tests can check ordering,
+    # timeout/retry settings, and checksums without credentials or a real bucket.
     def __init__(self):
         self.objects = {}
         self.reads, self.writes = [], []
@@ -139,6 +145,8 @@ def test_home_path_expansion(cloud, artifact_path, monkeypatch):
 
 
 def test_replacement_rollback_and_idempotent_artifact(cloud, artifact_path):
+    # Rollback changes only the pointer. Old immutable objects stay available, and
+    # repeating the same promotion reuses the same artifact generation and checksum.
     first = publication.promote_artifact(artifact_path, "stage")
     first_bytes = artifact_path.read_bytes()
     second = json.loads(first_bytes)
@@ -157,6 +165,7 @@ def test_replacement_rollback_and_idempotent_artifact(cloud, artifact_path):
 
 
 def test_cross_bucket_promotion_preserves_exact_bytes_and_local_destination(cloud):
+    # The source may be an experiment, but prod must point to its own copied object.
     source = (
         "gs://greenearth-471522-engagement-prediction-test/experiments/"
         + artifact_uri().rsplit("/", 1)[1]
@@ -197,6 +206,8 @@ def test_upload_failure_leaves_default_unchanged(cloud, artifact_path):
 
 
 def test_pointer_race_does_not_replace_current_default(cloud, artifact_path):
+    # A competing promotion is allowed to leave the new immutable upload behind;
+    # it must not let this command overwrite the now-current default selection.
     first = publication.promote_artifact(artifact_path, "stage")
     before = cloud.data(default_uri())
     artifact = json.loads(artifact_path.read_bytes())
@@ -237,6 +248,8 @@ def test_existing_different_bytes_refuse_overwrite(cloud, artifact_path):
     ],
 )
 def test_invalid_pointer_cannot_redirect_and_prevents_promotion(cloud, artifact_path, pointer):
+    # An existing default must not redirect reads to another environment, a nested
+    # path, or another pointer. Reject it before attempting any cloud writes.
     cloud.put(default_uri(), pointer)
     with pytest.raises(publication.PublicationError):
         publication.promote_artifact(artifact_path, "stage")

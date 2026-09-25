@@ -6,6 +6,10 @@ are read only from POSTHOG_PERSONAL_API_KEY, GE_ELASTICSEARCH_API_KEY, and
 GE_API_KEY. The embedding API must read the same Elasticsearch environment.
 """
 
+# Flow: PostHog activity cohort -> retained ES like counts -> actual user embeddings
+# -> normalized mean -> local JSON. Promotion is a separate command so a person can
+# inspect this artifact before selecting it for an environment.
+
 import argparse
 import json
 import logging
@@ -61,6 +65,8 @@ class RequestError(Exception):
     """A safe, body-free upstream failure."""
 
     def __init__(self, reason, detail=None):
+        # Only controlled reason/detail strings travel through logs and summaries;
+        # raw response bodies can contain credentials or user data.
         self.reason = reason
         self.detail = detail
         super().__init__(reason)
@@ -97,6 +103,7 @@ class JsonClient:
         self.base_url = base_url.rstrip("/")
         self.headers = {"Content-Type": "application/json", **headers}
         self._retry_count = 0
+        # Embedding workers share this client, including its aggregate retry counter.
         self._retry_lock = Lock()
         context = ssl.create_default_context()
         if insecure:
@@ -110,6 +117,8 @@ class JsonClient:
             return self._retry_count
 
     def _log_request(self, level, message, *args):
+        # Per-user embedding requests are intentionally quiet. Their outcomes are
+        # counted by average_embeddings and reported in its final reason summary.
         if self.service != "Embedding API":
             logger.log(level, message, *args)
 
@@ -120,6 +129,7 @@ class JsonClient:
         return self.request("POST", path, payload)
 
     def request(self, method, path, payload=None):
+        # Keep one correlation ID across retries of the same logical request.
         request_id = uuid.uuid4().hex
         context = f"{self.service}: {method} {self.base_url}{path} request_id={request_id}"
         request = Request(
@@ -175,6 +185,8 @@ class JsonClient:
                 except (ValueError, UnicodeError, OSError, HTTPException):
                     pass
                 error.close()
+                # These failures require operator action. Raising RunError stops
+                # new user submissions, whereas RequestError records one failed user.
                 if code in (
                     "inference_not_configured",
                     "upstream_authentication_error",
@@ -225,6 +237,8 @@ class JsonClient:
                 reason = "network_error"
                 detail = f"transport={type(error).__name__}"
             if delay > 60:
+                # Do not silently retry earlier than the server requested, or leave
+                # a manual run sleeping indefinitely on a very long Retry-After.
                 raise RequestError(
                     "retry_after_too_long", "Retry-After exceeds the 60-second retry budget"
                 )
@@ -248,6 +262,7 @@ class JsonClient:
                 delay,
             )
             with self._retry_lock:
+                # Count scheduled retries, including workers that have not finished yet.
                 self._retry_count += 1
             time.sleep(delay)
         raise AssertionError("unreachable")
@@ -255,6 +270,9 @@ class JsonClient:
 
 def collect_posthog_users(client, project_id, minimum, cutoff):
     """Keyset-page complete user counts, including when responses cap rows early."""
+    # Every page shares the same upper event timestamp. Advancing by DID rather
+    # than OFFSET keeps each user's complete count together; values are bound
+    # parameters, not interpolated SQL. There is no lower date bound or feed filter.
     query = """
         SELECT distinct_id, count() AS interaction_seen_count
         FROM events
@@ -302,6 +320,8 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
             )
         ):
             raise RunError("PostHog: incomplete or invalid query response")
+        # A short page is not proof of exhaustion: PostHog may cap results below
+        # our requested limit. Continue until a query returns no rows.
         if not rows:
             logger.info(
                 "PostHog: page %d empty; pagination complete in %.2fs; %d qualifying users",
@@ -325,6 +345,8 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
                 raise RunError("PostHog: invalid interaction count")
             if did < previous:
                 raise RunError("PostHog: results are not ordered by DID")
+            # A repeated row contains the same aggregate, not another batch of
+            # interactions to add. Disagreement makes the cohort unreliable.
             if did in users and users[did] != count:
                 raise RunError("PostHog: conflicting duplicate user counts")
             users[did] = count
@@ -346,6 +368,8 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
 
 def collect_like_counts(client, index, dids):
     """Count exact retained likes; every requested author fits in every shard."""
+    # These are counts in the retained likes index, not lifetime likes or the
+    # smaller usable history window later loaded by the API. Missing terms stay zero.
     counts = dict.fromkeys(dids, 0)
     ordered = sorted(counts)
     batch_count = (len(ordered) + 499) // 500
@@ -362,6 +386,8 @@ def collect_like_counts(client, index, dids):
         logger.info(
             "Elasticsearch: requesting batch %d/%d (%d DIDs)", batch_number, batch_count, len(batch)
         )
+        # Filtering to this batch bounds the number of possible author buckets.
+        # Both size limits can therefore include every term, even on each shard.
         result = client.post(
             f"/{quote(index, safe='')}/_search",
             {
@@ -386,6 +412,8 @@ def collect_like_counts(client, index, dids):
         aggregation = aggregations.get("users")
         if not isinstance(aggregation, dict):
             raise RunError("Elasticsearch: invalid user aggregation")
+        # Approximate or partial counts could wrongly exclude users at the cutoff.
+        # Require a complete, exact aggregation before applying the like threshold.
         if (
             result.get("timed_out") is not False
             or type(shards.get("failed")) is not int
@@ -437,6 +465,8 @@ def fetch_embedding(client, did, expected_source):
         result = client.post("/embeddings/user", {"user_did": did})
         if result.get("user_did") != did:
             raise RequestError("mismatched_user_did", "response DID differs from request")
+        # A local ES tunnel and a remote API can accidentally target different
+        # environments. Compare data-source identity before trusting any vector.
         for key, value in expected_source.items():
             if result.get(key) != value:
                 raise RunError(f"Embedding API: Elasticsearch source mismatch ({key})")
@@ -448,6 +478,8 @@ def fetch_embedding(client, did, expected_source):
         if usable > likes or likes > policy["limit"]:
             raise RequestError("invalid_history_counts", "history counts exceed their limits")
         if result.get("status") == "skipped":
+            # Missing usable history is a legitimate exclusion, not a transport
+            # failure. It must not carry an empty-history substitute embedding.
             reason = result.get("reason")
             if (
                 reason not in ("no_likes", "no_embedded_history")
@@ -492,6 +524,8 @@ def fetch_embedding(client, did, expected_source):
             "post_model_uuid": post_model,
         }
     except RequestError as error:
+        # Return per-user failures for aggregate reporting. Configuration and shared
+        # contract errors deliberately propagate so the coordinator can stop the run.
         return {"status": "failed", "reason": error.reason}
 
 
@@ -509,6 +543,8 @@ def average_embeddings(client, dids, workers, expected_source):
         len(dids),
         workers,
     )
+    # Keep only one pending task per worker instead of queuing the whole cohort.
+    # That lets a global failure stop new requests while active requests finish.
     with ThreadPoolExecutor(max_workers=workers) as executor:
         for _ in range(workers):
             did = next(remaining, None)
@@ -523,6 +559,9 @@ def average_embeddings(client, dids, workers, expected_source):
                     if status == "failed":
                         failed[result["reason"]] += 1
                     else:
+                        # The first response establishes the history policy; the
+                        # first vector establishes the model pair and dimension.
+                        # Later vectors must describe the same embedding space.
                         current_policy = result["history_policy"]
                         if policy is not None and current_policy != policy:
                             raise RunError("Embedding API: mixed history policies")
@@ -566,6 +605,7 @@ def average_embeddings(client, dids, workers, expected_source):
                 )
                 next_progress_at = now + 10
             if fatal is None:
+                # Refill completed slots only when no global error was observed.
                 for _ in done:
                     did = next(remaining, None)
                     if did is not None:
@@ -587,12 +627,16 @@ def average_embeddings(client, dids, workers, expected_source):
                 count,
                 REASON_HINTS.get(reason, "Inspect API/inference logs."),
             )
+    # Expected history skips are allowed. Any request failure prevents publishing
+    # a partial mean, even if other users produced valid vectors.
     if fatal:
         raise fatal
     if failed:
         raise RunError(f"{failed.total()} embedding requests failed; no average was written")
     if not vectors or model_pair is None:
         raise RunError("No valid user embeddings; no average was written")
+    # Each user gets one vote: activity and like counts selected the cohort but
+    # do not weight the mean. fsum reduces cancellation/rounding error per coordinate.
     try:
         mean = [math.fsum(column) / len(vectors) for column in zip(*vectors, strict=True)]
     except (OverflowError, ValueError):
@@ -604,6 +648,8 @@ def average_embeddings(client, dids, workers, expected_source):
         or magnitude == 0
     ):
         raise RunError("The average must be finite and nonzero; no average was written")
+    # Normalize only after averaging. Normalizing inputs here would change the
+    # mean's direction when their magnitudes differ; a zero mean has no direction.
     mean = [value / magnitude for value in mean]
     logger.info(
         "Average: computed L2-normalized unweighted mean contributors=%d dimension=%d "
@@ -631,6 +677,8 @@ def utc_string(value):
 def atomic_json(destination, value):
     temporary = None
     try:
+        # Use the destination directory so the final rename stays on one filesystem.
+        # Readers see either the finished JSON or no new artifact, never half a write.
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -668,6 +716,7 @@ def positive_int(value):
 
 
 def base_url(value):
+    # Service URLs are logged, so credentials belong in headers rather than URLs.
     try:
         parts = urlsplit(value)
         _ = parts.port
@@ -688,6 +737,7 @@ def base_url(value):
 
 
 def build_parser():
+    # Operational defaults live here; this command does not configure model training.
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--posthog-project-id", type=positive_int, default=509275)
     parser.add_argument("--posthog-host", type=base_url, default="https://us.posthog.com")
@@ -721,6 +771,8 @@ def generate(args, run_id, started_at):
         args.posthog_host,
         {"Authorization": f"Bearer {credentials['POSTHOG_PERSONAL_API_KEY']}"},
     )
+    # The local-tunnel TLS exception is scoped to ES. PostHog and the embedding
+    # API still use their own clients with certificate verification enabled.
     es = JsonClient(
         "Elasticsearch",
         args.es_url,
@@ -728,6 +780,7 @@ def generate(args, run_id, started_at):
         insecure=args.es_insecure,
     )
     api = JsonClient("Embedding API", args.api_url, {"X-API-Key": credentials["GE_API_KEY"]})
+    # Freeze the PostHog cutoff once, rounded down to whole seconds, for every page.
     cutoff = utc_string(started_at.replace(microsecond=0))
     try:
         identity = es.get("/")
@@ -754,6 +807,8 @@ def generate(args, run_id, started_at):
     )
     result = average_embeddings(api, eligible, args.workers, source)
     skipped_users = result.pop("skipped_users")
+    # The consumer receives one mean plus provenance/coverage, never individual
+    # DIDs, activity records, credentials, or individual user vectors.
     artifact = {
         "artifact_type": "average_user_embedding",
         "format_version": 1,
@@ -786,11 +841,14 @@ def run(args):
     }
     try:
         started = datetime.now(UTC)
+        # The timestamp makes runs recognizable; the random suffix distinguishes
+        # separate runs even if their clocks produce the same timestamp.
         run_id = started.strftime("%Y%m%dT%H%M%S.%fZ_") + uuid.uuid4().hex[:8]
         directory = Path(args.output_dir).expanduser().resolve()
         logger.info("Run: started run_id=%s output_dir=%s", run_id, directory)
         directory.mkdir(parents=True, exist_ok=True)
         artifact = generate(args, run_id, started)
+        # All collection and contract checks finish before the artifact is written.
         artifact_path = directory / f"average_user_embedding_{run_id}.json"
         atomic_json(artifact_path, artifact)
         summary["artifact_path"] = str(artifact_path)
@@ -817,6 +875,8 @@ def run(args):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    # Human-readable progress goes to stderr. Keep stdout as one JSON result so
+    # callers can capture it without parsing log lines, including on failed runs.
     handler = logging.StreamHandler()
     formatter = logging.Formatter(
         "%(asctime)s.%(msecs)03dZ %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"

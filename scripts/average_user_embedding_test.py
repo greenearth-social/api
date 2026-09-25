@@ -17,6 +17,8 @@ import average_user_embedding as average
 import pytest
 
 
+# Most cases replace a service boundary with deterministic responses. The companion
+# integration test additionally connects the producer to the real embedding router.
 class FakeClient:
     def __init__(self, respond):
         self.respond = respond
@@ -82,6 +84,8 @@ def skipped(did, reason="no_embedded_history"):
 
 
 def test_posthog_paginates_past_short_pages_with_fixed_cutoff_and_full_counts():
+    # Return only 100 rows despite LIMIT 1000: stopping on a short page would lose
+    # most users, while recomputing page-local counts would lose their full activity.
     expected = {f"did:plc:u{number:04d}": 50 + number for number in range(2305)}
 
     def respond(path, payload):
@@ -143,6 +147,8 @@ def test_posthog_stalled_pagination_is_fatal():
 
 
 def test_likes_batching_is_exact_and_missing_users_count_zero():
+    # Two full batches plus a one-user tail exercise both aggregation size limits.
+    # The omitted first DID represents a user with no retained like documents.
     dids = [f"did:plc:u{number:04d}" for number in range(1001)]
 
     def respond(path, payload):
@@ -188,6 +194,7 @@ def test_likes_rejects_partial_or_inexact_aggregations(mutation):
 
 
 def http_error(status, retry_after=None, code=None):
+    # Deliberately include a recognizable secret to catch accidental body logging.
     headers = {"Retry-After": retry_after} if retry_after is not None else {}
     body = {"detail": {"code": code, "message": "NEVER-PUBLISH-THIS-SECRET"}}
     return HTTPError(
@@ -196,6 +203,7 @@ def http_error(status, retry_after=None, code=None):
 
 
 def client_with_responses(monkeypatch, responses):
+    # Exercise the real HTTP/retry logic without sockets or wall-clock backoff waits.
     client = average.JsonClient("Embedding API", "https://unused", {"X-API-Key": "private-key"})
     opener = Mock()
     opener.open.side_effect = responses
@@ -315,6 +323,7 @@ def test_inconsistent_history_counts_do_not_contribute(response):
 
 
 def average_users(client, users, workers=2):
+    # Activity/like counts qualify users upstream; only DIDs enter the mean stage.
     return average.average_embeddings(
         client, [record["user_did"] for record in users], workers, SOURCE
     )
@@ -393,6 +402,8 @@ def test_missing_history_updates_aggregate_counts_and_logs_without_retaining_did
     ],
 )
 def test_metadata_mismatch_is_global_failure(second, match):
+    # Equal-length vectors are still incompatible if their model pair or source
+    # history differs; these failures invalidate the whole run, not just one user.
     client = FakeClient(
         lambda _, payload: embedding("did:plc:a") if payload["user_did"] == "did:plc:a" else second
     )
@@ -461,6 +472,8 @@ def test_single_failed_user_prevents_partial_average_but_finishes_all_users(capl
 
 
 def test_global_failure_stops_submissions_and_drains_active_requests():
+    # Synchronize the first four workers so the test does not depend on scheduling.
+    # A fatal error should prevent any of the remaining 996 requests from starting.
     barrier = threading.Barrier(4)
 
     def respond(*_):
@@ -474,6 +487,8 @@ def test_global_failure_stops_submissions_and_drains_active_requests():
 
 
 def install_pipeline_fakes(monkeypatch, responder=None, collection_failure=False):
+    # Six users pass PostHog, five meet the inclusive like threshold, and one of
+    # those five has no embedded history. Distinct fake secrets track any leakage.
     for name in ("POSTHOG_PERSONAL_API_KEY", "GE_ELASTICSEARCH_API_KEY", "GE_API_KEY"):
         monkeypatch.setenv(name, "SECRET-" + name)
     clients = []
@@ -527,6 +542,8 @@ def read_summary(capsys):
 def test_full_pipeline_saves_only_compact_artifact_and_no_secrets(
     tmp_path, monkeypatch, capsys, tls_args, insecure
 ):
+    # Drive the real CLI, validation, and atomic writer; only external clients are
+    # replaced. The output directory must contain the single consumer artifact.
     clients = install_pipeline_fakes(monkeypatch)
     assert average.main(["--output-dir", str(tmp_path / "output"), *tls_args]) == 0
     summary = read_summary(capsys)
@@ -577,6 +594,8 @@ def test_full_pipeline_saves_only_compact_artifact_and_no_secrets(
 def test_failed_generation_returns_error_without_output(
     tmp_path, monkeypatch, capsys, caplog, failure
 ):
+    # Failure may occur at different stages, but no path may leave a usable-looking
+    # artifact or expose individual DIDs and credentials in the summary.
     caplog.set_level(logging.INFO, logger=average.__name__)
 
     def respond(did):
@@ -628,6 +647,7 @@ def test_output_paths_expand_from_cwd_or_home(tmp_path, monkeypatch, capsys, cap
 
 
 def test_local_output_is_atomic_and_cleans_failed_write(tmp_path, monkeypatch):
+    # Fail at the final rename, after JSON serialization, to check temporary cleanup.
     target = tmp_path / "artifact.json"
 
     def fail_write(source, destination):
@@ -670,6 +690,8 @@ def test_missing_credentials_fail_before_network_without_output(tmp_path, monkey
 
 
 def test_embedding_and_retry_logs_are_aggregate_and_safe(monkeypatch, caplog):
+    # A recovered retry should appear only as a count; neither the input vector nor
+    # the normalized mean belongs in logs, even though model identity is useful there.
     caplog.set_level(logging.INFO, logger=average.__name__)
     vector = [123456.789, -987654.321]
     response = embedding("did:plc:a", vector)
@@ -760,6 +782,8 @@ def test_likes_reject_bool_metadata(mutation):
 
 @pytest.mark.parametrize("interrupt", ["wait", "request"])
 def test_interrupt_stops_submissions_and_drains_active_requests(monkeypatch, interrupt):
+    # Cover Ctrl-C in the coordinating thread and an interrupt raised by a worker.
+    # The initial two jobs may finish, but cancellation must not enqueue more users.
     if interrupt == "wait":
         original = average.wait
         calls = 0
