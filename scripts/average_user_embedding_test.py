@@ -97,8 +97,9 @@ def test_posthog_paginates_past_short_pages_with_fixed_cutoff_and_full_counts():
         query = payload["query"]
         assert query["values"]["minimum"] == 50
         assert query["values"]["cutoff"] == "2026-09-17T00:00:00Z"
+        assert query["values"]["page_size"] == 1000
         assert "HAVING count() >= {minimum}" in query["query"]
-        assert "LIMIT 1000" in query["query"]
+        assert "LIMIT {page_size}" in query["query"]
         assert "feed_name" not in query["query"]
         assert "timestamp >=" not in query["query"]
         assert payload["refresh"] == "force_blocking"
@@ -110,22 +111,6 @@ def test_posthog_paginates_past_short_pages_with_fixed_cutoff_and_full_counts():
     assert len(client.requests) == 25
 
 
-def test_posthog_deduplicates_without_summing_counts():
-    pages = iter(
-        [
-            [["did:plc:a", 50], ["did:plc:a", 50], ["did:plc:b", 51]],
-            [["did:plc:b", 51], ["did:plc:c", 52]],
-            [],
-        ]
-    )
-    client = FakeClient(lambda *_: {"results": next(pages)})
-    assert average.collect_posthog_users(client, 1, 50, "cutoff") == {
-        "did:plc:a": 50,
-        "did:plc:b": 51,
-        "did:plc:c": 52,
-    }
-
-
 @pytest.mark.parametrize(
     "result",
     [
@@ -134,8 +119,6 @@ def test_posthog_deduplicates_without_summing_counts():
         {"results": [["not-a-did", 50]]},
         {"results": [["did:plc:a", 49]]},
         {"results": [["did:plc:a", True]]},
-        {"results": [["did:plc:b", 50], ["did:plc:a", 51]]},
-        {"results": [["did:plc:a", 50], ["did:plc:a", 51]]},
     ],
 )
 def test_posthog_rejects_incomplete_or_invalid_data(result):

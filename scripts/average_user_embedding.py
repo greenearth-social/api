@@ -68,16 +68,16 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
     # Every page shares the same upper event timestamp. Advancing by DID rather
     # than OFFSET keeps each user's complete count together; values are bound
     # parameters, not interpolated SQL. There is no lower date bound or feed filter.
-    query = f"""
+    query = """
         SELECT distinct_id, count() AS interaction_seen_count
         FROM events
         WHERE event = 'interactionSeen'
-          AND timestamp < parseDateTimeBestEffort({{cutoff}})
-          AND distinct_id > {{after_did}}
+          AND timestamp < parseDateTimeBestEffort({cutoff})
+          AND distinct_id > {after_did}
         GROUP BY distinct_id
-        HAVING count() >= {{minimum}}
+        HAVING count() >= {minimum}
         ORDER BY distinct_id ASC
-        LIMIT {POSTHOG_PAGE_SIZE}
+        LIMIT {page_size}
     """
     users = {}
     cursor = ""
@@ -100,7 +100,12 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
                 "query": {
                     "kind": "HogQLQuery",
                     "query": query,
-                    "values": {"cutoff": cutoff, "after_did": cursor, "minimum": minimum},
+                    "values": {
+                        "cutoff": cutoff,
+                        "after_did": cursor,
+                        "minimum": minimum,
+                        "page_size": POSTHOG_PAGE_SIZE,
+                    },
                 },
                 "refresh": "force_blocking",
             },
@@ -126,9 +131,6 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
                 len(users),
             )
             return users
-        previous_count = len(users)
-        next_cursor = cursor
-        previous = ""
         for row in rows:
             if not isinstance(row, list) or len(row) != 2:
                 raise RunError("PostHog: invalid user row")
@@ -139,24 +141,16 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
                 raise RunError("PostHog: distinct_id is not a valid DID")
             if not is_count(count) or count < minimum:
                 raise RunError("PostHog: invalid interaction count")
-            if did < previous:
-                raise RunError("PostHog: results are not ordered by DID")
-            # A repeated row contains the same aggregate, not another batch of
-            # interactions to add. Disagreement makes the cohort unreliable.
-            if did in users and users[did] != count:
-                raise RunError("PostHog: conflicting duplicate user counts")
             users[did] = count
-            previous = did
-            next_cursor = max(next_cursor, did)
+        # GROUP BY gives one row per DID; ORDER BY puts the next cursor last.
+        next_cursor = rows[-1][0]
         if next_cursor <= cursor:
             raise RunError("PostHog: pagination did not advance")
         cursor = next_cursor
         logger.info(
-            "PostHog: page %d received %d rows, %d new DIDs, %d duplicates in %.2fs; total=%d",
+            "PostHog: page %d received %d users in %.2fs; total=%d",
             page,
             len(rows),
-            len(users) - previous_count,
-            len(rows) - (len(users) - previous_count),
             time.monotonic() - started,
             len(users),
         )
