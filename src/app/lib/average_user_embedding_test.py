@@ -18,6 +18,8 @@ FIXTURE = Path(__file__).resolve().parents[3] / "scripts/fixtures/average_user_e
 
 @pytest.fixture(autouse=True)
 def reset_prior(monkeypatch):
+    # Production state lasts for a worker's lifetime; tests must not inherit a
+    # previous test's loaded vector or the developer's local configuration.
     monkeypatch.delenv("GE_AVERAGE_USER_EMBEDDING_URI", raising=False)
     module.set_average_user_embedding(None, "not_configured")
     yield
@@ -88,6 +90,8 @@ async def test_gcs_download_uses_adc_one_attempt_and_no_request_path_io(monkeypa
     prior = module.get_average_user_embedding()
     assert prior is not None
     for _ in range(3):
+        # Requests only read the startup snapshot, so repeated access must not
+        # create clients or trigger another download.
         assert module.get_average_user_embedding() is prior
         assert module.get_average_user_embedding_error() is None
     constructor.assert_called_once_with()
@@ -158,6 +162,8 @@ async def test_unconfigured_prior_does_not_load(monkeypatch):
 async def test_invalid_artifact_is_unavailable(
     tmp_path, monkeypatch, artifact, caplog, updates, reason
 ):
+    # Reuse the producer's contract fixture and validation. Each bad artifact
+    # disables only the prior and leaves a useful, controlled diagnostic.
     artifact.update(updates)
     write_artifact(tmp_path, monkeypatch, artifact)
     await module.init_average_user_embedding()
@@ -212,6 +218,7 @@ async def test_gcs_failure_is_unavailable_without_logging_exception_secrets(monk
 
 @pytest.mark.asyncio
 async def test_startup_cancellation_propagates(monkeypatch):
+    # Optional-prior fallback must not swallow cancellation of the API lifespan.
     monkeypatch.setenv("GE_AVERAGE_USER_EMBEDDING_URI", "prior.json")
     monkeypatch.setattr(
         module, "_load_average_user_embedding", MagicMock(side_effect=asyncio.CancelledError)

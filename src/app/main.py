@@ -171,10 +171,14 @@ async def lifespan(app: FastAPI):
             "Firebase Admin SDK initialization failed; feed-transparency endpoints will return 500"
         )
     init_http_client()
+    # Load once per worker before requests are served. The loader handles an
+    # unavailable optional prior so it does not prevent the API from starting.
     await init_average_user_embedding()
     try:
         yield
     finally:
+        # Do not carry a prior into a later lifespan in the same process (tests
+        # can start the app repeatedly with different artifact configurations).
         set_average_user_embedding(None)
         # Let in-flight popularity refreshes finish before the clients they
         # write through are closed.

@@ -30,6 +30,8 @@ GE_TWO_TOWER_KNN_INDEX="${GE_TWO_TOWER_KNN_INDEX:-posts_recent_quality}"
 # Resolve the promoted artifact before deployment, then pin its immutable URI
 # on the revision. An explicit URI overrides the environment's default pointer.
 GE_AVERAGE_USER_EMBEDDING_URI="${GE_AVERAGE_USER_EMBEDDING_URI:-}"
+# Track CLI selection separately: disabling may override an inherited environment
+# value, but providing both selection and disable flags is an input error.
 AVERAGE_USER_EMBEDDING_URI_EXPLICIT=false
 WITHOUT_AVERAGE_USER_EMBEDDING=false
 
@@ -159,6 +161,8 @@ validate_config() {
 
 resolve_average_user_embedding() {
     if [ "$WITHOUT_AVERAGE_USER_EMBEDDING" = true ]; then
+        # Clear even an inherited URI so this revision deliberately runs without
+        # a prior instead of retaining an earlier deployment's selection.
         GE_AVERAGE_USER_EMBEDDING_URI=""
         log_warn "Deploying without an average user embedding (--without-average-user-embedding)."
         return
@@ -166,10 +170,13 @@ resolve_average_user_embedding() {
 
     log_info "Resolving the average user embedding for $ENVIRONMENT..."
     local resolver_args=(--environment "$ENVIRONMENT" --project-id "$PROJECT_ID")
+    # Precedence: explicit CLI URI, inherited environment URI, promoted default.
     if [ -n "$GE_AVERAGE_USER_EMBEDDING_URI" ]; then
         resolver_args+=(--artifact-uri "$GE_AVERAGE_USER_EMBEDDING_URI")
     fi
 
+    # Fail deployment if selection cannot be verified. This differs intentionally
+    # from runtime fallback, which keeps an existing API available after load errors.
     local artifact_uri
     if ! artifact_uri=$(pipenv run python scripts/resolve_average_user_embedding.py "${resolver_args[@]}"); then
         log_error "Average user embedding selection failed; Cloud Run was not changed."
@@ -328,6 +335,8 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$GE_ELASTICSEARCH_URL"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_TWO_TOWER_KNN_INDEX=$GE_TWO_TOWER_KNN_INDEX"
+    # Always send the setting: an empty value is the explicit opt-out above.
+    # Pin an artifact object, never default.json, so promotion cannot change it.
     deploy_cmd="$deploy_cmd --set-env-vars=GE_AVERAGE_USER_EMBEDDING_URI=$GE_AVERAGE_USER_EMBEDDING_URI"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
@@ -655,6 +664,7 @@ main() {
 
     require_clean_worktree
     validate_config
+    # Resolve before UX-post publication or any Cloud Run deployment changes.
     resolve_average_user_embedding
     prepare_ux_posts
     if ! preflight_bsky_publishers; then
@@ -763,6 +773,8 @@ if [ "$WITHOUT_AVERAGE_USER_EMBEDDING" = true ] && [ "$AVERAGE_USER_EMBEDDING_UR
     exit 1
 fi
 
+# Tests source the real parser/functions and substitute cloud commands before
+# calling main. Direct execution retains the normal deployment entry point.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     main
 fi

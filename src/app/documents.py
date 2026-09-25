@@ -99,6 +99,8 @@ class UserDocument(BaseModel):
         description="Freshness preference: 0=6h, 1=12h, 2=24h, 3=48h, 4=72h, 5=7d.  "
         "Used to filter posts by age.",
     )
+    # Default only for absent values; explicitly saved preferences remain intact.
+    # Keep aligned with feed_preferences.CONTROL_DEFAULTS for requests without a user.
     politics: float = Field(
         default=0.5,
         ge=0.0,

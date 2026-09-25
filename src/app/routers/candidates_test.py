@@ -26,6 +26,8 @@ def stub_inference():
     branch (and so returns a single, distinct candidate), which is what the
     routing cases below need; stubbing inference keeps them off the network.
     """
+    # Use actual-only retrieval with a known model pair. Router tests should not
+    # depend on a prior loaded by another test or the local development environment.
     with (
         patch(
             "app.lib.candidates.two_tower.get_inference_settings",

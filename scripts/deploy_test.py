@@ -92,6 +92,8 @@ def run_deploy(
 
 
 def recorded_args(tmp_path: Path, name: str) -> list[str]:
+    # The shell harness uses NUL separators to preserve actual argument boundaries,
+    # including an explicitly empty environment value used to disable the prior.
     return (tmp_path / name).read_text().removesuffix("\0").split("\0")
 
 

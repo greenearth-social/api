@@ -25,12 +25,16 @@ def main(argv=None):
         help="use an exact timestamped gs:// artifact instead of the environment's default",
     )
     args = parser.parse_args(argv)
+    # This is deployment preflight, not runtime loading: resolve and validate
+    # the selection now so deploy.sh can pin the exact artifact on the revision.
     try:
         result = resolve_artifact(args.environment, args.project_id, args.artifact_uri)
     except (PublicationError, ArtifactValidationError) as error:
         print(f"Average embedding selection failed: {error}", file=sys.stderr)
         return 1
     except Exception as error:
+        # Unexpected SDK errors may include credentials or response bodies.
+        # A nonzero exit and empty stdout prevent treating an error as a URI.
         print(f"Average embedding selection failed ({type(error).__name__})", file=sys.stderr)
         return 1
 

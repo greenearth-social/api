@@ -455,6 +455,8 @@ ensure_average_user_embedding_bucket_access() {
 
     # Inference-service setup owns the model bucket. The API only reads artifacts
     # from its own environment; artifact promotion uses a separate identity.
+    # Grant at bucket scope, not project scope. An explicit deployment override
+    # in another bucket needs a separate grant; this does not grant write access.
     log_info "Granting average user embedding read access on $bucket to $sa_email..."
     if ! gcloud storage buckets add-iam-policy-binding "$bucket" \
         --member="serviceAccount:$sa_email" \
@@ -829,6 +831,7 @@ main() {
     validate_config
     setup_gcp_project
     create_service_account
+    # The runtime principal must exist before it can receive bucket access.
     ensure_average_user_embedding_bucket_access
     ensure_frontend_deployer_roles
     ensure_firestore_database
@@ -961,6 +964,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Allow tests to source the setup functions without performing cloud mutations.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     main
 fi

@@ -337,6 +337,8 @@ class TestPredictFailureCounters:
     ],
 )
 async def test_predict_user_embedding_validates_prediction_outputs(monkeypatch, payload, message):
+    # Supply valid pair metadata so malformed outputs remain the failure under
+    # test, rather than failing an unrelated metadata check first.
     if isinstance(payload, dict):
         payload = {
             "model_type": "user-tower",

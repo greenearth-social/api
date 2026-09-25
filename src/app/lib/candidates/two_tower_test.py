@@ -23,6 +23,8 @@ INFERENCE_SETTINGS = ("https://inference", "api-key")
 
 
 def make_history(count: int, missing: int = 0) -> UserHistory:
+    # Separate retained likes from usable embeddings so tests can prove that
+    # missing post vectors do not increase the actual user's blend weight.
     return UserHistory(
         [
             UserHistoryItem(
@@ -55,6 +57,8 @@ def generator():
 
 @pytest.fixture
 def dependencies(monkeypatch, prior):
+    # Orthogonal unit vectors make the blend coordinates equal its two weights.
+    # Mock I/O boundaries, leaving vector selection and fallback logic real.
     history = make_history(2)
     mocks = SimpleNamespace(
         history=AsyncMock(return_value=history),
@@ -259,6 +263,8 @@ async def test_incompatible_prior_falls_back_to_actual(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("actual", [[-1.0, 0.0], [1e308, 1e308]])
 async def test_invalid_blend_falls_back_to_valid_actual(generator, dependencies, actual):
+    # Opposing vectors cancel at equal weights; huge finite coordinates overflow
+    # during weighting. Neither case should discard a valid actual-only vector.
     dependencies.prediction.return_value = replace(
         dependencies.prediction.return_value, embedding=actual
     )
@@ -292,6 +298,8 @@ async def test_missing_prediction_metadata_fails(generator, dependencies):
 
 @pytest.mark.asyncio
 async def test_does_not_call_readiness(generator, dependencies):
+    # A prediction's model pair must drive retrieval even if /ready could report
+    # a different model during a rollout. The readiness helper still exists for others.
     with patch("app.lib.inference.get_cached_post_tower_uuid", new_callable=AsyncMock) as ready:
         await generator.generate(object(), "did:plc:user1")
     ready.assert_not_awaited()

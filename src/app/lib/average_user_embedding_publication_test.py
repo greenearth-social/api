@@ -328,6 +328,8 @@ def test_resolve_default_is_read_only_with_pinned_bounded_downloads(cloud, envir
     }
     assert not cloud.writes
     downloads = [entry for entry in cloud.reads if entry[0] == "download"]
+    # The fake assigned generation 101 to the artifact and 102 to default.json.
+    # Resolve the pointer first, then read that artifact's observed generation.
     assert [entry[2]["if_generation_match"] for entry in downloads] == [102, 101]
     for _, _, options in cloud.reads:
         assert options["timeout"] == 60

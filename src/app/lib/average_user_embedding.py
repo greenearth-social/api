@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AverageUserEmbedding:
+    # Keep only retrieval inputs and provenance from the validated artifact.
+    # The frozen record and tuple prevent requests from mutating the shared prior.
     embedding: tuple[float, ...]
     dimension: int
     user_model_uuid: str
@@ -26,7 +28,11 @@ class AverageUserEmbedding:
     contributing_users: int
 
 
+# Each API worker owns one startup snapshot. Getters never read files or GCS;
+# replacing the artifact or recovering from a failed load requires a restart.
 _average_user_embedding: AverageUserEmbedding | None = None
+# Distinguish an intentionally disabled prior from a failed configured load so
+# the generator can log expected fallback at INFO and a load failure at WARNING.
 _average_user_embedding_error: str | None = "not_configured"
 
 
@@ -47,6 +53,8 @@ def set_average_user_embedding(
 
 
 def _load_average_user_embedding(uri: str) -> AverageUserEmbedding:
+    # deploy.sh resolves default.json to an exact artifact URI before deploying.
+    # Runtime loading does not follow the mutable default or select a model.
     parts = urlsplit(uri)
     if parts.scheme == "gs":
         if (
@@ -64,6 +72,8 @@ def _load_average_user_embedding(uri: str) -> AverageUserEmbedding:
 
         with storage.Client() as client:
             blob = client.bucket(parts.netloc).blob(parts.path[1:])
+            # This optional startup dependency gets one attempt, with a 30-second
+            # request timeout; SDK retries must not prolong startup.
             # The SDK accepts None to disable retries despite its narrower annotation.
             data = blob.download_as_bytes(timeout=30, retry=None)  # type: ignore[arg-type]
         artifact = parse_artifact(data)
@@ -72,6 +82,9 @@ def _load_average_user_embedding(uri: str) -> AverageUserEmbedding:
     else:
         artifact, _ = load_artifact(Path(uri).expanduser())
 
+    # Both loaders apply Part 1's normalized version-1 contract, including its
+    # declared dimension. Compatibility with a live prediction is checked later
+    # by the generator, since model versions can change while the API is running.
     return AverageUserEmbedding(
         embedding=tuple(artifact["embedding"]),
         dimension=artifact["dimension"],
@@ -91,8 +104,12 @@ async def init_average_user_embedding() -> None:
         return
 
     try:
+        # File reads, ADC discovery, and the synchronous GCS client would block
+        # the event loop. Startup still awaits completion before serving requests.
         prior = await asyncio.to_thread(_load_average_user_embedding, uri)
     except Exception as exc:
+        # A prior is optional: keep the API and actual-user retrieval available.
+        # Store a reason instead of retrying on subsequent feed requests.
         set_average_user_embedding(None, "load_failed")
         # Only our validation exceptions have controlled messages. Cloud SDK
         # exceptions or malformed URIs can contain credentials; omit their text.

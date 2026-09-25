@@ -29,6 +29,8 @@ def test_resolver_prints_uri_and_identity_on_separate_streams(monkeypatch, capsy
 
     resolve.assert_called_once_with("stage", "greenearth-471522", None)
     output = capsys.readouterr()
+    # Shell command substitution consumes stdout verbatim. Identity logs must
+    # stay on stderr so they cannot become part of the Cloud Run environment value.
     assert output.out == uri + "\n"
     for field in (
         "run_id",

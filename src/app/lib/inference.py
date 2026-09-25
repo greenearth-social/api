@@ -227,6 +227,8 @@ async def predict_user_embedding(
     The caller supplies history from the shared production history loader. This path
     never synthesizes empty history and never reads the readiness UUID cache.
     """
+    # Shared by the export endpoint and candidate retrieval. Keep the prediction
+    # actual-only here; choosing or blending a prior belongs to the generator.
     embedded_history = history.items_with_embeddings
     like_count = len(history.items)
     embedding_count = len(embedded_history)

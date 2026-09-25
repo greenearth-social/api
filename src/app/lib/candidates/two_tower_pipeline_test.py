@@ -17,6 +17,8 @@ from .base import CandidateResult
 
 @pytest.fixture
 def dependencies(monkeypatch):
+    # Keep the real generator and shared pipeline: these tests exercise source
+    # allocation and diagnostics, while history, inference, and ES remain local mocks.
     prior = AverageUserEmbedding((1.0, 0.0), 2, "1" * 32, "2" * 32, "test-run", 2)
     history = UserHistory([UserHistoryItem("at://liked/1", "2026-09-21T00:00:00Z", [1.0])])
     history_mock = AsyncMock(return_value=history)
@@ -77,6 +79,8 @@ async def test_prior_fallback_preserves_other_source_and_diagnostics(
         result = await generate.run_generate(request(), object())
     sources = {post.generator_name for post in result.candidates}
     assert sources == ({"two_tower", "popularity"} if has_prior or has_history else {"popularity"})
+    # An optional missing prior is an expected fallback; inference/search errors
+    # are tested separately below as recorded pipeline degradations.
     assert context.degradations == []
     assert dependencies.prediction.await_count == int(has_history)
     assert dependencies.search.await_count == int(has_prior or has_history)
@@ -102,6 +106,8 @@ async def test_actual_failures_keep_other_sources_and_record_degradation(
 
 @pytest.mark.asyncio
 async def test_zero_allocation_does_not_force_two_tower_with_a_prior(dependencies):
+    # This small positive weight rounds to zero allocated candidates. Having a
+    # prior must not force the generator to run outside the caller's allocation.
     await generate.run_generate(request(tower_weight=0.01, count=1), object())
     dependencies.history.assert_not_awaited()
     dependencies.prediction.assert_not_awaited()

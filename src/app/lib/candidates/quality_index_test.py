@@ -158,6 +158,8 @@ class TestTwoTowerUsesQualityIndex:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("index", [POSTS_QUALITY_KNN_INDEX, POSTS_KNN_INDEX])
 async def test_generator_emits_exact_prior_vector_and_retrieval_filters(monkeypatch, index):
+    # Empty history selects the prior without inference. Keep the real kNN query
+    # builder so assertions cover the ES request, not just helper arguments.
     monkeypatch.setenv("GE_TWO_TOWER_KNN_INDEX", index)
     generator = TwoTowerCandidateGenerator(name="two_tower", history_mode="actual")
     es = FakeEs(

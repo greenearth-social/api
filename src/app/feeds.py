@@ -363,10 +363,15 @@ FEEDS: dict[str, FeedConfig] = {
         min_rank_score=0.425,
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
+            # Simulate cold start regardless of the requesting DID: the empty
+            # variant searches the prior without loading that user's history.
+            # Weights split candidate allocation; ranking can change display shares.
             generators=[
                 GeneratorSpec(name="popularity", weight=0.5),
                 GeneratorSpec(name="two_tower_empty_history", weight=0.5)
             ],
+            # A missing prior may leave only popularity's allocation. Do not
+            # silently fill its missing half with another generator.
             infill=None,
             num_candidates=30,
             video_only=False,

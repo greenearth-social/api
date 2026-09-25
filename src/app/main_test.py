@@ -142,6 +142,8 @@ def test_lifespan_loads_prior_once_and_keeps_api_available_on_failure(
         uri = tmp_path / "missing.json"
     monkeypatch.setenv("GE_AVERAGE_USER_EMBEDDING_URI", str(uri))
 
+    # Exercise real loading and lifespan cleanup with a valid or missing file.
+    # Stub unrelated startup services so API availability needs no cloud access.
     load = MagicMock(wraps=prior_module._load_average_user_embedding)
     monkeypatch.setattr(prior_module, "_load_average_user_embedding", load)
     monkeypatch.setattr(main, "AsyncElasticsearch", MagicMock(return_value=AsyncMock()))

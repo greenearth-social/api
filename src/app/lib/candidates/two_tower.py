@@ -25,6 +25,8 @@ from .es_candidates import knn_search_posts
 
 logger = logging.getLogger(__name__)
 
+# Treat the prior as two usable history items: it dominates sparse histories,
+# has equal weight at two items, and fades as actual history grows.
 AVG_USER_EMBEDDING_WEIGHT = 2.0
 
 
@@ -56,8 +58,11 @@ MIN_LIKE_COUNT = 20
 class TwoTowerCandidateGenerator(CandidateGenerator):
     """Candidate generator using the two tower model.
 
-    Pipeline:
-        user_did → recent likes → post embeddings → user tower → kNN search
+    With usable history, blend the user prediction with a compatible prior,
+    falling back to the actual prediction if the prior cannot be used.
+    Without usable history (or in empty-history mode), use the prior alone if
+    available; otherwise return no candidates.
+    All paths search post embeddings from the corresponding post-tower model.
     """
 
     def __init__(self, name: str, history_mode: HistoryMode):
@@ -83,8 +88,13 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         async with timed(logger, "two_tower_user_side", user_did=user_did):
             history = None
             if self.history_mode == "actual":
+                # Reuse the cached, latest-64-likes history also used by the
+                # embedding endpoint. Only items passed to the tower add weight;
+                # likes whose post embeddings are missing do not count.
                 history = await fetch_user_history_features(es, user_did)
                 num_likes = len(history.items_with_embeddings)
+            # Empty-history mode deliberately skips the loader even for an
+            # established user. Snapshots still record that no history was used.
             rec = current_recorder()
             if rec is not None:
                 rec.record_user_features(
@@ -92,6 +102,8 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                 )
 
             if history is not None and num_likes:
+                # Prior fallback handles an unavailable prior, not broken user
+                # inference. Prediction errors propagate to pipeline diagnostics.
                 inference_base_url, inference_api_key = get_inference_settings()
                 prediction = await predict_user_embedding(
                     history, base_url=inference_base_url, api_key=inference_api_key
@@ -104,8 +116,13 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                 if not prediction.user_model_uuid or not prediction.post_model_uuid:
                     raise InferenceResponseFormatError("Expected user-tower model pair metadata")
                 user_embedding = actual_embedding
+                # This is paired_post_model_uuid from the prediction response.
+                # A separate /ready lookup could observe a different model pair
+                # during an inference rollout, so this response is authoritative.
                 post_tower_uuid = prediction.post_model_uuid
                 retrieval_mode = "actual_only"
+                # Equal dimensions alone do not imply a shared embedding space:
+                # both tower UUIDs must match before their vectors can be blended.
                 if prior is None:
                     fallback_reason = "average_user_embedding_unavailable"
                 elif (
@@ -116,6 +133,9 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                 elif len(actual_embedding) != prior.dimension:
                     fallback_reason = "average_user_embedding_dimension_mismatch"
                 else:
+                    # Part 1 saved a normalized mean and the tower returns its
+                    # own embedding. Preserve both inputs and the weighted mean;
+                    # cosine search does not require normalizing the blend again.
                     blended = [
                         (AVG_USER_EMBEDDING_WEIGHT * average + num_likes * actual)
                         / (AVG_USER_EMBEDDING_WEIGHT + num_likes)
@@ -125,6 +145,8 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                         user_embedding = blended
                         retrieval_mode = "blended"
                     else:
+                        # Even valid inputs can cancel to zero or overflow when
+                        # blended. Keep the already-validated actual prediction.
                         fallback_reason = "average_user_embedding_invalid_blend"
                 if fallback_reason:
                     prior_error = get_average_user_embedding_error() if prior is None else None
@@ -145,10 +167,15 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                         num_likes,
                     )
             elif prior is not None:
+                # No usable history means no user-tower or /ready call. Search
+                # the artifact's own post-model space, even if serving has moved
+                # to a newer pair; never silently substitute another model.
                 user_embedding = list(prior.embedding)
                 post_tower_uuid = prior.post_model_uuid
                 retrieval_mode = "prior_only"
             else:
+                # No vector to search with. Other configured sources can still
+                # contribute through the existing candidate pipeline.
                 logger.info(
                     "%s skipped: no usable history or average embedding; prior_error=%s",
                     self.name,
@@ -179,6 +206,8 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             len(user_embedding),
         )
 
+        # Blended, actual-only, and prior-only retrieval share the same filters
+        # and allocation. Selecting a prior does not expand the candidate budget.
         resolved_index = two_tower_knn_index()
         # Only apply the traction filter on the posts_recent fallback — see
         # MIN_LIKE_COUNT's docstring for why it would be redundant against the
@@ -206,6 +235,8 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             retrieval_mode,
             post_tower_uuid,
         )
+        # A successful actual-only fallback still carries its reason into feed
+        # diagnostics. An empty search takes precedence as the retrieval outcome.
         reason = fallback_reason
         if not candidates:
             reason = "no_recent_authors_topics_posts"
