@@ -67,7 +67,6 @@ def embedding(did, vector=None, model=USER_MODEL):
         "user_model_uuid": model,
         "post_model_uuid": POST_MODEL,
         "history_policy": POLICY.copy(),
-        "likes_index": "likes",
         "history_like_count": 5,
         "history_embedding_count": 3,
         "reason": None,
@@ -80,7 +79,6 @@ def skipped(did, reason="no_embedded_history"):
         "status": "skipped",
         "reason": reason,
         "history_policy": POLICY.copy(),
-        "likes_index": "likes",
         "history_like_count": 0 if reason == "no_likes" else 5,
         "history_embedding_count": 0,
     }
@@ -326,7 +324,6 @@ def test_missing_history_updates_aggregate_counts_and_logs_without_retaining_did
         ),
         (embedding("did:plc:b", [1, 2, 3]), "mixed model"),
         ({**embedding("did:plc:b"), "history_policy": {**POLICY, "limit": 50}}, "mixed history"),
-        ({**skipped("did:plc:b"), "likes_index": "other-index"}, "source mismatch"),
     ],
 )
 def test_metadata_mismatch_is_global_failure(second, match):

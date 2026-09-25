@@ -80,7 +80,7 @@ def client(monkeypatch):
     return TestClient(app)
 
 
-def test_export_propagates_actual_pair_source_and_history_without_candidate_search(
+def test_export_propagates_actual_pair_and_history_without_candidate_search(
     client, monkeypatch
 ):
     # The serving prediction is authoritative for its paired model. Deliberately
@@ -104,7 +104,6 @@ def test_export_propagates_actual_pair_source_and_history_without_candidate_sear
         "dimension": 2,
         "history_like_count": 1,
         "history_embedding_count": 1,
-        "likes_index": "likes",
         "history_policy": {
             "limit": 64,
             "sources": ["posts", "replies"],

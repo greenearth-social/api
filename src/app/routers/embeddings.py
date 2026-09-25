@@ -57,7 +57,6 @@ class UserEmbeddingResponse(BaseModel):
     history_like_count: int = Field(ge=0)
     history_embedding_count: int = Field(ge=0)
     history_policy: HistoryPolicy = Field(default_factory=HistoryPolicy)
-    likes_index: str = "likes"
     embedding: list[float] | None = None
     user_model_uuid: str | None = None
     post_model_uuid: str | None = None

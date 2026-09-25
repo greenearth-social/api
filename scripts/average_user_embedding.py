@@ -256,8 +256,6 @@ def fetch_embedding(client, did):
     result = post_json(client, "/embeddings/user", {"user_did": did})
     if result.get("user_did") != did:
         raise RunError("Embedding API: response DID differs from request")
-    if result.get("likes_index") != LIKES_INDEX:
-        raise RunError("Embedding API: Elasticsearch source mismatch (likes_index)")
     policy = validate_history_policy(result.get("history_policy"))
     for key in ("history_like_count", "history_embedding_count"):
         if not is_count(result.get(key)):

@@ -714,7 +714,7 @@ an artifact in a feed. Deployment and runtime integration are deferred to Part 2
 `POST /embeddings/user` accepts `{"user_did": "did:plc:..."}` and uses the existing
 `X-API-Key` authentication. An `ok` response includes the embedding, dimension,
 `user_model_uuid`, `post_model_uuid`, loaded-like and usable-history counts,
-`history_policy`, and `likes_index`. A `skipped` response
+and `history_policy`. A `skipped` response
 identifies `no_likes` or `no_embedded_history` and contains no vector.
 
 Deploy inference-service's paired-model response support before using this
@@ -746,9 +746,8 @@ the environment or `.env`:
 - `GE_ELASTICSEARCH_API_KEY`: a key with read access to the `likes` index.
 - `GE_API_KEY`: a key accepted by the running API's `X-API-Key` authentication.
 
-The script assumes the API container uses the same Elasticsearch cluster and
-checks that endpoint responses name the `likes` index. Host URLs can differ when
-a tunnel is involved.
+The script assumes the API container uses the same Elasticsearch cluster.
+Host URLs can differ when a tunnel is involved.
 
 ```bash
 pipenv run python scripts/average_user_embedding.py --help
