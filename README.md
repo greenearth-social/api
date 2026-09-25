@@ -810,7 +810,7 @@ The artifact has `format_version: 1`. It contains the L2-normalized mean `embedd
 `user_model_uuid`, `post_model_uuid`, `run_id`, `source_completed_at`,
 `contributing_users`, and `cohort`. The `cohort` records the PostHog cutoff,
 selection thresholds, and user counts at each selection stage.
-See the [artifact schema](scripts/average_user_embedding.schema.json) and
+See the [artifact schema](src/app/lib/average_user_embedding.schema.json) and
 [small contract fixture](scripts/fixtures/average_user_embedding_v1.json).
 Artifact validation requires an L2 magnitude within `1e-6` of 1.
 The fixture is illustrative, not a model artifact to deploy.
@@ -825,6 +825,9 @@ The producer and API consumers share the
 Use `parse_artifact(data)` to validate downloaded bytes or `load_artifact(path)`
 to read a local file and retain its original bytes. The script adds the repository's
 `src/` directory to its import path, following the other scripts' `app.lib` imports.
+The module validates structure against the bundled JSON schema using `jsonschema`.
+Python parses UTC timestamps and checks their ordering, vector finiteness and unit
+magnitude, dimension, and cohort totals. Validation never modifies the artifact.
 
 The artifact excludes DIDs, individual vectors, credentials, and service URLs,
 and is written atomically. A final JSON summary is printed to stdout with

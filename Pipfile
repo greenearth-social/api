@@ -18,6 +18,7 @@ opentelemetry-exporter-gcp-monitoring = "*"
 posthog = "*"
 firebase-admin = "*"
 numpy = "*"
+jsonschema = "*"
 
 [dev-packages]
 pytest = "*"

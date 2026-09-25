@@ -1,17 +1,22 @@
 """Shared validation and loading for normalized average-embedding artifacts."""
 
-# scripts/average_user_embedding.schema.json describes the JSON shape. This module
-# also checks relationships that schema alone does not enforce, such as vector
-# magnitude, matching counts, and timestamp ordering. It validates without repairing
-# the input so generation, promotion, and consumers agree on the inspected artifact.
+# The adjacent JSON schema validates the structure. Python handles vector math and
+# relationships between fields without changing the artifact's original values.
 
 import json
 import math
-import re
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeGuard
+
+from jsonschema import Draft202012Validator, ValidationError
+
+# Load once from the application package so offline scripts and the deployed API
+# share the same contract regardless of the current working directory.
+_ARTIFACT_VALIDATOR = Draft202012Validator(
+    json.loads(Path(__file__).with_name("average_user_embedding.schema.json").read_text()),
+)
 
 
 class ArtifactValidationError(Exception):
@@ -44,93 +49,47 @@ def model_id(value):
         raise ArtifactValidationError("Model identifiers must be nonzero UUIDs") from None
 
 
-def utc_timestamp(value: object) -> datetime:
-    try:
-        if not isinstance(value, str) or not value.endswith("Z"):
-            raise ValueError
-        parsed = datetime.fromisoformat(value)
-        if parsed.utcoffset() != timedelta(0):
-            raise ValueError
-        return parsed
-    except ValueError:
-        raise ArtifactValidationError("Expected a UTC timestamp ending in Z") from None
-
-
 def validate_artifact(artifact):
-    """Strict allowlist protects publication from leaking prototype user reports."""
-    keys = {
-        "format_version",
-        "embedding",
-        "dimension",
-        "user_model_uuid",
-        "post_model_uuid",
-        "run_id",
-        "source_completed_at",
-        "contributing_users",
-        "cohort",
-    }
-    if not isinstance(artifact, dict) or set(artifact) != keys:
-        raise ArtifactValidationError("Artifact does not match the version 1 compact schema")
-    if type(artifact["format_version"]) is not int or artifact["format_version"] != 1:
-        raise ArtifactValidationError("Unsupported artifact version")
-    vector, dimension = artifact["embedding"], artifact["dimension"]
-    # Version 1 stores the normalized mean. Loading must reject malformed data,
-    # not renormalize it and silently change the artifact's original coordinates.
-    if (
-        not isinstance(vector, list)
-        or not vector
-        or not all(is_finite_number(value) for value in vector)
-        or not any(value != 0 for value in vector)
-        or not is_count(dimension)
-        or dimension != len(vector)
-    ):
+    """Validate the schema, then the arithmetic relationships it cannot express."""
+    try:
+        _ARTIFACT_VALIDATOR.validate(artifact)
+    except ValidationError as error:
+        # Library messages include rejected values, which may contain private data.
+        # Report only the field location and failed schema rule to callers/logs.
         raise ArtifactValidationError(
-            "Artifact requires a finite nonzero vector and matching dimension"
-        )
+            "Artifact does not match the version 1 compact schema "
+            f"at {error.json_path} ({error.validator})"
+        ) from None
+
+    vector, dimension = artifact["embedding"], artifact["dimension"]
+    if not all(is_finite_number(value) for value in vector) or dimension != len(vector):
+        raise ArtifactValidationError("Artifact requires a finite vector and matching dimension")
+    # Checking unit magnitude also rejects zero vectors; never renormalize on load.
     if not math.isclose(math.hypot(*vector), 1.0, rel_tol=0.0, abs_tol=1e-6):
         raise ArtifactValidationError("Artifact embedding must have unit L2 magnitude within 1e-6")
-    for key in ("user_model_uuid", "post_model_uuid"):
-        # Accept canonical identifiers in saved artifacts, even though API responses
-        # can be canonicalized from other valid UUID spellings before saving.
-        if model_id(artifact[key]) != artifact[key]:
-            raise ArtifactValidationError("Artifact model UUIDs must use lowercase 32-hex format")
-    run_id = artifact["run_id"]
-    # The run ID becomes part of the filename and contains the producer's UTC start
-    # time. Check both its safe spelling and whether the date itself actually exists.
-    if not isinstance(run_id, str) or not re.fullmatch(r"\d{8}T\d{6}\.\d{6}Z_[0-9a-f]{8}", run_id):
-        raise ArtifactValidationError("Invalid artifact run ID")
-    try:
-        started = datetime.strptime(run_id.split("_")[0], "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=UTC)
-    except ValueError:
-        raise ArtifactValidationError("Invalid artifact run timestamp") from None
-    completed = utc_timestamp(artifact["source_completed_at"])
-    if completed < started:
-        raise ArtifactValidationError("Artifact completion precedes its run timestamp")
-    count = artifact["contributing_users"]
-    if not is_count(count) or count == 0:
-        raise ArtifactValidationError("Artifact requires at least one contributor")
+
     cohort = artifact["cohort"]
+    try:
+        # The schema checks the run ID's spelling; parsing checks its calendar date.
+        started = datetime.strptime(artifact["run_id"].split("_")[0], "%Y%m%dT%H%M%S.%fZ").replace(
+            tzinfo=UTC
+        )
+        completed = datetime.fromisoformat(artifact["source_completed_at"])
+        cutoff = datetime.fromisoformat(cohort["cutoff"])
+    except ValueError:
+        raise ArtifactValidationError("Invalid artifact timestamp") from None
+    if not cutoff <= started <= completed:
+        raise ArtifactValidationError(
+            "Artifact timestamps must satisfy cutoff <= run start <= completion"
+        )
+
     # Coverage must balance in both stages: PostHog users split into eligible and
     # below-threshold users, and eligible users split into contributors and skips.
-    # There is no failed-user count because failed runs must not produce artifacts.
-    count_keys = {
-        "min_interaction_seen",
-        "min_likes",
-        "posthog_users",
-        "below_min_likes",
-        "eligible_users",
-        "skipped_users",
-    }
     if (
-        not isinstance(cohort, dict)
-        or set(cohort) != count_keys | {"cutoff"}
-        or any(not is_count(cohort.get(key)) for key in count_keys)
-        or count + cohort["skipped_users"] != cohort["eligible_users"]
+        artifact["contributing_users"] + cohort["skipped_users"] != cohort["eligible_users"]
         or cohort["eligible_users"] + cohort["below_min_likes"] != cohort["posthog_users"]
     ):
         raise ArtifactValidationError("Invalid artifact cohort or coverage metadata")
-    if utc_timestamp(cohort["cutoff"]) > started:
-        raise ArtifactValidationError("Artifact cohort cutoff follows run start")
     return artifact
 
 

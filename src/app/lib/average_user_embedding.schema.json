@@ -34,6 +34,7 @@
     },
     "user_model_uuid": {
       "type": "string",
+      "maxLength": 32,
       "pattern": "^[0-9a-f]{32}$",
       "not": {
         "const": "00000000000000000000000000000000"
@@ -41,6 +42,7 @@
     },
     "post_model_uuid": {
       "type": "string",
+      "maxLength": 32,
       "pattern": "^[0-9a-f]{32}$",
       "not": {
         "const": "00000000000000000000000000000000"
@@ -48,11 +50,11 @@
     },
     "run_id": {
       "type": "string",
+      "maxLength": 32,
       "pattern": "^\\d{8}T\\d{6}\\.\\d{6}Z_[0-9a-f]{8}$"
     },
     "source_completed_at": {
       "type": "string",
-      "format": "date-time",
       "pattern": "Z$"
     },
     "contributing_users": {
@@ -74,7 +76,6 @@
       "properties": {
         "cutoff": {
           "type": "string",
-          "format": "date-time",
           "pattern": "Z$"
         },
         "min_interaction_seen": {
