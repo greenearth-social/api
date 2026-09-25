@@ -170,10 +170,6 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
                 "https://es.test",
                 "--api-url",
                 "https://api.test",
-                "--workers",
-                # Make the model-change failure deterministic rather than racing
-                # which user's response establishes the expected model pair first.
-                "1",
                 "--output-dir",
                 str(tmp_path / "results"),
             ]

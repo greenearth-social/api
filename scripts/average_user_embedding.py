@@ -21,7 +21,6 @@ import tempfile
 import time
 import uuid
 from collections import Counter
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -304,64 +303,47 @@ def fetch_embedding(client, did):
     }
 
 
-def average_embeddings(client, dids, workers):
+def average_embeddings(client, dids):
     """L2-normalize the equal-weight mean; any failed request stops the run."""
     started = time.monotonic()
     next_progress_at = started + PROGRESS_LOG_INTERVAL_SECONDS
     skipped = Counter()
-    vectors, pending = [], set()
-    remaining = iter(dids)
+    vectors = []
     model_pair = dimension = policy = None
     logger.info(
-        "Embeddings: requesting %d users with workers=%d; timeout=%ds",
+        "Embeddings: requesting %d users sequentially; timeout=%ds",
         len(dids),
-        workers,
         REQUEST_TIMEOUT_SECONDS,
     )
-    # Keep only one pending task per worker. If a request fails, stop submitting
-    # users and let the context manager finish active requests before clients close.
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        for _ in range(workers):
-            did = next(remaining, None)
-            if did is not None:
-                pending.add(executor.submit(fetch_embedding, client, did))
-        while pending:
-            done, pending = wait(
-                pending, timeout=PROGRESS_LOG_INTERVAL_SECONDS, return_when=FIRST_COMPLETED
+    for did in dids:
+        result = fetch_embedding(client, did)
+        # All contributors must use the same history policy and model pair.
+        current_policy = result["history_policy"]
+        if policy is not None and current_policy != policy:
+            raise RunError("Embedding API: mixed history policies")
+        policy = current_policy
+        if result["status"] == "skipped":
+            skipped[result["reason"]] += 1
+        else:
+            current_pair = (result["user_model_uuid"], result["post_model_uuid"])
+            current_dimension = result["dimension"]
+            if model_pair is not None and (
+                current_pair != model_pair or current_dimension != dimension
+            ):
+                raise RunError("Embedding API: mixed model pairs or vector dimensions")
+            model_pair, dimension = current_pair, current_dimension
+            vectors.append(result["embedding"])
+        now = time.monotonic()
+        if now >= next_progress_at:
+            logger.info(
+                "Embeddings: progress %d/%d completed contributing=%d skipped=%d elapsed=%.2fs",
+                len(vectors) + skipped.total(),
+                len(dids),
+                len(vectors),
+                skipped.total(),
+                now - started,
             )
-            for future in done:
-                result = future.result()
-                # All contributors must use the same history policy and model pair.
-                current_policy = result["history_policy"]
-                if policy is not None and current_policy != policy:
-                    raise RunError("Embedding API: mixed history policies")
-                policy = current_policy
-                if result["status"] == "skipped":
-                    skipped[result["reason"]] += 1
-                else:
-                    current_pair = (result["user_model_uuid"], result["post_model_uuid"])
-                    current_dimension = result["dimension"]
-                    if model_pair is not None and (
-                        current_pair != model_pair or current_dimension != dimension
-                    ):
-                        raise RunError("Embedding API: mixed model pairs or vector dimensions")
-                    model_pair, dimension = current_pair, current_dimension
-                    vectors.append(result["embedding"])
-            now = time.monotonic()
-            if now >= next_progress_at:
-                logger.info(
-                    "Embeddings: progress %d/%d completed contributing=%d skipped=%d elapsed=%.2fs",
-                    len(vectors) + skipped.total(),
-                    len(dids),
-                    len(vectors),
-                    skipped.total(),
-                    now - started,
-                )
-                next_progress_at = now + PROGRESS_LOG_INTERVAL_SECONDS
-            for _ in done:
-                did = next(remaining, None)
-                if did is not None:
-                    pending.add(executor.submit(fetch_embedding, client, did))
+            next_progress_at = now + PROGRESS_LOG_INTERVAL_SECONDS
     logger.info(
         "Embeddings: summary eligible=%d contributing=%d skipped=%d",
         len(dids),
@@ -482,7 +464,6 @@ def build_parser():
     parser.add_argument("--es-url", type=base_url, default="https://localhost:9200")
     parser.add_argument("--min-likes", type=nonnegative_int, default=5)
     parser.add_argument("--api-url", type=base_url, default="http://localhost:8300")
-    parser.add_argument("--workers", type=positive_int, default=4)
     parser.add_argument(
         "--es-insecure",
         action=argparse.BooleanOptionalAction,
@@ -503,7 +484,6 @@ def generate(args, run_id, started_at):
     # Freeze the PostHog cutoff once, rounded down to whole seconds, for every page.
     cutoff = utc_string(started_at.replace(microsecond=0))
     # Reuse one connection pool per service. Only ES may skip TLS verification.
-    # Workers finish before these contexts close, including on errors or Ctrl-C.
     with (
         httpx.Client(
             base_url=args.posthog_host,
@@ -539,7 +519,7 @@ def generate(args, run_id, started_at):
             len(users) - len(eligible),
         )
         # Get the user tower embeddings for each user and average the result
-        result = average_embeddings(api, eligible, args.workers)
+        result = average_embeddings(api, eligible)
     skipped_users = result.pop("skipped_users")
     # The consumer receives one mean plus provenance/coverage, never individual
     # DIDs, activity records, credentials, or individual user vectors.

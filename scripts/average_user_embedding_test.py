@@ -5,7 +5,6 @@ import logging
 import math
 import subprocess
 import sys
-import threading
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -254,9 +253,9 @@ def test_inconsistent_history_counts_do_not_contribute(response):
         average.fetch_embedding(FakeClient(lambda *_: response), "did:plc:a")
 
 
-def average_users(client, users, workers=2):
+def average_users(client, users):
     # Activity/like counts qualify users upstream; only DIDs enter the mean stage.
-    return average.average_embeddings(client, [record["user_did"] for record in users], workers)
+    return average.average_embeddings(client, [record["user_did"] for record in users])
 
 
 def test_mean_is_equal_weight_then_normalized_and_returns_only_aggregate_metadata():
@@ -381,7 +380,7 @@ def test_nonfinite_aggregation_is_fatal(vector, users):
         average_users(client, [user(f"did:plc:{name}") for name in users])
 
 
-def test_single_failed_user_stops_submissions_and_prevents_partial_average(caplog):
+def test_single_failed_user_stops_requests_and_prevents_partial_average(caplog):
     caplog.set_level(logging.INFO, logger=average.__name__)
 
     def respond(_, payload):
@@ -391,25 +390,20 @@ def test_single_failed_user_stops_submissions_and_prevents_partial_average(caplo
 
     client = FakeClient(respond)
     with pytest.raises(httpx.ReadTimeout):
-        average_users(client, [user(f"did:plc:{letter}") for letter in "abc"], workers=1)
-    assert len(client.requests) == 2
+        average_users(client, [user(f"did:plc:{letter}") for letter in "abc"])
+    assert [payload["user_did"] for _, payload in client.requests] == ["did:plc:a", "did:plc:b"]
     assert "Average: computed" not in caplog.text
     assert "did:plc:" not in caplog.text
 
 
-def test_global_failure_stops_submissions_and_drains_active_requests():
-    # Synchronize the first four workers so the test does not depend on scheduling.
-    # A fatal error should prevent any of the remaining 996 requests from starting.
-    barrier = threading.Barrier(4)
-
+def test_global_failure_stops_requests_immediately():
     def respond(*_):
-        barrier.wait(timeout=5)
         raise average.RunError("global configuration failure")
 
     client = FakeClient(respond)
     with pytest.raises(average.RunError, match="configuration"):
-        average_users(client, [user(f"did:plc:u{i}") for i in range(1000)], workers=4)
-    assert len(client.requests) == 4
+        average_users(client, [user(f"did:plc:u{i}") for i in range(1000)])
+    assert len(client.requests) == 1
 
 
 def install_pipeline_fakes(monkeypatch, responder=None, collection_failure=False):
@@ -675,6 +669,7 @@ def test_help_works_from_another_directory(tmp_path):
     assert "--publish-artifact" not in result.stdout
     assert "--gcs-output-prefix" not in result.stdout
     assert "--no-es-insecure" in result.stdout
+    assert "--workers" not in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -711,29 +706,11 @@ def test_likes_reject_bool_metadata(mutation):
         average.collect_like_counts(FakeClient(lambda *_: result), ["did:plc:a"])
 
 
-@pytest.mark.parametrize("interrupt", ["wait", "request"])
-def test_interrupt_stops_submissions_and_drains_active_requests(monkeypatch, interrupt):
-    # Cover Ctrl-C in the coordinating thread and an interrupt raised by a worker.
-    # The initial two jobs may finish, but cancellation must not enqueue more users.
-    if interrupt == "wait":
-        original = average.wait
-        calls = 0
-
-        def wait_once_interrupted(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                raise KeyboardInterrupt
-            return original(*args, **kwargs)
-
-        monkeypatch.setattr(average, "wait", wait_once_interrupted)
-
-    def respond(_, payload):
-        if interrupt == "request":
-            raise KeyboardInterrupt
-        return embedding(payload["user_did"])
+def test_interrupt_stops_requests_immediately():
+    def respond(*_):
+        raise KeyboardInterrupt
 
     client = FakeClient(respond)
     with pytest.raises(KeyboardInterrupt):
-        average_users(client, [user(f"did:plc:u{i}") for i in range(10)], workers=2)
-    assert len(client.requests) == 2
+        average_users(client, [user(f"did:plc:u{i}") for i in range(10)])
+    assert len(client.requests) == 1

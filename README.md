@@ -775,7 +775,6 @@ pipenv run python scripts/average_user_embedding.py \
 | `--es-insecure` / `--no-es-insecure` | `True` (ES certificate verification disabled) |
 | `--min-likes` | `5` |
 | `--api-url` | `http://localhost:8300` |
-| `--workers` | `4` |
 | `--output-dir` | `./outputs/average_user_embeddings/` |
 
 `--no-es-insecure` enables TLS certificate verification for Elasticsearch.
@@ -798,9 +797,9 @@ ES data can change during a run; the PostHog cutoff does not make ES reads a
 point-in-time snapshot.
 
 The script uses one HTTPX client per service, with 60-second network timeouts
-and no automatic retries or redirects. A failed request stops the run; rerun
-the command after resolving the error. Active embedding requests finish before
-the clients close. The timeouts apply to network operations, not the entire command.
+and no automatic retries or redirects. Embedding requests run sequentially.
+A failed request stops the run immediately; rerun the command after resolving
+the error. The timeouts apply to network operations, not the entire command.
 
 ### Local artifact and diagnostics
 
