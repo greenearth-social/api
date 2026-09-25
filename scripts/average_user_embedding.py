@@ -28,10 +28,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-# Add the repo's src/ directory so the script can import app.* from any working directory.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from app.lib.average_user_embedding_artifact import (  # noqa: E402
+from ..src.app.lib.average_user_embedding_artifact import (
     ArtifactValidationError,
     is_count,
     is_finite_number,
@@ -525,9 +522,11 @@ def generate(args, run_id, started_at):
             follow_redirects=False,
         ) as api,
     ):
+        # Get our (MySky) users with a minimum number of interactionSeen events
         users = collect_posthog_users(
             posthog, args.posthog_project_id, args.min_interaction_seen, cutoff
         )
+        # Filter users that have at least min_likes likes
         likes = collect_like_counts(es, users)
         eligible = [did for did in sorted(users) if likes[did] >= args.min_likes]
         logger.info(
@@ -536,6 +535,7 @@ def generate(args, run_id, started_at):
             args.min_likes,
             len(users) - len(eligible),
         )
+        # Get the user tower embeddings for each user and average the result
         result = average_embeddings(api, eligible, args.workers)
     skipped_users = result.pop("skipped_users")
     # The consumer receives one mean plus provenance/coverage, never individual
@@ -546,9 +546,6 @@ def generate(args, run_id, started_at):
         "source_completed_at": utc_string(datetime.now(UTC)),
         **result,
         "cohort": {
-            "posthog_project_id": args.posthog_project_id,
-            "event": "interactionSeen",
-            "scope": "all_history_all_feeds",
             "cutoff": cutoff,
             "min_interaction_seen": args.min_interaction_seen,
             "min_likes": args.min_likes,

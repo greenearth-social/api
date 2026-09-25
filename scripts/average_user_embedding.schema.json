@@ -64,9 +64,6 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "posthog_project_id",
-        "event",
-        "scope",
         "cutoff",
         "min_interaction_seen",
         "min_likes",
@@ -76,16 +73,6 @@
         "skipped_users"
       ],
       "properties": {
-        "posthog_project_id": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "event": {
-          "const": "interactionSeen"
-        },
-        "scope": {
-          "const": "all_history_all_feeds"
-        },
         "cutoff": {
           "type": "string",
           "format": "date-time",

@@ -144,12 +144,8 @@ def validate_artifact(artifact):
     }
     if (
         not isinstance(cohort, dict)
-        or set(cohort) != count_keys | {"posthog_project_id", "event", "scope", "cutoff"}
+        or set(cohort) != count_keys | {"cutoff"}
         or any(not is_count(cohort.get(key)) for key in count_keys)
-        or not is_count(cohort.get("posthog_project_id"))
-        or cohort["posthog_project_id"] == 0
-        or cohort.get("event") != "interactionSeen"
-        or cohort.get("scope") != "all_history_all_feeds"
         or count + cohort["skipped_users"] != cohort["eligible_users"]
         or cohort["eligible_users"] + cohort["below_min_likes"] != cohort["posthog_users"]
     ):

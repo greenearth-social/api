@@ -11,9 +11,6 @@
   "source_completed_at": "2026-09-21T16:31:01.123456Z",
   "contributing_users": 2,
   "cohort": {
-    "posthog_project_id": 509275,
-    "event": "interactionSeen",
-    "scope": "all_history_all_feeds",
     "cutoff": "2026-09-21T16:30:45.000000Z",
     "min_interaction_seen": 50,
     "min_likes": 5,
