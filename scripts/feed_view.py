@@ -11,6 +11,12 @@ we resolve them against the environment's own Elasticsearch rather than the
 public AppView, so this works entirely against seeded fixture data with no
 network access and no Bluesky credentials.
 
+The exception is the UX posts the api injects into a feed for product reasons —
+the SETTINGS pin, the survey post, the logged-out explainer (``app.ux_posts``).
+They live on Bluesky, not in the index, and prod's index doesn't have them either,
+so they are recognized by URI and shown from their versioned content instead of
+being looked up.
+
 Pipeline detail (per-item rank, ranker score, which generator retrieved a
 post) comes from the feed snapshot the api writes for every feed load. The
 ``feedContext`` token on each skeleton item carries the snapshot's request id
@@ -48,6 +54,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from feed_format import fmt_score, media_badges, relative_time
+
+from app import ux_posts
 
 console = Console()
 
@@ -156,6 +164,22 @@ async def fetch_skeleton(
     return resp.json()
 
 
+def ux_posts_by_uri() -> dict[str, str]:
+    """Map each resolved UX post URI to its content file name.
+
+    Resolved the same way the api resolves them (manifest plus ``GE_UX_POST_URIS``),
+    so run inside the api container this matches what the api injects.
+    """
+    return {uri: name for name, uri in ux_posts.resolved_uris().items()}
+
+
+def _ux_post_content(name: str) -> str | None:
+    try:
+        return ux_posts.read_content(name)
+    except OSError:
+        return None
+
+
 async def hydrate_posts(es, uris: list[str]) -> dict[str, dict[str, Any]]:
     """Fetch post documents for *uris*, keyed by AT URI.
 
@@ -240,10 +264,27 @@ def render_post(
     uri: str,
     source: dict[str, Any] | None,
     meta: Any | None,
+    ux_post: str | None = None,
 ) -> Text:
-    """One post as it appears in the feed listing."""
+    """One post as it appears in the feed listing.
+
+    *ux_post* is the content file name when *uri* is an injected UX post, which is
+    rendered from its content rather than from Elasticsearch.
+    """
     out = Text()
     out.append(f"{position:>3}. ", style="bold green")
+
+    if ux_post is not None:
+        label = ux_post.removesuffix(".md")
+        out.append(f"[UX post: {label}]", style="bold yellow")
+        if ux_post == ux_posts.PLACEHOLDER:
+            out.append("  stands in for a UX post that isn't published yet", style="dim")
+        content = (_ux_post_content(ux_post) or "").strip()
+        for line in content.splitlines():
+            out.append("\n     ")
+            out.append(line, style="default")
+        out.append(f"\n     {uri}", style="dim cyan")
+        return out
 
     if source is None:
         out.append("(not in Elasticsearch) ", style="red")
@@ -303,6 +344,7 @@ def render_page(
     hydrated: dict[str, dict[str, Any]],
     pipeline: dict[str, Any] | None,
     start_position: int,
+    ux_post_names: dict[str, str],
 ) -> None:
     items = skeleton.get("feed", [])
     header = Text()
@@ -324,7 +366,8 @@ def render_page(
     for offset, item in enumerate(items):
         uri = item.get("post", "")
         source = hydrated.get(uri)
-        if source is None:
+        ux_post = ux_post_names.get(uri)
+        if source is None and ux_post is None:
             missing += 1
         console.print(
             render_post(
@@ -332,6 +375,7 @@ def render_page(
                 uri=uri,
                 source=source,
                 meta=meta_by_uri.get(uri),
+                ux_post=ux_post,
             )
         )
         console.print()
@@ -374,6 +418,8 @@ async def run(args: argparse.Namespace) -> None:
         request_timeout=30,
     )
 
+    ux_post_names = ux_posts_by_uri()
+
     snapshot_failure: str | None = None
     snapshot_confirmed = False
     try:
@@ -393,7 +439,9 @@ async def run(args: argparse.Namespace) -> None:
                 print(json.dumps(skeleton, indent=2))
             else:
                 items = skeleton.get("feed", [])
-                uris = [i["post"] for i in items if i.get("post")]
+                uris = [
+                    i["post"] for i in items if i.get("post") and i["post"] not in ux_post_names
+                ]
                 hydrated = await hydrate_posts(es, uris)
 
                 pipeline = None
@@ -427,6 +475,7 @@ async def run(args: argparse.Namespace) -> None:
                     hydrated=hydrated,
                     pipeline=pipeline,
                     start_position=position,
+                    ux_post_names=ux_post_names,
                 )
                 if pipeline is not None:
                     console.print(

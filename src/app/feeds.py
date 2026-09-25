@@ -12,8 +12,7 @@ the codebase (e.g.  the ``publish_feed.py`` script) can import it without
 pulling in FastAPI.
 """
 
-import os
-
+from . import ux_posts
 from .models import (
     CandidateGenerateRequest,
     FeedConfig,
@@ -21,6 +20,7 @@ from .models import (
     RankModelSpec,
     RankPredictRequest,
 )
+from .ux_posts import ux_post_uri
 
 DEFAULT_SOCIAL_RADIUS: int = 3
 
@@ -41,23 +41,7 @@ PERSONALIZED_RANK_REQUEST_TEMPLATE = RankPredictRequest.model_construct(
 # The post served, on its own, to logged-out viewers of feeds that need a
 # signed-in user to mean anything (``logged_out="explain"``). A feed with no
 # items reads as a broken feed, so show something that says why (issue #384).
-# The GreenEarth account's "This feed is personalized for you, so you must be
-# logged in to see it."
-LOGGED_OUT_POST_URI: str = "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msw6wzvh7k2k"
-
-
-def _pinned_post_uri(feed_name: str, fallback: str) -> str:
-    """Resolve a deployment-managed pin while retaining a local/dev fallback."""
-    env_name = f"GE_PINNED_POST_{feed_name.upper().replace('-', '_')}_URI"
-    configured = os.environ.get(env_name, "").strip()
-    return configured or fallback
-
-
-def _survey_post_uri(feed_name: str, fallback: str) -> str:
-    """Resolve the survey post URI for a feed from the environment, or fall back to the hardcoded URI."""
-    env_name = f"GE_SURVEY_POST_{feed_name.upper().replace('-', '_')}_URI"
-    configured = os.environ.get(env_name, "").strip()
-    return configured or fallback
+LOGGED_OUT_POST_URI: str | None = ux_post_uri(ux_posts.LOGGED_OUT)
 
 
 # Social-radius preset generator weights for your-feed.
@@ -123,6 +107,9 @@ SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
 # feeds are published as "GE <internal_display_name> <git_sha>" (see issue #228),
 # so keep internal_display_name to 13 chars or fewer. feeds_test.py enforces this.
 #
+# Public descriptions are published verbatim in production. Include the full copy
+# here, including attribution. Stage/dev use "Built by Caterpie" and the git sha.
+#
 # NOTE: every private (development) feed sets logged_out="deny" — a feed nobody
 # is meant to see has nothing to say to a logged-out visitor. Public feeds take
 # the "explain" default, or "serve" when they work without a user. feeds_test.py
@@ -146,7 +133,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "random": FeedConfig(
         display_name="Random",
-        description="A random selection of recent posts from the community.",
+        description="A random selection of recent posts from the community.\nPart of the MySky feed family.",
         public=True,
         internal_rkey="67-r",
         internal_display_name="67 R",
@@ -154,15 +141,7 @@ FEEDS: dict[str, FeedConfig] = {
         controls=("freshness",),
         diversify=False,
         exclude_seen_posts=False,
-        pinned_post_uri=_pinned_post_uri(
-            "random",
-            "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetia5l7y2j",
-        ),
-        pinned_post_content=(
-            "Click [SETTINGS](https://app.greenearth.social/#/settings/random) to personalize "
-            "your feed.\n\nA random slice of the ATProto universe. Still applies your moderation "
-            "settings. Part of the GreenEarth Family."
-        ),
+        pinned_post_uri=ux_post_uri(ux_posts.PIN_RANDOM),
         # Random posts don't depend on who's asking, so it works logged out.
         logged_out="serve",
         gen_request_template=CandidateGenerateRequest.model_construct(
@@ -174,30 +153,15 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
     "your-feed": FeedConfig(
-        display_name="MySky by GreenEarth",
-        description="A feed you control, designed for constructive conversation.",
+        display_name="MySky",
+        description="Own your algorithm.\nA personalized feed with a control panel.",
         public=True,
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
         avatar="assets/icons/mysky.png",
         controls=("source_weights", "freshness", "purpose", "politics"),
-        pinned_post_uri=_pinned_post_uri(
-            "your-feed",
-            "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetfgpr3t2s",
-        ),
-        pinned_post_content=(
-            "Click [SETTINGS](https://app.greenearth.social/#/settings/your-feed) to personalize "
-            "your MySky feed.\n\nA feed you control, designed for constructive conversation."
-        ),
-        survey_post_uri=_survey_post_uri(
-            "your-feed",
-            "at://did:plc:66mudnfk2p4olwpaskmrw2vq/app.bsky.feed.post/3mtxartxzwx2s",
-        ),
-        survey_post_content=(
-            "🦋 Enjoying MySky? Or not? 🦋\n"
-            "[Sign up here](https://calendly.com/jonathanstray/bluesky-algorithms-talk) "
-            "for a paid user interview, $15 to help us build the open social web."
-        ),
+        pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED),
+        survey_post_uri=ux_post_uri(ux_posts.SURVEY_YOUR_FEED),
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
         # min_rank_score=0.425 maps the old -0.15 floor into the current [0, 1]
@@ -221,21 +185,13 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "best-of-friends": FeedConfig(
         display_name="Best of Friends",
-        description="The best posts from people you follow, curated just for you.",
+        description="The best posts from people you follow, curated just for you.\nPart of the MySky feed family.",
         public=True,
         internal_rkey="fd-bof",
         internal_display_name="fd BOF",
         avatar="assets/icons/best-of-friends.png",
         controls=("freshness", "purpose", "politics"),
-        pinned_post_uri=_pinned_post_uri(
-            "best-of-friends",
-            "at://did:plc:wrmpulygwvuhjn2c3jbalgqj/app.bsky.feed.post/3msetho32pa2g",
-        ),
-        pinned_post_content=(
-            "Click [SETTINGS](https://app.greenearth.social/#/settings/best-of-friends) to "
-            "personalize your feed.\n\nThe best posts from your mutuals and people you follow. "
-            "Part of the GreenEarth Family."
-        ),
+        pinned_post_uri=ux_post_uri(ux_posts.PIN_BEST_OF_FRIENDS),
         # Slate-cutoff starting points — tune from the feed.slate.kept_share and
         # feed.slate.cutoff_count metrics once live (see issue #248). min_rank_score
         # matches your-feed's empirically-calibrated value above; this feed's own

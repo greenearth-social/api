@@ -274,7 +274,8 @@ The deployment script will:
 - Build the container using Google Cloud buildpacks
 - Deploy to Cloud Run with proper environment variables and secrets
 - Stamp the deployed git sha onto the revision and the debug feed records
-- Preserve existing public feed descriptions while syncing other generator metadata
+- Synchronize production public descriptions verbatim from `src/app/feeds.py`
+- Stamp stage/dev descriptions with `Built by Caterpie` and the deployed git sha
 
 API deployments do not change Firebase configuration. Deploy Firebase rules,
 indexes, TTL policies, Functions, and Hosting from the frontend repository.
@@ -314,7 +315,8 @@ Each deploy stamps its short git sha in three places:
   [Rolling back a deployment](#rolling-back-a-deployment)).
 - **Debug feed display names + descriptions** — every internal ("debug") feed
   record is published as e.g. `GE e2 S e9f07f5`, with `Built by Caterpie · e9f07f5`
-  in the description. The public prod GreenEarth feeds are left unstamped.
+  in the description. All stage/dev feeds, including copies of public feeds, use
+  this description and have the sha in their name. Public production feeds are unstamped.
 
 **Reporting a bug against a feed?** Open the debug feed in Bluesky and copy the
 trailing sha from its name (e.g. `e9f07f5`) into the report — it pins the bug to
@@ -570,77 +572,152 @@ Other useful `publish_feed.py` flags:
 - `--generator-did` — override `GE_FEED_GENERATOR_DID`
 - `--pds` — use a different PDS (default: `https://bsky.social`)
 
-#### One-time public feed-description migration
+#### Updating public feed descriptions
 
-Public feed descriptions are account-managed copy. Routine deployments preserve
-their current `description` and `descriptionFacets`; they do not append or
-recompose the attribution line. Use the dedicated migration script when that
-copy intentionally changes.
+`src/app/feeds.py` is the source of truth for production public feed descriptions.
+Edit the feed's `description` there; the next production deployment's feed sync
+publishes that exact text, replacing any existing copy. Include any desired
+attribution in the configured text: the publisher does not append a footer.
 
-The current migration replaces only either legacy attribution:
+All stage/dev feeds, including copies of public feeds, use
+`Built by Caterpie · <git_sha>` instead. This also applies to feeds published by
+`internal-tools/devenv`, which runs the publisher with `--sync --environment dev`.
+Production internal feeds use the same Caterpie description. If no git sha is
+available, the fallback is `Built by Caterpie`.
 
-```text
-Built by GreenEarth (www.greenearth.social).
-Built by GreenEarth (https://www.greenearth.social).
-```
-
-with:
-
-```text
-Built by Green Earth (https://www.greenearth.social).
-```
-
-Everything else in each existing description is retained. The script is
-idempotent, will not append the new text when no legacy attribution is present,
-and exits non-zero if a targeted record is missing or needs manual attention.
-It reads the appropriate Bluesky app password from GCP Secret Manager unless
-`GE_BSKY_APP_PASSWORD` or `--app-password` is supplied.
-
-Preview and then apply it once in each environment:
+To update only descriptions **without deploying the API**, run the dedicated
+script from `api/`. It uses the same environment-specific description rules and
+preserves other record fields, including the display name, avatar, service DID,
+and creation date:
 
 ```bash
-pipenv run python scripts/update_feed_descriptions.py --environment stage --dry-run
-pipenv run python scripts/update_feed_descriptions.py --environment stage
+# Preview and apply the stage diagnostic description using the deployed short SHA.
+# Replace <deployed-sha> with the stage revision's git SHA.
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment stage --feed-name your-feed --git-sha '<deployed-sha>' --dry-run
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment stage --feed-name your-feed --git-sha '<deployed-sha>'
 
-pipenv run python scripts/update_feed_descriptions.py --environment prod --dry-run
-pipenv run python scripts/update_feed_descriptions.py --environment prod
+# Preview and apply the configured public copy to production.
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment prod --feed-name your-feed --dry-run
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment prod --feed-name your-feed
 ```
 
-Stage targets the public feed configurations published under their Caterpie
-rkeys; production targets `your-feed`, `best-of-friends`, and `random` on the
-GreenEarth account. Records with description facets are deliberately left for
-manual review because changing text would invalidate their byte offsets.
+The dry run prints the existing and proposed text without writing records. Omit
+`--feed-name` to update all public feeds. Stage maps canonical names from
+`feeds.py` to Caterpie rkeys (`your-feed` becomes `a0-yf`); production uses the
+canonical rkeys on the MySky account. The script leaves already matching records
+unchanged and exits nonzero if a target is missing or invalid. It reads the
+appropriate Bluesky app password from GCP Secret Manager unless
+`GE_BSKY_APP_PASSWORD` or `--app-password` is supplied.
 
-Public feed pins are managed from the `pinned_post_content` entries in
-`src/app/feeds.py`. Their SETTINGS links use markdown syntax, which
-`scripts/manage_pinned_posts.py` converts into Bluesky rich-text facets.
+For stage, `--git-sha` overrides `GE_GIT_SHA` and then the local API checkout's
+HEAD. When changing descriptions without deploying, use the deployed revision's
+short SHA so the diagnostic description identifies the code actually serving it.
 
-The deployment lifecycle is deliberately change-aware:
+Both deployment sync and the description updater retain existing
+`descriptionFacets` only when the description is unchanged. When text changes,
+they remove the old facets because their byte offsets no longer apply. Warnings
+about a missing local UX post manifest do not prevent description updates.
 
-- The script fingerprints the three configured messages and its managed-post
-  schema version. The fingerprint and resolved URIs are stored on the Cloud Run
-  revision as `GE_PINNED_POST_CONFIG_SHA` and `GE_PINNED_POST_<FEED>_URI`.
-- If the fingerprint matches the currently deployed revision, `deploy.sh`
-  reuses its URIs without logging into Bluesky.
-- A changed message/link, a missing deployed state, or an intentional schema
-  version bump runs the authenticated sync. It scans the publisher's post
-  records for an exact text-and-link match; an existing match is reused, while
-  changed content is published as a normal TID-keyed Bluesky post with a new URI.
-- `./scripts/deploy.sh --sync-pinned-posts` forces an authenticated verification
-  when recovering from a deleted record. It still does not create a
-  duplicate when an exact matching post already exists.
-- Previous managed posts are retained because an older Cloud Run revision or
-  rollback may still reference them. A required pin-sync failure stops deployment
-  before Cloud Run is changed.
+### UX posts
 
-Production authenticates publishing with the stable account DID
+"UX posts" are the posts we insert into feeds for product reasons rather than because
+they were ranked: the SETTINGS pin at the top of each public feed, the "you must be
+logged in" explainer, and the user-interview survey post. Their content is versioned
+in `assets/ux_posts/*.md` as plain text with `[label](url)` markdown links, which
+`scripts/manage_ux_posts.py` converts into Bluesky rich-text facets.
+
+They publish to the **notifications account**, `notify.mysky.social`
+(`did:plc:66mudnfk2p4olwpaskmrw2vq`), not the brand account. Editing a post publishes
+a new record, so keeping them off `mysky.social` means its followers never see a
+republished revision in their timeline (issue #404). Both environments share the
+account: the AppView hydrates any public URI regardless of which generator served the
+skeleton.
+
+To change a post, edit the markdown and deploy. To add one, create the file and add
+it to `MANAGED_POSTS` in `src/app/ux_posts.py`, then reference it from `feeds.py` via
+`ux_post_uri()`.
+
+#### How URIs are resolved
+
+Bluesky requires TID record keys for `app.bsky.feed.post`, so a post's URI is
+assigned by the server and cannot be derived from its content. The mapping from
+filename to URI therefore lives in `src/app/ux_posts_resolved.json`, which is
+**generated and gitignored**:
+
+- A pull request contains only content and code, so concurrent branches never
+  conflict over deployment state and nothing has to be published before a merge.
+- The manifest is still uploaded into the Cloud Run image, so a rollback resolves
+  the URIs that revision was built with. `rollback.sh` only shifts traffic, and each
+  revision keeps its own image.
+
+`deploy.sh` runs `manage_ux_posts.py check` (offline content validation) and then
+resolves against the account before uploading:
+
+- Resolution matches each content file against the account's existing posts by exact
+  **signature** — the visible text plus its link targets. A match is reused, so
+  unchanged content never republishes. This needs no credentials, since it reads
+  public records.
+- Anything unmatched is new or edited, and is published with the
+  `bsky-app-password-notify-prod` secret. Old records are never deleted, because an
+  older revision may still reference them.
+- If a post is still unresolved afterwards, the deploy aborts before Cloud Run is
+  changed rather than shipping a revision that would serve placeholders.
+- `./scripts/deploy.sh --skip-ux-post-sync` ships the current manifest as-is.
+
+#### Interactions are disabled
+
+Most UX posts are one-way notices, so publishing one also writes two gate records
+keyed by the post's rkey: an `app.bsky.feed.threadgate` with an empty `allow` list
+(nobody can reply) and an `app.bsky.feed.postgate` with `disableRule` (no quote
+posts). An empty `allow` means "nobody" -- omitting the field would mean "everybody",
+so it is load-bearing.
+
+Posts listed in `REPLIES_ALLOWED` in `src/app/ux_posts.py` keep replies open; the
+survey post is there, since a reply is a reasonable way to respond to it. Quote posts
+are disabled on every UX post regardless. Because gates are persistent records,
+reconciliation converges in both directions -- adding a post to `REPLIES_ALLOWED`
+deletes its existing threadgate rather than just declining to write one.
+
+**Likes cannot be disabled.** atproto has no like-gating; any public post can be liked
+by anyone, and that is not something we can opt out of.
+
+Gates are separate records, so they can be applied to an already-published post
+without changing its URI. Resolution reports a post whose gates don't match
+policy as `MISGATED`, and the deploy treats that exactly like an unpublished post: it
+syncs before shipping the revision, so a gate changed by hand heals on the next
+deploy.
+
+Locally, resolve without credentials:
+
+```bash
+pipenv run python scripts/manage_ux_posts.py resolve   # write the manifest
+pipenv run python scripts/manage_ux_posts.py list      # show what resolved
+```
+
+A post that has no published record yet falls back to a **placeholder** post, so a
+newly added post shows up in a local feed as a visible "something belongs here"
+marker instead of silently vanishing. Deploy-time validation makes that unreachable
+in production. `GE_UX_POST_URIS` overrides individual URIs as a JSON object if you
+need to pin one by hand.
+
+Superseded records accumulate on the notifications account. `manage_ux_posts.py
+cleanup` lists those that no current content file resolves to and that are older than
+30 days, and deletes them only with `--yes`. It is deliberately manual: a recent
+record may still be referenced by a revision you would roll back to.
+
+`scripts/manage_post.py` remains available for publishing one-off posts by hand.
+
+Production authenticates feed-generator publishing with the stable account DID
 `did:plc:wrmpulygwvuhjn2c3jbalgqj` (currently `mysky.social`); stage/dev uses
 `did:plc:s4tl2ajfsnstzuxtegl7r33g` (currently `caterpie-internal.bsky.social`).
 Deployments validate the required publisher credentials before changing Cloud Run.
-Feed generator metadata is synchronized later in the same deployment, but existing
-public descriptions are preserved;
-a failed post-deploy sync makes the deployment command exit nonzero. Managed
-pinned-post publication remains part of the deployment lifecycle described above.
+Feed generator metadata, including production public descriptions from `feeds.py`
+and stage/dev Caterpie descriptions, is synchronized later in the same deployment;
+a failed post-deploy sync makes the deployment command exit nonzero.
 
 #### 6. View the feed in Bluesky
 
@@ -1164,8 +1241,9 @@ greenearth/api/
 │   ├── average_user_embedding.py  # Offline average generation
 │   ├── promote_average_user_embedding.py # Select an artifact for stage or prod
 │   ├── feed_debug.py              # CLI debug tool
-│   ├── manage_pinned_posts.py     # Change-aware public feed pin publication
-│   ├── update_feed_descriptions.py # One-time public description migration
+│   ├── manage_ux_posts.py         # UX post resolve/sync/cleanup
+│   ├── managed_posts.py           # Shared Bluesky post construction and matching
+│   ├── update_feed_descriptions.py # Sync descriptions using each environment's publishing rules
 │   └── publish_feed.py            # Publish/update feed generator records
 ├── .gcloudignore                  # Files to exclude from deployment
 ├── .python-version

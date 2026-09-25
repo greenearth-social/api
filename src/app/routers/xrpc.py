@@ -124,7 +124,6 @@ SURVEY_POST_MIN_VISITS = 3  # minimum initial loads before the survey is shown
 SURVEY_POST_COOLDOWN_DAYS = 7  # days between survey showings (triggered by interactionSeen)
 
 
-
 @dataclass
 class _InitialRequestEntry:
     created_at: float
@@ -1382,6 +1381,7 @@ async def _write_feed_snapshot_background(
     request_id: str,
     snapshot,
     *,
+    limit: int,
     load_test: bool = False,
 ) -> None:
     """Create or extend the lightweight feed snapshot in a background task.
@@ -1397,16 +1397,19 @@ async def _write_feed_snapshot_background(
     transparency reader would have to filter on.
     """
     try:
-        if not snapshot.items:
-            logger.warning(
-                "Persisting empty feed snapshot",
-                extra={
-                    "request_id": request_id,
-                    "feed_name": snapshot.feed_name,
-                    "generator_diagnostics": [
-                        diagnostic.model_dump() for diagnostic in snapshot.generator_diagnostics
-                    ],
-                },
+        collector = get_metric_collector()
+        if collector is not None:
+            posts_returned = len(snapshot.items)
+            collector.record(
+                "feed.snapshot.posts_returned_count", posts_returned, feed_name=snapshot.feed_name
+            )
+            collector.record(
+                "feed.snapshot.posts_requested_count", limit, feed_name=snapshot.feed_name
+            )
+            collector.record(
+                "feed.snapshot.posts_fulfilled_ratio",
+                posts_returned / limit,
+                feed_name=snapshot.feed_name,
             )
         truncated = await merge_feed_snapshot(
             db,
@@ -1777,9 +1780,13 @@ async def get_feed_skeleton(
                 # Nothing to personalize, so skip the pipeline entirely and say
                 # why the feed is empty. No cursor: this is the whole feed.
                 set_traffic("logged_out")
-                return FeedSkeletonResponse(
-                    feed=[SkeletonItem(post=feed_cfg.logged_out_post_uri or LOGGED_OUT_POST_URI)]
-                )
+                explain_uri = feed_cfg.logged_out_post_uri or LOGGED_OUT_POST_URI
+                if not explain_uri:
+                    # Only reachable in a checkout with no UX post manifest;
+                    # deployment validation refuses to ship one.
+                    logger.warning("No logged-out UX post resolved for feed %s", feed_name)
+                    return FeedSkeletonResponse(feed=[])
+                return FeedSkeletonResponse(feed=[SkeletonItem(post=explain_uri)])
 
             is_anonymous = True
             user_did = ANONYMOUS_DID
@@ -2028,6 +2035,7 @@ async def get_feed_skeleton(
                             user_did,
                             replacement_request_id,
                             _snapshot_page(generated_snapshot, page),
+                            limit=limit,
                             load_test=is_load_test,
                         )
                     return FeedSkeletonResponse(
@@ -2071,6 +2079,7 @@ async def get_feed_skeleton(
                             user_did,
                             parsed.id,
                             _snapshot_page(cached_snapshot, page),
+                            limit=limit,
                             load_test=is_load_test,
                         )
                     return FeedSkeletonResponse(
@@ -2138,6 +2147,7 @@ async def get_feed_skeleton(
                                 user_did,
                                 parsed.id,
                                 _snapshot_page(generated_snapshot, page),
+                                limit=limit,
                                 load_test=is_load_test,
                             )
                         return FeedSkeletonResponse(
@@ -2154,6 +2164,7 @@ async def get_feed_skeleton(
                         user_did,
                         parsed.id,
                         _snapshot_page(generated_snapshot, []),
+                        limit=limit,
                         load_test=is_load_test,
                     )
 
@@ -2244,6 +2255,7 @@ async def get_feed_skeleton(
                             user_did,
                             accepted_request_id,
                             _snapshot_page(accepted_snapshot, generated_page),
+                            limit=limit,
                             load_test=False,
                         )
                         next_cursor = (
@@ -2348,6 +2360,7 @@ async def get_feed_skeleton(
                     user_did,
                     request_id,
                     _snapshot_page(generated_snapshot, generated_page),
+                    limit=limit,
                     load_test=is_load_test,
                 )
 
