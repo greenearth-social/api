@@ -1,13 +1,10 @@
 """Exercise the real endpoint-to-producer contract without external services."""
 
-import io
 import json
 import logging
 import math
 from collections import Counter
 from types import SimpleNamespace
-from urllib.error import HTTPError
-from urllib.parse import urlsplit
 
 import average_user_embedding as producer
 import httpx
@@ -117,28 +114,31 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
     for variable in ("POSTHOG_PERSONAL_API_KEY", "GE_ELASTICSEARCH_API_KEY", "GE_API_KEY"):
         monkeypatch.setenv(variable, "integration-test-key")
 
-    real_client = producer.JsonClient
+    real_client = httpx.Client
     endpoint_calls = []
     with TestClient(app) as endpoint:
 
-        class OfflineTransport:
-            # Bridge urllib requests to the in-process FastAPI app. This keeps the
-            # producer's real JSON parsing/retry path while avoiding all network I/O.
-            def open(self, request, *, timeout):
-                assert timeout == 60
-                url = urlsplit(request.full_url)
-                body = json.loads(request.data) if request.data else None
-                if url.hostname == "posthog.test":
-                    after = body["query"]["values"]["after_did"]
-                    result = {
+        def handle(request):
+            # Keep real HTTPX requests/JSON parsing and bridge the API requests to
+            # FastAPI, replacing only the external services at the transport boundary.
+            assert all(timeout == 60 for timeout in request.extensions["timeout"].values())
+            body = json.loads(request.content)
+            if request.url.host == "posthog.test":
+                after = body["query"]["values"]["after_did"]
+                return httpx.Response(
+                    200,
+                    json={
                         "results": [
                             [did, count] for did, count in INTERACTIONS.items() if did > after
                         ],
-                    }
-                elif url.hostname == "es.test":
-                    assert url.path == "/likes/_search"
-                    batch = body["query"]["terms"]["author_did"]
-                    result = {
+                    },
+                )
+            if request.url.host == "es.test":
+                assert request.url.path == "/likes/_search"
+                batch = body["query"]["terms"]["author_did"]
+                return httpx.Response(
+                    200,
+                    json={
                         **search_response([]),
                         "aggregations": {
                             "users": {
@@ -149,28 +149,19 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
                                 ],
                             }
                         },
-                    }
-                else:
-                    assert url.hostname == "api.test"
-                    endpoint_calls.append(body["user_did"])
-                    response = endpoint.post(url.path, json=body, headers=dict(request.headers))
-                    if response.status_code >= 400:
-                        raise HTTPError(
-                            request.full_url,
-                            response.status_code,
-                            "request failed",
-                            response.headers,
-                            io.BytesIO(response.content),
-                        )
-                    result = response.json()
-                return io.BytesIO(json.dumps(result).encode())
+                    },
+                )
+            assert request.url.host == "api.test"
+            endpoint_calls.append(body["user_did"])
+            response = endpoint.post(request.url.path, json=body, headers=dict(request.headers))
+            return httpx.Response(
+                response.status_code, content=response.content, headers=response.headers
+            )
 
-        def make_client(*args, **kwargs):
-            client = real_client(*args, **kwargs)
-            client.opener = OfflineTransport()
-            return client
+        def make_client(**kwargs):
+            return real_client(**kwargs, transport=httpx.MockTransport(handle))
 
-        monkeypatch.setattr(producer, "JsonClient", make_client)
+        monkeypatch.setattr(producer.httpx, "Client", make_client)
         args = producer.build_parser().parse_args(
             [
                 "--posthog-host",
@@ -198,7 +189,7 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
         assert summary["status"] == "failed"
         assert summary["artifact_path"] is None
         assert "mixed model" in summary["error"]
-        assert "failed=1" in caplog.text
+        assert "Run: failed: Embedding API: mixed model" in caplog.text
         assert not list((tmp_path / "results").glob("*"))
     else:
         # Validate what a consumer would load from disk, including coverage and the
@@ -226,7 +217,6 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
         }
         assert "contributing=2" in caplog.text
         assert "skipped=1" in caplog.text
-        assert "failed=0" in caplog.text
         assert "no_embedded_history" in caplog.text
         assert b"did:" not in data
         assert b"integration-test-key" not in data

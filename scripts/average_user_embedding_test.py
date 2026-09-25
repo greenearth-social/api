@@ -1,6 +1,5 @@
 """Offline coverage of cohort completeness, failure policy, and saved means."""
 
-import io
 import json
 import logging
 import math
@@ -8,25 +7,31 @@ import subprocess
 import sys
 import threading
 from collections import Counter
-from http.client import IncompleteRead
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
-from urllib.error import HTTPError, URLError
 
 import average_user_embedding as average
+import httpx
 import pytest
 
 
 # Most cases replace a service boundary with deterministic responses. The companion
 # integration test additionally connects the producer to the real embedding router.
-class FakeClient:
+class FakeClient(httpx.Client):
     def __init__(self, respond):
-        self.respond = respond
         self.requests = []
 
-    def post(self, path, payload):
-        self.requests.append((path, payload))
-        return self.respond(path, payload)
+        def handle(request):
+            payload = json.loads(request.content)
+            self.requests.append((request.url.path, payload))
+            result = respond(request.url.path, payload)
+            if isinstance(result, httpx.Response):
+                return result
+            # Raw JSON permits malformed numeric values for validation tests.
+            return httpx.Response(200, content=json.dumps(result))
+
+        super().__init__(base_url="https://unused", transport=httpx.MockTransport(handle))
 
 
 def es_response(counts):
@@ -192,110 +197,56 @@ def test_likes_rejects_partial_or_inexact_aggregations(mutation):
         average.collect_like_counts(FakeClient(lambda *_: data), ["did:plc:a"])
 
 
-def http_error(status, retry_after=None, code=None):
-    # Deliberately include a recognizable secret to catch accidental body logging.
-    headers = {"Retry-After": retry_after} if retry_after is not None else {}
-    body = {"detail": {"code": code, "message": "NEVER-PUBLISH-THIS-SECRET"}}
-    return HTTPError(
-        "https://unused", status, "error", headers, io.BytesIO(json.dumps(body).encode())
-    )
+def test_post_json_sends_payload_and_returns_object():
+    with FakeClient(lambda *_: {"ok": True}) as client:
+        assert average.post_json(client, "/query", {"limit": 10}) == {"ok": True}
+        assert client.requests == [("/query", {"limit": 10})]
 
 
-def client_with_responses(monkeypatch, responses):
-    # Exercise the real HTTP/retry logic without sockets or wall-clock backoff waits.
-    client = average.JsonClient("Embedding API", "https://unused", {"X-API-Key": "private-key"})
-    opener = Mock()
-    opener.open.side_effect = responses
-    client.opener = opener
-    sleep = Mock()
-    monkeypatch.setattr(average.time, "sleep", sleep)
-    return client, opener, sleep
+@pytest.mark.parametrize("status", [302, 400, 401, 403, 404, 429, 500, 502, 504])
+def test_http_errors_are_not_retried_or_redirected(status):
+    def respond(*_):
+        return httpx.Response(
+            status,
+            headers={"Retry-After": "7", "Location": "https://another-host.test"},
+            json={"detail": {"code": "upstream_error", "message": "NEVER-PUBLISH-THIS-SECRET"}},
+        )
 
-
-def test_client_retries_rate_limit_and_network_error_then_returns_json(monkeypatch):
-    client, opener, sleep = client_with_responses(
-        monkeypatch, [http_error(429, "3"), URLError("network secret"), io.BytesIO(b'{"ok": true}')]
-    )
-    assert client.post("/embeddings/user", {"user_did": "did:plc:a"}) == {"ok": True}
-    assert [call.args for call in sleep.call_args_list] == [(3.0,), (2.0,)]
-    assert opener.open.call_count == 3
-    assert all(call.kwargs["timeout"] == 60 for call in opener.open.call_args_list)
-    request = opener.open.call_args.args[0]
-    assert request.get_header("X-api-key") == "private-key"
-
-
-def test_client_retries_three_times_and_does_not_leak_response_body(monkeypatch):
-    client, opener, sleep = client_with_responses(monkeypatch, [http_error(502) for _ in range(3)])
-    with pytest.raises(average.RequestError, match="^http_502$"):
-        client.post("/embeddings/user", {})
-    assert opener.open.call_count == 3
-    assert [call.args for call in sleep.call_args_list] == [(1.0,), (2.0,)]
-
-
-def test_incomplete_response_is_a_retryable_transport_failure(monkeypatch):
-    class BrokenResponse(io.BytesIO):
-        def read(self, *args):
-            raise IncompleteRead(b'{"embedding":')
-
-    client, opener, sleep = client_with_responses(
-        monkeypatch, [BrokenResponse(), io.BytesIO(b'{"ok": true}')]
-    )
-    assert client.post("/embeddings/user", {}) == {"ok": True}
-    assert opener.open.call_count == 2
-    sleep.assert_called_once_with(1.0)
+    with FakeClient(respond) as client:
+        with pytest.raises(httpx.HTTPStatusError) as error:
+            average.post_json(client, "/embeddings/user", {"user_did": "did:plc:a"})
+        assert error.value.response.status_code == status
+        assert "NEVER-PUBLISH" not in str(error.value)
+        assert len(client.requests) == 1
 
 
 @pytest.mark.parametrize(
-    "status,code",
-    [(401, None), (403, None), (404, None), (302, None), (502, "inference_not_configured")],
+    "error_type", [httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError]
 )
-def test_client_configuration_errors_are_fatal_without_retry(monkeypatch, status, code):
-    client, opener, sleep = client_with_responses(monkeypatch, [http_error(status, code=code)])
-    with pytest.raises(average.RunError) as error:
-        client.post("/embeddings/user", {})
-    assert "NEVER-PUBLISH" not in str(error.value)
-    assert opener.open.call_count == 1
-    sleep.assert_not_called()
+def test_transport_errors_stop_after_one_attempt(error_type):
+    def respond(*_):
+        raise error_type("Transport failed")
+
+    with FakeClient(respond) as client:
+        with pytest.raises(error_type):
+            average.post_json(client, "/embeddings/user", {})
+        assert len(client.requests) == 1
 
 
-def test_retry_after_date_and_invalid_value(monkeypatch):
-    monkeypatch.setattr(average.time, "time", lambda: 0)
-    assert average.retry_delay("Thu, 01 Jan 1970 00:00:07 GMT", 0) == 7
-    assert average.retry_delay("invalid", 1) == 2
-    assert average.retry_delay("-1", 0) == 1
-
-
-@pytest.mark.parametrize("delay", ["61", "86400", "Thu, 01 Jan 2099 00:00:00 GMT"])
-def test_long_retry_after_fails_without_sleep(monkeypatch, delay):
-    client, opener, sleep = client_with_responses(monkeypatch, [http_error(429, delay)])
-    with pytest.raises(average.RequestError, match="retry_after_too_long"):
-        client.post("/embeddings/user", {})
-    sleep.assert_not_called()
-    assert opener.open.call_count == 1
-
-
-def test_stable_request_id_across_attempts(monkeypatch):
-    client, opener, _ = client_with_responses(
-        monkeypatch, [http_error(502), io.BytesIO(b'{"ok": true}')]
-    )
-    assert client.post("/embeddings/user", {"user_did": "did:plc:a"}) == {"ok": True}
-    requests = [call.args[0] for call in opener.open.call_args_list]
-    assert requests[0].method == "POST"
-    assert json.loads(requests[0].data) == {"user_did": "did:plc:a"}
-    assert requests[0].get_header("X-request-id") == requests[1].get_header("X-request-id")
-    assert len(requests[0].get_header("X-request-id")) == 32
+@pytest.mark.parametrize("body", [b"not JSON", b"", b"[]", b"null"])
+def test_invalid_json_response_reports_the_url(body):
+    with FakeClient(lambda *_: httpx.Response(200, content=body)) as client:
+        with pytest.raises(average.RunError, match="https://unused/query"):
+            average.post_json(client, "/query", {})
 
 
 @pytest.mark.parametrize(
     "vector", [[], [float("nan")], [float("inf")], [10**1000], [True], ["1"], [[1]]]
 )
 def test_invalid_vectors_are_rejected(vector):
-    result = average.fetch_embedding(
-        FakeClient(lambda *_: embedding("did:plc:a", vector)), "did:plc:a"
-    )
-    assert result["status"] == "failed"
-    assert result["reason"] == "invalid_embedding_response"
-    assert "embedding" not in result
+    client = FakeClient(lambda *_: embedding("did:plc:a", vector))
+    with pytest.raises(average.RunError, match="finite nonempty vector"):
+        average.fetch_embedding(client, "did:plc:a")
 
 
 @pytest.mark.parametrize("reason", ["no_likes", "no_embedded_history"])
@@ -316,9 +267,8 @@ def test_missing_history_is_explicitly_skipped(reason):
     ],
 )
 def test_inconsistent_history_counts_do_not_contribute(response):
-    result = average.fetch_embedding(FakeClient(lambda *_: response), "did:plc:a")
-    assert result["status"] == "failed"
-    assert "embedding" not in result
+    with pytest.raises(average.RunError, match="counts"):
+        average.fetch_embedding(FakeClient(lambda *_: response), "did:plc:a")
 
 
 def average_users(client, users, workers=2):
@@ -378,7 +328,7 @@ def test_missing_history_updates_aggregate_counts_and_logs_without_retaining_did
     assert result["embedding"] == pytest.approx([2 / math.sqrt(20), 4 / math.sqrt(20)])
     assert result["contributing_users"] == 1
     assert result["skipped_users"] == 2
-    assert "summary eligible=3 contributing=1 skipped=2 failed=0" in caplog.text
+    assert "summary eligible=3 contributing=1 skipped=2" in caplog.text
     assert "skipped reason=no_likes count=1" in caplog.text
     assert "skipped reason=no_embedded_history count=1" in caplog.text
     assert "did:" not in caplog.text + json.dumps(result)
@@ -416,12 +366,10 @@ def test_metadata_mismatch_is_global_failure(second, match):
         ("post_model_uuid", None, "Model identifiers must be nonzero UUIDs"),
     ],
 )
-def test_shared_metadata_validation_preserves_fatal_failure_reasons(field, value, reason, caplog):
+def test_shared_metadata_validation_preserves_failure_reasons(field, value, reason):
     client = FakeClient(lambda *_: {**embedding("did:plc:a"), field: value})
-    with pytest.raises(average.RunError, match=reason):
+    with pytest.raises(average.ArtifactValidationError, match=reason):
         average_users(client, [user("did:plc:a")])
-    assert f"failed reason={reason} count=1" in caplog.text
-    assert "unexpected_error" not in caplog.text
 
 
 def test_zero_contributors_is_fatal():
@@ -450,20 +398,19 @@ def test_nonfinite_aggregation_is_fatal(vector, users):
         average_users(client, [user(f"did:plc:{name}") for name in users])
 
 
-def test_single_failed_user_prevents_partial_average_but_finishes_all_users(caplog):
+def test_single_failed_user_stops_submissions_and_prevents_partial_average(caplog):
     caplog.set_level(logging.INFO, logger=average.__name__)
 
     def respond(_, payload):
         if payload["user_did"] == "did:plc:b":
-            raise average.RequestError("upstream_timeout")
+            raise httpx.ReadTimeout("Embedding request timed out")
         return embedding(payload["user_did"])
 
     client = FakeClient(respond)
-    with pytest.raises(average.RunError, match="1 embedding requests failed"):
-        average_users(client, [user(f"did:plc:{letter}") for letter in "abc"])
-    assert len(client.requests) == 3
-    assert "summary eligible=3 contributing=2 skipped=0 failed=1" in caplog.text
-    assert "failed reason=upstream_timeout count=1" in caplog.text
+    with pytest.raises(httpx.ReadTimeout):
+        average_users(client, [user(f"did:plc:{letter}") for letter in "abc"], workers=1)
+    assert len(client.requests) == 2
+    assert "Average: computed" not in caplog.text
     assert "did:plc:" not in caplog.text
 
 
@@ -483,42 +430,49 @@ def test_global_failure_stops_submissions_and_drains_active_requests():
 
 
 def install_pipeline_fakes(monkeypatch, responder=None, collection_failure=False):
-    # Six users pass PostHog, five meet the inclusive like threshold, and one of
-    # those five has no embedded history. Distinct fake secrets track any leakage.
+    # Exercise real HTTPX clients without sockets; keep references to verify closure.
     for name in ("POSTHOG_PERSONAL_API_KEY", "GE_ELASTICSEARCH_API_KEY", "GE_API_KEY"):
         monkeypatch.setenv(name, "SECRET-" + name)
     clients = []
+    real_client = httpx.Client
 
-    class PipelineClient:
-        def __init__(self, service, base_url, headers, insecure=False):
-            self.service, self.headers, self.insecure = service, headers, insecure
-            self.requests = []
-            clients.append(self)
+    def make_client(**kwargs):
+        requests = []
+        authorization = kwargs["headers"].get("Authorization", "")
 
-        def post(self, path, payload):
-            self.requests.append((path, payload))
-            if self.service == "PostHog":
+        def handle(request):
+            payload = json.loads(request.content)
+            requests.append((request.url.path, payload))
+            if authorization.startswith("Bearer "):
                 if collection_failure:
-                    raise average.RequestError("http_502")
-                return {
+                    return httpx.Response(502, text="NEVER-PUBLISH-THIS-SECRET")
+                result = {
                     "results": []
                     if payload["query"]["values"]["after_did"]
                     else [
                         [f"did:plc:{letter}", 50 + number] for number, letter in enumerate("abcdef")
                     ]
                 }
-            if self.service == "Elasticsearch":
-                return es_response({f"did:plc:{letter}": 5 for letter in "abcde"})
-            did = payload["user_did"]
-            if responder is not None:
-                return responder(did)
-            return (
-                skipped(did)
-                if did == "did:plc:c"
-                else embedding(did, [2, 4] if did == "did:plc:a" else [6, 8])
-            )
+            elif authorization.startswith("ApiKey "):
+                result = es_response({f"did:plc:{letter}": 5 for letter in "abcde"})
+            else:
+                did = payload["user_did"]
+                result = (
+                    responder(did)
+                    if responder is not None
+                    else skipped(did)
+                    if did == "did:plc:c"
+                    else embedding(did, [2, 4] if did == "did:plc:a" else [6, 8])
+                )
+            if isinstance(result, httpx.Response):
+                return result
+            return httpx.Response(200, content=json.dumps(result))
 
-    monkeypatch.setattr(average, "JsonClient", PipelineClient)
+        client = real_client(**kwargs, transport=httpx.MockTransport(handle))
+        clients.append(SimpleNamespace(client=client, config=kwargs, requests=requests))
+        return client
+
+    monkeypatch.setattr(average.httpx, "Client", make_client)
     return clients
 
 
@@ -567,10 +521,17 @@ def test_full_pipeline_saves_only_compact_artifact_and_no_secrets(
     artifact_text = artifact_path.read_text()
     assert "did:" not in artifact_text and "http" not in artifact_text
     assert artifact_text.count('"embedding"') == 1
-    assert [client.insecure for client in clients] == [False, insecure, False]
-    assert clients[0].headers == {"Authorization": "Bearer SECRET-POSTHOG_PERSONAL_API_KEY"}
-    assert clients[1].headers == {"Authorization": "ApiKey SECRET-GE_ELASTICSEARCH_API_KEY"}
-    assert clients[2].headers == {"X-API-Key": "SECRET-GE_API_KEY"}
+    assert [record.config.get("verify", True) for record in clients] == [
+        True,
+        not insecure,
+        True,
+    ]
+    assert all(record.client.is_closed for record in clients)
+    assert all(record.client.timeout == httpx.Timeout(60) for record in clients)
+    assert all(not record.client.follow_redirects for record in clients)
+    assert clients[0].client.headers["Authorization"] == "Bearer SECRET-POSTHOG_PERSONAL_API_KEY"
+    assert clients[1].client.headers["Authorization"] == "ApiKey SECRET-GE_ELASTICSEARCH_API_KEY"
+    assert clients[2].client.headers["X-API-Key"] == "SECRET-GE_API_KEY"
     assert Counter(payload["user_did"] for _, payload in clients[2].requests) == {
         f"did:plc:{letter}": 1 for letter in "abcde"
     }
@@ -581,7 +542,7 @@ def test_full_pipeline_saves_only_compact_artifact_and_no_secrets(
 
 
 @pytest.mark.parametrize(
-    "failure", ["zero", "auth", "mixed", "request", "malformed", "collection", "interrupt"]
+    "failure", ["zero", "auth", "mixed", "request", "malformed", "json", "collection", "interrupt"]
 )
 def test_failed_generation_returns_error_without_output(
     tmp_path, monkeypatch, capsys, caplog, failure
@@ -594,22 +555,34 @@ def test_failed_generation_returns_error_without_output(
         if failure == "zero":
             return skipped(did)
         if failure == "auth":
-            raise average.RunError("Embedding API: HTTP 401")
+            return httpx.Response(401, text="NEVER-PUBLISH-THIS-SECRET")
         if failure == "interrupt":
             raise KeyboardInterrupt
         if failure == "request":
-            raise average.RequestError("upstream_timeout")
+            raise httpx.ReadTimeout("Embedding request timed out")
+        if failure == "json":
+            return httpx.Response(200, content="not JSON")
         if failure == "malformed":
             return embedding(did, [float("nan")])
         return embedding(
             did, model=USER_MODEL if did == "did:plc:a" else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         )
 
-    install_pipeline_fakes(monkeypatch, respond, collection_failure=failure == "collection")
+    clients = install_pipeline_fakes(
+        monkeypatch, respond, collection_failure=failure == "collection"
+    )
     assert average.main(["--output-dir", str(tmp_path)]) == 1
     summary = read_summary(capsys)
     assert summary["artifact_path"] is None
     assert summary["status"] == "failed" and summary["error"]
+    assert all(record.client.is_closed for record in clients)
+    if failure in ("auth", "request", "json"):
+        assert "http://localhost:8300/embeddings/user" in summary["error"]
+    if failure == "auth":
+        assert "401" in summary["error"]
+    if failure == "request":
+        assert "ReadTimeout" in summary["error"]
+    assert "NEVER-PUBLISH" not in json.dumps(summary) + caplog.text
     assert set(summary) == {"status", "artifact_path", "error"}
     assert not list(tmp_path.iterdir())
     assert "did:" not in caplog.text
@@ -671,7 +644,7 @@ def test_urls_cannot_embed_credentials_or_secret_query_values(url):
 def test_missing_credentials_fail_before_network_without_output(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("POSTHOG_PERSONAL_API_KEY", raising=False)
     monkeypatch.setattr(
-        average, "JsonClient", Mock(side_effect=AssertionError("network must not start"))
+        average.httpx, "Client", Mock(side_effect=AssertionError("network must not start"))
     )
     assert average.main(["--output-dir", str(tmp_path)]) == 1
     summary = read_summary(capsys)
@@ -681,37 +654,20 @@ def test_missing_credentials_fail_before_network_without_output(tmp_path, monkey
     assert not list(tmp_path.iterdir())
 
 
-def test_embedding_and_retry_logs_are_aggregate_and_safe(monkeypatch, caplog):
-    # A recovered retry should appear only as a count; neither the input vector nor
-    # the normalized mean belongs in logs, even though model identity is useful there.
-    caplog.set_level(logging.INFO, logger=average.__name__)
+def test_embedding_logs_are_aggregate_and_safe(tmp_path, monkeypatch, caplog, capsys):
+    # Run the CLI so HTTPX request logging is configured too. Per-user vectors and
+    # request lines should stay out of logs, while the aggregate remains informative.
+    caplog.set_level(logging.INFO)
     vector = [123456.789, -987654.321]
-    response = embedding("did:plc:a", vector)
-    client, opener, sleep = client_with_responses(
-        monkeypatch,
-        [
-            http_error(504, "7", code="upstream_timeout"),
-            io.BytesIO(json.dumps(response).encode()),
-        ],
-    )
-    result = average_users(client, [user("did:plc:a", interactions=75, likes=17)])
-    assert result["embedding"] == pytest.approx([value / math.hypot(*vector) for value in vector])
-    assert opener.open.call_count == 2
-    sleep.assert_called_once_with(7.0)
-    assert client.retry_count == 1
-    assert result["contributing_users"] == 1
-    assert result["skipped_users"] == 0
+    install_pipeline_fakes(monkeypatch, lambda did: embedding(did, vector))
+    assert average.main(["--output-dir", str(tmp_path)]) == 0
+    read_summary(capsys)
     assert USER_MODEL in caplog.text and POST_MODEL in caplog.text
     assert "dimension=2" in caplog.text
-    assert "summary eligible=1 contributing=1" in caplog.text
-    assert "retries=1" in caplog.text
+    assert "summary eligible=5 contributing=5 skipped=0" in caplog.text
     assert "did:plc:" not in caplog.text
-    assert "history_embedding_count=" not in caplog.text
-    assert "request_id=" not in caplog.text
-    assert "attempt 1/3" not in caplog.text
-    assert "private-key" not in caplog.text and "NEVER-PUBLISH" not in caplog.text
+    assert "HTTP Request:" not in caplog.text
     assert all(str(value) not in caplog.text for value in vector)
-    assert all(str(value) not in caplog.text for value in result["embedding"])
     assert "L2-normalized unweighted mean" in caplog.text
 
 

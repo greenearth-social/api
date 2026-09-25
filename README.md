@@ -797,10 +797,10 @@ likes for inference.
 ES data can change during a run; the PostHog cutoff does not make ES reads a
 point-in-time snapshot.
 
-Transient HTTP/network failures receive up to three attempts with a 60-second
-socket timeout, 1/2-second backoff, and valid `Retry-After` delays up to 60 seconds.
-Longer requested delays fail explicitly. These are per-operation timeouts,
-not a deadline for the entire command.
+The script uses one HTTPX client per service, with 60-second network timeouts
+and no automatic retries or redirects. A failed request stops the run; rerun
+the command after resolving the error. Active embedding requests finish before
+the clients close. The timeouts apply to network operations, not the entire command.
 
 ### Local artifact and diagnostics
 
@@ -826,8 +826,8 @@ to read a local file and retain its original bytes. The script adds the reposito
 The artifact excludes DIDs, individual vectors, credentials, and service URLs,
 and is written atomically. A final JSON summary is printed to stdout with
 `status` and `artifact_path`, plus the original `run_id` once a valid artifact is
-available and `error` on failure. Aggregate progress, contributor,
-skipped and failed counts, and reason summaries go to stderr. Per-user request
+available and `error` on failure. Stage-level progress, contributor and skipped
+counts, skip reasons, and request failures go to stderr. Per-user request
 or outcome messages and diagnostic lists are not saved. Redirect stderr if you
 want to retain the logs, for example:
 
@@ -836,7 +836,7 @@ pipenv run python scripts/average_user_embedding.py \
   2>average_user_embedding.log
 ```
 
-Missing-history skips are summarized and may reduce coverage. Any exhausted user
+Missing-history skips are summarized and may reduce coverage. Any user
 request failure, incomplete collection, authentication/configuration error,
 likes-index mismatch, mixed model pair/dimension/history policy, zero contributors,
 or invalid/zero-magnitude mean prevents saving the artifact and exits nonzero.

@@ -16,7 +16,6 @@ import logging
 import math
 import os
 import re
-import ssl
 import sys
 import tempfile
 import time
@@ -24,13 +23,10 @@ import uuid
 from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
-from http.client import HTTPException
 from pathlib import Path
-from threading import Lock
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+
+import httpx
 
 # Add the repo's src/ directory so the script can import app.* from any working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -48,223 +44,22 @@ logger = logging.getLogger(__name__)
 
 LIKES_INDEX = "likes"
 
-REASON_HINTS = {
-    "no_likes": "No recent likes were loaded; compare the API and script ES environment.",
-    "no_embedded_history": "No usable history embeddings; inspect indexed post/reply embeddings.",
-    "upstream_error": "History or inference failed; inspect the API container logs.",
-    "upstream_timeout": "History or inference timed out; inspect API/inference logs.",
-    "invalid_inference_response": "The API rejected inference output or model metadata.",
-    "invalid_embedding_response": "The embedding response was invalid; inspect API/inference logs.",
-    "network_error": "Check the API URL, container port, and connectivity.",
-}
-
 
 class RunError(Exception):
     """A collection or configuration error that prevents saving an average."""
 
 
-class RequestError(Exception):
-    """A safe, body-free upstream failure."""
-
-    def __init__(self, reason, detail=None):
-        # Only controlled reason/detail strings travel through logs and summaries;
-        # raw response bodies can contain credentials or user data.
-        self.reason = reason
-        self.detail = detail
-        super().__init__(reason)
-
-
-class NoRedirect(HTTPRedirectHandler):
-    """Do not forward credentials to a redirect target."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def retry_delay(value, attempt):
-    """Honor Retry-After seconds or an HTTP date; otherwise back off 1, 2s."""
-    if value:
-        try:
-            delay = float(value)
-            if math.isfinite(delay) and delay >= 0:
-                return delay
-        except ValueError:
-            try:
-                date = parsedate_to_datetime(value)
-                return max(0.0, date.timestamp() - time.time())
-            except (TypeError, ValueError, OverflowError):
-                pass
-    return float(2**attempt)
-
-
-class JsonClient:
-    """Log collection requests; summarize embedding requests at the stage level."""
-
-    def __init__(self, service, base_url, headers, insecure=False):
-        self.service = service
-        self.base_url = base_url.rstrip("/")
-        self.headers = {"Content-Type": "application/json", **headers}
-        self._retry_count = 0
-        # Embedding workers share this client, including its aggregate retry counter.
-        self._retry_lock = Lock()
-        context = ssl.create_default_context()
-        if insecure:
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-        self.opener = build_opener(NoRedirect(), HTTPSHandler(context=context))
-
-    @property
-    def retry_count(self):
-        with self._retry_lock:
-            return self._retry_count
-
-    def _log_request(self, level, message, *args):
-        # Per-user embedding requests are intentionally quiet. Their outcomes are
-        # counted by average_embeddings and reported in its final reason summary.
-        if self.service != "Embedding API":
-            logger.log(level, message, *args)
-
-    def post(self, path, payload):
-        return self.request("POST", path, payload)
-
-    def request(self, method, path, payload=None):
-        # Keep one correlation ID across retries of the same logical request.
-        request_id = uuid.uuid4().hex
-        context = f"{self.service}: {method} {self.base_url}{path} request_id={request_id}"
-        request = Request(
-            self.base_url + path,
-            data=json.dumps(payload, allow_nan=False).encode("utf-8")
-            if payload is not None
-            else None,
-            headers={**self.headers, "X-Request-ID": request_id},
-            method=method,
-        )
-        for attempt in range(3):
-            delay = float(2**attempt)
-            started = time.monotonic()
-            self._log_request(logging.INFO, "%s attempt %d/3 (timeout=60s)", context, attempt + 1)
-            try:
-                with self.opener.open(request, timeout=60) as response:
-                    status = getattr(response, "status", 200)
-                    try:
-                        data = json.load(response)
-                    except (ValueError, UnicodeError):
-                        raise RequestError("invalid_json", "response is not valid JSON") from None
-                if not isinstance(data, dict):
-                    raise RequestError("invalid_json_object", "response must be a JSON object")
-                self._log_request(
-                    logging.INFO,
-                    "%s attempt %d/3 succeeded: HTTP %s in %.2fs",
-                    context,
-                    attempt + 1,
-                    status,
-                    time.monotonic() - started,
-                )
-                return data
-            except RequestError as error:
-                self._log_request(
-                    logging.ERROR,
-                    "%s attempt %d/3 rejected after %.2fs: %s (%s)",
-                    context,
-                    attempt + 1,
-                    time.monotonic() - started,
-                    error.reason,
-                    error.detail,
-                )
-                raise
-            except HTTPError as error:
-                status = error.code
-                delay = retry_delay(error.headers.get("Retry-After"), attempt)
-                # Read only known machine codes; never copy upstream text into output.
-                code = None
-                try:
-                    body = json.loads(error.read(65536))
-                    if isinstance(body, dict) and isinstance(body.get("detail"), dict):
-                        code = body["detail"].get("code")
-                except (ValueError, UnicodeError, OSError, HTTPException):
-                    pass
-                error.close()
-                # These failures require operator action. Raising RunError stops
-                # new user submissions, whereas RequestError records one failed user.
-                if code in (
-                    "inference_not_configured",
-                    "upstream_authentication_error",
-                    "upstream_configuration_error",
-                    "model_metadata_missing",
-                ):
-                    self._log_request(
-                        logging.ERROR, "%s HTTP %d: %s; aborting", context, status, code
-                    )
-                    raise RunError(f"Embedding API: configuration failure ({code})") from None
-                if status in (400, 401, 403, 404, 405, 422) or 300 <= status < 400:
-                    self._log_request(
-                        logging.ERROR,
-                        "%s HTTP %d: authentication/configuration error; aborting",
-                        context,
-                        status,
-                    )
-                    raise RunError(
-                        f"{self.service}: HTTP {status}; check credentials and configuration"
-                    ) from None
-                reason = (
-                    code
-                    if code
-                    in (
-                        "invalid_inference_response",
-                        "upstream_error",
-                        "upstream_timeout",
-                    )
-                    else f"http_{status}"
-                )
-                detail = f"HTTP {status}; code={reason}"
-                if status not in (408, 429) and not 500 <= status < 600:
-                    self._log_request(logging.ERROR, "%s %s; not retryable", context, detail)
-                    raise RequestError(reason, detail) from None
-            except (ssl.SSLError, ssl.CertificateError):
-                self._log_request(logging.ERROR, "%s TLS configuration error; aborting", context)
-                raise RunError(f"{self.service}: TLS configuration error") from None
-            except URLError as error:
-                if isinstance(error.reason, ssl.SSLError):
-                    self._log_request(
-                        logging.ERROR, "%s TLS configuration error; aborting", context
-                    )
-                    raise RunError(f"{self.service}: TLS configuration error") from None
-                reason = "network_error"
-                # Exception text may contain URLs/credentials; expose only its type.
-                detail = f"transport={type(error.reason).__name__}"
-            except (TimeoutError, ConnectionError, OSError, HTTPException) as error:
-                reason = "network_error"
-                detail = f"transport={type(error).__name__}"
-            if delay > 60:
-                # Do not silently retry earlier than the server requested, or leave
-                # a manual run sleeping indefinitely on a very long Retry-After.
-                raise RequestError(
-                    "retry_after_too_long", "Retry-After exceeds the 60-second retry budget"
-                )
-            if attempt == 2:
-                self._log_request(
-                    logging.ERROR,
-                    "%s attempt %d/3 failed in %.2fs: %s; exhausted all 3 attempts",
-                    context,
-                    attempt + 1,
-                    time.monotonic() - started,
-                    detail,
-                )
-                raise RequestError(reason, detail)
-            self._log_request(
-                logging.WARNING,
-                "%s attempt %d/3 failed in %.2fs: %s; retrying in %.1fs",
-                context,
-                attempt + 1,
-                time.monotonic() - started,
-                detail,
-                delay,
-            )
-            with self._retry_lock:
-                # Count scheduled retries, including workers that have not finished yet.
-                self._retry_count += 1
-            time.sleep(delay)
-        raise AssertionError("unreachable")
+def post_json(client: httpx.Client, path: str, payload: dict) -> dict:
+    """Send one request; callers handle failures and validate the response contents."""
+    response = client.post(path, json=payload)
+    response.raise_for_status()
+    try:
+        data = response.json()
+    except ValueError:
+        raise RunError(f"Invalid JSON response from {response.url}") from None
+    if not isinstance(data, dict):
+        raise RunError(f"Expected a JSON object from {response.url}")
+    return data
 
 
 def collect_posthog_users(client, project_id, minimum, cutoff):
@@ -297,7 +92,8 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
         page += 1
         started = time.monotonic()
         logger.info("PostHog: requesting page %d (limit=1000)", page)
-        result = client.post(
+        result = post_json(
+            client,
             f"/api/projects/{project_id}/query/",
             {
                 "query": {
@@ -387,7 +183,8 @@ def collect_like_counts(client, dids):
         )
         # Filtering to this batch bounds the number of possible author buckets.
         # Both size limits can therefore include every term, even on each shard.
-        result = client.post(
+        result = post_json(
+            client,
             f"/{LIKES_INDEX}/_search",
             {
                 "size": 0,
@@ -460,87 +257,71 @@ def collect_like_counts(client, dids):
 
 def fetch_embedding(client, did):
     """Validate one response and return only what aggregation needs."""
-    try:
-        result = client.post("/embeddings/user", {"user_did": did})
-        if result.get("user_did") != did:
-            raise RequestError("mismatched_user_did", "response DID differs from request")
-        if result.get("likes_index") != LIKES_INDEX:
-            raise RunError("Embedding API: Elasticsearch source mismatch (likes_index)")
-        policy = validate_history_policy(result.get("history_policy"))
-        for key in ("history_like_count", "history_embedding_count"):
-            if not is_count(result.get(key)):
-                raise RequestError("invalid_history_counts", f"{key} must be a nonnegative integer")
-        likes, usable = result["history_like_count"], result["history_embedding_count"]
-        if usable > likes or likes > policy["limit"]:
-            raise RequestError("invalid_history_counts", "history counts exceed their limits")
-        if result.get("status") == "skipped":
-            # Missing usable history is a legitimate exclusion, not a transport
-            # failure. It must not carry an empty-history substitute embedding.
-            reason = result.get("reason")
-            if (
-                reason not in ("no_likes", "no_embedded_history")
-                or any(
-                    result.get(key) is not None
-                    for key in (
-                        "embedding",
-                        "user_model_uuid",
-                        "post_model_uuid",
-                        "dimension",
-                    )
-                )
-                or usable != 0
-                or (reason == "no_likes") != (likes == 0)
-            ):
-                raise RequestError(
-                    "invalid_skip_response", "skip reason/counts/vector inconsistent"
-                )
-            return {"status": "skipped", "reason": reason, "history_policy": policy}
-        vector, dimension = result.get("embedding"), result.get("dimension")
+    result = post_json(client, "/embeddings/user", {"user_did": did})
+    if result.get("user_did") != did:
+        raise RunError("Embedding API: response DID differs from request")
+    if result.get("likes_index") != LIKES_INDEX:
+        raise RunError("Embedding API: Elasticsearch source mismatch (likes_index)")
+    policy = validate_history_policy(result.get("history_policy"))
+    for key in ("history_like_count", "history_embedding_count"):
+        if not is_count(result.get(key)):
+            raise RunError(f"Embedding API: {key} must be a nonnegative integer")
+    likes, usable = result["history_like_count"], result["history_embedding_count"]
+    if usable > likes or likes > policy["limit"]:
+        raise RunError("Embedding API: history counts exceed their limits")
+    if result.get("status") == "skipped":
+        # Missing usable history is a legitimate exclusion, not a transport
+        # failure. It must not carry an empty-history substitute embedding.
+        reason = result.get("reason")
         if (
-            result.get("status") != "ok"
-            or not isinstance(vector, list)
-            or not vector
-            or not all(is_finite_number(value) for value in vector)
-            or not is_count(dimension)
-            or dimension != len(vector)
-            or usable == 0
-        ):
-            raise RequestError(
-                "invalid_embedding_response",
-                "expected finite nonempty vector, matching dimension and usable history",
+            reason not in ("no_likes", "no_embedded_history")
+            or any(
+                result.get(key) is not None
+                for key in ("embedding", "user_model_uuid", "post_model_uuid", "dimension")
             )
-        user_model = model_id(result.get("user_model_uuid"))
-        post_model = model_id(result.get("post_model_uuid"))
-        return {
-            "status": "ok",
-            "history_policy": policy,
-            "embedding": vector,
-            "dimension": dimension,
-            "user_model_uuid": user_model,
-            "post_model_uuid": post_model,
-        }
-    except RequestError as error:
-        # Return per-user failures for aggregate reporting. Configuration and shared
-        # contract errors deliberately propagate so the coordinator can stop the run.
-        return {"status": "failed", "reason": error.reason}
+            or usable != 0
+            or (reason == "no_likes") != (likes == 0)
+        ):
+            raise RunError("Embedding API: skip reason/counts/vector inconsistent")
+        return {"status": "skipped", "reason": reason, "history_policy": policy}
+    vector, dimension = result.get("embedding"), result.get("dimension")
+    if (
+        result.get("status") != "ok"
+        or not isinstance(vector, list)
+        or not vector
+        or not all(is_finite_number(value) for value in vector)
+        or not is_count(dimension)
+        or dimension != len(vector)
+        or usable == 0
+    ):
+        raise RunError(
+            "Embedding API: expected finite nonempty vector, matching dimension and usable history"
+        )
+    return {
+        "status": "ok",
+        "history_policy": policy,
+        "embedding": vector,
+        "dimension": dimension,
+        "user_model_uuid": model_id(result.get("user_model_uuid")),
+        "post_model_uuid": model_id(result.get("post_model_uuid")),
+    }
 
 
 def average_embeddings(client, dids, workers):
-    """L2-normalize the equal-weight mean, retaining only aggregate outcome counts."""
+    """L2-normalize the equal-weight mean; any failed request stops the run."""
     started = time.monotonic()
     next_progress_at = started + 10
-    skipped, failed = Counter(), Counter()
+    skipped = Counter()
     vectors, pending = [], set()
     remaining = iter(dids)
     model_pair = dimension = policy = None
-    fatal = None
     logger.info(
-        "Embeddings: requesting %d users with workers=%d; timeout=60s attempts=3",
+        "Embeddings: requesting %d users with workers=%d; timeout=60s",
         len(dids),
         workers,
     )
-    # Keep only one pending task per worker instead of queuing the whole cohort.
-    # That lets a global failure stop new requests while active requests finish.
+    # Keep only one pending task per worker. If a request fails, stop submitting
+    # users and let the context manager finish active requests before clients close.
     with ThreadPoolExecutor(max_workers=workers) as executor:
         for _ in range(workers):
             did = next(remaining, None)
@@ -549,86 +330,46 @@ def average_embeddings(client, dids, workers):
         while pending:
             done, pending = wait(pending, timeout=10, return_when=FIRST_COMPLETED)
             for future in done:
-                try:
-                    result = future.result()
-                    status = result["status"]
-                    if status == "failed":
-                        failed[result["reason"]] += 1
-                    else:
-                        # The first response establishes the history policy; the
-                        # first vector establishes the model pair and dimension.
-                        # Later vectors must describe the same embedding space.
-                        current_policy = result["history_policy"]
-                        if policy is not None and current_policy != policy:
-                            raise RunError("Embedding API: mixed history policies")
-                        policy = current_policy
-                        if status == "skipped":
-                            skipped[result["reason"]] += 1
-                        else:
-                            current_pair = (
-                                result["user_model_uuid"],
-                                result["post_model_uuid"],
-                            )
-                            current_dimension = result["dimension"]
-                            if model_pair is not None and (
-                                current_pair != model_pair or current_dimension != dimension
-                            ):
-                                raise RunError(
-                                    "Embedding API: mixed model pairs or vector dimensions"
-                                )
-                            model_pair, dimension = current_pair, current_dimension
-                            vectors.append(result["embedding"])
-                except (RunError, ArtifactValidationError) as error:
-                    fatal = fatal or RunError(str(error))
-                    failed[str(error)] += 1
-                except Exception as error:
-                    fatal = fatal or RunError(
-                        f"Unexpected embedding failure ({type(error).__name__})"
-                    )
-                    failed["unexpected_error"] += 1
+                result = future.result()
+                # All contributors must use the same history policy and model pair.
+                current_policy = result["history_policy"]
+                if policy is not None and current_policy != policy:
+                    raise RunError("Embedding API: mixed history policies")
+                policy = current_policy
+                if result["status"] == "skipped":
+                    skipped[result["reason"]] += 1
+                else:
+                    current_pair = (result["user_model_uuid"], result["post_model_uuid"])
+                    current_dimension = result["dimension"]
+                    if model_pair is not None and (
+                        current_pair != model_pair or current_dimension != dimension
+                    ):
+                        raise RunError("Embedding API: mixed model pairs or vector dimensions")
+                    model_pair, dimension = current_pair, current_dimension
+                    vectors.append(result["embedding"])
             now = time.monotonic()
             if now >= next_progress_at:
                 logger.info(
-                    "Embeddings: progress %d/%d completed contributing=%d skipped=%d "
-                    "failed=%d retries=%d elapsed=%.2fs",
-                    len(vectors) + skipped.total() + failed.total(),
+                    "Embeddings: progress %d/%d completed contributing=%d skipped=%d elapsed=%.2fs",
+                    len(vectors) + skipped.total(),
                     len(dids),
                     len(vectors),
                     skipped.total(),
-                    failed.total(),
-                    getattr(client, "retry_count", 0),
                     now - started,
                 )
                 next_progress_at = now + 10
-            if fatal is None:
-                # Refill completed slots only when no global error was observed.
-                for _ in done:
-                    did = next(remaining, None)
-                    if did is not None:
-                        pending.add(executor.submit(fetch_embedding, client, did))
+            for _ in done:
+                did = next(remaining, None)
+                if did is not None:
+                    pending.add(executor.submit(fetch_embedding, client, did))
     logger.info(
-        "Embeddings: summary eligible=%d contributing=%d skipped=%d failed=%d retries=%d",
+        "Embeddings: summary eligible=%d contributing=%d skipped=%d",
         len(dids),
         len(vectors),
         skipped.total(),
-        failed.total(),
-        getattr(client, "retry_count", 0),
     )
-    for label, reasons in (("skipped", skipped), ("failed", failed)):
-        for reason, count in sorted(reasons.items()):
-            logger.warning(
-                "Embeddings: %s reason=%s count=%d. %s",
-                label,
-                reason,
-                count,
-                REASON_HINTS.get(reason, "Inspect API/inference logs."),
-            )
-    # Expected history skips are allowed. Any request failure prevents publishing
-    # a partial mean, even if other users produced valid vectors.
-    if fatal:
-        raise fatal
-    if failed:
-        raise RunError(f"{failed.total()} embedding requests failed; no average was written")
+    for reason, count in sorted(skipped.items()):
+        logger.warning("Embeddings: skipped reason=%s count=%d", reason, count)
     if not vectors or model_pair is None:
         raise RunError("No valid user embeddings; no average was written")
     # Each user gets one vote: activity and like counts selected the cohort but
@@ -759,37 +500,43 @@ def generate(args, run_id, started_at):
         if not value or any(character.isspace() for character in value):
             raise RunError(f"Set {name} to a valid API key")
         credentials[name] = value
-    posthog = JsonClient(
-        "PostHog",
-        args.posthog_host,
-        {"Authorization": f"Bearer {credentials['POSTHOG_PERSONAL_API_KEY']}"},
-    )
-    # The local-tunnel TLS exception is scoped to ES. PostHog and the embedding
-    # API still use their own clients with certificate verification enabled.
-    es = JsonClient(
-        "Elasticsearch",
-        args.es_url,
-        {"Authorization": f"ApiKey {credentials['GE_ELASTICSEARCH_API_KEY']}"},
-        insecure=args.es_insecure,
-    )
-    api = JsonClient("Embedding API", args.api_url, {"X-API-Key": credentials["GE_API_KEY"]})
     # Freeze the PostHog cutoff once, rounded down to whole seconds, for every page.
     cutoff = utc_string(started_at.replace(microsecond=0))
-    try:
+    # Reuse one connection pool per service. Only ES may skip TLS verification.
+    # Workers finish before these contexts close, including on errors or Ctrl-C.
+    with (
+        httpx.Client(
+            base_url=args.posthog_host,
+            headers={"Authorization": f"Bearer {credentials['POSTHOG_PERSONAL_API_KEY']}"},
+            timeout=60,
+            follow_redirects=False,
+        ) as posthog,
+        httpx.Client(
+            base_url=args.es_url,
+            headers={"Authorization": f"ApiKey {credentials['GE_ELASTICSEARCH_API_KEY']}"},
+            verify=not args.es_insecure,
+            timeout=60,
+            follow_redirects=False,
+        ) as es,
+        httpx.Client(
+            base_url=args.api_url,
+            headers={"X-API-Key": credentials["GE_API_KEY"]},
+            timeout=60,
+            follow_redirects=False,
+        ) as api,
+    ):
         users = collect_posthog_users(
             posthog, args.posthog_project_id, args.min_interaction_seen, cutoff
         )
         likes = collect_like_counts(es, users)
-    except RequestError as error:
-        raise RunError(f"Cohort collection failed: {error.reason}") from None
-    eligible = [did for did in sorted(users) if likes[did] >= args.min_likes]
-    logger.info(
-        "Elasticsearch: %d users meet like threshold >=%d; %d filtered out",
-        len(eligible),
-        args.min_likes,
-        len(users) - len(eligible),
-    )
-    result = average_embeddings(api, eligible, args.workers)
+        eligible = [did for did in sorted(users) if likes[did] >= args.min_likes]
+        logger.info(
+            "Elasticsearch: %d users meet like threshold >=%d; %d filtered out",
+            len(eligible),
+            args.min_likes,
+            len(users) - len(eligible),
+        )
+        result = average_embeddings(api, eligible, args.workers)
     skipped_users = result.pop("skipped_users")
     # The consumer receives one mean plus provenance/coverage, never individual
     # DIDs, activity records, credentials, or individual user vectors.
@@ -838,8 +585,12 @@ def run(args):
         summary["run_id"] = artifact["run_id"]
         logger.info("Artifact: %s", artifact_path)
         summary["status"] = "success"
-    except (RunError, ArtifactValidationError, RequestError) as error:
-        reason = error.reason if isinstance(error, RequestError) else str(error)
+    except (RunError, ArtifactValidationError, httpx.HTTPError) as error:
+        reason = str(error) or type(error).__name__
+        if isinstance(error, httpx.RequestError):
+            reason = (
+                f"{type(error).__name__} for {error.request.method} {error.request.url}: {reason}"
+            )
         summary["error"] = reason
         logger.error("Run: failed: %s", reason)
     except KeyboardInterrupt:
@@ -865,6 +616,8 @@ def main(argv=None):
         format="%(asctime)s %(levelname)s %(message)s",
         stream=sys.stderr,
     )
+    # HTTPX logs every request at INFO; keep this CLI's output at the stage level.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     summary = run(args)
     print(json.dumps(summary, allow_nan=False))
     return 0 if summary["status"] == "success" else 1
