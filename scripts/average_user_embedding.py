@@ -40,6 +40,10 @@ from ..src.app.lib.average_user_embedding_artifact import (
 logger = logging.getLogger(__name__)
 
 LIKES_INDEX = "likes"
+POSTHOG_PAGE_SIZE = 1000
+ES_BATCH_SIZE = 500
+REQUEST_TIMEOUT_SECONDS = 60
+PROGRESS_LOG_INTERVAL_SECONDS = 10
 
 
 class RunError(Exception):
@@ -64,16 +68,16 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
     # Every page shares the same upper event timestamp. Advancing by DID rather
     # than OFFSET keeps each user's complete count together; values are bound
     # parameters, not interpolated SQL. There is no lower date bound or feed filter.
-    query = """
+    query = f"""
         SELECT distinct_id, count() AS interaction_seen_count
         FROM events
         WHERE event = 'interactionSeen'
-          AND timestamp < parseDateTimeBestEffort({cutoff})
-          AND distinct_id > {after_did}
+          AND timestamp < parseDateTimeBestEffort({{cutoff}})
+          AND distinct_id > {{after_did}}
         GROUP BY distinct_id
-        HAVING count() >= {minimum}
+        HAVING count() >= {{minimum}}
         ORDER BY distinct_id ASC
-        LIMIT 1000
+        LIMIT {POSTHOG_PAGE_SIZE}
     """
     users = {}
     cursor = ""
@@ -88,7 +92,7 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
     while True:
         page += 1
         started = time.monotonic()
-        logger.info("PostHog: requesting page %d (limit=1000)", page)
+        logger.info("PostHog: requesting page %d (limit=%d)", page, POSTHOG_PAGE_SIZE)
         result = post_json(
             client,
             f"/api/projects/{project_id}/query/",
@@ -164,16 +168,16 @@ def collect_like_counts(client, dids):
     # smaller usable history window later loaded by the API. Missing terms stay zero.
     counts = dict.fromkeys(dids, 0)
     ordered = sorted(counts)
-    batch_count = (len(ordered) + 499) // 500
+    batch_count = (len(ordered) + ES_BATCH_SIZE - 1) // ES_BATCH_SIZE
     logger.info(
         "Elasticsearch: counting retained likes for %d DIDs in %d batches; index=%s",
         len(ordered),
         batch_count,
         LIKES_INDEX,
     )
-    for start in range(0, len(ordered), 500):
-        batch = ordered[start : start + 500]
-        batch_number = start // 500 + 1
+    for start in range(0, len(ordered), ES_BATCH_SIZE):
+        batch = ordered[start : start + ES_BATCH_SIZE]
+        batch_number = start // ES_BATCH_SIZE + 1
         started = time.monotonic()
         logger.info(
             "Elasticsearch: requesting batch %d/%d (%d DIDs)", batch_number, batch_count, len(batch)
@@ -307,15 +311,16 @@ def fetch_embedding(client, did):
 def average_embeddings(client, dids, workers):
     """L2-normalize the equal-weight mean; any failed request stops the run."""
     started = time.monotonic()
-    next_progress_at = started + 10
+    next_progress_at = started + PROGRESS_LOG_INTERVAL_SECONDS
     skipped = Counter()
     vectors, pending = [], set()
     remaining = iter(dids)
     model_pair = dimension = policy = None
     logger.info(
-        "Embeddings: requesting %d users with workers=%d; timeout=60s",
+        "Embeddings: requesting %d users with workers=%d; timeout=%ds",
         len(dids),
         workers,
+        REQUEST_TIMEOUT_SECONDS,
     )
     # Keep only one pending task per worker. If a request fails, stop submitting
     # users and let the context manager finish active requests before clients close.
@@ -325,7 +330,9 @@ def average_embeddings(client, dids, workers):
             if did is not None:
                 pending.add(executor.submit(fetch_embedding, client, did))
         while pending:
-            done, pending = wait(pending, timeout=10, return_when=FIRST_COMPLETED)
+            done, pending = wait(
+                pending, timeout=PROGRESS_LOG_INTERVAL_SECONDS, return_when=FIRST_COMPLETED
+            )
             for future in done:
                 result = future.result()
                 # All contributors must use the same history policy and model pair.
@@ -354,7 +361,7 @@ def average_embeddings(client, dids, workers):
                     skipped.total(),
                     now - started,
                 )
-                next_progress_at = now + 10
+                next_progress_at = now + PROGRESS_LOG_INTERVAL_SECONDS
             for _ in done:
                 did = next(remaining, None)
                 if did is not None:
@@ -505,20 +512,20 @@ def generate(args, run_id, started_at):
         httpx.Client(
             base_url=args.posthog_host,
             headers={"Authorization": f"Bearer {credentials['POSTHOG_PERSONAL_API_KEY']}"},
-            timeout=60,
+            timeout=REQUEST_TIMEOUT_SECONDS,
             follow_redirects=False,
         ) as posthog,
         httpx.Client(
             base_url=args.es_url,
             headers={"Authorization": f"ApiKey {credentials['GE_ELASTICSEARCH_API_KEY']}"},
             verify=not args.es_insecure,
-            timeout=60,
+            timeout=REQUEST_TIMEOUT_SECONDS,
             follow_redirects=False,
         ) as es,
         httpx.Client(
             base_url=args.api_url,
             headers={"X-API-Key": credentials["GE_API_KEY"]},
-            timeout=60,
+            timeout=REQUEST_TIMEOUT_SECONDS,
             follow_redirects=False,
         ) as api,
     ):
