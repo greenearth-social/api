@@ -107,6 +107,9 @@ SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
 # feeds are published as "GE <internal_display_name> <git_sha>" (see issue #228),
 # so keep internal_display_name to 13 chars or fewer. feeds_test.py enforces this.
 #
+# Public descriptions are published verbatim in production. Include the full copy
+# here, including attribution. Stage/dev use "Built by Caterpie" and the git sha.
+#
 # NOTE: every private (development) feed sets logged_out="deny" — a feed nobody
 # is meant to see has nothing to say to a logged-out visitor. Public feeds take
 # the "explain" default, or "serve" when they work without a user. feeds_test.py
@@ -130,7 +133,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "random": FeedConfig(
         display_name="Random",
-        description="A random selection of recent posts from the community.",
+        description="A random selection of recent posts from the community.\nPart of the MySky feed family.",
         public=True,
         internal_rkey="67-r",
         internal_display_name="67 R",
@@ -150,8 +153,8 @@ FEEDS: dict[str, FeedConfig] = {
         ),
     ),
     "your-feed": FeedConfig(
-        display_name="MySky by GreenEarth",
-        description="A feed you control, designed for constructive conversation.",
+        display_name="MySky",
+        description="Own your algorithm.\nA personalized feed with a control panel.",
         public=True,
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
@@ -182,7 +185,7 @@ FEEDS: dict[str, FeedConfig] = {
     ),
     "best-of-friends": FeedConfig(
         display_name="Best of Friends",
-        description="The best posts from people you follow, curated just for you.",
+        description="The best posts from people you follow, curated just for you.\nPart of the MySky feed family.",
         public=True,
         internal_rkey="fd-bof",
         internal_display_name="fd BOF",

@@ -274,7 +274,8 @@ The deployment script will:
 - Build the container using Google Cloud buildpacks
 - Deploy to Cloud Run with proper environment variables and secrets
 - Stamp the deployed git sha onto the revision and the debug feed records
-- Preserve existing public feed descriptions while syncing other generator metadata
+- Synchronize production public descriptions verbatim from `src/app/feeds.py`
+- Stamp stage/dev descriptions with `Built by Caterpie` and the deployed git sha
 
 API deployments do not change Firebase configuration. Deploy Firebase rules,
 indexes, TTL policies, Functions, and Hosting from the frontend repository.
@@ -314,7 +315,8 @@ Each deploy stamps its short git sha in three places:
   [Rolling back a deployment](#rolling-back-a-deployment)).
 - **Debug feed display names + descriptions** — every internal ("debug") feed
   record is published as e.g. `GE e2 S e9f07f5`, with `Built by Caterpie · e9f07f5`
-  in the description. The public prod GreenEarth feeds are left unstamped.
+  in the description. All stage/dev feeds, including copies of public feeds, use
+  this description and have the sha in their name. Public production feeds are unstamped.
 
 **Reporting a bug against a feed?** Open the debug feed in Bluesky and copy the
 trailing sha from its name (e.g. `e9f07f5`) into the report — it pins the bug to
@@ -570,46 +572,55 @@ Other useful `publish_feed.py` flags:
 - `--generator-did` — override `GE_FEED_GENERATOR_DID`
 - `--pds` — use a different PDS (default: `https://bsky.social`)
 
-#### One-time public feed-description migration
+#### Updating public feed descriptions
 
-Public feed descriptions are account-managed copy. Routine deployments preserve
-their current `description` and `descriptionFacets`; they do not append or
-recompose the attribution line. Use the dedicated migration script when that
-copy intentionally changes.
+`src/app/feeds.py` is the source of truth for production public feed descriptions.
+Edit the feed's `description` there; the next production deployment's feed sync
+publishes that exact text, replacing any existing copy. Include any desired
+attribution in the configured text: the publisher does not append a footer.
 
-The current migration replaces only either legacy attribution:
+All stage/dev feeds, including copies of public feeds, use
+`Built by Caterpie · <git_sha>` instead. This also applies to feeds published by
+`internal-tools/devenv`, which runs the publisher with `--sync --environment dev`.
+Production internal feeds use the same Caterpie description. If no git sha is
+available, the fallback is `Built by Caterpie`.
 
-```text
-Built by GreenEarth (www.greenearth.social).
-Built by GreenEarth (https://www.greenearth.social).
-```
-
-with:
-
-```text
-Built by Green Earth (https://www.greenearth.social).
-```
-
-Everything else in each existing description is retained. The script is
-idempotent, will not append the new text when no legacy attribution is present,
-and exits non-zero if a targeted record is missing or needs manual attention.
-It reads the appropriate Bluesky app password from GCP Secret Manager unless
-`GE_BSKY_APP_PASSWORD` or `--app-password` is supplied.
-
-Preview and then apply it once in each environment:
+To update only descriptions **without deploying the API**, run the dedicated
+script from `api/`. It uses the same environment-specific description rules and
+preserves other record fields, including the display name, avatar, service DID,
+and creation date:
 
 ```bash
-pipenv run python scripts/update_feed_descriptions.py --environment stage --dry-run
-pipenv run python scripts/update_feed_descriptions.py --environment stage
+# Preview and apply the stage diagnostic description using the deployed short SHA.
+# Replace <deployed-sha> with the stage revision's git SHA.
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment stage --feed-name your-feed --git-sha '<deployed-sha>' --dry-run
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment stage --feed-name your-feed --git-sha '<deployed-sha>'
 
-pipenv run python scripts/update_feed_descriptions.py --environment prod --dry-run
-pipenv run python scripts/update_feed_descriptions.py --environment prod
+# Preview and apply the configured public copy to production.
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment prod --feed-name your-feed --dry-run
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment prod --feed-name your-feed
 ```
 
-Stage targets the public feed configurations published under their Caterpie
-rkeys; production targets `your-feed`, `best-of-friends`, and `random` on the
-GreenEarth account. Records with description facets are deliberately left for
-manual review because changing text would invalidate their byte offsets.
+The dry run prints the existing and proposed text without writing records. Omit
+`--feed-name` to update all public feeds. Stage maps canonical names from
+`feeds.py` to Caterpie rkeys (`your-feed` becomes `a0-yf`); production uses the
+canonical rkeys on the MySky account. The script leaves already matching records
+unchanged and exits nonzero if a target is missing or invalid. It reads the
+appropriate Bluesky app password from GCP Secret Manager unless
+`GE_BSKY_APP_PASSWORD` or `--app-password` is supplied.
+
+For stage, `--git-sha` overrides `GE_GIT_SHA` and then the local API checkout's
+HEAD. When changing descriptions without deploying, use the deployed revision's
+short SHA so the diagnostic description identifies the code actually serving it.
+
+Both deployment sync and the description updater retain existing
+`descriptionFacets` only when the description is unchanged. When text changes,
+they remove the old facets because their byte offsets no longer apply. Warnings
+about a missing local UX post manifest do not prevent description updates.
 
 ### UX posts
 
@@ -704,9 +715,9 @@ Production authenticates feed-generator publishing with the stable account DID
 `did:plc:wrmpulygwvuhjn2c3jbalgqj` (currently `mysky.social`); stage/dev uses
 `did:plc:s4tl2ajfsnstzuxtegl7r33g` (currently `caterpie-internal.bsky.social`).
 Deployments validate the required publisher credentials before changing Cloud Run.
-Feed generator metadata is synchronized later in the same deployment, but existing
-public descriptions are preserved; a failed post-deploy sync makes the deployment
-command exit nonzero.
+Feed generator metadata, including production public descriptions from `feeds.py`
+and stage/dev Caterpie descriptions, is synchronized later in the same deployment;
+a failed post-deploy sync makes the deployment command exit nonzero.
 
 #### 6. View the feed in Bluesky
 
@@ -982,7 +993,7 @@ greenearth/api/
 │   ├── feed_debug.py              # CLI debug tool
 │   ├── manage_ux_posts.py         # UX post resolve/sync/cleanup
 │   ├── managed_posts.py           # Shared Bluesky post construction and matching
-│   ├── update_feed_descriptions.py # One-time public description migration
+│   ├── update_feed_descriptions.py # Sync descriptions using each environment's publishing rules
 │   └── publish_feed.py            # Publish/update feed generator records
 ├── .gcloudignore                  # Files to exclude from deployment
 ├── .python-version
