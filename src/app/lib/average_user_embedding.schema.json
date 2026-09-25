@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Average user embedding artifact v1",
+  "description": "Consumer contract. In addition to this schema, validate finite coordinates, L2 magnitude within 1e-6 of 1, dimension equal to vector length, valid run timestamp, cutoff <= run start <= completion, contributors + skips = eligible, and eligible + filtered = PostHog users.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format_version",
+    "embedding",
+    "dimension",
+    "user_model_uuid",
+    "post_model_uuid",
+    "run_id",
+    "source_completed_at",
+    "contributing_users",
+    "cohort"
+  ],
+  "properties": {
+    "format_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "embedding": {
+      "description": "L2-normalized, equally weighted arithmetic mean of the contributing user embeddings. Normalization is applied after averaging.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "number"
+      }
+    },
+    "dimension": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "user_model_uuid": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[0-9a-f]{32}$",
+      "not": {
+        "const": "00000000000000000000000000000000"
+      }
+    },
+    "post_model_uuid": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[0-9a-f]{32}$",
+      "not": {
+        "const": "00000000000000000000000000000000"
+      }
+    },
+    "run_id": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^\\d{8}T\\d{6}\\.\\d{6}Z_[0-9a-f]{8}$"
+    },
+    "source_completed_at": {
+      "type": "string",
+      "pattern": "Z$"
+    },
+    "contributing_users": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "cohort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cutoff",
+        "min_interaction_seen",
+        "min_likes",
+        "posthog_users",
+        "below_min_likes",
+        "eligible_users",
+        "skipped_users"
+      ],
+      "properties": {
+        "cutoff": {
+          "type": "string",
+          "pattern": "Z$"
+        },
+        "min_interaction_seen": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "min_likes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "posthog_users": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "below_min_likes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eligible_users": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped_users": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

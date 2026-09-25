@@ -1,7 +1,7 @@
 import base64
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 FeedControlName = Literal[
     "source_weights",
@@ -227,6 +227,36 @@ class RankPredictResult(BaseModel):
         default_factory=list,
         description="Per-candidate ranking data in ranked order",
     )
+
+
+class UserEmbeddingRequest(BaseModel):
+    # Body for POST /embeddings/user. The offline averaging script sends one
+    # user's DID; the endpoint loads their history and runs the user tower.
+    model_config = ConfigDict(extra="forbid")
+
+    user_did: str = Field(
+        min_length=7,
+        max_length=2048,
+        pattern=r"^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$",
+        json_schema_extra={"example": "string"},
+    )
+
+
+class UserEmbeddingResponse(BaseModel):
+    # An "ok" response exports the actual user embedding and its model pair for
+    # the averaging script. A "skipped" response reports missing usable history
+    # through reason and omits the vector and model metadata.
+    user_did: str
+    status: Literal["ok", "skipped"]
+    # Loaded likes are capped by the history window; usable embeddings may be fewer
+    # when liked posts/replies are missing or lack content embeddings.
+    history_like_count: int = Field(ge=0)
+    history_embedding_count: int = Field(ge=0)
+    embedding: list[float] | None = None
+    user_model_uuid: str | None = None
+    post_model_uuid: str | None = None
+    dimension: int | None = None
+    reason: Literal["no_likes", "no_embedded_history"] | None = None
 
 
 class FeedConfig(BaseModel):

@@ -61,4 +61,7 @@ profiles/
 .DS_Store
 
 load_test_data
+
+# Local operational artifacts, reports, and logs
+/outputs/
 src/app/ux_posts_resolved.json

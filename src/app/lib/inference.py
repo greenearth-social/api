@@ -6,9 +6,13 @@ towers of the two tower model, etc.
 
 import asyncio
 import logging
+import math
 import os
+import re
 import time
+from dataclasses import dataclass
 from typing import Literal, assert_never
+from uuid import UUID
 
 import httpx
 
@@ -16,7 +20,7 @@ from .feed_debug import current_recorder
 from .http_client import get_http_client
 from .request_context import get_request_id
 from .telemetry import timed
-from .user_history_cache import fetch_user_history_features
+from .user_history_cache import UserHistory, fetch_user_history_features
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,20 @@ HistoryMode = Literal["actual", "empty"]
 
 class InferenceResponseFormatError(RuntimeError):
     """Raised when inference-service returns a successful but malformed response."""
+
+
+class InferenceModelMetadataError(InferenceResponseFormatError):
+    """The deployed inference service does not provide an authoritative model pair."""
+
+
+@dataclass(frozen=True)
+class UserEmbeddingResult:
+    history_like_count: int
+    history_embedding_count: int
+    embedding: list[float] | None = None
+    user_model_uuid: str | None = None
+    post_model_uuid: str | None = None
+    reason: Literal["no_likes", "no_embedded_history"] | None = None
 
 
 def build_inference_headers(api_key: str) -> dict[str, str]:
@@ -158,7 +176,8 @@ async def predict_user_tower_single(
     *,
     base_url: str,
     api_key: str,
-) -> list[list[float]]:
+) -> object:
+    """Request one user prediction, retaining outputs and model metadata."""
     url = f"{base_url}/models/user-tower/predict"
     headers = build_inference_headers(api_key)
     payload = {
@@ -183,8 +202,66 @@ async def predict_user_tower_single(
         if collector is not None:
             collector.record("rank.model.failure_count", 1, status_code=str(resp.status_code))
         raise_inference_response_error("user-tower", resp.status_code, resp.text)
-    payload = _decode_inference_json("user-tower", resp)
-    return _extract_inference_outputs("user-tower", payload)
+    return _decode_inference_json("user-tower", resp)
+
+
+def _model_uuid(payload: dict, field: str) -> str:
+    value = payload.get(field)
+    if not isinstance(value, str) or not re.fullmatch(
+        r"(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})", value
+    ):
+        raise InferenceModelMetadataError(f"User-tower response missing valid {field}")
+    model_uuid = UUID(value)
+    if model_uuid.int == 0:
+        raise InferenceModelMetadataError(f"User-tower response missing valid {field}")
+    return model_uuid.hex
+
+
+async def predict_user_embedding(
+    history: UserHistory,
+    *,
+    base_url: str,
+    api_key: str,
+) -> UserEmbeddingResult:
+    """Export an actual-history prediction and its authoritative model pair.
+
+    The caller supplies history from the shared production history loader. This path
+    never synthesizes empty history and never reads the readiness UUID cache.
+    """
+    embedded_history = history.items_with_embeddings
+    like_count = len(history.items)
+    embedding_count = len(embedded_history)
+    if not history.items:
+        return UserEmbeddingResult(like_count, embedding_count, reason="no_likes")
+    if not embedded_history:
+        return UserEmbeddingResult(like_count, embedding_count, reason="no_embedded_history")
+    payload = await predict_user_tower_single(
+        [item.embedding for item in embedded_history if item.embedding is not None],
+        [item.author_did for item in embedded_history],
+        base_url=base_url,
+        api_key=api_key,
+    )
+    outputs = _extract_inference_outputs("user-tower", payload)
+    if not isinstance(payload, dict) or payload.get("model_type") != "user-tower":
+        raise InferenceResponseFormatError("Expected user-tower prediction metadata")
+    user_model_uuid = _model_uuid(payload, "model_uuid")
+    post_model_uuid = _model_uuid(payload, "paired_post_model_uuid")
+    if len(outputs) != 1 or not isinstance(outputs[0], list) or not outputs[0]:
+        raise InferenceResponseFormatError("Expected exactly one nonempty embedding")
+    vector = outputs[0]
+    try:
+        valid = all(type(value) in (int, float) and math.isfinite(value) for value in vector)
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise InferenceResponseFormatError("Expected finite numeric embedding coordinates")
+    return UserEmbeddingResult(
+        history_like_count=like_count,
+        history_embedding_count=embedding_count,
+        embedding=vector,
+        user_model_uuid=user_model_uuid,
+        post_model_uuid=post_model_uuid,
+    )
 
 
 async def predict_heavy_ranker_single_user(
@@ -297,12 +374,13 @@ async def compute_user_embedding(
             case _:
                 assert_never(history_mode)
 
-        output_user_embedding_list = await predict_user_tower_single(
+        payload = await predict_user_tower_single(
             user_history_vectors,
             history_author_dids,
             base_url=inference_base_url,
             api_key=inference_api_key,
         )
+        output_user_embedding_list = _extract_inference_outputs("user-tower", payload)
         if len(output_user_embedding_list) != 1:
             raise RuntimeError(
                 f"user inference returned {len(output_user_embedding_list)} embeddings; expected 1",
