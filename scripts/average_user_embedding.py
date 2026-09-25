@@ -877,21 +877,12 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     # Human-readable progress goes to stderr. Keep stdout as one JSON result so
     # callers can capture it without parsing log lines, including on failed runs.
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(asctime)s.%(msecs)03dZ %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stderr,
     )
-    formatter.converter = time.gmtime
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    previous_level = logger.level
-    logger.setLevel(logging.INFO)
-    try:
-        summary = run(args)
-    finally:
-        logger.removeHandler(handler)
-        handler.close()
-        logger.setLevel(previous_level)
+    summary = run(args)
     print(json.dumps(summary, allow_nan=False))
     return 0 if summary["status"] == "success" else 1
 
