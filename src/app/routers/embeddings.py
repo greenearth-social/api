@@ -3,13 +3,11 @@
 import asyncio
 import logging
 import time
-from typing import Literal
 
 import httpx
 from elastic_transport import ConnectionTimeout
 from elasticsearch import ApiError
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
 
 from ..lib.inference import (
     InferenceModelMetadataError,
@@ -19,6 +17,7 @@ from ..lib.inference import (
 )
 from ..lib.request_context import get_request_id
 from ..lib.user_history_cache import fetch_user_history_features
+from ..models import UserEmbeddingRequest, UserEmbeddingResponse
 from ..security import verify_api_key
 
 logger = logging.getLogger(__name__)
@@ -27,31 +26,6 @@ router = APIRouter(tags=["embeddings"], dependencies=[Depends(verify_api_key)])
 
 # Leave time to return a structured 504 before the producer's 60-second HTTP timeout.
 REQUEST_TIMEOUT_SECONDS = 55.0
-
-
-class UserEmbeddingRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    user_did: str = Field(
-        min_length=7,
-        max_length=2048,
-        pattern=r"^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$",
-        json_schema_extra={"example": "string"},
-    )
-
-
-class UserEmbeddingResponse(BaseModel):
-    user_did: str
-    status: Literal["ok", "skipped"]
-    # Loaded likes are capped by the history window; usable embeddings may be fewer
-    # when liked posts/replies are missing or lack content embeddings.
-    history_like_count: int = Field(ge=0)
-    history_embedding_count: int = Field(ge=0)
-    embedding: list[float] | None = None
-    user_model_uuid: str | None = None
-    post_model_uuid: str | None = None
-    dimension: int | None = None
-    reason: Literal["no_likes", "no_embedded_history"] | None = None
 
 
 def _failure(

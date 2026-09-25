@@ -1,7 +1,7 @@
 import base64
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 FeedControlName = Literal[
     "source_weights",
@@ -151,7 +151,7 @@ class CandidateGenerateRequest(BaseModel):
             "the user in previous pages)."
         ),
     )
-    hydrate_embeddings: bool = Field(default=False, 
+    hydrate_embeddings: bool = Field(default=False,
 
         description="When true, refetches the 384-dim embedding arrays for the final candidates."
     )
@@ -227,6 +227,31 @@ class RankPredictResult(BaseModel):
         default_factory=list,
         description="Per-candidate ranking data in ranked order",
     )
+
+
+class UserEmbeddingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_did: str = Field(
+        min_length=7,
+        max_length=2048,
+        pattern=r"^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$",
+        json_schema_extra={"example": "string"},
+    )
+
+
+class UserEmbeddingResponse(BaseModel):
+    user_did: str
+    status: Literal["ok", "skipped"]
+    # Loaded likes are capped by the history window; usable embeddings may be fewer
+    # when liked posts/replies are missing or lack content embeddings.
+    history_like_count: int = Field(ge=0)
+    history_embedding_count: int = Field(ge=0)
+    embedding: list[float] | None = None
+    user_model_uuid: str | None = None
+    post_model_uuid: str | None = None
+    dimension: int | None = None
+    reason: Literal["no_likes", "no_embedded_history"] | None = None
 
 
 class FeedConfig(BaseModel):
