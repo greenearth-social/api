@@ -161,6 +161,8 @@ FEEDS: dict[str, FeedConfig] = {
         avatar="assets/icons/mysky.png",
         controls=("source_weights", "freshness", "purpose", "politics"),
         pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED),
+        explore_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_EXPLORE),
+        returning_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_RETURNING),
         survey_post_uri=ux_post_uri(ux_posts.SURVEY_YOUR_FEED),
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
@@ -352,7 +354,8 @@ FEEDS: dict[str, FeedConfig] = {
     "cold-start": FeedConfig(
         display_name="Cold Start",
         description=(
-            "Main MySky feed by GreenEarth for a user with no like history and no followed accounts."
+            "Main MySky feed by GreenEarth for a user with no like history and no "
+            "followed accounts."
         ),
         public=False,
         internal_rkey="mf-cs",

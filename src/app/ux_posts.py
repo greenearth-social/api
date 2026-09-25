@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 # in their timeline (issue #404).
 PUBLISHER_DID = "did:plc:66mudnfk2p4olwpaskmrw2vq"
 PUBLISHER_HANDLE = "notify.mysky.social"
+PUBLISHER_DID_ENV_VAR = "GE_UX_POST_PUBLISHER_DID"
+PUBLISHER_HANDLE_ENV_VAR = "GE_UX_POST_PUBLISHER_HANDLE"
 
 # Content lives outside src/ because only the resolved URIs are needed at runtime;
 # `.gcloudignore` keeps assets/ out of the deployed image.
@@ -41,10 +44,14 @@ MANIFEST_SCHEMA_VERSION = 1
 
 # Bluesky's post length limit, counted in graphemes.
 MAX_POST_GRAPHEMES = 300
+DEFAULT_SETTINGS_APP_ORIGIN = "https://app.greenearth.social"
+SETTINGS_PATH_PREFIX = "/#/settings/"
 
 # Named constants rather than bare strings at call sites: a typo becomes an
 # AttributeError at import instead of a silently unresolved post.
 PIN_YOUR_FEED = "pin-your-feed.md"
+PIN_YOUR_FEED_EXPLORE = "pin-your-feed-explore.md"
+PIN_YOUR_FEED_RETURNING = "pin-your-feed-returning.md"
 PIN_BEST_OF_FRIENDS = "pin-best-of-friends.md"
 PIN_RANDOM = "pin-random.md"
 SURVEY_YOUR_FEED = "survey-your-feed.md"
@@ -56,6 +63,8 @@ MANAGED_POSTS: tuple[str, ...] = (
     PIN_BEST_OF_FRIENDS,
     PIN_RANDOM,
     PIN_YOUR_FEED,
+    PIN_YOUR_FEED_EXPLORE,
+    PIN_YOUR_FEED_RETURNING,
     PLACEHOLDER,
     SURVEY_YOUR_FEED,
 )
@@ -64,6 +73,26 @@ MANAGED_POSTS: tuple[str, ...] = (
 # threadgate allowing nobody. Quote posts are disabled on every UX post, and likes
 # cannot be disabled at all -- atproto has no like-gating.
 REPLIES_ALLOWED: frozenset[str] = frozenset({SURVEY_YOUR_FEED})
+
+
+@dataclass(frozen=True)
+class VideoSpec:
+    """The native video attached to a managed UX post."""
+
+    filename: str
+    alt: str
+
+
+VIDEO_POSTS: dict[str, VideoSpec] = {
+    PIN_YOUR_FEED: VideoSpec(
+        filename="pin-your-feed.mp4",
+        alt="A demonstration of how to customize the MySky feed.",
+    ),
+    PIN_YOUR_FEED_EXPLORE: VideoSpec(
+        filename="pin-your-feed-explore.mp4",
+        alt="A demonstration of how to pin the MySky feed.",
+    ),
+}
 
 # Optional override, for pinning a URI by hand without a redeploy. Nothing sets this
 # in normal operation; the manifest is the usual source.
@@ -159,9 +188,40 @@ def content_path(name: str) -> Path:
     return CONTENT_DIR / name
 
 
+def video_path(name: str) -> Path | None:
+    """Return the video asset for a managed post, if it has one."""
+    spec = VIDEO_POSTS.get(name)
+    return CONTENT_DIR / spec.filename if spec else None
+
+
+def publisher_did() -> str:
+    """Return the deploy-time UX-post publisher, defaulting to production."""
+    return os.environ.get(PUBLISHER_DID_ENV_VAR, "").strip() or PUBLISHER_DID
+
+
+def publisher_handle() -> str:
+    """Return a human-readable label for the deploy-time publisher."""
+    configured = os.environ.get(PUBLISHER_HANDLE_ENV_VAR, "").strip()
+    if configured:
+        return configured
+    return PUBLISHER_HANDLE if publisher_did() == PUBLISHER_DID else publisher_did()
+
+
+def settings_url(feed_name: str) -> str:
+    """Build a Settings deep link for the frontend paired with this deployment."""
+    redirect_origin = os.environ.get("GE_SETTINGS_LINK_ORIGIN", "").strip().rstrip("/")
+    if redirect_origin:
+        return f"{redirect_origin}/settings/{feed_name}"
+    origin = os.environ.get("GE_SETTINGS_APP_ORIGIN", DEFAULT_SETTINGS_APP_ORIGIN).strip()
+    return f"{(origin or DEFAULT_SETTINGS_APP_ORIGIN).rstrip('/')}{SETTINGS_PATH_PREFIX}{feed_name}"
+
+
 def read_content(name: str) -> str:
     """Read a managed post's markdown source. Not available in the deployed image."""
-    return content_path(name).read_text(encoding="utf-8")
+    content = content_path(name).read_text(encoding="utf-8")
+    canonical_prefix = f"{DEFAULT_SETTINGS_APP_ORIGIN}{SETTINGS_PATH_PREFIX}"
+    configured_prefix = settings_url("")
+    return content.replace(canonical_prefix, configured_prefix)
 
 
 def resolved_uris() -> dict[str, str]:

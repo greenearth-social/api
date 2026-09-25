@@ -30,6 +30,16 @@ GE_TWO_TOWER_KNN_INDEX="${GE_TWO_TOWER_KNN_INDEX:-posts_recent_quality}"
 # Inference configuration
 GE_INFERENCE_BASE_URL=""
 
+# Frontend origin used by Settings links in repository-managed Bluesky posts.
+# Keep stage aligned with the APP_ORIGIN deployed to the stage OAuth functions.
+GE_SETTINGS_APP_ORIGIN="${GE_SETTINGS_APP_ORIGIN:-}"
+GE_SETTINGS_APP_METADATA_URL="${GE_SETTINGS_APP_METADATA_URL:-}"
+GE_SETTINGS_LINK_ORIGIN="${GE_SETTINGS_LINK_ORIGIN:-}"
+STAGE_SETTINGS_APP_ORIGIN="https://greenearth-471522--stage-4tnzb2wq.web.app"
+STAGE_SETTINGS_APP_METADATA_URL="https://us-central1-greenearth-471522.cloudfunctions.net/oauthClientMetadataStage"
+STAGE_SETTINGS_LINK_ORIGIN="https://greenearth-api-stage-oef7fsaama-ue.a.run.app"
+PROD_SETTINGS_APP_ORIGIN="https://app.greenearth.social"
+
 # Short git sha of the deployed code, resolved by require_clean_worktree().
 # Stamped onto the Cloud Run revision (env var + label) and onto debug feed
 # records so we can identify exactly what code is live (see issue #228).
@@ -111,6 +121,36 @@ resolve_inference_base_url() {
     log_info "Using mapped inference URL: $GE_INFERENCE_BASE_URL"
 }
 
+resolve_settings_app_origin() {
+    if [ -z "$GE_SETTINGS_APP_ORIGIN" ]; then
+        if [ "$ENVIRONMENT" = "prod" ]; then
+            GE_SETTINGS_APP_ORIGIN="$PROD_SETTINGS_APP_ORIGIN"
+        else
+            GE_SETTINGS_APP_ORIGIN="$STAGE_SETTINGS_APP_ORIGIN"
+        fi
+    fi
+    if [ "$ENVIRONMENT" != "prod" ]; then
+        if [ -z "$GE_SETTINGS_APP_METADATA_URL" ]; then
+            GE_SETTINGS_APP_METADATA_URL="$STAGE_SETTINGS_APP_METADATA_URL"
+        fi
+        if [ -z "$GE_SETTINGS_LINK_ORIGIN" ]; then
+            GE_SETTINGS_LINK_ORIGIN=$(gcloud run services describe \
+                "greenearth-api-$ENVIRONMENT" \
+                --region="$REGION" \
+                --project="$PROJECT_ID" \
+                --format="value(status.url)" 2>/dev/null || true)
+            GE_SETTINGS_LINK_ORIGIN="${GE_SETTINGS_LINK_ORIGIN:-$STAGE_SETTINGS_LINK_ORIGIN}"
+        fi
+    fi
+    GE_SETTINGS_APP_ORIGIN="${GE_SETTINGS_APP_ORIGIN%/}"
+    GE_SETTINGS_LINK_ORIGIN="${GE_SETTINGS_LINK_ORIGIN%/}"
+    export GE_SETTINGS_APP_ORIGIN GE_SETTINGS_APP_METADATA_URL GE_SETTINGS_LINK_ORIGIN
+    log_info "Using Settings app origin: $GE_SETTINGS_APP_ORIGIN"
+    if [ -n "$GE_SETTINGS_LINK_ORIGIN" ]; then
+        log_info "Publishing stable Settings links through: $GE_SETTINGS_LINK_ORIGIN"
+    fi
+}
+
 require_clean_worktree() {
     log_info "Verifying git working tree is clean..."
 
@@ -147,6 +187,7 @@ validate_config() {
     gcloud config set project "$PROJECT_ID"
 
     resolve_inference_base_url
+    resolve_settings_app_origin
 
     log_info "Configuration validation complete."
 }
@@ -295,6 +336,9 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_TWO_TOWER_KNN_INDEX=$GE_TWO_TOWER_KNN_INDEX"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_SETTINGS_APP_ORIGIN=$GE_SETTINGS_APP_ORIGIN"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_SETTINGS_APP_METADATA_URL=$GE_SETTINGS_APP_METADATA_URL"
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_SETTINGS_LINK_ORIGIN=$GE_SETTINGS_LINK_ORIGIN"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_PROBE_USER_DID=did:plc:s4tl2ajfsnstzuxtegl7r33g"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=4"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_RANK_MODEL_TIMEOUT_SEC=2.5"
@@ -483,6 +527,15 @@ preflight_bsky_publishers() {
 }
 
 prepare_ux_posts() {
+    local ux_post_publisher_id="$NOTIFY_BSKY_PUBLISHER_ID"
+    local ux_post_publisher_handle="notify.mysky.social"
+    local ux_post_secret="$NOTIFY_BSKY_SECRET"
+    if [ "$ENVIRONMENT" != "prod" ]; then
+        ux_post_publisher_id="$CATERPIE_BSKY_PUBLISHER_ID"
+        ux_post_publisher_handle="caterpie-internal.bsky.social"
+        ux_post_secret="$CATERPIE_STAGE_BSKY_SECRET"
+    fi
+
     # Content validation is offline and instant, so it always runs.
     if ! pipenv run python scripts/manage_ux_posts.py check; then
         log_error "UX post content is invalid; Cloud Run was not changed."
@@ -498,26 +551,29 @@ prepare_ux_posts() {
     # Resolving needs no credentials: it matches content against the account's public
     # records. Only publishing a genuinely new or edited post needs the app password,
     # so fetch it lazily and fail loudly if something is actually missing.
-    log_info "Resolving UX posts against $NOTIFY_BSKY_PUBLISHER_ID..."
-    if pipenv run python scripts/manage_ux_posts.py resolve --require-complete; then
+    log_info "Resolving UX posts against $ux_post_publisher_handle ($ux_post_publisher_id)..."
+    if GE_UX_POST_PUBLISHER_DID="$ux_post_publisher_id" \
+        GE_UX_POST_PUBLISHER_HANDLE="$ux_post_publisher_handle" \
+        pipenv run python scripts/manage_ux_posts.py resolve --require-complete; then
         log_info "All UX posts are already published."
         return 0
     fi
 
     local bsky_password
     if ! bsky_password=$(gcloud secrets versions access latest \
-        --secret="$NOTIFY_BSKY_SECRET" --project="$PROJECT_ID" 2>/dev/null); then
+        --secret="$ux_post_secret" --project="$PROJECT_ID" 2>/dev/null); then
         bsky_password=""
     fi
     if [ -z "$bsky_password" ]; then
-        log_error "UX posts need publishing but '$NOTIFY_BSKY_SECRET' is unavailable."
-        log_error "Create it with scripts/gcp_setup.sh --notify-bsky-app-password ..."
+        log_error "UX posts need publishing but '$ux_post_secret' is unavailable."
         exit 1
     fi
 
     log_info "Publishing new or edited UX posts..."
-    if ! pipenv run python scripts/manage_ux_posts.py \
-        --handle "$NOTIFY_BSKY_PUBLISHER_ID" \
+    if ! GE_UX_POST_PUBLISHER_DID="$ux_post_publisher_id" \
+        GE_UX_POST_PUBLISHER_HANDLE="$ux_post_publisher_handle" \
+        pipenv run python scripts/manage_ux_posts.py \
+        --handle "$ux_post_publisher_id" \
         --app-password "$bsky_password" \
         sync; then
         log_error "UX post sync failed; Cloud Run was not changed."
@@ -525,7 +581,9 @@ prepare_ux_posts() {
     fi
 
     # The manifest must be complete, or the revision would serve placeholders.
-    if ! pipenv run python scripts/manage_ux_posts.py resolve --require-complete; then
+    if ! GE_UX_POST_PUBLISHER_DID="$ux_post_publisher_id" \
+        GE_UX_POST_PUBLISHER_HANDLE="$ux_post_publisher_handle" \
+        pipenv run python scripts/manage_ux_posts.py resolve --require-complete; then
         log_error "UX posts are still unresolved after syncing; Cloud Run was not changed."
         exit 1
     fi

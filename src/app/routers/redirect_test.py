@@ -1,5 +1,6 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
@@ -72,6 +73,66 @@ def test_redirect_omits_empty_utm_params():
     location = response.headers["location"]
     assert "utm_source=bluesky" in location
     assert "utm_medium" not in location
+
+
+# ---------------------------------------------------------------------------
+# GET /settings/{feed_name}
+# ---------------------------------------------------------------------------
+
+
+def test_settings_redirect_resolves_current_preview_origin(monkeypatch):
+    metadata_url = "https://functions.example/oauthClientMetadataStage"
+    monkeypatch.setenv("GE_SETTINGS_APP_METADATA_URL", metadata_url)
+    monkeypatch.setenv("GE_SETTINGS_APP_ORIGIN", "https://fallback.example")
+    metadata_response = MagicMock()
+    metadata_response.json.return_value = {
+        "client_uri": "https://greenearth-471522--stage-4tnzb2wq.web.app"
+    }
+    http_client = MagicMock()
+    http_client.get = AsyncMock(return_value=metadata_response)
+
+    with patch("app.routers.redirect.get_http_client", return_value=http_client):
+        response = client.get("/settings/your-feed")
+
+    assert response.status_code == 302
+    assert response.headers["location"] == (
+        "https://greenearth-471522--stage-4tnzb2wq.web.app/#/settings/your-feed"
+    )
+    http_client.get.assert_awaited_once_with(metadata_url, timeout=5.0)
+
+
+def test_settings_redirect_falls_back_when_metadata_is_unavailable(monkeypatch):
+    monkeypatch.setenv("GE_SETTINGS_APP_METADATA_URL", "https://functions.example/metadata")
+    monkeypatch.setenv("GE_SETTINGS_APP_ORIGIN", "https://fallback.example/")
+    http_client = MagicMock()
+    http_client.get = AsyncMock(
+        side_effect=httpx.ConnectError(
+            "unavailable",
+            request=httpx.Request("GET", "https://functions.example/metadata"),
+        )
+    )
+
+    with patch("app.routers.redirect.get_http_client", return_value=http_client):
+        response = client.get("/settings/random")
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://fallback.example/#/settings/random"
+
+
+@pytest.mark.parametrize("feed_name", ["missing", "two-tower"])
+def test_settings_redirect_rejects_unknown_and_internal_feeds(feed_name):
+    response = client.get(f"/settings/{feed_name}")
+
+    assert response.status_code == 404
+
+
+def test_settings_redirect_returns_503_without_valid_origin(monkeypatch):
+    monkeypatch.delenv("GE_SETTINGS_APP_METADATA_URL", raising=False)
+    monkeypatch.delenv("GE_SETTINGS_APP_ORIGIN", raising=False)
+
+    response = client.get("/settings/your-feed")
+
+    assert response.status_code == 503
 
 
 # ---------------------------------------------------------------------------

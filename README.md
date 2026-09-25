@@ -627,15 +627,28 @@ about a missing local UX post manifest do not prevent description updates.
 "UX posts" are the posts we insert into feeds for product reasons rather than because
 they were ranked: the SETTINGS pin at the top of each public feed, the "you must be
 logged in" explainer, and the user-interview survey post. Their content is versioned
-in `assets/ux_posts/*.md` as plain text with `[label](url)` markdown links, which
-`scripts/manage_ux_posts.py` converts into Bluesky rich-text facets.
+in `assets/ux_posts/` as plain text with `[label](url)` markdown links and optional
+native-video assets. `scripts/manage_ux_posts.py` converts the links into Bluesky
+rich-text facets and uploads videos when a managed post declares one.
 
-They publish to the **notifications account**, `notify.mysky.social`
+Settings links in those files use the production URL as their checked-in
+canonical form. Production keeps that URL. Stage rewrites links to the stable
+Cloud Run origin from `GE_SETTINGS_LINK_ORIGIN` and its
+`/settings/{feed_name}` redirect. That endpoint reads the current Firebase
+preview origin from `GE_SETTINGS_APP_METADATA_URL`, falling back to
+`GE_SETTINGS_APP_ORIGIN`, so weekly preview-channel URL changes do not require
+publishing new Bluesky posts.
+
+Production publishes them to the **notifications account**, `notify.mysky.social`
 (`did:plc:66mudnfk2p4olwpaskmrw2vq`), not the brand account. Editing a post publishes
 a new record, so keeping them off `mysky.social` means its followers never see a
-republished revision in their timeline (issue #404). Both environments share the
-account: the AppView hydrates any public URI regardless of which generator served the
-skeleton.
+republished revision in their timeline (issue #404). Stage publishes them to its
+existing `caterpie-internal.bsky.social` account so preview-only Settings links never
+appear on the public production notifications account.
+
+MySky has three contextual top-post variants. The pre-Settings and Explore variants
+are managed native-video posts; the returning-user variant is a managed text post.
+All three are published and resolved through the same UX-post registry.
 
 To change a post, edit the markdown and deploy. To add one, create the file and add
 it to `MANAGED_POSTS` in `src/app/ux_posts.py`, then reference it from `feeds.py` via
@@ -658,9 +671,10 @@ filename to URI therefore lives in `src/app/ux_posts_resolved.json`, which is
 resolves against the account before uploading:
 
 - Resolution matches each content file against the account's existing posts by exact
-  **signature** — the visible text plus its link targets. A match is reused, so
-  unchanged content never republishes. This needs no credentials, since it reads
-  public records.
+  **signature** — the visible text, link targets, and optional video blob CID. A match
+  is reused, so unchanged content never republishes. This needs no credentials,
+  since it reads public records and calculates the local video's content-addressed
+  CID offline.
 - Anything unmatched is new or edited, and is published with the
   `bsky-app-password-notify-prod` secret. Old records are never deleted, because an
   older revision may still reference them.
@@ -718,6 +732,15 @@ Deployments validate the required publisher credentials before changing Cloud Ru
 Feed generator metadata, including production public descriptions from `feeds.py`
 and stage/dev Caterpie descriptions, is synchronized later in the same deployment;
 a failed post-deploy sync makes the deployment command exit nonzero.
+
+PostSeen user classification is updated transactionally on the interaction
+serving path, so there is no scheduled job. Backfill existing interactions by
+reviewing the dry-run output and then explicitly executing it:
+
+```bash
+pipenv run python scripts/backfill_user_classification.py
+pipenv run python scripts/backfill_user_classification.py --execute
+```
 
 #### 6. View the feed in Bluesky
 

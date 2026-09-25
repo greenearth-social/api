@@ -121,6 +121,29 @@ class UserDocument(BaseModel):
         description="When the user last received an interactionSeen event for the survey post. "
         "Used to enforce the once-per-week throttle.",
     )
+    precompute_artifacts: bool = Field(
+        default=False,
+        description="Whether expensive per-user artifacts should be precomputed. Set after "
+        "the first real interactionSeen event.",
+    )
+    presumed_pinned: bool = Field(
+        default=False,
+        description="Whether repeat PostSeen activity indicates the user has probably pinned "
+        "the feed. This flag is monotonic until an explicit churn policy is introduced.",
+    )
+    post_seen_days_utc: list[str] = Field(
+        default_factory=list,
+        description="Distinct UTC calendar dates with PostSeen activity in the trailing "
+        "seven-day window, formatted as YYYY-MM-DD.",
+    )
+    last_post_seen_at: datetime | None = Field(
+        default=None,
+        description="Most recent UTC server receipt time recorded for PostSeen classification.",
+    )
+    settings_visited_at: datetime | None = Field(
+        default=None,
+        description="First time the authenticated user opened the Settings experience.",
+    )
     created_by_load_test: bool = Field(
         default=False,
         description="True when this document was created by a load-test session and no real "
