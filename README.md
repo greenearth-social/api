@@ -777,7 +777,6 @@ pipenv run python scripts/average_user_embedding.py \
 | `--min-interaction-seen` | `50` |
 | `--es-url` | `https://localhost:9200` |
 | `--es-insecure` / `--no-es-insecure` | `True` (ES certificate verification disabled) |
-| `--likes-index` | `likes` |
 | `--min-likes` | `5` |
 | `--api-url` | `http://localhost:8300` |
 | `--workers` | `4` |
@@ -794,10 +793,11 @@ commands should supply an explicit absolute `--output-dir`.
 
 PostHog selection covers all available history and feeds, with a fixed
 run-start cutoff, bound query parameters, and DID-ordered pages of 1,000.
-Counts must meet the inclusive threshold. ES like counts use batches of 500
-and represent likes **made by the user that remain in the index**, not a
-lifetime total; PostHog is not used to count likes. Missing aggregation buckets
-count as zero. The API separately loads up to 64 recent likes for inference.
+Counts must meet the inclusive threshold. ES like counts query the fixed `likes`
+index in batches of 500 and represent likes **made by the user that remain in
+the index**, not a lifetime total; PostHog is not used to count likes. Missing
+aggregation buckets count as zero. The API separately loads up to 64 recent
+likes for inference.
 ES data can change during a run; the PostHog cutoff does not make ES reads a
 point-in-time snapshot.
 

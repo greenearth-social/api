@@ -160,7 +160,7 @@ def test_likes_batching_is_exact_and_missing_users_count_zero():
         return es_response({did: 5 for did in batch if did != dids[0]})
 
     client = FakeClient(respond)
-    result = average.collect_like_counts(client, "likes", dids)
+    result = average.collect_like_counts(client, dids)
     assert result == {did: 0 if did == dids[0] else 5 for did in dids}
     assert [len(payload["query"]["terms"]["author_did"]) for _, payload in client.requests] == [
         500,
@@ -190,7 +190,7 @@ def test_likes_rejects_partial_or_inexact_aggregations(mutation):
     data = es_response({"did:plc:a": 5})
     mutation(data)
     with pytest.raises(average.RunError):
-        average.collect_like_counts(FakeClient(lambda *_: data), "likes", ["did:plc:a"])
+        average.collect_like_counts(FakeClient(lambda *_: data), ["did:plc:a"])
 
 
 def http_error(status, retry_after=None, code=None):
@@ -777,7 +777,7 @@ def test_likes_reject_bool_metadata(mutation):
     result = es_response({"did:plc:a": 5})
     mutation(result)
     with pytest.raises(average.RunError):
-        average.collect_like_counts(FakeClient(lambda *_: result), "likes", ["did:plc:a"])
+        average.collect_like_counts(FakeClient(lambda *_: result), ["did:plc:a"])
 
 
 @pytest.mark.parametrize("interrupt", ["wait", "request"])

@@ -29,7 +29,7 @@ from http.client import HTTPException
 from pathlib import Path
 from threading import Lock
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 # Add the repo's src/ directory so the script can import app.* from any working directory.
@@ -45,6 +45,8 @@ from app.lib.average_user_embedding_artifact import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+LIKES_INDEX = "likes"
 
 REASON_HINTS = {
     "no_likes": "No recent likes were loaded; compare the API and script ES environment.",
@@ -366,7 +368,7 @@ def collect_posthog_users(client, project_id, minimum, cutoff):
         )
 
 
-def collect_like_counts(client, index, dids):
+def collect_like_counts(client, dids):
     """Count exact retained likes; every requested author fits in every shard."""
     # These are counts in the retained likes index, not lifetime likes or the
     # smaller usable history window later loaded by the API. Missing terms stay zero.
@@ -377,7 +379,7 @@ def collect_like_counts(client, index, dids):
         "Elasticsearch: counting retained likes for %d DIDs in %d batches; index=%s",
         len(ordered),
         batch_count,
-        index,
+        LIKES_INDEX,
     )
     for start in range(0, len(ordered), 500):
         batch = ordered[start : start + 500]
@@ -389,7 +391,7 @@ def collect_like_counts(client, index, dids):
         # Filtering to this batch bounds the number of possible author buckets.
         # Both size limits can therefore include every term, even on each shard.
         result = client.post(
-            f"/{quote(index, safe='')}/_search",
+            f"/{LIKES_INDEX}/_search",
             {
                 "size": 0,
                 "query": {"terms": {"author_did": batch}},
@@ -743,7 +745,6 @@ def build_parser():
     parser.add_argument("--posthog-host", type=base_url, default="https://us.posthog.com")
     parser.add_argument("--min-interaction-seen", type=nonnegative_int, default=50)
     parser.add_argument("--es-url", type=base_url, default="https://localhost:9200")
-    parser.add_argument("--likes-index", default="likes")
     parser.add_argument("--min-likes", type=nonnegative_int, default=5)
     parser.add_argument("--api-url", type=base_url, default="http://localhost:8300")
     parser.add_argument("--workers", type=positive_int, default=4)
@@ -759,8 +760,6 @@ def build_parser():
 
 def generate(args, run_id, started_at):
     credentials = {}
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.likes_index):
-        raise RunError("--likes-index must be a single index or alias name")
     for name in ("POSTHOG_PERSONAL_API_KEY", "GE_ELASTICSEARCH_API_KEY", "GE_API_KEY"):
         value = os.environ.get(name, "").strip()
         if not value or any(character.isspace() for character in value):
@@ -791,11 +790,11 @@ def generate(args, run_id, started_at):
             or cluster == "_na_"
         ):
             raise RunError("Elasticsearch did not return a valid cluster UUID")
-        source = {"es_cluster_uuid": cluster, "likes_index": args.likes_index}
+        source = {"es_cluster_uuid": cluster, "likes_index": LIKES_INDEX}
         users = collect_posthog_users(
             posthog, args.posthog_project_id, args.min_interaction_seen, cutoff
         )
-        likes = collect_like_counts(es, args.likes_index, users)
+        likes = collect_like_counts(es, users)
     except RequestError as error:
         raise RunError(f"Cohort collection failed: {error.reason}") from None
     eligible = [did for did in sorted(users) if likes[did] >= args.min_likes]
