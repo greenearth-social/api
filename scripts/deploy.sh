@@ -41,13 +41,11 @@ GE_INFERENCE_BASE_URL=""
 # records so we can identify exactly what code is live (see issue #228).
 GIT_SHA=""
 
-# Resolved by sync_pinned_posts before the Cloud Run revision is created.
-GE_PINNED_POST_YOUR_FEED_URI=""
-GE_PINNED_POST_BEST_OF_FRIENDS_URI=""
-GE_PINNED_POST_RANDOM_URI=""
-GE_PINNED_POST_CONFIG_SHA=""
-DEPLOYED_PINNED_POST_CONFIG_SHA=""
-FORCE_SYNC_PINNED_POSTS=false
+# UX posts (feed pins, the survey post, the logged-out explainer) are resolved into
+# src/app/ux_posts_resolved.json before the source upload. That manifest is generated
+# and gitignored, so it never conflicts between branches, but it ships inside the
+# image -- which is what makes a rollback resolve the URIs it was built with.
+SKIP_UX_POST_SYNC=false
 
 # Bluesky publishing identities. Use stable account DIDs for authentication so
 # account handle changes cannot break deployments. Caterpie's environment-specific
@@ -57,6 +55,12 @@ PROD_BSKY_SECRET="bsky-app-password-prod"
 CATERPIE_BSKY_PUBLISHER_ID="did:plc:s4tl2ajfsnstzuxtegl7r33g"
 CATERPIE_STAGE_BSKY_SECRET="bsky-app-password-caterpie"
 CATERPIE_PROD_BSKY_SECRET="bsky-app-password-caterpie-prod"
+# UX posts publish to the notifications account rather than the brand account, so
+# republished revisions never reach the brand account's followers (issue #404). Both
+# environments share it: the AppView hydrates any public URI regardless of which
+# generator served the skeleton.
+NOTIFY_BSKY_PUBLISHER_ID="did:plc:66mudnfk2p4olwpaskmrw2vq"
+NOTIFY_BSKY_SECRET="bsky-app-password-notify-prod"
 
 # PostHog configuration. Each environment is a separate PostHog project (separate
 # API key, provisioned via scripts/gcp_setup.sh), but all projects live on the same
@@ -331,10 +335,6 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=4"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_RANK_MODEL_TIMEOUT_SEC=2.5"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_EMBED_HYDRATION_TIMEOUT_SEC=1.5"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_YOUR_FEED_URI=$GE_PINNED_POST_YOUR_FEED_URI"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_BEST_OF_FRIENDS_URI=$GE_PINNED_POST_BEST_OF_FRIENDS_URI"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_RANDOM_URI=$GE_PINNED_POST_RANDOM_URI"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_PINNED_POST_CONFIG_SHA=$GE_PINNED_POST_CONFIG_SHA"
     # Below the AppView's 10s abort on getFeedSkeleton calls (confirmed via
     # atproto source, see #291) so a hung downstream call (ES, ranker)
     # surfaces as a logged, metered 504 instead of losing the race against
@@ -518,107 +518,54 @@ preflight_bsky_publishers() {
     log_info "Bluesky publishing credentials are valid."
 }
 
-sync_pinned_posts() {
-    local publisher_id="$CATERPIE_BSKY_PUBLISHER_ID"
-    local bsky_secret="$CATERPIE_STAGE_BSKY_SECRET"
-    if [ "$ENVIRONMENT" = "prod" ]; then
-        publisher_id="$PROD_BSKY_PUBLISHER_ID"
-        bsky_secret="$PROD_BSKY_SECRET"
+prepare_ux_posts() {
+    # Content validation is offline and instant, so it always runs.
+    if ! pipenv run python scripts/manage_ux_posts.py check; then
+        log_error "UX post content is invalid; Cloud Run was not changed."
+        exit 1
+    fi
+
+    if [ "$SKIP_UX_POST_SYNC" = true ]; then
+        log_warn "Skipping UX post sync (--skip-ux-post-sync)."
+        log_warn "The revision will ship whatever src/app/ux_posts_resolved.json holds."
+        return 0
+    fi
+
+    # Resolving needs no credentials: it matches content against the account's public
+    # records. Only publishing a genuinely new or edited post needs the app password,
+    # so fetch it lazily and fail loudly if something is actually missing.
+    log_info "Resolving UX posts against $NOTIFY_BSKY_PUBLISHER_ID..."
+    if pipenv run python scripts/manage_ux_posts.py resolve --require-complete; then
+        log_info "All UX posts are already published."
+        return 0
     fi
 
     local bsky_password
     if ! bsky_password=$(gcloud secrets versions access latest \
-        --secret="$bsky_secret" --project="$PROJECT_ID" 2>/dev/null); then
+        --secret="$NOTIFY_BSKY_SECRET" --project="$PROJECT_ID" 2>/dev/null); then
         bsky_password=""
     fi
     if [ -z "$bsky_password" ]; then
-        log_error "Could not fetch the pinned-post app password from '$bsky_secret'"
-        log_error "Refusing to deploy a revision whose managed pin URIs are unresolved."
+        log_error "UX posts need publishing but '$NOTIFY_BSKY_SECRET' is unavailable."
+        log_error "Create it with scripts/gcp_setup.sh --notify-bsky-app-password ..."
         exit 1
     fi
 
-    log_info "Publishing/reusing managed feed pins → $publisher_id..."
-    GE_PINNED_POST_YOUR_FEED_URI=""
-    GE_PINNED_POST_BEST_OF_FRIENDS_URI=""
-    GE_PINNED_POST_RANDOM_URI=""
-    local pin_output
-    if ! pin_output=$(pipenv run python scripts/manage_pinned_posts.py \
-        --handle "$publisher_id" \
+    log_info "Publishing new or edited UX posts..."
+    if ! pipenv run python scripts/manage_ux_posts.py \
+        --handle "$NOTIFY_BSKY_PUBLISHER_ID" \
         --app-password "$bsky_password" \
-        --format tsv); then
-        log_error "Managed pinned-post sync failed; Cloud Run was not changed."
+        sync; then
+        log_error "UX post sync failed; Cloud Run was not changed."
         exit 1
     fi
 
-    local feed_name
-    local post_uri
-    while IFS=$'\t' read -r feed_name post_uri; do
-        case "$feed_name" in
-            your-feed) GE_PINNED_POST_YOUR_FEED_URI="$post_uri" ;;
-            best-of-friends) GE_PINNED_POST_BEST_OF_FRIENDS_URI="$post_uri" ;;
-            random) GE_PINNED_POST_RANDOM_URI="$post_uri" ;;
-        esac
-    done <<< "$pin_output"
-
-    if [ -z "$GE_PINNED_POST_YOUR_FEED_URI" ] \
-        || [ -z "$GE_PINNED_POST_BEST_OF_FRIENDS_URI" ] \
-        || [ -z "$GE_PINNED_POST_RANDOM_URI" ]; then
-        log_error "Pinned-post sync did not return all three public feed URIs."
+    # The manifest must be complete, or the revision would serve placeholders.
+    if ! pipenv run python scripts/manage_ux_posts.py resolve --require-complete; then
+        log_error "UX posts are still unresolved after syncing; Cloud Run was not changed."
         exit 1
     fi
-    log_info "Managed feed pins are ready."
-}
-
-load_deployed_pinned_post_state() {
-    local service_json
-    if ! service_json=$(gcloud run services describe "greenearth-api-$ENVIRONMENT" \
-        --region="$REGION" --project="$PROJECT_ID" --format=json 2>/dev/null); then
-        return 1
-    fi
-
-    local pin_state
-    if ! pin_state=$(pipenv run python scripts/manage_pinned_posts.py \
-        --extract-deployed-state <<< "$service_json"); then
-        return 1
-    fi
-
-    local env_name
-    local env_value
-    while IFS=$'\t' read -r env_name env_value; do
-        case "$env_name" in
-            GE_PINNED_POST_CONFIG_SHA) DEPLOYED_PINNED_POST_CONFIG_SHA="$env_value" ;;
-            GE_PINNED_POST_YOUR_FEED_URI) GE_PINNED_POST_YOUR_FEED_URI="$env_value" ;;
-            GE_PINNED_POST_BEST_OF_FRIENDS_URI) GE_PINNED_POST_BEST_OF_FRIENDS_URI="$env_value" ;;
-            GE_PINNED_POST_RANDOM_URI) GE_PINNED_POST_RANDOM_URI="$env_value" ;;
-        esac
-    done <<< "$pin_state"
-}
-
-prepare_pinned_posts() {
-    GE_PINNED_POST_CONFIG_SHA=$(pipenv run python scripts/manage_pinned_posts.py --config-sha)
-    if [ -z "$GE_PINNED_POST_CONFIG_SHA" ]; then
-        log_error "Could not calculate the managed pinned-post configuration fingerprint."
-        exit 1
-    fi
-
-    load_deployed_pinned_post_state || true
-    if [ "$FORCE_SYNC_PINNED_POSTS" = false ] \
-        && [ "$DEPLOYED_PINNED_POST_CONFIG_SHA" = "$GE_PINNED_POST_CONFIG_SHA" ] \
-        && [ -n "$GE_PINNED_POST_YOUR_FEED_URI" ] \
-        && [ -n "$GE_PINNED_POST_BEST_OF_FRIENDS_URI" ] \
-        && [ -n "$GE_PINNED_POST_RANDOM_URI" ]; then
-        log_info "Managed pin configuration is unchanged; reusing deployed URIs."
-        return 0
-    fi
-
-    if [ "$FORCE_SYNC_PINNED_POSTS" = true ]; then
-        log_info "Managed pin sync forced by --sync-pinned-posts."
-    elif [ -z "$DEPLOYED_PINNED_POST_CONFIG_SHA" ]; then
-        log_info "No deployed managed-pin state found; an initial sync is required."
-    else
-        log_info "Managed pin configuration changed; publishing/reusing the new records."
-    fi
-    sync_pinned_posts
+    log_info "UX posts are ready."
 }
 
 _sync_feeds_to_account() {
@@ -709,6 +656,7 @@ main() {
     require_clean_worktree
     validate_config
     resolve_average_user_embedding
+    prepare_ux_posts
     if ! preflight_bsky_publishers; then
         log_error "Bluesky publishing preflight failed; Cloud Run was not changed."
         exit 1
@@ -722,7 +670,6 @@ main() {
 
     get_elasticsearch_internal_lb_ip
     generate_requirements
-    prepare_pinned_posts
     deploy_api_service
     if ! sync_feeds; then
         log_error "Cloud Run deployed, but Bluesky feed sync failed."
@@ -780,8 +727,8 @@ while [[ $# -gt 0 ]]; do
             API_REQUEST_TIMEOUT="$2"
             shift 2
             ;;
-        --sync-pinned-posts)
-            FORCE_SYNC_PINNED_POSTS=true
+        --skip-ux-post-sync)
+            SKIP_UX_POST_SYNC=true
             shift
             ;;
         --help)
@@ -799,7 +746,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --min-instances N        Minimum instances (default: 1)"
             echo "  --max-instances N        Maximum instances (default: 20)"
             echo "  --timeout SECONDS        Cloud Run request timeout (default: 60)"
-            echo "  --sync-pinned-posts      Force Bluesky pin verification/publication"
+            echo "  --skip-ux-post-sync      Ship the current UX post manifest without syncing"
             echo "  --help                   Show this help message"
             exit 0
             ;;

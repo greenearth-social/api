@@ -1,13 +1,10 @@
 """Exercise the real endpoint-to-producer contract without external services."""
 
-import io
 import json
 import logging
 import math
 from collections import Counter
 from types import SimpleNamespace
-from urllib.error import HTTPError
-from urllib.parse import urlsplit
 
 import average_user_embedding as producer
 import httpx
@@ -25,6 +22,8 @@ USER_MODEL = "1affd684bc7f45f895e488f83dd0a2fa"
 POST_MODEL = "9b946f280fd84899a7f82246fbc34d17"
 OTHER_POST_MODEL = "2" * 32
 DIDS = [f"did:plc:{name}" for name in ("a", "b", "c", "d")]
+# a and b contribute equally despite very different retained like counts; c has
+# no usable history and d falls below the like threshold before any endpoint call.
 INTERACTIONS = dict(zip(DIDS, (50, 100, 70, 60), strict=True))
 LIKE_COUNTS = dict(zip(DIDS, (5, 500, 5, 4), strict=True))
 
@@ -39,9 +38,6 @@ def search_response(hits):
 
 class HistoryES:
     """Reply history must participate; any candidate search fails the test."""
-
-    async def info(self):
-        return {"cluster_uuid": "same-cluster"}
 
     async def search(self, *, index, query, **kwargs):
         if index == "likes":
@@ -84,6 +80,8 @@ class HistoryES:
 def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_changes):
     caplog.set_level(logging.INFO, logger=producer.__name__)
     app = FastAPI()
+    # Use the real router, response models, history loader, and prediction helper.
+    # Only authentication and external services are replaced in this isolated app.
     app.include_router(embeddings.router)
     app.dependency_overrides[verify_api_key] = lambda: "test-key-id"
     app.state.es = HistoryES()
@@ -93,6 +91,8 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
     inference_calls = []
 
     async def predict(url, *, json, headers):
+        # History markers identify contributors without relying on request ordering.
+        # Changing b's paired model simulates a rollout during artifact generation.
         assert url.endswith("/models/user-tower/predict")
         marker = json["history_embeddings"][0][0]
         inference_calls.append(marker)
@@ -114,64 +114,54 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
     for variable in ("POSTHOG_PERSONAL_API_KEY", "GE_ELASTICSEARCH_API_KEY", "GE_API_KEY"):
         monkeypatch.setenv(variable, "integration-test-key")
 
-    real_client = producer.JsonClient
+    real_client = httpx.Client
     endpoint_calls = []
     with TestClient(app) as endpoint:
 
-        class OfflineTransport:
-            def open(self, request, *, timeout):
-                assert timeout == 60
-                url = urlsplit(request.full_url)
-                body = json.loads(request.data) if request.data else None
-                if url.hostname == "posthog.test":
-                    assert isinstance(body, dict)
-                    after = body["query"]["values"]["after_did"]
-                    result = {
+        def handle(request):
+            # Keep real HTTPX requests/JSON parsing and bridge the API requests to
+            # FastAPI, replacing only the external services at the transport boundary.
+            assert all(timeout == 60 for timeout in request.extensions["timeout"].values())
+            body = json.loads(request.content)
+            if request.url.host == "posthog.test":
+                after = body["query"]["values"]["after_did"]
+                return httpx.Response(
+                    200,
+                    json={
                         "results": [
                             [did, count] for did, count in INTERACTIONS.items() if did > after
                         ],
-                    }
-                elif url.hostname == "es.test":
-                    if url.path == "/":
-                        result = {"cluster_uuid": "same-cluster"}
-                    else:
-                        assert url.path == "/likes/_search"
-                        assert isinstance(body, dict)
-                        batch = body["query"]["terms"]["author_did"]
-                        result = {
-                            **search_response([]),
-                            "aggregations": {
-                                "users": {
-                                    "sum_other_doc_count": 0,
-                                    "doc_count_error_upper_bound": 0,
-                                    "buckets": [
-                                        {"key": did, "doc_count": LIKE_COUNTS[did]} for did in batch
-                                    ],
-                                }
-                            },
-                        }
-                else:
-                    assert url.hostname == "api.test"
-                    assert isinstance(body, dict)
-                    endpoint_calls.append(body["user_did"])
-                    response = endpoint.post(url.path, json=body, headers=dict(request.headers))
-                    if response.status_code >= 400:
-                        raise HTTPError(
-                            request.full_url,
-                            response.status_code,
-                            "request failed",
-                            response.headers,
-                            io.BytesIO(response.content),
-                        )
-                    result = response.json()
-                return io.BytesIO(json.dumps(result).encode())
+                    },
+                )
+            if request.url.host == "es.test":
+                assert request.url.path == "/likes/_search"
+                batch = body["query"]["terms"]["author_did"]
+                return httpx.Response(
+                    200,
+                    json={
+                        **search_response([]),
+                        "aggregations": {
+                            "users": {
+                                "sum_other_doc_count": 0,
+                                "doc_count_error_upper_bound": 0,
+                                "buckets": [
+                                    {"key": did, "doc_count": LIKE_COUNTS[did]} for did in batch
+                                ],
+                            }
+                        },
+                    },
+                )
+            assert request.url.host == "api.test"
+            endpoint_calls.append(body["user_did"])
+            response = endpoint.post(request.url.path, json=body, headers=dict(request.headers))
+            return httpx.Response(
+                response.status_code, content=response.content, headers=response.headers
+            )
 
-        def make_client(*args, **kwargs):
-            client = real_client(*args, **kwargs)
-            monkeypatch.setattr(client, "opener", OfflineTransport())
-            return client
+        def make_client(**kwargs):
+            return real_client(**kwargs, transport=httpx.MockTransport(handle))
 
-        monkeypatch.setattr(producer, "JsonClient", make_client)
+        monkeypatch.setattr(producer.httpx, "Client", make_client)
         args = producer.build_parser().parse_args(
             [
                 "--posthog-host",
@@ -180,8 +170,6 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
                 "https://es.test",
                 "--api-url",
                 "https://api.test",
-                "--workers",
-                "1",
                 "--output-dir",
                 str(tmp_path / "results"),
             ]
@@ -217,7 +205,6 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
     }
     assert "contributing=2" in caplog.text
     assert "skipped=1" in caplog.text
-    assert "failed=0" in caplog.text
     assert "no_embedded_history" in caplog.text
     assert b"did:" not in data
     assert b"integration-test-key" not in data

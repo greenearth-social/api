@@ -63,8 +63,9 @@ def _search(hits, **changes):
 
 @pytest.fixture
 def client(monkeypatch):
-    es = Mock()
-    es.info = AsyncMock(return_value={"cluster_uuid": "cluster-1"})
+    # Repository conftest.py bypasses API-key auth for ordinary tests. Replace the
+    # external clients/history here, but exercise real routing and inference parsing.
+    es = Mock(spec=["search"])
     monkeypatch.setattr(app.state, "es", es, raising=False)
     monkeypatch.setattr(app.state, "firestore", object(), raising=False)
     monkeypatch.setattr(
@@ -79,9 +80,11 @@ def client(monkeypatch):
     return TestClient(app)
 
 
-def test_export_propagates_actual_pair_source_and_history_without_candidate_search(
+def test_export_propagates_actual_pair_and_history_without_candidate_search(
     client, monkeypatch
 ):
+    # The serving prediction is authoritative for its paired model. Deliberately
+    # fail any readiness lookup or candidate search to enforce this export boundary.
     monkeypatch.setattr(
         inference,
         "get_cached_post_tower_uuid",
@@ -101,8 +104,6 @@ def test_export_propagates_actual_pair_source_and_history_without_candidate_sear
         "dimension": 2,
         "history_like_count": 1,
         "history_embedding_count": 1,
-        "es_cluster_uuid": "cluster-1",
-        "likes_index": "likes",
     }
     cast(AsyncMock, embeddings.fetch_user_history_features).assert_awaited_once_with(
         app.state.es, DID
@@ -118,41 +119,6 @@ def test_export_propagates_actual_pair_source_and_history_without_candidate_sear
         prediction.call_args.kwargs["headers"]["x-request-id"] == response.headers["x-request-id"]
     )
     app.state.es.search.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_cluster_identity_shared_across_concurrent_users(client):
-    async def lookup():
-        await asyncio.sleep(0)
-        return {"cluster_uuid": "cluster-1"}
-
-    app.state.es.info.side_effect = lookup
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as concurrent_client:
-        responses = await asyncio.gather(
-            *(
-                concurrent_client.post("/embeddings/user", json={"user_did": f"did:plc:user{i}"})
-                for i in range(4)
-            )
-        )
-        responses.append(
-            await concurrent_client.post("/embeddings/user", json={"user_did": DID})
-        )
-    assert all(response.status_code == 200 for response in responses)
-    assert all(response.json()["es_cluster_uuid"] == "cluster-1" for response in responses)
-    app.state.es.info.assert_awaited_once()
-
-
-def test_replacing_es_client_refreshes_cluster_identity(client, monkeypatch):
-    response = client.post("/embeddings/user", json={"user_did": DID})
-    assert response.json()["es_cluster_uuid"] == "cluster-1"
-    replacement = Mock(info=AsyncMock(return_value={"cluster_uuid": "cluster-2"}))
-    monkeypatch.setattr(app.state, "es", replacement)
-    response = client.post("/embeddings/user", json={"user_did": DID})
-    assert response.status_code == 200
-    assert response.json()["es_cluster_uuid"] == "cluster-2"
-    replacement.info.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -173,18 +139,19 @@ def test_missing_history_skips_inference_and_excludes_vectors(client, monkeypatc
     assert body["reason"] == reason
     assert body["history_like_count"] == len(history.items)
     assert body["history_embedding_count"] == 0
-    assert body["es_cluster_uuid"] == "cluster-1"
     assert not {"embedding", "dimension", "user_model_uuid", "post_model_uuid"} & body.keys()
     _mock_prediction_request().assert_not_called()
 
 
 def test_authentication_uses_existing_api_key_header(client, monkeypatch):
+    # Remove the shared test bypass only here; verify auth runs before upstream I/O.
     app.dependency_overrides.pop(verify_api_key)
     authenticate = AsyncMock(return_value=None)
     monkeypatch.setattr(security, "authenticate_api_key", authenticate)
     response = client.post("/embeddings/user", json={"user_did": DID})
     assert response.status_code == 401
-    app.state.es.info.assert_not_called()
+    cast(AsyncMock, embeddings.fetch_user_history_features).assert_not_called()
+    _mock_prediction_request().assert_not_called()
     authenticate.return_value = SimpleNamespace(key_id="valid")
     response = client.post(
         "/embeddings/user", json={"user_did": DID}, headers={"X-API-Key": "a-key"}
@@ -198,7 +165,8 @@ def test_authentication_uses_existing_api_key_header(client, monkeypatch):
 )
 def test_invalid_did_rejected_before_upstream_calls(client, did):
     assert client.post("/embeddings/user", json={"user_did": did}).status_code == 422
-    app.state.es.info.assert_not_called()
+    cast(AsyncMock, embeddings.fetch_user_history_features).assert_not_called()
+    _mock_prediction_request().assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -226,6 +194,8 @@ def test_invalid_predictions_return_sanitized_error(client, changes, code):
 def test_nonfinite_vectors_rejected(client, value):
     import json
 
+    # Use raw JSON bytes because the HTTP test helper would reject nonfinite numbers
+    # before the application's own parser/validator gets a chance to inspect them.
     body = json.dumps(_prediction()).replace("[0.6, 0.8]", f"[{value}, 1]")
     _mock_prediction_request().return_value = httpx.Response(200, content=body)
     response = client.post("/embeddings/user", json={"user_did": DID})
@@ -247,6 +217,8 @@ def test_nonfinite_vectors_rejected(client, value):
 def test_upstream_http_errors_use_existing_inference_handling(
     client, caplog, status, code, error_class
 ):
+    # Preserve the shared helper's current HTTP-error behavior: inference HTTP
+    # errors become RuntimeError, which this route translates to upstream_error.
     _mock_prediction_request().return_value = httpx.Response(
         status, text="secret-upstream-body"
     )
@@ -280,16 +252,16 @@ def test_history_failures_prevent_inference(client, monkeypatch, caplog, excepti
     _mock_prediction_request().assert_not_called()
 
 
-@pytest.mark.parametrize("stage", ["source_identity", "history", "inference"])
+@pytest.mark.parametrize("stage", ["history", "inference"])
 def test_overall_deadline_covers_all_stages(client, monkeypatch, stage):
+    # A short injected deadline avoids a real 55-second wait while exercising
+    # cancellation during history loading and inference.
     monkeypatch.setattr(embeddings, "REQUEST_TIMEOUT_SECONDS", 0.01)
 
     async def slow_operation(*args, **kwargs):
         await asyncio.sleep(10)
 
-    if stage == "source_identity":
-        app.state.es.info.side_effect = slow_operation
-    elif stage == "history":
+    if stage == "history":
         cast(AsyncMock, embeddings.fetch_user_history_features).side_effect = slow_operation
     else:
         _mock_prediction_request().side_effect = slow_operation
@@ -314,21 +286,8 @@ def test_missing_inference_configuration_is_explicit(client, monkeypatch):
     response = client.post("/embeddings/user", json={"user_did": DID})
     assert response.status_code == 502
     assert response.json()["detail"]["code"] == "inference_not_configured"
-    app.state.es.info.assert_not_called()
-
-
-@pytest.mark.parametrize("cluster_uuid", [None, "", " ", "_na_", 12])
-def test_missing_cluster_identity_is_not_exported(client, cluster_uuid):
-    app.state.es.info.return_value = {"cluster_uuid": cluster_uuid}
-    response = client.post("/embeddings/user", json={"user_did": DID})
-    assert response.status_code == 502
-    assert response.json()["detail"]["code"] == "upstream_error"
+    cast(AsyncMock, embeddings.fetch_user_history_features).assert_not_called()
     _mock_prediction_request().assert_not_called()
-    app.state.es.info.return_value = {"cluster_uuid": "cluster-1"}
-    response = client.post("/embeddings/user", json={"user_did": DID})
-    assert response.status_code == 200
-    assert response.json()["es_cluster_uuid"] == "cluster-1"
-    assert app.state.es.info.await_count == 2
 
 
 @pytest.mark.parametrize("vector", [[0.6, 0.8], [1.0, 2.0, 3.0]])
@@ -347,6 +306,8 @@ def test_dimension_comes_from_vector_and_uuid_format_is_canonical(client, vector
 def test_real_history_path_uses_production_preparation_and_best_effort_hydration(
     client, monkeypatch, failed_index
 ):
+    # Restore the real history loader for this test. It uses the latest 64 likes,
+    # hydrates posts and replies, and can continue with one failed hydration index.
     monkeypatch.setattr(
         embeddings,
         "fetch_user_history_features",

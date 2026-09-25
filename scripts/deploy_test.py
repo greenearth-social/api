@@ -59,7 +59,7 @@ verify_vpc_connector() { record check_connector; VPC_CONNECTOR_EXISTS=false; }
 configure_kubectl() { record configure_kubectl; }
 get_elasticsearch_internal_lb_ip() { GE_ELASTICSEARCH_URL=https://127.0.0.1:9200; }
 generate_requirements() { record generate_requirements; }
-prepare_pinned_posts() { record prepare_pinned_posts; }
+prepare_ux_posts() { record prepare_ux_posts; }
 sync_feeds() { record sync_feeds; }
 main
 """
@@ -126,14 +126,14 @@ def test_default_selection_is_resolved_and_pinned_before_deployment(
     assert deploy_args[:3] == ["run", "deploy", f"greenearth-api-{environment_name}"]
     assert f"--set-env-vars=GE_AVERAGE_USER_EMBEDDING_URI={artifact_uri}" in deploy_args
     events = (tmp_path / "events").read_text().splitlines()
-    assert events[:4] == [
+    assert events[:5] == [
         "clean_worktree",
         "configure_project",
         "resolve_embedding",
+        "prepare_ux_posts",
         "publisher_preflight",
     ]
-    assert events.index("resolve_embedding") < events.index("prepare_pinned_posts")
-    assert events.index("prepare_pinned_posts") < events.index("deploy")
+    assert events.index("prepare_ux_posts") < events.index("deploy")
 
 
 @pytest.mark.parametrize("use_cli_override", [False, True])

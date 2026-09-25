@@ -23,15 +23,24 @@ First, please join our discord and introduce yourself: https://discord.com/invit
    pipenv install
    ```
 
-   This installs all required packages **and** the `greenearth-api` package
-   itself in editable mode (development install). This allows scripts in
-   `scripts/` to import from `app.*` without path manipulation.
+   Scripts that import `app.*` add the checkout's `src/` directory to their
+   Python import path.
 
 1. Install development dependencies:
 
    ```bash
    pipenv install --dev
    ```
+
+After switching branches or merging dependency changes, refresh the virtualenv
+from the committed lockfile:
+
+```bash
+pipenv sync --dev
+```
+
+The average-embedding producer and API consumer both require `jsonschema`, which
+is included in the runtime dependencies.
 
 ## Running the Server
 
@@ -272,12 +281,17 @@ Deploy to Cloud Run:
 The deployment script will:
 
 - Refuse to run with a dirty working tree (see below)
+- Resolve and validate the promoted average embedding, then pin its timestamped
+  artifact URI on the revision (unless explicitly disabled)
+- Prepare the managed UX posts and validate feed-publisher credentials before
+  changing Cloud Run
 - Generate `requirements.txt` from `Pipfile`
 - Auto-detect the Elasticsearch internal load balancer IP
 - Build the container using Google Cloud buildpacks
 - Deploy to Cloud Run with proper environment variables and secrets
 - Stamp the deployed git sha onto the revision and the debug feed records
-- Preserve existing public feed descriptions while syncing other generator metadata
+- Synchronize production public descriptions verbatim from `src/app/feeds.py`
+- Stamp stage/dev descriptions with `Built by Caterpie` and the deployed git sha
 
 API deployments do not change Firebase configuration. Deploy Firebase rules,
 indexes, TTL policies, Functions, and Hosting from the frontend repository.
@@ -317,7 +331,8 @@ Each deploy stamps its short git sha in three places:
   [Rolling back a deployment](#rolling-back-a-deployment)).
 - **Debug feed display names + descriptions** — every internal ("debug") feed
   record is published as e.g. `GE e2 S e9f07f5`, with `Built by Caterpie · e9f07f5`
-  in the description. The public prod GreenEarth feeds are left unstamped.
+  in the description. All stage/dev feeds, including copies of public feeds, use
+  this description and have the sha in their name. Public production feeds are unstamped.
 
 **Reporting a bug against a feed?** Open the debug feed in Bluesky and copy the
 trailing sha from its name (e.g. `e9f07f5`) into the report — it pins the bug to
@@ -463,6 +478,9 @@ XRPC endpoints.
 
 See `src/app/feeds.py`
 
+Feeds with a politics control default to `0.5` when no saved preference overrides
+it. Existing explicit preferences are retained.
+
 ### Testing Feeds in Development
 
 Bluesky's AppView needs to reach your feed generator over the public internet.
@@ -579,77 +597,152 @@ Other useful `publish_feed.py` flags:
 - `--generator-did` — override `GE_FEED_GENERATOR_DID`
 - `--pds` — use a different PDS (default: `https://bsky.social`)
 
-#### One-time public feed-description migration
+#### Updating public feed descriptions
 
-Public feed descriptions are account-managed copy. Routine deployments preserve
-their current `description` and `descriptionFacets`; they do not append or
-recompose the attribution line. Use the dedicated migration script when that
-copy intentionally changes.
+`src/app/feeds.py` is the source of truth for production public feed descriptions.
+Edit the feed's `description` there; the next production deployment's feed sync
+publishes that exact text, replacing any existing copy. Include any desired
+attribution in the configured text: the publisher does not append a footer.
 
-The current migration replaces only either legacy attribution:
+All stage/dev feeds, including copies of public feeds, use
+`Built by Caterpie · <git_sha>` instead. This also applies to feeds published by
+`internal-tools/devenv`, which runs the publisher with `--sync --environment dev`.
+Production internal feeds use the same Caterpie description. If no git sha is
+available, the fallback is `Built by Caterpie`.
 
-```text
-Built by GreenEarth (www.greenearth.social).
-Built by GreenEarth (https://www.greenearth.social).
-```
-
-with:
-
-```text
-Built by Green Earth (https://www.greenearth.social).
-```
-
-Everything else in each existing description is retained. The script is
-idempotent, will not append the new text when no legacy attribution is present,
-and exits non-zero if a targeted record is missing or needs manual attention.
-It reads the appropriate Bluesky app password from GCP Secret Manager unless
-`GE_BSKY_APP_PASSWORD` or `--app-password` is supplied.
-
-Preview and then apply it once in each environment:
+To update only descriptions **without deploying the API**, run the dedicated
+script from `api/`. It uses the same environment-specific description rules and
+preserves other record fields, including the display name, avatar, service DID,
+and creation date:
 
 ```bash
-pipenv run python scripts/update_feed_descriptions.py --environment stage --dry-run
-pipenv run python scripts/update_feed_descriptions.py --environment stage
+# Preview and apply the stage diagnostic description using the deployed short SHA.
+# Replace <deployed-sha> with the stage revision's git SHA.
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment stage --feed-name your-feed --git-sha '<deployed-sha>' --dry-run
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment stage --feed-name your-feed --git-sha '<deployed-sha>'
 
-pipenv run python scripts/update_feed_descriptions.py --environment prod --dry-run
-pipenv run python scripts/update_feed_descriptions.py --environment prod
+# Preview and apply the configured public copy to production.
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment prod --feed-name your-feed --dry-run
+pipenv run python scripts/update_feed_descriptions.py \
+  --environment prod --feed-name your-feed
 ```
 
-Stage targets the public feed configurations published under their Caterpie
-rkeys; production targets `your-feed`, `best-of-friends`, and `random` on the
-GreenEarth account. Records with description facets are deliberately left for
-manual review because changing text would invalidate their byte offsets.
+The dry run prints the existing and proposed text without writing records. Omit
+`--feed-name` to update all public feeds. Stage maps canonical names from
+`feeds.py` to Caterpie rkeys (`your-feed` becomes `a0-yf`); production uses the
+canonical rkeys on the MySky account. The script leaves already matching records
+unchanged and exits nonzero if a target is missing or invalid. It reads the
+appropriate Bluesky app password from GCP Secret Manager unless
+`GE_BSKY_APP_PASSWORD` or `--app-password` is supplied.
 
-Public feed pins are managed from the `pinned_post_content` entries in
-`src/app/feeds.py`. Their SETTINGS links use markdown syntax, which
-`scripts/manage_pinned_posts.py` converts into Bluesky rich-text facets.
+For stage, `--git-sha` overrides `GE_GIT_SHA` and then the local API checkout's
+HEAD. When changing descriptions without deploying, use the deployed revision's
+short SHA so the diagnostic description identifies the code actually serving it.
 
-The deployment lifecycle is deliberately change-aware:
+Both deployment sync and the description updater retain existing
+`descriptionFacets` only when the description is unchanged. When text changes,
+they remove the old facets because their byte offsets no longer apply. Warnings
+about a missing local UX post manifest do not prevent description updates.
 
-- The script fingerprints the three configured messages and its managed-post
-  schema version. The fingerprint and resolved URIs are stored on the Cloud Run
-  revision as `GE_PINNED_POST_CONFIG_SHA` and `GE_PINNED_POST_<FEED>_URI`.
-- If the fingerprint matches the currently deployed revision, `deploy.sh`
-  reuses its URIs without logging into Bluesky.
-- A changed message/link, a missing deployed state, or an intentional schema
-  version bump runs the authenticated sync. It scans the publisher's post
-  records for an exact text-and-link match; an existing match is reused, while
-  changed content is published as a normal TID-keyed Bluesky post with a new URI.
-- `./scripts/deploy.sh --sync-pinned-posts` forces an authenticated verification
-  when recovering from a deleted record. It still does not create a
-  duplicate when an exact matching post already exists.
-- Previous managed posts are retained because an older Cloud Run revision or
-  rollback may still reference them. A required pin-sync failure stops deployment
-  before Cloud Run is changed.
+### UX posts
 
-Production authenticates publishing with the stable account DID
+"UX posts" are the posts we insert into feeds for product reasons rather than because
+they were ranked: the SETTINGS pin at the top of each public feed, the "you must be
+logged in" explainer, and the user-interview survey post. Their content is versioned
+in `assets/ux_posts/*.md` as plain text with `[label](url)` markdown links, which
+`scripts/manage_ux_posts.py` converts into Bluesky rich-text facets.
+
+They publish to the **notifications account**, `notify.mysky.social`
+(`did:plc:66mudnfk2p4olwpaskmrw2vq`), not the brand account. Editing a post publishes
+a new record, so keeping them off `mysky.social` means its followers never see a
+republished revision in their timeline (issue #404). Both environments share the
+account: the AppView hydrates any public URI regardless of which generator served the
+skeleton.
+
+To change a post, edit the markdown and deploy. To add one, create the file and add
+it to `MANAGED_POSTS` in `src/app/ux_posts.py`, then reference it from `feeds.py` via
+`ux_post_uri()`.
+
+#### How URIs are resolved
+
+Bluesky requires TID record keys for `app.bsky.feed.post`, so a post's URI is
+assigned by the server and cannot be derived from its content. The mapping from
+filename to URI therefore lives in `src/app/ux_posts_resolved.json`, which is
+**generated and gitignored**:
+
+- A pull request contains only content and code, so concurrent branches never
+  conflict over deployment state and nothing has to be published before a merge.
+- The manifest is still uploaded into the Cloud Run image, so a rollback resolves
+  the URIs that revision was built with. `rollback.sh` only shifts traffic, and each
+  revision keeps its own image.
+
+`deploy.sh` runs `manage_ux_posts.py check` (offline content validation) and then
+resolves against the account before uploading:
+
+- Resolution matches each content file against the account's existing posts by exact
+  **signature** — the visible text plus its link targets. A match is reused, so
+  unchanged content never republishes. This needs no credentials, since it reads
+  public records.
+- Anything unmatched is new or edited, and is published with the
+  `bsky-app-password-notify-prod` secret. Old records are never deleted, because an
+  older revision may still reference them.
+- If a post is still unresolved afterwards, the deploy aborts before Cloud Run is
+  changed rather than shipping a revision that would serve placeholders.
+- `./scripts/deploy.sh --skip-ux-post-sync` ships the current manifest as-is.
+
+#### Interactions are disabled
+
+Most UX posts are one-way notices, so publishing one also writes two gate records
+keyed by the post's rkey: an `app.bsky.feed.threadgate` with an empty `allow` list
+(nobody can reply) and an `app.bsky.feed.postgate` with `disableRule` (no quote
+posts). An empty `allow` means "nobody" -- omitting the field would mean "everybody",
+so it is load-bearing.
+
+Posts listed in `REPLIES_ALLOWED` in `src/app/ux_posts.py` keep replies open; the
+survey post is there, since a reply is a reasonable way to respond to it. Quote posts
+are disabled on every UX post regardless. Because gates are persistent records,
+reconciliation converges in both directions -- adding a post to `REPLIES_ALLOWED`
+deletes its existing threadgate rather than just declining to write one.
+
+**Likes cannot be disabled.** atproto has no like-gating; any public post can be liked
+by anyone, and that is not something we can opt out of.
+
+Gates are separate records, so they can be applied to an already-published post
+without changing its URI. Resolution reports a post whose gates don't match
+policy as `MISGATED`, and the deploy treats that exactly like an unpublished post: it
+syncs before shipping the revision, so a gate changed by hand heals on the next
+deploy.
+
+Locally, resolve without credentials:
+
+```bash
+pipenv run python scripts/manage_ux_posts.py resolve   # write the manifest
+pipenv run python scripts/manage_ux_posts.py list      # show what resolved
+```
+
+A post that has no published record yet falls back to a **placeholder** post, so a
+newly added post shows up in a local feed as a visible "something belongs here"
+marker instead of silently vanishing. Deploy-time validation makes that unreachable
+in production. `GE_UX_POST_URIS` overrides individual URIs as a JSON object if you
+need to pin one by hand.
+
+Superseded records accumulate on the notifications account. `manage_ux_posts.py
+cleanup` lists those that no current content file resolves to and that are older than
+30 days, and deletes them only with `--yes`. It is deliberately manual: a recent
+record may still be referenced by a revision you would roll back to.
+
+`scripts/manage_post.py` remains available for publishing one-off posts by hand.
+
+Production authenticates feed-generator publishing with the stable account DID
 `did:plc:wrmpulygwvuhjn2c3jbalgqj` (currently `mysky.social`); stage/dev uses
 `did:plc:s4tl2ajfsnstzuxtegl7r33g` (currently `caterpie-internal.bsky.social`).
 Deployments validate the required publisher credentials before changing Cloud Run.
-Feed generator metadata is synchronized later in the same deployment, but existing
-public descriptions are preserved;
-a failed post-deploy sync makes the deployment command exit nonzero. Managed
-pinned-post publication remains part of the deployment lifecycle described above.
+Feed generator metadata, including production public descriptions from `feeds.py`
+and stage/dev Caterpie descriptions, is synchronized later in the same deployment;
+a failed post-deploy sync makes the deployment command exit nonzero.
 
 #### 6. View the feed in Bluesky
 
@@ -723,9 +816,8 @@ the promoted default automatically and pin that timestamped artifact URI.
 
 `POST /embeddings/user` accepts `{"user_did": "did:plc:..."}` and uses the existing
 `X-API-Key` authentication. An `ok` response includes the embedding, dimension,
-`user_model_uuid`, `post_model_uuid`, loaded-like and usable-history counts,
-`es_cluster_uuid`, and `likes_index`. A `skipped` response
-identifies `no_likes` or `no_embedded_history` and contains no vector.
+`user_model_uuid`, `post_model_uuid`, and loaded-like and usable-history counts.
+A `skipped` response identifies `no_likes` or `no_embedded_history` and contains no vector.
 
 Deploy inference-service's paired-model response support before using this
 endpoint. Its user-tower prediction must return `paired_post_model_uuid` from
@@ -753,16 +845,11 @@ existing environment variables take precedence. Supply these credentials through
 the environment or `.env`:
 
 - `POSTHOG_PERSONAL_API_KEY`: a personal key authorized to query the project.
-- `GE_ELASTICSEARCH_API_KEY`: a read-only key with cluster-monitor permission,
-  as granted by the existing ES key setup, for the source identity check.
+- `GE_ELASTICSEARCH_API_KEY`: a key with read access to the `likes` index.
 - `GE_API_KEY`: a key accepted by the running API's `X-API-Key` authentication.
 
-The API container must use the same Elasticsearch cluster and `likes` index.
-The script compares the cluster UUID and index against every endpoint response;
-host URLs can differ when a tunnel is involved. The API caches its first successful
-cluster identity lookup for the lifetime of its Elasticsearch client, so users
-share one lookup per API process. Restart the API if its Elasticsearch destination
-changes, including when repointing a local tunnel.
+The script assumes the API container uses the same Elasticsearch cluster.
+Host URLs can differ when a tunnel is involved.
 
 ```bash
 pipenv run python scripts/average_user_embedding.py --help
@@ -787,10 +874,8 @@ pipenv run python scripts/average_user_embedding.py \
 | `--min-interaction-seen` | `50` |
 | `--es-url` | `https://localhost:9200` |
 | `--es-insecure` / `--no-es-insecure` | `True` (ES certificate verification disabled) |
-| `--likes-index` | `likes` |
 | `--min-likes` | `5` |
 | `--api-url` | `http://localhost:8300` |
-| `--workers` | `4` |
 | `--output-dir` | `./outputs/average_user_embeddings/` |
 
 `--no-es-insecure` enables TLS certificate verification for Elasticsearch.
@@ -804,17 +889,18 @@ commands should supply an explicit absolute `--output-dir`.
 
 PostHog selection covers all available history and feeds, with a fixed
 run-start cutoff, bound query parameters, and DID-ordered pages of 1,000.
-Counts must meet the inclusive threshold. ES like counts use batches of 500
-and represent likes **made by the user that remain in the index**, not a
-lifetime total; PostHog is not used to count likes. Missing aggregation buckets
-count as zero. The API separately loads up to 64 recent likes for inference.
+Counts must meet the inclusive threshold. ES like counts query the fixed `likes`
+index in batches of 500 and represent likes **made by the user that remain in
+the index**, not a lifetime total; PostHog is not used to count likes. Missing
+aggregation buckets count as zero. The API separately loads up to 64 recent
+likes for inference.
 ES data can change during a run; the PostHog cutoff does not make ES reads a
 point-in-time snapshot.
 
-Transient HTTP/network failures receive up to three attempts with a 60-second
-socket timeout, 1/2-second backoff, and valid `Retry-After` delays up to 60 seconds.
-Longer requested delays fail explicitly. These are per-operation timeouts,
-not a deadline for the entire command.
+The script uses one HTTPX client per service, with 60-second network timeouts
+and no automatic retries or redirects. Embedding requests run sequentially.
+A failed request stops the run immediately; rerun the command after resolving
+the error. The timeouts apply to network operations, not the entire command.
 
 ### Local artifact and diagnostics
 
@@ -827,7 +913,7 @@ The artifact has `format_version: 1`. It contains the L2-normalized mean `embedd
 `user_model_uuid`, `post_model_uuid`, `run_id`, `source_completed_at`,
 `contributing_users`, and `cohort`. The `cohort` records the PostHog cutoff,
 selection thresholds, and user counts at each selection stage.
-See the [artifact schema](scripts/average_user_embedding.schema.json) and
+See the [artifact schema](src/app/lib/average_user_embedding.schema.json) and
 [small contract fixture](scripts/fixtures/average_user_embedding_v1.json).
 Artifact validation requires an L2 magnitude within `1e-6` of 1.
 The fixture is illustrative, not a model artifact to deploy.
@@ -842,12 +928,15 @@ The producer and API consumers share the
 Use `parse_artifact(data)` to validate downloaded bytes or `load_artifact(path)`
 to read a local file and retain its original bytes. The script adds the repository's
 `src/` directory to its import path, following the other scripts' `app.lib` imports.
+The module validates structure against the bundled JSON schema using `jsonschema`.
+Python parses UTC timestamps and checks their ordering, vector finiteness and unit
+magnitude, dimension, and cohort totals. Validation never modifies the artifact.
 
 The artifact excludes DIDs, individual vectors, credentials, and service URLs,
 and is written atomically. A final JSON summary is printed to stdout with
 `status` and `artifact_path`, plus the original `run_id` once a valid artifact is
-available and `error` on failure. Aggregate progress, contributor,
-skipped and failed counts, and reason summaries go to stderr. Per-user request
+available and `error` on failure. Stage-level progress, contributor and skipped
+counts, skip reasons, and request failures go to stderr. Per-user request
 or outcome messages and diagnostic lists are not saved. Redirect stderr if you
 want to retain the logs, for example:
 
@@ -856,9 +945,9 @@ pipenv run python scripts/average_user_embedding.py \
   2>average_user_embedding.log
 ```
 
-Missing-history skips are summarized and may reduce coverage. Any exhausted user
+Missing-history skips are summarized and may reduce coverage. Any user
 request failure, incomplete collection, authentication/configuration error,
-source mismatch, missing/invalid model UUIDs, mixed vector dimensions, zero contributors,
+missing/invalid model UUIDs, mixed vector dimensions, zero contributors,
 or invalid/zero-magnitude mean prevents saving the artifact and exits nonzero.
 There is no partial-result override. A failed generation creates no artifact.
 Exit zero means the local artifact was saved successfully; runtime failures exit
@@ -1022,8 +1111,8 @@ query_embedding = (
 `num_likes` counts usable history embeddings passed to the user tower, up to the
 existing 64-like limit; it is not the user's retained or lifetime like count.
 The final blend is not normalized, since retrieval uses cosine similarity.
-This changes candidate retrieval only; the offline endpoint and rankers still
-compute actual user embeddings.
+Blending happens only in candidate retrieval. `/embeddings/user` still returns
+actual user-tower predictions, and ranker behavior is unchanged.
 
 | Prior | Usable user history | Retrieval |
 | --- | --- | --- |
@@ -1037,6 +1126,12 @@ Elasticsearch failures keep the existing generator error handling. The
 `two_tower_empty_history` variant uses the average alone and never loads history
 or calls inference; without a prior it returns no candidates. Source allocations
 and explicit zero source weights continue to apply.
+
+The private `cold-start` feed allocates 50% of its candidates to `popularity` and
+50% to `two_tower_empty_history`, with no infill. This allocation is fixed,
+independent of the requesting user's saved source weights. If the prior is
+unavailable, only the popularity allocation can contribute. Deduplication,
+filtering, and ranking can change the final displayed proportions.
 
 Blended and actual-only searches use the paired post-model UUID returned with
 the actual prediction. Average-only searches use the artifact's post-model UUID.
@@ -1109,6 +1204,10 @@ results for the same two users. Startup logs identify the artifact, model pair,
 dimension, and contributor count; generator logs report retrieval mode, fallback
 reason, and result counts. Existing generator-result diagnostics retain fallback
 and empty-search reasons. Vectors are not logged.
+
+Successful startup loads and retrieval counts are logged at `INFO`. Stage and
+production default to `WARNING`; set `GE_LOG_LEVEL=INFO` on the API process or
+Cloud Run revision to see those messages. Artifact-loading failures are warnings.
 
 ## User-History Feature Cache
 
@@ -1331,8 +1430,9 @@ greenearth/api/
 │   ├── promote_average_user_embedding.py # Select an artifact for stage or prod
 │   ├── resolve_average_user_embedding.py # Validate and pin deployment selection
 │   ├── feed_debug.py              # CLI debug tool
-│   ├── manage_pinned_posts.py     # Change-aware public feed pin publication
-│   ├── update_feed_descriptions.py # One-time public description migration
+│   ├── manage_ux_posts.py         # UX post resolve/sync/cleanup
+│   ├── managed_posts.py           # Shared Bluesky post construction and matching
+│   ├── update_feed_descriptions.py # Sync descriptions using each environment's publishing rules
 │   └── publish_feed.py            # Publish/update feed generator records
 ├── .gcloudignore                  # Files to exclude from deployment
 ├── .python-version

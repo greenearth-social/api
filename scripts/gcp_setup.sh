@@ -21,6 +21,7 @@ API_KEY=""
 
 # Bluesky app password for feed publishing
 BSKY_APP_PASSWORD=""
+NOTIFY_BSKY_APP_PASSWORD=""
 
 # Perspective API key for post-ranking
 GE_PERSPECTIVE_API_KEY=""
@@ -661,34 +662,51 @@ setup_posthog_secret() {
         --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $posthog_secret"
 }
 
+_setup_bsky_secret() {
+    local secret_name="$1"
+    local password="$2"
+    local label="$3"
+    local flag="$4"
+
+    if [ -n "$password" ]; then
+        if ! gcloud secrets describe "$secret_name" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            echo -n "$password" | gcloud secrets create "$secret_name" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "$label secret created: $secret_name"
+        else
+            echo -n "$password" | gcloud secrets versions add "$secret_name" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "$label secret updated: $secret_name"
+        fi
+    else
+        if gcloud secrets describe "$secret_name" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            log_info "$label secret already exists: $secret_name"
+        else
+            log_warn "$label password not provided and secret does not exist: $secret_name"
+            log_warn "Run with $flag '<password>' to create it, or create manually:"
+            log_warn "  echo -n '<password>' | gcloud secrets create $secret_name --data-file=- --project=$PROJECT_ID"
+        fi
+    fi
+}
+
 setup_bsky_secret() {
-    log_info "Setting up Bluesky app password secret..."
+    log_info "Setting up Bluesky app password secrets..."
 
     local bsky_secret="bsky-app-password"
     if [ "$ENVIRONMENT" = "prod" ]; then
         bsky_secret="bsky-app-password-prod"
     fi
+    _setup_bsky_secret "$bsky_secret" "$BSKY_APP_PASSWORD" \
+        "Bluesky app password" "--bsky-app-password"
 
-    if [ -n "$BSKY_APP_PASSWORD" ]; then
-        if ! gcloud secrets describe "$bsky_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
-            echo -n "$BSKY_APP_PASSWORD" | gcloud secrets create "$bsky_secret" \
-                --data-file=- --project="$PROJECT_ID"
-            log_info "Bluesky app password secret created: $bsky_secret"
-        else
-            echo -n "$BSKY_APP_PASSWORD" | gcloud secrets versions add "$bsky_secret" \
-                --data-file=- --project="$PROJECT_ID"
-            log_info "Bluesky app password secret updated: $bsky_secret"
-        fi
-    else
-        if gcloud secrets describe "$bsky_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
-            log_info "Bluesky app password secret already exists: $bsky_secret"
-        else
-            log_warn "Bluesky app password not provided and secret does not exist: $bsky_secret"
-            log_warn "Run with --bsky-app-password '<password>' to create it, or create manually:"
-            log_warn "  echo -n '<password>' | gcloud secrets create $bsky_secret --data-file=- --project=$PROJECT_ID"
-        fi
-    fi
+    # The notifications account that publishes UX posts (issue #404). Read only by
+    # scripts/deploy.sh and scripts/manage_ux_posts.py on a developer machine, never
+    # by the running service, so it gets no secretAccessor binding for the runner.
+    # One account serves both environments, hence the fixed -prod name.
+    _setup_bsky_secret "bsky-app-password-notify-prod" "$NOTIFY_BSKY_APP_PASSWORD" \
+        "Notifications-account app password" "--notify-bsky-app-password"
 }
+
 
 setup_feed_probe_cloud_scheduler() {
     log_info "Setting up Cloud Scheduler feed probes for $ENVIRONMENT..."
@@ -880,6 +898,10 @@ while [[ $# -gt 0 ]]; do
             API_KEY="$2"
             shift 2
             ;;
+        --notify-bsky-app-password)
+            NOTIFY_BSKY_APP_PASSWORD="$2"
+            shift 2
+            ;;
         --bsky-app-password)
             BSKY_APP_PASSWORD="$2"
             shift 2
@@ -909,6 +931,9 @@ while [[ $# -gt 0 ]]; do
             echo "                           Elasticsearch API key (skips K8s fetch if provided)"
             echo "  --api-key KEY            API key for authentication (stored in Secret Manager)"
             echo "  --bsky-app-password PWD  Bluesky app password (stored in Secret Manager)"
+            echo "  --notify-bsky-app-password PWD"
+            echo "                           App password for notify.mysky.social, which"
+            echo "                           publishes UX posts (stored in Secret Manager)"
             echo "  --perspective-api-key KEY"
             echo "                           Perspective API key (stored in Secret Manager)"
             echo "  --posthog-api-key KEY    PostHog project API key for this environment"

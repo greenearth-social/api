@@ -13,6 +13,8 @@ from app.lib.average_user_embedding_artifact import ArtifactValidationError
 from app.lib.average_user_embedding_publication import PublicationError
 
 
+# Cloud semantics are covered by average_user_embedding_publication_test.py.
+# These tests focus on CLI arguments, exit status, and separating stdout from stderr.
 def test_cli_promotes_with_explicit_environment_and_prints_selection(monkeypatch, capsys):
     result = {
         "previous_artifact_uri": "gs://bucket/previous.json",
@@ -51,6 +53,8 @@ def test_custom_project(monkeypatch, capsys):
     ],
 )
 def test_failures_are_safe_json_nonzero(monkeypatch, capsys, error):
+    # Controlled validation messages may be shown, but filesystem exception text
+    # is untrusted and should be reduced to its exception class.
     monkeypatch.setattr(promote, "promote_artifact", Mock(side_effect=error))
     assert promote.main(["file.json", "--environment", "stage"]) == 1
     output = capsys.readouterr()
@@ -67,6 +71,8 @@ def test_environment_is_required(capsys):
 
 
 def test_help_from_outside_repository(tmp_path):
+    # A subprocess avoids inheriting pytest's import-path setup and checks the
+    # repository-relative imports a person invoking the script actually relies on.
     script = Path(promote.__file__).resolve()
     result = subprocess.run(
         [sys.executable, str(script), "--help"],

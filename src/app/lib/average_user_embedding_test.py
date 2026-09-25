@@ -144,15 +144,15 @@ async def test_unconfigured_prior_does_not_load(monkeypatch):
 @pytest.mark.parametrize(
     "updates,reason",
     [
-        ({"embedding": [0.0, 0.0]}, "finite nonzero"),
-        ({"embedding": [float("nan"), 1.0]}, "finite nonzero"),
-        ({"embedding": [float("inf"), 1.0]}, "finite nonzero"),
+        ({"embedding": [0.0, 0.0]}, "unit L2 magnitude"),
+        ({"embedding": [float("nan"), 1.0]}, "finite vector"),
+        ({"embedding": [float("inf"), 1.0]}, "finite vector"),
         ({"embedding": [1.0, 1.0]}, "unit L2 magnitude"),
         ({"dimension": 128}, "matching dimension"),
-        ({"format_version": 2}, "Unsupported artifact version"),
-        ({"user_model_uuid": "not-a-uuid"}, "Model identifiers"),
-        ({"contributing_users": 0}, "at least one contributor"),
-        ({"source_completed_at": "invalid"}, "UTC timestamp"),
+        ({"format_version": 2}, "$.format_version (const)"),
+        ({"user_model_uuid": "not-a-uuid"}, "$.user_model_uuid (pattern)"),
+        ({"contributing_users": 0}, "$.contributing_users (minimum)"),
+        ({"source_completed_at": "invalid"}, "$.source_completed_at (pattern)"),
     ],
 )
 async def test_invalid_artifact_is_unavailable(

@@ -1,7 +1,7 @@
 import base64
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 FeedControlName = Literal[
     "source_weights",
@@ -229,6 +229,36 @@ class RankPredictResult(BaseModel):
     )
 
 
+class UserEmbeddingRequest(BaseModel):
+    # Body for POST /embeddings/user. The offline averaging script sends one
+    # user's DID; the endpoint loads their history and runs the user tower.
+    model_config = ConfigDict(extra="forbid")
+
+    user_did: str = Field(
+        min_length=7,
+        max_length=2048,
+        pattern=r"^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$",
+        json_schema_extra={"example": "string"},
+    )
+
+
+class UserEmbeddingResponse(BaseModel):
+    # An "ok" response exports the actual user embedding and its model pair for
+    # the averaging script. A "skipped" response reports missing usable history
+    # through reason and omits the vector and model metadata.
+    user_did: str
+    status: Literal["ok", "skipped"]
+    # Loaded likes are capped by the history window; usable embeddings may be fewer
+    # when liked posts/replies are missing or lack content embeddings.
+    history_like_count: int = Field(ge=0)
+    history_embedding_count: int = Field(ge=0)
+    embedding: list[float] | None = None
+    user_model_uuid: str | None = None
+    post_model_uuid: str | None = None
+    dimension: int | None = None
+    reason: Literal["no_likes", "no_embedded_history"] | None = None
+
+
 class FeedConfig(BaseModel):
     """Configuration for a single published feed.
 
@@ -280,22 +310,14 @@ class FeedConfig(BaseModel):
     )
     pinned_post_uri: str | None = Field(
         None,
-        description="AT URI of a post to pin at the top of the first page of this feed.",
-    )
-    pinned_post_content: str | None = Field(
-        None,
-        description="Repository-managed pinned-post text. Markdown-style links are converted "
-        "to Bluesky rich-text facets by scripts/manage_pinned_posts.py during deployment.",
+        description="AT URI of a post to pin at the top of the first page of this feed. "
+        "Resolved by app.ux_posts.ux_post_uri() from the deploy-generated manifest.",
     )
     survey_post_uri: str | None = Field(
         None,
         description="AT URI of a post to inject at position 6 of the first page for users "
-        "who have loaded the feed at least 3 times and have not seen it in the past 7 days.",
-    )
-    survey_post_content: str | None = Field(
-        None,
-        description="Survey post text used to identify the post (for reference only; not "
-        "rendered by the API at runtime).",
+        "who have loaded the feed at least 3 times and have not seen it in the past 7 days. "
+        "Resolved by app.ux_posts.ux_post_uri() from the deploy-generated manifest.",
     )
     logged_out: LoggedOutBehavior = Field(
         "explain",
@@ -306,7 +328,7 @@ class FeedConfig(BaseModel):
     logged_out_post_uri: str | None = Field(
         None,
         description="AT URI of the post served on its own to logged-out callers. Only "
-        "read when logged_out is 'explain'; defaults to feeds.LOGGED_OUT_POST_URI.",
+        "read when logged_out is 'explain'; falls back to the shared logged-out UX post.",
     )
     max_render_share: float | None = Field(
         None,
