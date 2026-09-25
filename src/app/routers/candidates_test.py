@@ -8,9 +8,10 @@ from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
 from ..lib.embeddings import MINILM_L12_EMBEDDING_FIELD, MINILM_L12_EMBEDDING_KEY
+from ..lib.inference import UserEmbeddingResult
+from ..lib.user_history_cache import UserHistory, UserHistoryItem
 from ..main import app
 from ..security import verify_api_key
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -25,21 +26,34 @@ def stub_inference():
     branch (and so returns a single, distinct candidate), which is what the
     routing cases below need; stubbing inference keeps them off the network.
     """
+    # Use actual-only retrieval with a known model pair. Router tests should not
+    # depend on a prior loaded by another test or the local development environment.
     with (
         patch(
             "app.lib.candidates.two_tower.get_inference_settings",
             return_value=("https://inference", "api-key"),
         ),
         patch(
-            "app.lib.candidates.two_tower.get_cached_post_tower_uuid",
+            "app.lib.candidates.two_tower.fetch_user_history_features",
             new_callable=AsyncMock,
-            return_value="post-tower-uuid",
+            return_value=UserHistory(items=[
+                UserHistoryItem(
+                    at_uri="at://liked/1", liked_at="2026-01-01T00:00:00Z", embedding=[1.0]
+                ),
+            ]),
         ),
         patch(
-            "app.lib.candidates.two_tower.compute_user_embedding",
+            "app.lib.candidates.two_tower.predict_user_embedding",
             new_callable=AsyncMock,
-            return_value=[0.1, 0.2],
+            return_value=UserEmbeddingResult(
+                history_like_count=1,
+                history_embedding_count=1,
+                embedding=[0.1, 0.2],
+                user_model_uuid="1" * 32,
+                post_model_uuid="2" * 32,
+            ),
         ),
+        patch("app.lib.candidates.two_tower.get_average_user_embedding", return_value=None),
     ):
         yield
 

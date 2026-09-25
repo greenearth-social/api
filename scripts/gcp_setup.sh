@@ -449,6 +449,28 @@ create_service_account() {
     log_info "IAM roles granted successfully"
 }
 
+ensure_average_user_embedding_bucket_access() {
+    local bucket="gs://$PROJECT_ID-engagement-prediction-model-$ENVIRONMENT"
+    local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
+
+    # Inference-service setup owns the model bucket. The API only reads artifacts
+    # from its own environment; artifact promotion uses a separate identity.
+    # Grant at bucket scope, not project scope. An explicit deployment override
+    # in another bucket needs a separate grant; this does not grant write access.
+    log_info "Granting average user embedding read access on $bucket to $sa_email..."
+    if ! gcloud storage buckets add-iam-policy-binding "$bucket" \
+        --member="serviceAccount:$sa_email" \
+        --role="roles/storage.objectViewer" \
+        --project="$PROJECT_ID" \
+        --condition=None > /dev/null; then
+        log_error "Could not grant average user embedding read access on $bucket."
+        log_error "Ensure inference-service/scripts/gcp_setup.sh has created the bucket and your identity can update its IAM policy."
+        return 1
+    fi
+
+    log_info "Average user embedding bucket read access granted."
+}
+
 ensure_frontend_deployer_roles() {
     # The frontend repo (greenearth-social/frontend) deploys Cloud Functions,
     # Firebase Hosting, and Firestore configuration via this service account.
@@ -809,6 +831,8 @@ main() {
     validate_config
     setup_gcp_project
     create_service_account
+    # The runtime principal must exist before it can receive bucket access.
+    ensure_average_user_embedding_bucket_access
     ensure_frontend_deployer_roles
     ensure_firestore_database
     ensure_firestore_api_key_secret
@@ -839,7 +863,7 @@ main() {
     log_info "Next steps:"
     log_info "  1. Review and configure secrets in Secret Manager if needed"
     log_info "  2. Ensure inference domain mapping is set up (inference-stage/inference)"
-    log_info "     via ../engagement-prediction/inference_service/gcp_setup.sh"
+    log_info "     via ../inference-service/scripts/gcp_setup.sh"
     log_info "  3. Run ./scripts/deploy.sh to deploy the API to Cloud Run"
     log_info "  4. Feed probe schedulers: 3 jobs fire every minute to produce latency signal in Cloud Monitoring"
     echo ""
@@ -940,4 +964,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-main
+# Allow tests to source the setup functions without performing cloud mutations.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main
+fi

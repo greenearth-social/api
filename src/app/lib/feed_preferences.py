@@ -23,7 +23,9 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | SourceWeightsDocument] = {
     "source_weights": DEFAULT_SOURCE_WEIGHTS,
     "social_radius": 3,
     "freshness": 5,
-    "politics": 1.0,
+    # Match UserDocument's missing-value default. Resolution still prefers saved
+    # per-feed or legacy user values, so this does not migrate existing settings.
+    "politics": 0.5,
     "purpose": 0.5,
 }
 

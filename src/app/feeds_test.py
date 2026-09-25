@@ -160,7 +160,8 @@ class TestFeedsRegistry:
         cfg = FEEDS["cold-start"]
         assert cfg.public is False
         assert [(spec.name, spec.weight) for spec in cfg.gen_request_template.generators] == [
-            ("popularity", 1.0),
+            ("popularity", 0.5),
+            ("two_tower_empty_history", 0.5),
         ]
         assert cfg.rank_request_template is not None
         assert [(spec.name, spec.weight) for spec in cfg.rank_request_template.models] == [

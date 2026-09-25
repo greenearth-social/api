@@ -81,8 +81,12 @@ def test_resolver_prefers_feed_scoped_politics_over_legacy_value():
     assert resolved.politics == 0.0
 
 
-def test_resolver_uses_neutral_politics_default_without_a_user():
-    assert resolve_feed_preferences(None, "your-feed").politics == 1.0
+@pytest.mark.parametrize(
+    "feed_name", ["your-feed", "best-of-friends", "cutoff-preview", "unranked-your-feed"]
+)
+@pytest.mark.parametrize("user", [None, UserDocument(user_did="did:plc:test")])
+def test_resolver_uses_default_politics_for_new_users(feed_name, user):
+    assert resolve_feed_preferences(user, feed_name).politics == 0.5
 
 
 @pytest.mark.parametrize("politics", [0.0, 2.0])

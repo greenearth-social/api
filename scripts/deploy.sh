@@ -27,6 +27,14 @@ GE_ELASTICSEARCH_URL="INTERNAL_LB_PLACEHOLDER"
 # (ingex ingest/cmd/backfill_quality_index).
 GE_TWO_TOWER_KNN_INDEX="${GE_TWO_TOWER_KNN_INDEX:-posts_recent_quality}"
 
+# Resolve the promoted artifact before deployment, then pin its immutable URI
+# on the revision. An explicit URI overrides the environment's default pointer.
+GE_AVERAGE_USER_EMBEDDING_URI="${GE_AVERAGE_USER_EMBEDDING_URI:-}"
+# Track CLI selection separately: disabling may override an inherited environment
+# value, but providing both selection and disable flags is an input error.
+AVERAGE_USER_EMBEDDING_URI_EXPLICIT=false
+WITHOUT_AVERAGE_USER_EMBEDDING=false
+
 # Inference configuration
 GE_INFERENCE_BASE_URL=""
 
@@ -149,6 +157,40 @@ validate_config() {
     resolve_inference_base_url
 
     log_info "Configuration validation complete."
+}
+
+resolve_average_user_embedding() {
+    if [ "$WITHOUT_AVERAGE_USER_EMBEDDING" = true ]; then
+        # Clear even an inherited URI so this revision deliberately runs without
+        # a prior instead of retaining an earlier deployment's selection.
+        GE_AVERAGE_USER_EMBEDDING_URI=""
+        log_warn "Deploying without an average user embedding (--without-average-user-embedding)."
+        return
+    fi
+
+    log_info "Resolving the average user embedding for $ENVIRONMENT..."
+    local resolver_args=(--environment "$ENVIRONMENT" --project-id "$PROJECT_ID")
+    # Precedence: explicit CLI URI, inherited environment URI, promoted default.
+    if [ -n "$GE_AVERAGE_USER_EMBEDDING_URI" ]; then
+        resolver_args+=(--artifact-uri "$GE_AVERAGE_USER_EMBEDDING_URI")
+    fi
+
+    # Fail deployment if selection cannot be verified. This differs intentionally
+    # from runtime fallback, which keeps an existing API available after load errors.
+    local artifact_uri
+    if ! artifact_uri=$(pipenv run python scripts/resolve_average_user_embedding.py "${resolver_args[@]}"); then
+        log_error "Average user embedding selection failed; Cloud Run was not changed."
+        log_error "Promote a valid artifact first, or explicitly use --without-average-user-embedding."
+        exit 1
+    fi
+    # The resolver validates the artifact; this also protects the eval-built
+    # deployment command from unexpected output or unsafe URI characters.
+    if [[ ! "$artifact_uri" =~ ^gs://[A-Za-z0-9._-]+/[A-Za-z0-9/_.-]+$ ]]; then
+        log_error "Average user embedding resolver did not return a single valid GCS URI."
+        exit 1
+    fi
+    GE_AVERAGE_USER_EMBEDDING_URI="$artifact_uri"
+    log_info "Pinned average user embedding: $GE_AVERAGE_USER_EMBEDDING_URI"
 }
 
 configure_kubectl() {
@@ -293,6 +335,9 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_URL=$GE_ELASTICSEARCH_URL"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_ELASTICSEARCH_VERIFY_SSL=false"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_TWO_TOWER_KNN_INDEX=$GE_TWO_TOWER_KNN_INDEX"
+    # Always send the setting: an empty value is the explicit opt-out above.
+    # Pin an artifact object, never default.json, so promotion cannot change it.
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_AVERAGE_USER_EMBEDDING_URI=$GE_AVERAGE_USER_EMBEDDING_URI"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_PROBE_USER_DID=did:plc:s4tl2ajfsnstzuxtegl7r33g"
@@ -619,6 +664,8 @@ main() {
 
     require_clean_worktree
     validate_config
+    # Resolve before UX-post publication or any Cloud Run deployment changes.
+    resolve_average_user_embedding
     prepare_ux_posts
     if ! preflight_bsky_publishers; then
         log_error "Bluesky publishing preflight failed; Cloud Run was not changed."
@@ -665,6 +712,19 @@ while [[ $# -gt 0 ]]; do
             GE_TWO_TOWER_KNN_INDEX="$2"
             shift 2
             ;;
+        --average-user-embedding-uri)
+            if [ -z "${2:-}" ] || [[ "$2" == --* ]]; then
+                log_error "--average-user-embedding-uri requires a gs:// artifact URI."
+                exit 1
+            fi
+            GE_AVERAGE_USER_EMBEDDING_URI="$2"
+            AVERAGE_USER_EMBEDDING_URI_EXPLICIT=true
+            shift 2
+            ;;
+        --without-average-user-embedding)
+            WITHOUT_AVERAGE_USER_EMBEDDING=true
+            shift
+            ;;
         --min-instances)
             API_INSTANCES_MIN="$2"
             shift 2
@@ -691,6 +751,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --elasticsearch-url URL  Elasticsearch URL (default: INTERNAL_LB_PLACEHOLDER)"
             echo "  --two-tower-knn-index IDX  Index for two-tower kNN (default: posts_recent_quality;"
             echo "                             use posts_recent if the quality corpus is not backfilled)"
+            echo "  --average-user-embedding-uri URI  Pin this artifact instead of the promoted default"
+            echo "  --without-average-user-embedding  Explicitly deploy without an average embedding"
             echo "  --min-instances N        Minimum instances (default: 1)"
             echo "  --max-instances N        Maximum instances (default: 20)"
             echo "  --timeout SECONDS        Cloud Run request timeout (default: 60)"
@@ -706,4 +768,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-main
+if [ "$WITHOUT_AVERAGE_USER_EMBEDDING" = true ] && [ "$AVERAGE_USER_EMBEDDING_URI_EXPLICIT" = true ]; then
+    log_error "--average-user-embedding-uri and --without-average-user-embedding cannot be combined."
+    exit 1
+fi
+
+# Tests source the real parser/functions and substitute cloud commands before
+# calling main. Direct execution retains the normal deployment entry point.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main
+fi

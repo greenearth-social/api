@@ -1283,10 +1283,10 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
                     "popular": 0.25,
                 },
                 "freshness": 5,
-                "politics": 1.0,
+                "politics": 0.5,
                 "purpose": 0.5,
             },
-            "best-of-friends": {"freshness": 5, "purpose": 0.5, "politics": 1.0},
+            "best-of-friends": {"freshness": 5, "purpose": 0.5, "politics": 0.5},
         }
     }
 
