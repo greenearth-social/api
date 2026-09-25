@@ -103,11 +103,6 @@ def test_export_propagates_actual_pair_source_and_history_without_candidate_sear
         "history_embedding_count": 1,
         "es_cluster_uuid": "cluster-1",
         "likes_index": "likes",
-        "history_policy": {
-            "limit": 64,
-            "sources": ["posts", "replies"],
-            "embedding_key": "all_MiniLM_L12_v2",
-        },
     }
     cast(AsyncMock, embeddings.fetch_user_history_features).assert_awaited_once_with(
         app.state.es, DID

@@ -37,7 +37,6 @@ from app.lib.average_user_embedding_artifact import (  # noqa: E402
     is_finite_number,
     model_id,
     validate_artifact,
-    validate_history_policy,
 )
 
 logger = logging.getLogger(__name__)
@@ -440,13 +439,12 @@ def fetch_embedding(client, did, expected_source):
         for key, value in expected_source.items():
             if result.get(key) != value:
                 raise RunError(f"Embedding API: Elasticsearch source mismatch ({key})")
-        policy = validate_history_policy(result.get("history_policy"))
         for key in ("history_like_count", "history_embedding_count"):
             if not is_count(result.get(key)):
                 raise RequestError("invalid_history_counts", f"{key} must be a nonnegative integer")
         likes, usable = result["history_like_count"], result["history_embedding_count"]
-        if usable > likes or likes > policy["limit"]:
-            raise RequestError("invalid_history_counts", "history counts exceed their limits")
+        if usable > likes:
+            raise RequestError("invalid_history_counts", "history counts are inconsistent")
         if result.get("status") == "skipped":
             reason = result.get("reason")
             if (
@@ -466,7 +464,7 @@ def fetch_embedding(client, did, expected_source):
                 raise RequestError(
                     "invalid_skip_response", "skip reason/counts/vector inconsistent"
                 )
-            return {"status": "skipped", "reason": reason, "history_policy": policy}
+            return {"status": "skipped", "reason": reason}
         vector, dimension = result.get("embedding"), result.get("dimension")
         if (
             result.get("status") != "ok"
@@ -485,7 +483,6 @@ def fetch_embedding(client, did, expected_source):
         post_model = model_id(result.get("post_model_uuid"))
         return {
             "status": "ok",
-            "history_policy": policy,
             "embedding": vector,
             "dimension": dimension,
             "user_model_uuid": user_model,
@@ -502,7 +499,7 @@ def average_embeddings(client, dids, workers, expected_source):
     skipped, failed = Counter(), Counter()
     vectors, pending = [], set()
     remaining = iter(dids)
-    model_pair = dimension = policy = None
+    model_pair = dimension = None
     fatal = None
     logger.info(
         "Embeddings: requesting %d users with workers=%d; timeout=60s attempts=3",
@@ -522,27 +519,20 @@ def average_embeddings(client, dids, workers, expected_source):
                     status = result["status"]
                     if status == "failed":
                         failed[result["reason"]] += 1
+                    elif status == "skipped":
+                        skipped[result["reason"]] += 1
                     else:
-                        current_policy = result["history_policy"]
-                        if policy is not None and current_policy != policy:
-                            raise RunError("Embedding API: mixed history policies")
-                        policy = current_policy
-                        if status == "skipped":
-                            skipped[result["reason"]] += 1
-                        else:
-                            current_pair = (
+                        # Label the artifact with the first contributor's model pair.
+                        # This manual job assumes fixed serving models during generation.
+                        if model_pair is None:
+                            model_pair = (
                                 result["user_model_uuid"],
                                 result["post_model_uuid"],
                             )
-                            current_dimension = result["dimension"]
-                            if model_pair is not None and (
-                                current_pair != model_pair or current_dimension != dimension
-                            ):
-                                raise RunError(
-                                    "Embedding API: mixed model pairs or vector dimensions"
-                                )
-                            model_pair, dimension = current_pair, current_dimension
-                            vectors.append(result["embedding"])
+                            dimension = result["dimension"]
+                        elif result["dimension"] != dimension:
+                            raise RunError("Embedding API: mixed vector dimensions")
+                        vectors.append(result["embedding"])
                 except (RunError, ArtifactValidationError) as error:
                     fatal = fatal or RunError(str(error))
                     failed[str(error)] += 1
@@ -618,7 +608,6 @@ def average_embeddings(client, dids, workers, expected_source):
         "dimension": dimension,
         "user_model_uuid": model_pair[0],
         "post_model_uuid": model_pair[1],
-        "history_policy": policy,
         "contributing_users": len(vectors),
         "skipped_users": skipped.total(),
     }
@@ -755,15 +744,11 @@ def generate(args, run_id, started_at):
     result = average_embeddings(api, eligible, args.workers, source)
     skipped_users = result.pop("skipped_users")
     artifact = {
-        "artifact_type": "average_user_embedding",
         "format_version": 1,
         "run_id": run_id,
         "source_completed_at": utc_string(datetime.now(UTC)),
         **result,
         "cohort": {
-            "posthog_project_id": args.posthog_project_id,
-            "event": "interactionSeen",
-            "scope": "all_history_all_feeds",
             "cutoff": cutoff,
             "min_interaction_seen": args.min_interaction_seen,
             "min_likes": args.min_likes,

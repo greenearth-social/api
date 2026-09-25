@@ -12,11 +12,15 @@ from app.lib.average_user_embedding_artifact import (
     validate_artifact,
 )
 
+# The JSON fixture is an illustrative two-dimensional normalized mean, not a serving
+# model artifact. Its four-user cohort splits into two contributors, one history
+# skip, and one user below the like threshold. Keep it plain JSON for real loaders.
 FIXTURE = Path(__file__).parents[3] / "scripts/fixtures/average_user_embedding_v1.json"
 USER_MODEL = "1affd684bc7f45f895e488f83dd0a2fa"
 
 
 def artifact_fixture():
+    # Parse anew so one negative case's nested mutations cannot affect another case.
     return json.loads(FIXTURE.read_bytes())
 
 
@@ -27,7 +31,6 @@ def artifact_fixture():
         lambda a: a.update(format_version=True),
         lambda a: a.update(contributors=[{"user_did": "did:plc:private"}]),
         lambda a: a["cohort"].update(user_dids=["did:plc:private"]),
-        lambda a: a["history_policy"].update(private="secret"),
         lambda a: a.update(embedding=[0, 0]),
         lambda a: a.update(embedding=[float("nan"), 1]),
         lambda a: a.update(embedding=[float("inf"), 1]),
@@ -44,6 +47,7 @@ def artifact_fixture():
     ],
 )
 def test_artifact_validation_rejects_malformed_or_private_data(mutate):
+    # Mutate one otherwise-valid field to isolate each contract/privacy boundary.
     artifact = artifact_fixture()
     mutate(artifact)
     with pytest.raises(ArtifactValidationError):
@@ -52,6 +56,7 @@ def test_artifact_validation_rejects_malformed_or_private_data(mutate):
 
 @pytest.mark.parametrize("magnitude", [1.0, 1.0 - 0.999e-6, 1.0 + 0.999e-6])
 def test_artifact_validation_accepts_unit_magnitude_within_absolute_tolerance(magnitude):
+    # The tolerance allows numeric roundoff; validation must not rewrite the vector.
     artifact = artifact_fixture()
     artifact["embedding"] = [magnitude, 0]
     assert validate_artifact(artifact) == artifact
@@ -74,6 +79,7 @@ def test_json_duplicate_keys_are_rejected(tmp_path):
 
 
 def test_parsing_and_loading_preserve_the_artifact_and_original_bytes(tmp_path):
+    # Unusual but valid whitespace catches accidental reserialization before upload.
     artifact = artifact_fixture()
     data = ("\n  " + json.dumps(artifact, indent=3) + "\r\n").encode()
     path = tmp_path / "average.json"
@@ -86,8 +92,9 @@ def test_parsing_and_loading_preserve_the_artifact_and_original_bytes(tmp_path):
     assert path.read_bytes() == data
 
 
-@pytest.mark.parametrize("key", ["format_version", "limit", "min_likes"])
+@pytest.mark.parametrize("key", ["format_version", "min_likes"])
 def test_parser_rejects_duplicate_keys_at_every_object_level(key):
+    # object_pairs_hook must guard the nested cohort object as well as the root.
     data = json.dumps(artifact_fixture())
     data = data.replace(f'"{key}":', f'"{key}": 1, "{key}":', 1).encode()
     with pytest.raises(ArtifactValidationError, match="duplicate JSON keys"):

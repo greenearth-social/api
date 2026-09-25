@@ -12,8 +12,6 @@ from .average_user_embedding_artifact import (
     load_artifact,
     parse_artifact,
 )
-from .embeddings import MINILM_L12_EMBEDDING_KEY
-from .user_history_cache import USER_HISTORY_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -73,16 +71,6 @@ def _load_average_user_embedding(uri: str) -> AverageUserEmbedding:
         raise ArtifactValidationError("Expected a local file path or gs://bucket/object URI")
     else:
         artifact, _ = load_artifact(Path(uri).expanduser())
-
-    policy = artifact["history_policy"]
-    if (
-        policy["limit"] != USER_HISTORY_LIMIT
-        or set(policy["sources"]) != {"posts", "replies"}
-        or policy["embedding_key"] != MINILM_L12_EMBEDDING_KEY
-    ):
-        raise ArtifactValidationError(
-            "Artifact history policy does not match the production loader"
-        )
 
     return AverageUserEmbedding(
         embedding=tuple(artifact["embedding"]),

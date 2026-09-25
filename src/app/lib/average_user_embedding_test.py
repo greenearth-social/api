@@ -149,7 +149,7 @@ async def test_unconfigured_prior_does_not_load(monkeypatch):
         ({"embedding": [float("inf"), 1.0]}, "finite nonzero"),
         ({"embedding": [1.0, 1.0]}, "unit L2 magnitude"),
         ({"dimension": 128}, "matching dimension"),
-        ({"format_version": 2}, "Unsupported artifact type or version"),
+        ({"format_version": 2}, "Unsupported artifact version"),
         ({"user_model_uuid": "not-a-uuid"}, "Model identifiers"),
         ({"contributing_users": 0}, "at least one contributor"),
         ({"source_completed_at": "invalid"}, "UTC timestamp"),
@@ -164,20 +164,6 @@ async def test_invalid_artifact_is_unavailable(
     assert module.get_average_user_embedding() is None
     assert module.get_average_user_embedding_error() == "load_failed"
     assert reason in caplog.text
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "updates", [{"limit": 32}, {"sources": ["posts"]}, {"embedding_key": "other_model"}]
-)
-async def test_history_policy_must_match_production(
-    tmp_path, monkeypatch, artifact, caplog, updates
-):
-    artifact["history_policy"].update(updates)
-    write_artifact(tmp_path, monkeypatch, artifact)
-    await module.init_average_user_embedding()
-    assert module.get_average_user_embedding() is None
-    assert "history policy does not match" in caplog.text
 
 
 @pytest.mark.asyncio

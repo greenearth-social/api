@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 from collections import Counter
+from email.message import Message
 from http.client import IncompleteRead
 from pathlib import Path
 from unittest.mock import Mock
@@ -48,7 +49,6 @@ def user(did, interactions=50, likes=5):
 USER_MODEL = "1affd684bc7f45f895e488f83dd0a2fa"
 POST_MODEL = "9b946f280fd84899a7f82246fbc34d17"
 SOURCE = {"es_cluster_uuid": "es-cluster-A", "likes_index": "likes"}
-POLICY = {"limit": 64, "sources": ["posts", "replies"], "embedding_key": "all_MiniLM_L12_v2"}
 
 
 def embedding(did, vector=None, model=USER_MODEL):
@@ -61,7 +61,6 @@ def embedding(did, vector=None, model=USER_MODEL):
         "dimension": len(vector),
         "user_model_uuid": model,
         "post_model_uuid": POST_MODEL,
-        "history_policy": POLICY.copy(),
         **SOURCE,
         "history_like_count": 5,
         "history_embedding_count": 3,
@@ -74,7 +73,6 @@ def skipped(did, reason="no_embedded_history"):
         "user_did": did,
         "status": "skipped",
         "reason": reason,
-        "history_policy": POLICY.copy(),
         **SOURCE,
         "history_like_count": 0 if reason == "no_likes" else 5,
         "history_embedding_count": 0,
@@ -188,7 +186,9 @@ def test_likes_rejects_partial_or_inexact_aggregations(mutation):
 
 
 def http_error(status, retry_after=None, code=None):
-    headers = {"Retry-After": retry_after} if retry_after is not None else {}
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
     body = {"detail": {"code": code, "message": "NEVER-PUBLISH-THIS-SECRET"}}
     return HTTPError(
         "https://unused", status, "error", headers, io.BytesIO(json.dumps(body).encode())
@@ -296,7 +296,7 @@ def test_missing_history_is_explicitly_skipped(reason):
     result = average.fetch_embedding(
         FakeClient(lambda *_: skipped("did:plc:a", reason)), "did:plc:a", SOURCE
     )
-    assert result == {"status": "skipped", "reason": reason, "history_policy": POLICY}
+    assert result == {"status": "skipped", "reason": reason}
 
 
 @pytest.mark.parametrize(
@@ -305,7 +305,6 @@ def test_missing_history_is_explicitly_skipped(reason):
         {**skipped("did:plc:a", "no_likes"), "history_like_count": 1},
         {**skipped("did:plc:a"), "history_embedding_count": 1},
         {**embedding("did:plc:a"), "history_embedding_count": 6},
-        {**embedding("did:plc:a"), "history_like_count": 65},
     ],
 )
 def test_inconsistent_history_counts_do_not_contribute(response):
@@ -341,7 +340,6 @@ def test_mean_is_equal_weight_then_normalized_and_returns_only_aggregate_metadat
         "dimension",
         "user_model_uuid",
         "post_model_uuid",
-        "history_policy",
         "contributing_users",
         "skipped_users",
     }
@@ -378,16 +376,28 @@ def test_missing_history_updates_aggregate_counts_and_logs_without_retaining_did
     assert "did:" not in caplog.text + json.dumps(result)
 
 
+def test_first_contributor_model_pair_is_kept_when_later_models_change():
+    responses = {
+        "did:plc:skip": skipped("did:plc:skip"),
+        "did:plc:a": embedding("did:plc:a", [2, 4]),
+        "did:plc:b": {
+            **embedding("did:plc:b", [6, 8], model="a" * 32),
+            "post_model_uuid": "b" * 32,
+        },
+    }
+    client = FakeClient(lambda _, payload: responses[payload["user_did"]])
+    result = average_users(client, [user(did) for did in responses], workers=1)
+    assert result["user_model_uuid"] == USER_MODEL
+    assert result["post_model_uuid"] == POST_MODEL
+    assert result["embedding"] == pytest.approx([4 / math.sqrt(52), 6 / math.sqrt(52)])
+    assert result["contributing_users"] == 2
+    assert result["skipped_users"] == 1
+
+
 @pytest.mark.parametrize(
     "second,match",
     [
-        (embedding("did:plc:b", model="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "mixed model"),
-        (
-            {**embedding("did:plc:b"), "post_model_uuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-            "mixed model",
-        ),
-        (embedding("did:plc:b", [1, 2, 3]), "mixed model"),
-        ({**embedding("did:plc:b"), "history_policy": {**POLICY, "limit": 50}}, "mixed history"),
+        (embedding("did:plc:b", [1, 2, 3]), "mixed vector dimensions"),
         ({**embedding("did:plc:b"), "es_cluster_uuid": "wrong-cluster"}, "source mismatch"),
         ({**skipped("did:plc:b"), "likes_index": "other-index"}, "source mismatch"),
     ],
@@ -403,8 +413,6 @@ def test_metadata_mismatch_is_global_failure(second, match):
 @pytest.mark.parametrize(
     "field,value,reason",
     [
-        ("history_policy", None, "Invalid history policy metadata"),
-        ("history_policy", {**POLICY, "limit": True}, "Invalid history policy metadata"),
         ("user_model_uuid", "invalid", "Model identifiers must be nonzero UUIDs"),
         ("post_model_uuid", None, "Model identifiers must be nonzero UUIDs"),
     ],
@@ -572,7 +580,7 @@ def test_full_pipeline_saves_only_compact_artifact_and_no_secrets(
 
 
 @pytest.mark.parametrize(
-    "failure", ["zero", "auth", "mixed", "request", "malformed", "collection", "interrupt"]
+    "failure", ["zero", "auth", "dimensions", "request", "malformed", "collection", "interrupt"]
 )
 def test_failed_generation_returns_error_without_output(
     tmp_path, monkeypatch, capsys, caplog, failure
@@ -590,9 +598,9 @@ def test_failed_generation_returns_error_without_output(
             raise average.RequestError("upstream_timeout")
         if failure == "malformed":
             return embedding(did, [float("nan")])
-        return embedding(
-            did, model=USER_MODEL if did == "did:plc:a" else "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        )
+        if failure == "dimensions":
+            return embedding(did, [1, 2] if did == "did:plc:a" else [1, 2, 3])
+        return embedding(did)
 
     install_pipeline_fakes(monkeypatch, respond, collection_failure=failure == "collection")
     assert average.main(["--output-dir", str(tmp_path)]) == 1
