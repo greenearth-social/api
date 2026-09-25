@@ -44,25 +44,6 @@ def model_id(value):
         raise ArtifactValidationError("Model identifiers must be nonzero UUIDs") from None
 
 
-def validate_history_policy(policy):
-    # This is provenance, not a hardcoded serving configuration. A consumer must
-    # separately decide whether the declared window/sources/embedding key suit it.
-    if (
-        not isinstance(policy, dict)
-        or set(policy) != {"limit", "sources", "embedding_key"}
-        or not is_count(policy.get("limit"))
-        or policy["limit"] == 0
-        or not isinstance(policy.get("sources"), list)
-        or not policy["sources"]
-        or any(source not in ("posts", "replies") for source in policy["sources"])
-        or len(set(policy["sources"])) != len(policy["sources"])
-        or not isinstance(policy.get("embedding_key"), str)
-        or not re.fullmatch(r"[A-Za-z0-9_.-]+", policy["embedding_key"])
-    ):
-        raise ArtifactValidationError("Invalid history policy metadata")
-    return policy
-
-
 def utc_timestamp(value: object) -> datetime:
     try:
         if not isinstance(value, str) or not value.endswith("Z"):
@@ -87,7 +68,6 @@ def validate_artifact(artifact):
         "source_completed_at",
         "contributing_users",
         "cohort",
-        "history_policy",
     }
     if not isinstance(artifact, dict) or set(artifact) != keys:
         raise ArtifactValidationError("Artifact does not match the version 1 compact schema")
@@ -129,7 +109,6 @@ def validate_artifact(artifact):
     count = artifact["contributing_users"]
     if not is_count(count) or count == 0:
         raise ArtifactValidationError("Artifact requires at least one contributor")
-    validate_history_policy(artifact["history_policy"])
     cohort = artifact["cohort"]
     # Coverage must balance in both stages: PostHog users split into eligible and
     # below-threshold users, and eligible users split into contributors and skips.

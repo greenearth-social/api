@@ -104,11 +104,6 @@ def test_export_propagates_actual_pair_and_history_without_candidate_search(
         "dimension": 2,
         "history_like_count": 1,
         "history_embedding_count": 1,
-        "history_policy": {
-            "limit": 64,
-            "sources": ["posts", "replies"],
-            "embedding_key": "all_MiniLM_L12_v2",
-        },
     }
     cast(AsyncMock, embeddings.fetch_user_history_features).assert_awaited_once_with(
         app.state.es, DID

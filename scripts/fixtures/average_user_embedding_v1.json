@@ -18,13 +18,5 @@
     "below_min_likes": 1,
     "eligible_users": 3,
     "skipped_users": 1
-  },
-  "history_policy": {
-    "limit": 64,
-    "sources": [
-      "posts",
-      "replies"
-    ],
-    "embedding_key": "all_MiniLM_L12_v2"
   }
 }

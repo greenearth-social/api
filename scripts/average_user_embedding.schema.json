@@ -13,8 +13,7 @@
     "run_id",
     "source_completed_at",
     "contributing_users",
-    "cohort",
-    "history_policy"
+    "cohort"
   ],
   "properties": {
     "format_version": {
@@ -101,36 +100,6 @@
         "skipped_users": {
           "type": "integer",
           "minimum": 0
-        }
-      }
-    },
-    "history_policy": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "limit",
-        "sources",
-        "embedding_key"
-      ],
-      "properties": {
-        "limit": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "sources": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": {
-            "enum": [
-              "posts",
-              "replies"
-            ]
-          }
-        },
-        "embedding_key": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9_.-]+$"
         }
       }
     }

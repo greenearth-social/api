@@ -180,41 +180,33 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
     assert all(count == 1 for count in Counter(endpoint_calls).values())
     assert DIDS[3] not in endpoint_calls
     assert not {"report_path", "log_path", "output_dir", "counts"} & summary.keys()
-    if model_changes:
-        # Even valid individual vectors must not produce an artifact across models.
-        assert summary["status"] == "failed"
-        assert summary["artifact_path"] is None
-        assert "mixed model" in summary["error"]
-        assert "Run: failed: Embedding API: mixed model" in caplog.text
-        assert not list((tmp_path / "results").glob("*"))
-    else:
-        # Validate what a consumer would load from disk, including coverage and the
-        # normalized equal-weight mean; the test also checks no user data is saved.
-        assert summary["status"] == "success"
-        artifact_path = tmp_path / "results" / f"average_user_embedding_{summary['run_id']}.json"
-        artifact, data = load_artifact(artifact_path)
-        assert summary["artifact_path"] == str(artifact_path)
-        assert list((tmp_path / "results").iterdir()) == [artifact_path]
-        assert artifact["format_version"] == 1
-        assert artifact["embedding"] == pytest.approx(
-            [2 / math.sqrt(56), 4 / math.sqrt(56), 6 / math.sqrt(56)]
-        )
-        assert artifact["post_model_uuid"] == POST_MODEL
-        assert artifact["user_model_uuid"] == USER_MODEL
-        assert artifact["contributing_users"] == 2
-        assert {
-            key: artifact["cohort"][key]
-            for key in ("posthog_users", "below_min_likes", "eligible_users", "skipped_users")
-        } == {
-            "posthog_users": 4,
-            "below_min_likes": 1,
-            "eligible_users": 3,
-            "skipped_users": 1,
-        }
-        assert "contributing=2" in caplog.text
-        assert "skipped=1" in caplog.text
-        assert "no_embedded_history" in caplog.text
-        assert b"did:" not in data
-        assert b"integration-test-key" not in data
-        assert "contributors" not in artifact
-        assert "skipped" not in artifact
+    # The first contributor labels the artifact even if later responses report
+    # different models. Validate the saved mean, coverage, and compact contract.
+    assert summary["status"] == "success"
+    artifact_path = tmp_path / "results" / f"average_user_embedding_{summary['run_id']}.json"
+    artifact, data = load_artifact(artifact_path)
+    assert summary["artifact_path"] == str(artifact_path)
+    assert list((tmp_path / "results").iterdir()) == [artifact_path]
+    assert artifact["format_version"] == 1
+    assert artifact["embedding"] == pytest.approx(
+        [2 / math.sqrt(56), 4 / math.sqrt(56), 6 / math.sqrt(56)]
+    )
+    assert artifact["post_model_uuid"] == POST_MODEL
+    assert artifact["user_model_uuid"] == USER_MODEL
+    assert artifact["contributing_users"] == 2
+    assert {
+        key: artifact["cohort"][key]
+        for key in ("posthog_users", "below_min_likes", "eligible_users", "skipped_users")
+    } == {
+        "posthog_users": 4,
+        "below_min_likes": 1,
+        "eligible_users": 3,
+        "skipped_users": 1,
+    }
+    assert "contributing=2" in caplog.text
+    assert "skipped=1" in caplog.text
+    assert "no_embedded_history" in caplog.text
+    assert b"did:" not in data
+    assert b"integration-test-key" not in data
+    assert "contributors" not in artifact
+    assert "skipped" not in artifact

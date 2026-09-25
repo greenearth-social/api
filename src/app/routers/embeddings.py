@@ -11,7 +11,6 @@ from elasticsearch import ApiError
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..lib.embeddings import MINILM_L12_EMBEDDING_KEY
 from ..lib.inference import (
     InferenceModelMetadataError,
     InferenceResponseFormatError,
@@ -19,7 +18,7 @@ from ..lib.inference import (
     predict_user_embedding,
 )
 from ..lib.request_context import get_request_id
-from ..lib.user_history_cache import USER_HISTORY_LIMIT, fetch_user_history_features
+from ..lib.user_history_cache import fetch_user_history_features
 from ..security import verify_api_key
 
 logger = logging.getLogger(__name__)
@@ -41,14 +40,6 @@ class UserEmbeddingRequest(BaseModel):
     )
 
 
-class HistoryPolicy(BaseModel):
-    # Record how actual history was prepared, so the saved mean can later be checked
-    # against the history policy used by its consumer.
-    limit: int = USER_HISTORY_LIMIT
-    sources: list[str] = Field(default_factory=lambda: ["posts", "replies"])
-    embedding_key: str = MINILM_L12_EMBEDDING_KEY
-
-
 class UserEmbeddingResponse(BaseModel):
     user_did: str
     status: Literal["ok", "skipped"]
@@ -56,7 +47,6 @@ class UserEmbeddingResponse(BaseModel):
     # when liked posts/replies are missing or lack content embeddings.
     history_like_count: int = Field(ge=0)
     history_embedding_count: int = Field(ge=0)
-    history_policy: HistoryPolicy = Field(default_factory=HistoryPolicy)
     embedding: list[float] | None = None
     user_model_uuid: str | None = None
     post_model_uuid: str | None = None

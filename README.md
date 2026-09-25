@@ -713,9 +713,8 @@ an artifact in a feed. Deployment and runtime integration are deferred to Part 2
 
 `POST /embeddings/user` accepts `{"user_did": "did:plc:..."}` and uses the existing
 `X-API-Key` authentication. An `ok` response includes the embedding, dimension,
-`user_model_uuid`, `post_model_uuid`, loaded-like and usable-history counts,
-and `history_policy`. A `skipped` response
-identifies `no_likes` or `no_embedded_history` and contains no vector.
+`user_model_uuid`, `post_model_uuid`, and loaded-like and usable-history counts.
+A `skipped` response identifies `no_likes` or `no_embedded_history` and contains no vector.
 
 Deploy inference-service's paired-model response support before using this
 endpoint. Its user-tower prediction must return `paired_post_model_uuid` from
@@ -809,12 +808,17 @@ reports or log files.
 
 The artifact has `format_version: 1`. It contains the L2-normalized mean `embedding`, `dimension`,
 `user_model_uuid`, `post_model_uuid`, `run_id`, `source_completed_at`,
-`contributing_users`, `cohort`, and `history_policy`. The `cohort` records the PostHog cutoff,
+`contributing_users`, and `cohort`. The `cohort` records the PostHog cutoff,
 selection thresholds, and user counts at each selection stage.
 See the [artifact schema](scripts/average_user_embedding.schema.json) and
 [small contract fixture](scripts/fixtures/average_user_embedding_v1.json).
 Artifact validation requires an L2 magnitude within `1e-6` of 1.
 The fixture is illustrative, not a model artifact to deploy.
+
+The model UUIDs come from the first contributing user's response. The script
+requires valid UUIDs but does not compare model identities across users; it assumes
+the serving models stay fixed during a manual run. Consumers use the saved user/post
+model pair and dimension to check compatibility before blending with actual user embeddings.
 
 The producer and API consumers share the
 [`app.lib.average_user_embedding_artifact`](src/app/lib/average_user_embedding_artifact.py) module.
@@ -837,7 +841,7 @@ pipenv run python scripts/average_user_embedding.py \
 
 Missing-history skips are summarized and may reduce coverage. Any user
 request failure, incomplete collection, authentication/configuration error,
-likes-index mismatch, mixed model pair/dimension/history policy, zero contributors,
+missing/invalid model UUIDs, mixed vector dimensions, zero contributors,
 or invalid/zero-magnitude mean prevents saving the artifact and exits nonzero.
 There is no partial-result override. A failed generation creates no artifact.
 Exit zero means the local artifact was saved successfully; runtime failures exit
@@ -846,8 +850,8 @@ nonzero with details on stderr and in the final stdout summary.
 ### Inspect and promote an artifact
 
 Keep generation and promotion separate. Generate locally with the command above,
-then inspect the saved JSON's model pair, dimension, contributor count, cohort,
-and history policy. The test bucket is an optional place to share draft artifacts;
+then inspect the saved JSON's model pair, dimension, contributor count, and cohort.
+The test bucket is an optional place to share draft artifacts;
 there is no requirement to upload there before promotion.
 
 `scripts/promote_average_user_embedding.py` takes a local file or an exact GCS

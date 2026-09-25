@@ -31,7 +31,6 @@ def artifact_fixture():
         lambda a: a.update(format_version=True),
         lambda a: a.update(contributors=[{"user_did": "did:plc:private"}]),
         lambda a: a["cohort"].update(user_dids=["did:plc:private"]),
-        lambda a: a["history_policy"].update(private="secret"),
         lambda a: a.update(embedding=[0, 0]),
         lambda a: a.update(embedding=[float("nan"), 1]),
         lambda a: a.update(embedding=[float("inf"), 1]),
@@ -93,9 +92,9 @@ def test_parsing_and_loading_preserve_the_artifact_and_original_bytes(tmp_path):
     assert path.read_bytes() == data
 
 
-@pytest.mark.parametrize("key", ["format_version", "limit", "min_likes"])
+@pytest.mark.parametrize("key", ["format_version", "min_likes"])
 def test_parser_rejects_duplicate_keys_at_every_object_level(key):
-    # object_pairs_hook must guard nested policy/cohort objects as well as the root.
+    # object_pairs_hook must guard the nested cohort object as well as the root.
     data = json.dumps(artifact_fixture())
     data = data.replace(f'"{key}":', f'"{key}": 1, "{key}":', 1).encode()
     with pytest.raises(ArtifactValidationError, match="duplicate JSON keys"):

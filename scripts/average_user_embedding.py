@@ -35,7 +35,6 @@ from app.lib.average_user_embedding_artifact import (  # noqa: E402
     is_finite_number,
     model_id,
     validate_artifact,
-    validate_history_policy,
 )
 
 logger = logging.getLogger(__name__)
@@ -256,13 +255,12 @@ def fetch_embedding(client, did):
     result = post_json(client, "/embeddings/user", {"user_did": did})
     if result.get("user_did") != did:
         raise RunError("Embedding API: response DID differs from request")
-    policy = validate_history_policy(result.get("history_policy"))
     for key in ("history_like_count", "history_embedding_count"):
         if not is_count(result.get(key)):
             raise RunError(f"Embedding API: {key} must be a nonnegative integer")
     likes, usable = result["history_like_count"], result["history_embedding_count"]
-    if usable > likes or likes > policy["limit"]:
-        raise RunError("Embedding API: history counts exceed their limits")
+    if usable > likes:
+        raise RunError("Embedding API: history counts are inconsistent")
     if result.get("status") == "skipped":
         # Missing usable history is a legitimate exclusion, not a transport
         # failure. It must not carry an empty-history substitute embedding.
@@ -277,7 +275,7 @@ def fetch_embedding(client, did):
             or (reason == "no_likes") != (likes == 0)
         ):
             raise RunError("Embedding API: skip reason/counts/vector inconsistent")
-        return {"status": "skipped", "reason": reason, "history_policy": policy}
+        return {"status": "skipped", "reason": reason}
     vector, dimension = result.get("embedding"), result.get("dimension")
     if (
         result.get("status") != "ok"
@@ -293,7 +291,6 @@ def fetch_embedding(client, did):
         )
     return {
         "status": "ok",
-        "history_policy": policy,
         "embedding": vector,
         "dimension": dimension,
         "user_model_uuid": model_id(result.get("user_model_uuid")),
@@ -307,7 +304,7 @@ def average_embeddings(client, dids):
     next_progress_at = started + PROGRESS_LOG_INTERVAL_SECONDS
     skipped = Counter()
     vectors = []
-    model_pair = dimension = policy = None
+    model_pair = dimension = None
     logger.info(
         "Embeddings: requesting %d users sequentially; timeout=%ds",
         len(dids),
@@ -315,21 +312,16 @@ def average_embeddings(client, dids):
     )
     for did in dids:
         result = fetch_embedding(client, did)
-        # All contributors must use the same history policy and model pair.
-        current_policy = result["history_policy"]
-        if policy is not None and current_policy != policy:
-            raise RunError("Embedding API: mixed history policies")
-        policy = current_policy
         if result["status"] == "skipped":
             skipped[result["reason"]] += 1
         else:
-            current_pair = (result["user_model_uuid"], result["post_model_uuid"])
-            current_dimension = result["dimension"]
-            if model_pair is not None and (
-                current_pair != model_pair or current_dimension != dimension
-            ):
-                raise RunError("Embedding API: mixed model pairs or vector dimensions")
-            model_pair, dimension = current_pair, current_dimension
+            # Label the artifact with the first contributor's model pair. This
+            # manual job assumes the serving models stay fixed during generation.
+            if model_pair is None:
+                model_pair = (result["user_model_uuid"], result["post_model_uuid"])
+                dimension = result["dimension"]
+            elif result["dimension"] != dimension:
+                raise RunError("Embedding API: mixed vector dimensions")
             vectors.append(result["embedding"])
         now = time.monotonic()
         if now >= next_progress_at:
@@ -381,7 +373,6 @@ def average_embeddings(client, dids):
         "dimension": dimension,
         "user_model_uuid": model_pair[0],
         "post_model_uuid": model_pair[1],
-        "history_policy": policy,
         "contributing_users": len(vectors),
         "skipped_users": skipped.total(),
     }
