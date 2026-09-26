@@ -26,6 +26,7 @@ from .random_posts import RandomPostsCandidateGenerator
 from .followed_users import FollowedUsersCandidateGenerator
 from .network_likes import NetworkLikesCandidateGenerator
 from .two_tower import TwoTowerCandidateGenerator
+from .llm_query_vector import LlmQueryVectorCandidateGenerator
 
 # Register built-in generators
 _popularity = PopularityCandidateGenerator()
@@ -51,6 +52,9 @@ _two_tower_empty_history = TwoTowerCandidateGenerator(
     history_mode="empty",
 )
 register_generator(_two_tower_empty_history)
+
+_llm_query_vector = LlmQueryVectorCandidateGenerator()
+register_generator(_llm_query_vector)
 
 __all__ = [
     "CandidateGenerator",
