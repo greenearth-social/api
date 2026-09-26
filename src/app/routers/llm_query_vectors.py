@@ -11,15 +11,18 @@ llm_query_vector candidate generator (ingex#484) reads the user's most recently
 updated document, so the newest fit is the one that serves.
 """
 
+import asyncio
 import logging
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import add_llm_query_vector, get_latest_llm_query_vector
 from ..lib.llm_query_vector_fit import FitError, PoolTooSmallError, fit_query_vector
+from ..lib.posthog_client import get_posthog_client, llm_cg_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,24 @@ router = APIRouter(tags=["llm-query-vectors"])
 # make me feel happy"). The cap keeps the expansion and the 80 scoring calls,
 # which each embed the prompt, at their measured token counts.
 MAX_PROMPT_CHARS = 2000
+
+
+async def require_llm_cg_user(user_doc_id: FirebaseUser) -> str:
+    """The signed-in user's DID, or 403 while the ``llm-cg`` flag is off for them.
+
+    The feature is in beta: only the PostHog internal cohort may fit prompts,
+    which is what costs money. The frontend hides the UI for everyone else.
+    """
+    user_did = f"did:plc:{user_doc_id}"
+    enabled = await asyncio.to_thread(llm_cg_enabled, get_posthog_client(), user_did)
+    if not enabled:
+        raise HTTPException(
+            status_code=403, detail="The prompt source is not enabled for this account"
+        )
+    return user_did
+
+
+LlmCgUser = Annotated[str, Depends(require_llm_cg_user)]
 
 
 class QueryVectorFitRequest(BaseModel):
@@ -72,6 +93,7 @@ class QueryVectorFitResponse(BaseModel):
     "/api/feeds/llm-query-vectors/fit",
     response_model=QueryVectorFitResponse,
     responses={
+        403: {"description": "The llm-cg feature flag is off for this user"},
         422: {
             "description": "Invalid request, or too few posts match the prompt to fit a vector"
         },
@@ -82,13 +104,13 @@ class QueryVectorFitResponse(BaseModel):
 async def fit_llm_query_vector(
     body: QueryVectorFitRequest,
     request: Request,
-    user_doc_id: FirebaseUser,
+    user_did: LlmCgUser,
 ) -> QueryVectorFitResponse:
     """Expand the prompt to keywords, sample and score posts, fit a query
     vector, store it under the user. Synchronous: ~10 s and ~$0.13 per call.
     Every fit stores a new document; the feed uses the user's newest one.
-    The user is whoever the Firebase token belongs to."""
-    user_did = f"did:plc:{user_doc_id}"
+    The user is whoever the Firebase token belongs to, and must have the
+    ``llm-cg`` flag."""
     db = getattr(request.app.state, "firestore", None)
     if db is None:
         raise HTTPException(status_code=503, detail="Firestore unavailable")
@@ -147,19 +169,20 @@ class CurrentPromptResponse(BaseModel):
     response_model=CurrentPromptResponse,
     responses={
         204: {"description": "No prompt fitted yet"},
+        403: {"description": "The llm-cg feature flag is off for this user"},
         503: {"description": "Firestore unavailable"},
     },
 )
 async def current_llm_prompt(
     request: Request,
-    user_doc_id: FirebaseUser,
+    user_did: LlmCgUser,
 ) -> CurrentPromptResponse | Response:
     """The prompt behind the vector the feed currently serves for this user,
     which is the most recently updated one. The vector itself is not returned."""
     db = getattr(request.app.state, "firestore", None)
     if db is None:
         raise HTTPException(status_code=503, detail="Firestore unavailable")
-    stored = await get_latest_llm_query_vector(db, f"did:plc:{user_doc_id}")
+    stored = await get_latest_llm_query_vector(db, user_did)
     if stored is None:
         return Response(status_code=204)
     return CurrentPromptResponse(

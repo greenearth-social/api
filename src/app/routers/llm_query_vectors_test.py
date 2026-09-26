@@ -18,8 +18,10 @@ CURRENT_PATH = "/api/feeds/llm-query-vectors/current"
 
 
 @pytest.fixture
-def client() -> Generator[TestClient]:
-    """Client with Firebase auth bypassed and Firestore + ES stubbed on app state."""
+def client(monkeypatch) -> Generator[TestClient]:
+    """Client with Firebase auth bypassed, the llm-cg gate open, and Firestore + ES
+    stubbed on app state."""
+    monkeypatch.setenv("GE_LLM_CG_OPEN", "true")
     app.dependency_overrides[verify_firebase_auth] = lambda: "test-user"
     app.state.firestore = MagicMock()
     app.state.es = MagicMock()
@@ -122,3 +124,21 @@ def test_current_is_204_when_nothing_fitted(mock_latest, client):
 
     assert response.status_code == 204
     assert response.content == b""
+
+
+@patch("app.routers.llm_query_vectors.llm_cg_enabled", return_value=False)
+@patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
+def test_fit_is_403_when_flag_off(mock_fit, mock_enabled, client):
+    response = client.post(PATH, json={"prompt": "hopeful science"})
+    assert response.status_code == 403
+    mock_fit.assert_not_called()
+    mock_enabled.assert_called_once()
+    assert mock_enabled.call_args.args[1] == "did:plc:test-user"
+
+
+@patch("app.routers.llm_query_vectors.llm_cg_enabled", return_value=False)
+@patch("app.routers.llm_query_vectors.get_latest_llm_query_vector", new_callable=AsyncMock)
+def test_current_is_403_when_flag_off(mock_latest, mock_enabled, client):
+    response = client.get(CURRENT_PATH)
+    assert response.status_code == 403
+    mock_latest.assert_not_called()
