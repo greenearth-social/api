@@ -219,7 +219,7 @@ This script will:
 - Enable required GCP APIs (Cloud Run, Secret Manager, etc.)
 - Create a service account with appropriate IAM roles
 - Configure the Elasticsearch connection using `GE_ELASTICSEARCH_URL` as non-secret config and `GE_ELASTICSEARCH_API_KEY` as a Secret Manager secret
-- Create Secret Manager secrets for `GE_FEED_CONTEXT_SECRET` (auto-generated), `GE_POSTHOG_API_KEY`, `GE_PERSPECTIVE_API_KEY`, and `GE_BSKY_APP_PASSWORD`
+- Create Secret Manager secrets for `GE_FEED_CONTEXT_SECRET` (auto-generated), `GE_POSTHOG_API_KEY`, `GE_PERSPECTIVE_API_KEY`, `GE_ANTHROPIC_API_KEY`, and `GE_BSKY_APP_PASSWORD`
 - Verify VPC connector for internal network access
 - Ensure the environment's Firestore database exists
 
@@ -415,6 +415,7 @@ Available configuration inputs across `gcp_setup.sh` and `deploy.sh`:
 - `GE_PERSPECTIVE_API_KEY` - Perspective API key for toxicity scoring (pass to `gcp_setup.sh` via `--perspective-api-key`)
 - `GE_PERSPECTIVE_QPM` - Serving's share of the Perspective quota, in requests per minute (default: `26700`). The quota is 36 000 RPM shared with `ingex`, which scores posts at ingest and takes 9 000 RPM via `GE_PERSPECTIVE_QPS`. The two sum to 35 700, leaving a 300 RPM buffer — neither limiter is exact, since this one is per-process and the api runs several
 - `GE_PERSPECTIVE_HOST` - Perspective API host override (default: `https://commentanalyzer.googleapis.com`), used by the local dev stub
+- `GE_ANTHROPIC_API_KEY` - Anthropic API key for LLM query-vector fitting, `POST /llm-query-vectors/fit` (pass to `gcp_setup.sh` via `--anthropic-api-key`)
 - `GE_BSKY_APP_PASSWORD` - Bluesky app password for feed publishing (pass to `gcp_setup.sh` via `--bsky-app-password`)
 - `GE_INFERENCE_BASE_URL` - Explicit inference endpoint override (highest priority)
 - `GE_INFERENCE_DOMAIN` - Domain-mapped inference host used when base URL override is not set
@@ -476,6 +477,7 @@ export GE_ELASTICSEARCH_API_KEY="$GE_ELASTICSEARCH_API_KEY"
 export GE_INFERENCE_API_KEY="$GE_INFERENCE_API_KEY"
 export GE_FEED_CONTEXT_SECRET="$GE_FEED_CONTEXT_SECRET"
 export GE_PERSPECTIVE_API_KEY="$GE_PERSPECTIVE_API_KEY"
+export GE_ANTHROPIC_API_KEY="$GE_ANTHROPIC_API_KEY"
 EOF
 source .env
 
