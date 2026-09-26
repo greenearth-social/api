@@ -173,7 +173,7 @@ MIN_KEYWORDS = 16
 # request below says which it is asking for"); here there is one request.
 EXPANSION_SYSTEM = (
     "You generate keyword bags used as BM25 search queries against a corpus of "
-    "Bluesky posts (short, informal, public social-media text). "
+    "social media posts (short, informal, public text). "
     'A "keyword" here may be a single word *or* a short multi-word phrase — '
     "both are wanted. "
     "Your output is fed straight to the search engine, so what matters about "
@@ -230,7 +230,7 @@ _EXPANSION_SCHEMA = {
 def build_expansion_prompt(prompt: str, n: int = N_KEYWORDS) -> str:
     """The user message: the request, then the requirements block."""
     return (
-        f"Someone wants to see Bluesky posts matching this request:\n\n"
+        f"Someone wants to see social media posts matching this request:\n\n"
         f'    "{prompt}"\n\n'
         f"Give {n} keywords to search for, to find posts they would find "
         f"relevant." + _EXPANSION_COMMON % {"n": n}
