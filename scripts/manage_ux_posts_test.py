@@ -103,7 +103,6 @@ class TestContent:
             "The posts below are personalized for you by MySky.\n"
             "Don't like them? That's fine, you can change the settings!\n"
             "Own your algorithm!\n\n"
-            "MySky is a powerful feed YOU control, built by the community for the community.\n\n"
             "To try it, click the 📌 just above this post."
         )
         assert links == ()
