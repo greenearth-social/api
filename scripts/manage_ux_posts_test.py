@@ -68,7 +68,8 @@ class TestContent:
         "pin-your-feed.md": (
             "your-feed",
             "You're missing out on most of what MySky can do for you! Log in to your "
-            "Settings to customize your algorithm.",
+            "Settings to customize your algorithm.\n\n"
+            "To try it, click the 📌 just above this post.",
         ),
         "pin-your-feed-returning.md": (
             "your-feed",
