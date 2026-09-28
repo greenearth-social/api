@@ -30,16 +30,6 @@ GE_TWO_TOWER_KNN_INDEX="${GE_TWO_TOWER_KNN_INDEX:-posts_recent_quality}"
 # Inference configuration
 GE_INFERENCE_BASE_URL=""
 
-# Frontend origin used by Settings links in repository-managed Bluesky posts.
-# Keep stage aligned with the APP_ORIGIN deployed to the stage OAuth functions.
-GE_SETTINGS_APP_ORIGIN="${GE_SETTINGS_APP_ORIGIN:-}"
-GE_SETTINGS_APP_METADATA_URL="${GE_SETTINGS_APP_METADATA_URL:-}"
-GE_SETTINGS_LINK_ORIGIN="${GE_SETTINGS_LINK_ORIGIN:-}"
-STAGE_SETTINGS_APP_ORIGIN="https://greenearth-471522--stage-4tnzb2wq.web.app"
-STAGE_SETTINGS_APP_METADATA_URL="https://us-central1-greenearth-471522.cloudfunctions.net/oauthClientMetadataStage"
-STAGE_SETTINGS_LINK_ORIGIN="https://greenearth-api-stage-oef7fsaama-ue.a.run.app"
-PROD_SETTINGS_APP_ORIGIN="https://app.greenearth.social"
-
 # Short git sha of the deployed code, resolved by require_clean_worktree().
 # Stamped onto the Cloud Run revision (env var + label) and onto debug feed
 # records so we can identify exactly what code is live (see issue #228).
@@ -121,36 +111,6 @@ resolve_inference_base_url() {
     log_info "Using mapped inference URL: $GE_INFERENCE_BASE_URL"
 }
 
-resolve_settings_app_origin() {
-    if [ -z "$GE_SETTINGS_APP_ORIGIN" ]; then
-        if [ "$ENVIRONMENT" = "prod" ]; then
-            GE_SETTINGS_APP_ORIGIN="$PROD_SETTINGS_APP_ORIGIN"
-        else
-            GE_SETTINGS_APP_ORIGIN="$STAGE_SETTINGS_APP_ORIGIN"
-        fi
-    fi
-    if [ "$ENVIRONMENT" != "prod" ]; then
-        if [ -z "$GE_SETTINGS_APP_METADATA_URL" ]; then
-            GE_SETTINGS_APP_METADATA_URL="$STAGE_SETTINGS_APP_METADATA_URL"
-        fi
-        if [ -z "$GE_SETTINGS_LINK_ORIGIN" ]; then
-            GE_SETTINGS_LINK_ORIGIN=$(gcloud run services describe \
-                "greenearth-api-$ENVIRONMENT" \
-                --region="$REGION" \
-                --project="$PROJECT_ID" \
-                --format="value(status.url)" 2>/dev/null || true)
-            GE_SETTINGS_LINK_ORIGIN="${GE_SETTINGS_LINK_ORIGIN:-$STAGE_SETTINGS_LINK_ORIGIN}"
-        fi
-    fi
-    GE_SETTINGS_APP_ORIGIN="${GE_SETTINGS_APP_ORIGIN%/}"
-    GE_SETTINGS_LINK_ORIGIN="${GE_SETTINGS_LINK_ORIGIN%/}"
-    export GE_SETTINGS_APP_ORIGIN GE_SETTINGS_APP_METADATA_URL GE_SETTINGS_LINK_ORIGIN
-    log_info "Using Settings app origin: $GE_SETTINGS_APP_ORIGIN"
-    if [ -n "$GE_SETTINGS_LINK_ORIGIN" ]; then
-        log_info "Publishing stable Settings links through: $GE_SETTINGS_LINK_ORIGIN"
-    fi
-}
-
 require_clean_worktree() {
     log_info "Verifying git working tree is clean..."
 
@@ -187,8 +147,6 @@ validate_config() {
     gcloud config set project "$PROJECT_ID"
 
     resolve_inference_base_url
-    resolve_settings_app_origin
-
     log_info "Configuration validation complete."
 }
 
@@ -336,9 +294,6 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-env-vars=GE_TWO_TOWER_KNN_INDEX=$GE_TWO_TOWER_KNN_INDEX"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_PROJECT=$PROJECT_ID"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_FIRESTORE_DATABASE=$firestore_database"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_SETTINGS_APP_ORIGIN=$GE_SETTINGS_APP_ORIGIN"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_SETTINGS_APP_METADATA_URL=$GE_SETTINGS_APP_METADATA_URL"
-    deploy_cmd="$deploy_cmd --set-env-vars=GE_SETTINGS_LINK_ORIGIN=$GE_SETTINGS_LINK_ORIGIN"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_PROBE_USER_DID=did:plc:s4tl2ajfsnstzuxtegl7r33g"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_CANDIDATE_GENERATOR_TIMEOUT_SEC=4"
     deploy_cmd="$deploy_cmd --set-env-vars=GE_RANK_MODEL_TIMEOUT_SEC=2.5"

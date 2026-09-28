@@ -68,21 +68,21 @@ class TestContent:
         "pin-your-feed.md": (
             "your-feed",
             "You're missing out on most of what MySky can do for you! Log in to your "
-            "SETTINGS to customize your algorithm.",
+            "Settings to customize your algorithm.",
         ),
         "pin-your-feed-returning.md": (
             "your-feed",
-            "Welcome back! Click SETTINGS to customize your MySky feed.",
+            "Click Settings to customize your MySky feed.",
         ),
         "pin-best-of-friends.md": (
             "best-of-friends",
-            "Click SETTINGS to personalize your feed.\n\n"
+            "Click Settings to personalize your feed.\n\n"
             "The best posts from your mutuals and people you follow. "
             "Part of the GreenEarth Family.",
         ),
         "pin-random.md": (
             "random",
-            "Click SETTINGS to personalize your feed.\n\n"
+            "Click Settings to personalize your feed.\n\n"
             "A random slice of the ATProto universe. Still applies your moderation "
             "settings. Part of the GreenEarth Family.",
         ),
@@ -99,6 +99,8 @@ class TestContent:
             ux_posts.read_content(ux_posts.PIN_YOUR_FEED_EXPLORE)
         )
         assert text == (
+            "The posts below are personalized for you by MySky.\n"
+            "Don't like them? That's fine, you can change the settings!\n"
             "Own your algorithm!\n\n"
             "MySky is a powerful feed YOU control, built by the community for the community.\n\n"
             "To try it, click the 📌 just above this post."
@@ -110,15 +112,13 @@ class TestContent:
             text, _ = managed_posts.content_signature(ux_posts.read_content(name))
             assert len(text) <= ux_posts.MAX_POST_GRAPHEMES, name
 
-    def test_stage_settings_links_use_the_stable_redirect(self, monkeypatch):
-        monkeypatch.setenv("GE_SETTINGS_APP_ORIGIN", "https://preview.example")
-        monkeypatch.setenv("GE_SETTINGS_LINK_ORIGIN", "https://api-stage.example/")
+    def test_stage_settings_copy_has_no_public_links(self, monkeypatch):
+        monkeypatch.setenv(ux_posts.PUBLISHER_DID_ENV_VAR, "did:plc:stage")
 
-        _, links = managed_posts.content_signature(
-            ux_posts.read_content(ux_posts.PIN_YOUR_FEED_RETURNING)
-        )
-
-        assert links == ("https://api-stage.example/settings/your-feed",)
+        for name, (_feed_name, expected) in self.EXPECTED_PINS.items():
+            text, links = managed_posts.content_signature(ux_posts.read_content(name))
+            assert text == expected
+            assert links == ()
 
     def test_check_passes_on_the_real_content(self):
         assert manage_ux_posts.check_content() == []

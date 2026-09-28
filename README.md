@@ -632,12 +632,10 @@ native-video assets. `scripts/manage_ux_posts.py` converts the links into Bluesk
 rich-text facets and uploads videos when a managed post declares one.
 
 Settings links in those files use the production URL as their checked-in
-canonical form. Production keeps that URL. Stage rewrites links to the stable
-Cloud Run origin from `GE_SETTINGS_LINK_ORIGIN` and its
-`/settings/{feed_name}` redirect. That endpoint reads the current Firebase
-preview origin from `GE_SETTINGS_APP_METADATA_URL`, falling back to
-`GE_SETTINGS_APP_ORIGIN`, so weekly preview-channel URL changes do not require
-publishing new Bluesky posts.
+canonical form. Posts published from `notify.mysky.social` keep that link.
+Stage posts published from `caterpie-internal.bsky.social` keep the same visible
+copy but render Settings as plain text, so temporary stage URLs are never
+publicly linked from Bluesky.
 
 Production publishes them to the **notifications account**, `notify.mysky.social`
 (`did:plc:66mudnfk2p4olwpaskmrw2vq`), not the brand account. Editing a post publishes

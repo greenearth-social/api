@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,8 +45,7 @@ MANIFEST_SCHEMA_VERSION = 1
 
 # Bluesky's post length limit, counted in graphemes.
 MAX_POST_GRAPHEMES = 300
-DEFAULT_SETTINGS_APP_ORIGIN = "https://app.greenearth.social"
-SETTINGS_PATH_PREFIX = "/#/settings/"
+PRODUCTION_SETTINGS_PREFIX = "https://app.greenearth.social/#/settings/"
 
 # Named constants rather than bare strings at call sites: a typo becomes an
 # AttributeError at import instead of a silently unresolved post.
@@ -207,21 +207,13 @@ def publisher_handle() -> str:
     return PUBLISHER_HANDLE if publisher_did() == PUBLISHER_DID else publisher_did()
 
 
-def settings_url(feed_name: str) -> str:
-    """Build a Settings deep link for the frontend paired with this deployment."""
-    redirect_origin = os.environ.get("GE_SETTINGS_LINK_ORIGIN", "").strip().rstrip("/")
-    if redirect_origin:
-        return f"{redirect_origin}/settings/{feed_name}"
-    origin = os.environ.get("GE_SETTINGS_APP_ORIGIN", DEFAULT_SETTINGS_APP_ORIGIN).strip()
-    return f"{(origin or DEFAULT_SETTINGS_APP_ORIGIN).rstrip('/')}{SETTINGS_PATH_PREFIX}{feed_name}"
-
-
 def read_content(name: str) -> str:
     """Read a managed post's markdown source. Not available in the deployed image."""
     content = content_path(name).read_text(encoding="utf-8")
-    canonical_prefix = f"{DEFAULT_SETTINGS_APP_ORIGIN}{SETTINGS_PATH_PREFIX}"
-    configured_prefix = settings_url("")
-    return content.replace(canonical_prefix, configured_prefix)
+    if publisher_did() != PUBLISHER_DID:
+        settings_link = re.compile(rf"\[([^\]]+)\]\({re.escape(PRODUCTION_SETTINGS_PREFIX)}[^)]+\)")
+        return settings_link.sub(r"\1", content)
+    return content
 
 
 def resolved_uris() -> dict[str, str]:
