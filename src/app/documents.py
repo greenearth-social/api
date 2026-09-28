@@ -57,7 +57,7 @@ class FeedPreferencesDocument(BaseModel):
     social_radius: int | None = Field(default=None, ge=0, le=4)
     freshness: int | None = Field(default=None, ge=0, le=5)
     politics: float | None = Field(default=None, ge=0.0, le=2.0)
-    purpose: float | None = Field(default=None, ge=0.2, le=0.8)
+    purpose: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class UserDocument(BaseModel):
@@ -107,9 +107,9 @@ class UserDocument(BaseModel):
     )
     purpose: float = Field(
         default=0.5,
-        ge=0.2,
-        le=0.8,
-        description="Purpose preference: 0.2=engaging, 0.5=balanced, 0.8=constructive.  "
+        ge=0.0,
+        le=1.0,
+        description="Purpose preference: 0=engaging, 0.5=balanced, 1=constructive.  "
         "Used to weight engaging vs constructive content.",
     )
     feed_preferences: dict[str, FeedPreferencesDocument] = Field(

@@ -135,6 +135,10 @@ async def run_predict(
     models_with_valid_results: list[tuple[str, float, Ranker]] = [] # filtered version of resolved
     for (name, weight, ranker), result in zip(resolved, results):
         if isinstance(result, BaseException):
+            # A disabled model is best-effort for transparency only. It must
+            # never prevent a pure single-model ranking from succeeding.
+            if weight == 0:
+                continue
             # A model that timed out contributes no scores, same as one that
             # returned zero valid rankings. Any other error still propagates.
             if isinstance(result, TimeoutError):
@@ -163,11 +167,13 @@ async def run_predict(
         (c.at_uri, c.politics_score) for c in request.candidates if c.at_uri
     ]
     valid_uris_and_politics_scores = []
+    active_model_names = {name for name, weight, _ranker in models_with_valid_results if weight > 0}
     normalized_by_model: dict[str, dict[str, float]] = {}  # {model_name: {uri: normalized_score}}
     dropped_candidate_count = 0
     for uri, politics_score in candidate_uris_and_politics_scores:
-        # if the model has no valid results in any of the rank models, exclude it
-        if uri not in results_by_candidate:
+        # Zero-weight models are recorded for transparency, but only an active
+        # model can make a candidate eligible for the ranked result set.
+        if not any(name in results_by_candidate.get(uri, {}) for name in active_model_names):
             dropped_candidate_count += 1
             continue
         valid_uris_and_politics_scores.append((uri, politics_score))

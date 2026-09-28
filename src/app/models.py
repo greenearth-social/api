@@ -1,7 +1,7 @@
 import base64
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 FeedControlName = Literal[
     "source_weights",
@@ -180,7 +180,7 @@ class RankModelSpec(BaseModel):
 
     name: str = Field(..., description="Name of the registered ranker")
     weight: float = Field(
-        1.0, gt=0, description="Relative weight — proportional influence on the combined score"
+        1.0, ge=0, description="Relative weight — proportional influence on the combined score"
     )
 
 
@@ -210,6 +210,12 @@ class RankPredictRequest(BaseModel):
         le=2.0,
         description="Multiplier applied to the final rank score based on the post's politics score",
     )
+
+    @model_validator(mode="after")
+    def require_positive_total_model_weight(self) -> "RankPredictRequest":
+        if not any(model.weight > 0 for model in self.models):
+            raise ValueError("at least one rank model must have a positive weight")
+        return self
 
 
 class RankedCandidate(BaseModel):

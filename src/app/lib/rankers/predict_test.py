@@ -194,6 +194,72 @@ def test_run_predict_normalizes_and_combines_with_weights(monkeypatch):
     ]
 
 
+def test_run_predict_keeps_zero_weight_model_transparency_only(monkeypatch):
+    candidates = [
+        CandidatePost(at_uri="at://post/active"),
+        CandidatePost(at_uri="at://post/inactive-only"),
+    ]
+    rankers = {
+        "active": StubRanker("active", (0.0, 1.0), {"at://post/active": 0.8}),
+        "inactive": StubRanker(
+            "inactive",
+            (0.0, 1.0),
+            {"at://post/active": 0.1, "at://post/inactive-only": 1.0},
+        ),
+    }
+    monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
+
+    rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+    with feed_debug_scope(rec):
+        result = asyncio.run(
+            predict_module.run_predict(
+                _request(
+                    models=[
+                        RankModelSpec(name="active", weight=1.0),
+                        RankModelSpec(name="inactive", weight=0.0),
+                    ],
+                    candidates=candidates,
+                ),
+                es=object(),
+            )
+        )
+
+    assert [(ranking.at_uri, ranking.rank_score) for ranking in result.rankings] == [
+        ("at://post/active", pytest.approx(0.8))
+    ]
+    assert rec.model_scores == [
+        ("active", 1.0, {"at://post/active": pytest.approx(0.8)}),
+        (
+            "inactive",
+            0.0,
+            {"at://post/active": pytest.approx(0.1)},
+        ),
+    ]
+
+
+def test_run_predict_ignores_failure_from_zero_weight_model(monkeypatch):
+    active = StubRanker("active", (0.0, 1.0), {"at://post/1": 0.8})
+    rankers = {"active": active, "inactive": ExplodingRanker()}
+    monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
+
+    result = asyncio.run(
+        predict_module.run_predict(
+            _request(
+                models=[
+                    RankModelSpec(name="active", weight=1.0),
+                    RankModelSpec(name="inactive", weight=0.0),
+                ],
+                candidates=[CandidatePost(at_uri="at://post/1")],
+            ),
+            es=object(),
+        )
+    )
+
+    assert [(ranking.at_uri, ranking.rank_score) for ranking in result.rankings] == [
+        ("at://post/1", pytest.approx(0.8))
+    ]
+
+
 @pytest.mark.parametrize(
     ("politics", "expected"),
     [

@@ -5443,7 +5443,7 @@ class TestPurposeOverride:
             ("cold-start", "heavy_ranker_empty_history"),
         ],
     )
-    @pytest.mark.parametrize("purpose", [0.2, 0.5, 0.8])
+    @pytest.mark.parametrize("purpose", [0.0, 0.5, 1.0])
     def test_applies_complementary_weights_to_ranked_feeds(self, feed_name, engaging_name, purpose):
         from .xrpc import _with_purpose_weights
 
