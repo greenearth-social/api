@@ -4923,7 +4923,8 @@ class TestSourceWeightsOverride:
     def test_applies_social_radius_preset_0(self, mock_pipeline, mock_get_user):
         """social_radius=0 (Friends) → followed_users-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from ..feeds import SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -4947,7 +4948,8 @@ class TestSourceWeightsOverride:
     def test_applies_social_radius_preset_4(self, mock_pipeline, mock_get_user):
         """social_radius=4 (Everyone) → popularity-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from ..feeds import SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5039,11 +5041,8 @@ class TestSourceWeightsOverride:
     def test_default_radius_when_missing(self, mock_pipeline, mock_get_user):
         """User doc without social_radius field → defaults to 3 (balanced)."""
         from ..documents import UserDocument
-        from .xrpc import (
-            DEFAULT_SOCIAL_RADIUS,
-            SOCIAL_RADIUS_PRESETS,
-            PipelineResult,
-        )
+        from ..feeds import DEFAULT_SOCIAL_RADIUS, SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5091,11 +5090,8 @@ class TestSourceWeightsOverride:
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_fallen_back_to_defaults_when_user_has_no_doc(self, mock_pipeline, mock_get_user):
         """User doc is None → no override, defaults used."""
-        from .xrpc import (
-            DEFAULT_SOCIAL_RADIUS,
-            SOCIAL_RADIUS_PRESETS,
-            PipelineResult,
-        )
+        from ..feeds import DEFAULT_SOCIAL_RADIUS, SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = None
         mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
@@ -5132,7 +5128,8 @@ class TestSourceWeightsOverride:
         feed_uri,
     ):
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from ..feeds import SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5171,7 +5168,8 @@ class TestSourceWeightsOverride:
         feed_uri,
     ):
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
+        from ..feeds import SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",

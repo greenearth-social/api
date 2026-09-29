@@ -1219,6 +1219,35 @@ class TestGetRecentFeedDebug:
 
 class TestGetRecentFeedSnapshots:
     @pytest.mark.asyncio
+    async def test_reads_legacy_radius_metadata_without_losing_snapshot(self):
+        now = datetime.now(UTC)
+        snapshot = _feed_snapshot("legacy-request", now, ["at://a/1"])
+        snapshot.generator_diagnostics = [
+            GeneratorDiagnostic(
+                name="network_likes",
+                weight=0.2,
+                requested_count=40,
+                returned_count=12,
+                contributed_count=8,
+            )
+        ]
+        data = {**snapshot.model_dump(), "applied_social_radius": 3}
+        db = MagicMock()
+        query = MagicMock()
+        query.stream.return_value = _async_iter([_mock_doc_snapshot(True, data)])
+        collection = db.collection.return_value.document.return_value.collection.return_value
+        collection.order_by.return_value.limit.return_value = query
+
+        result = await get_recent_feed_snapshots(db, USER_DID, raise_on_error=True)
+
+        assert len(result) == 1
+        assert result[0].request_id == "legacy-request"
+        assert result[0].items == snapshot.items
+        assert result[0].items_meta == snapshot.items_meta
+        assert result[0].generator_diagnostics == snapshot.generator_diagnostics
+        assert "applied_social_radius" not in result[0].model_dump()
+
+    @pytest.mark.asyncio
     async def test_can_propagate_query_errors_to_authoritative_callers(self):
         async def failing_stream():
             raise RuntimeError("query unavailable")

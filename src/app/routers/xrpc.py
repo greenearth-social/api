@@ -44,11 +44,9 @@ from ..documents import (
     UserDocument,
 )
 from ..feeds import (
-    DEFAULT_SOCIAL_RADIUS,
     FEEDS,
     FOLLOWED_USERS_ONLY_GENERATORS,
     LOGGED_OUT_POST_URI,
-    SOCIAL_RADIUS_PRESETS,  # noqa: F401 - compatibility export
     canonical_feed_name,
 )
 from ..lib.atproto_auth import verify_auth_header
@@ -710,7 +708,6 @@ class _ConfiguredGeneration:
     effective_preferences: FeedPreferencesDocument
     generators_override: dict[str, list[GeneratorSpec]]
     max_age_hours: int
-    applied_social_radius: int | None
     preference_fingerprint: str
 
 
@@ -737,30 +734,9 @@ def _configured_generation(
         feed_cfg = _with_politics_multiplier(feed_cfg, effective.politics)
 
     generators_override: dict[str, list[GeneratorSpec]] = {}
-    applied_social_radius: int | None = None
-    uses_network_likes = feed_name in (
-        "your-feed",
-        "unranked-your-feed",
-        "cutoff-preview",
-    )
-    if uses_network_likes and "source_weights" in controls:
+    if "source_weights" in controls:
         source_weights = effective.source_weights
         assert source_weights is not None
-        preference_key = FEEDS[feed_name].preference_source or feed_name
-        stored = user_doc.feed_preferences.get(preference_key) if user_doc is not None else None
-        has_custom_weights = (
-            preference_patch is not None and "source_weights" in preference_patch.model_fields_set
-        ) or (stored is not None and stored.source_weights is not None)
-        legacy_radius = (
-            stored.social_radius
-            if stored is not None and stored.social_radius is not None
-            else user_doc.social_radius
-            if user_doc is not None
-            else DEFAULT_SOCIAL_RADIUS
-        )
-        if not has_custom_weights:
-            applied_social_radius = legacy_radius
-
         generators_override = {"generators": _source_generators(source_weights)}
 
     freshness_index = (
@@ -786,7 +762,6 @@ def _configured_generation(
         effective_preferences=effective,
         generators_override=generators_override,
         max_age_hours=max_age_hours,
-        applied_social_radius=applied_social_radius,
         preference_fingerprint=preference_fingerprint,
     )
 
@@ -802,7 +777,6 @@ async def _run_pipeline_capturing(
     request_id: str,
     regenerated: bool,
     debug_enabled: bool,
-    applied_social_radius: int | None = None,
 ) -> tuple[FeedSnapshotDocument, list[str]]:
     """Run the ranking pipeline, capturing a lightweight snapshot for every
     feed load and a full debug document for debug-flagged users.
@@ -853,7 +827,6 @@ async def _run_pipeline_capturing(
         request_id=request_id,
         generated_at=generated_at,
         expires_at=expires_at,
-        applied_social_radius=applied_social_radius,
         api_release_sha=api_release_sha(),
     )
 
@@ -887,7 +860,6 @@ async def _run_pipeline_capturing_with_timeout(
     request_id: str,
     regenerated: bool,
     debug_enabled: bool,
-    applied_social_radius: int | None = None,
 ) -> tuple[FeedSnapshotDocument, list[str]]:
     """Enforce ``GE_FEED_REQUEST_TIMEOUT_SEC`` around ``_run_pipeline_capturing``."""
     try:
@@ -902,7 +874,6 @@ async def _run_pipeline_capturing_with_timeout(
                 request_id=request_id,
                 regenerated=regenerated,
                 debug_enabled=debug_enabled,
-                applied_social_radius=applied_social_radius,
             ),
             timeout=_feed_request_timeout_sec(),
         )
@@ -1166,7 +1137,6 @@ async def generate_feed_preview(
         request_id=request_id,
         regenerated=False,
         debug_enabled=False,
-        applied_social_radius=configured.applied_social_radius,
     )
 
     cached_uris = snapshot.items
@@ -1186,7 +1156,6 @@ async def generate_feed_preview(
             items=cached_uris,
             items_meta=cached_meta,
             generator_diagnostics=snapshot.generator_diagnostics,
-            applied_social_radius=configured.applied_social_radius,
             user_did=user_did,
             feed_name=feed_name,
             generated_at=snapshot.generated_at,
@@ -1817,7 +1786,6 @@ async def get_feed_skeleton(
     )
     feed_cfg = configured.feed_cfg
     generators_override = configured.generators_override
-    applied_social_radius = configured.applied_social_radius
     max_age_hours = configured.max_age_hours
     preference_fingerprint = configured.preference_fingerprint
 
@@ -1905,7 +1873,6 @@ async def get_feed_skeleton(
                         request_id=replacement_request_id,
                         regenerated=True,
                         debug_enabled=debug_enabled,
-                        applied_social_radius=applied_social_radius,
                     )
                     if low_score_uris and not is_anonymous:
                         _spawn_background(
@@ -1930,7 +1897,6 @@ async def get_feed_skeleton(
                                 items=replacement_uris,
                                 items_meta=replacement_meta,
                                 generator_diagnostics=generated_snapshot.generator_diagnostics,
-                                applied_social_radius=applied_social_radius,
                                 user_did=user_did,
                                 feed_name=feed_name,
                                 generated_at=generated_snapshot.generated_at,
@@ -2010,7 +1976,6 @@ async def get_feed_skeleton(
                         api_release_sha=cache_doc.api_release_sha,
                         expires_at=cache_doc.expires_at,
                         generator_diagnostics=cache_doc.generator_diagnostics,
-                        applied_social_radius=cache_doc.applied_social_radius,
                         items_meta=cache_doc.items_meta,
                     )
                     if not is_probe and not is_anonymous:
@@ -2053,7 +2018,6 @@ async def get_feed_skeleton(
                     request_id=parsed.id,
                     regenerated=True,
                     debug_enabled=debug_enabled,
-                    applied_social_radius=applied_social_radius,
                 )
                 if low_score_uris and not is_anonymous:
                     _spawn_background(
@@ -2187,7 +2151,6 @@ async def get_feed_skeleton(
                             api_release_sha=accepted_cache.api_release_sha,
                             expires_at=accepted_cache.expires_at,
                             generator_diagnostics=accepted_cache.generator_diagnostics,
-                            applied_social_radius=accepted_cache.applied_social_radius,
                             items_meta=accepted_cache.items_meta,
                         )
                         await _write_feed_snapshot_background(
@@ -2248,7 +2211,6 @@ async def get_feed_skeleton(
                 request_id=request_id,
                 regenerated=False,
                 debug_enabled=debug_enabled,
-                applied_social_radius=applied_social_radius,
             )
             if low_score_uris and not is_anonymous and not is_appview_one_item_check:
                 _spawn_background(
@@ -2323,7 +2285,6 @@ async def get_feed_skeleton(
                             items=cache_uris,
                             items_meta=cache_items_meta,
                             generator_diagnostics=generated_snapshot.generator_diagnostics,
-                            applied_social_radius=applied_social_radius,
                             user_did=user_did,
                             feed_name=feed_name,
                             generated_at=generated_snapshot.generated_at,

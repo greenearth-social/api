@@ -96,6 +96,42 @@ class TestFirestoreFeedCacheStore:
 
 class TestFirestoreFeedCacheRetrieve:
     @pytest.mark.asyncio
+    async def test_reads_legacy_radius_metadata_without_losing_cached_feed(self):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+        diagnostics = [
+            {
+                "name": "network_likes",
+                "weight": 0.2,
+                "requested_count": 40,
+                "returned_count": 12,
+                "contributed_count": 8,
+            }
+        ]
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {
+            "items": ["at://a/1"],
+            "items_meta": [{"at_uri": "at://a/1", "rank": 1}],
+            "generator_diagnostics": diagnostics,
+            "applied_social_radius": 3,
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        doc_ref.get.return_value = snap
+
+        result = await cache.retrieve_document("legacy-key")
+
+        assert result is not None
+        assert result.items == ["at://a/1"]
+        assert result.items_meta[0].at_uri == "at://a/1"
+        assert result.items_meta[0].rank == 1
+        assert (
+            result.generator_diagnostics[0].model_dump(include=set(diagnostics[0]))
+            == diagnostics[0]
+        )
+        assert "applied_social_radius" not in result.model_dump()
+
+    @pytest.mark.asyncio
     async def test_returns_items_when_not_expired(self):
         db, _col, doc_ref = _mock_firestore_client()
         cache = FirestoreFeedCache(db)
