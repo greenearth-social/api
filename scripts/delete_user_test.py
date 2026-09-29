@@ -12,6 +12,29 @@ DID = "did:plc:target"
 KEY = "target"
 OTHER = "did:plc:other"
 
+_FIRESTORE_ENV_VARS = (
+    "GE_FIRESTORE_PROJECT",
+    "GE_FIRESTORE_DATABASE",
+    "GE_FIRESTORE_EMULATOR_HOST",
+    "FIRESTORE_EMULATOR_HOST",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_firestore_env(monkeypatch):
+    """Guarantee every var ``_configure_environment`` can write is restored.
+
+    ``monkeypatch.delenv(name, raising=False)`` is a no-op — and registers no
+    teardown — when ``name`` is already absent, so a test that only calls
+    ``delenv`` on a currently-unset var leaves whatever ``_configure_environment``
+    later writes via a raw ``os.environ[...] = `` assignment permanently in
+    place. Forcing a ``setenv`` here first makes monkeypatch record the true
+    pre-test state (present or absent) for every var this module touches, so
+    it's always undone at teardown regardless of what an individual test does.
+    """
+    for name in _FIRESTORE_ENV_VARS:
+        monkeypatch.setenv(name, "autouse-sentinel")
+
 
 class FakeSnap:
     def __init__(self, ref, data):
