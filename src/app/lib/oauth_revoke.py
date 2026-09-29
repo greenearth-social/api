@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 from datetime import UTC, datetime
+from typing import cast
 from urllib.parse import urlparse
 
 import httpx
@@ -21,7 +22,8 @@ def _fetch_id_token(audience: str) -> str:
     import google.auth.transport.requests
     import google.oauth2.id_token
 
-    return google.oauth2.id_token.fetch_id_token(google.auth.transport.requests.Request(), audience)
+    token = google.oauth2.id_token.fetch_id_token(google.auth.transport.requests.Request(), audience)
+    return cast(str, token)
 
 
 async def _call_function(did: str, client: httpx.AsyncClient | None) -> tuple[str, str | None]:
