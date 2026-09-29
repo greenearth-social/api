@@ -172,6 +172,14 @@ get_feed_context_secret() {
     fi
 }
 
+get_oauth_session_key_secret() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "OAUTH_SESSION_ENCRYPTION_KEY"
+    else
+        echo "OAUTH_SESSION_ENCRYPTION_KEY_STAGE"
+    fi
+}
+
 get_probe_secret() {
     if [ "$ENVIRONMENT" = "prod" ]; then
         echo "probe-secret-prod"
@@ -342,6 +350,26 @@ ensure_feed_context_secret() {
         --member="serviceAccount:$sa_email" \
         --role="roles/secretmanager.secretAccessor" \
         --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $key_secret"
+}
+
+ensure_oauth_session_key_secret() {
+    # AES-256 key (hex) that the frontend OAuth functions use to encrypt stored refresh
+    # tokens. Never rotate an existing value: doing so makes every stored grant
+    # undecryptable. The api never reads this secret, so no accessor binding here; Firebase
+    # grants the functions runtime access when the function declaring it is deployed.
+    local key_secret
+    key_secret="$(get_oauth_session_key_secret)"
+
+    log_info "Ensuring OAuth session encryption key exists: $key_secret"
+
+    if ! gcloud secrets describe "$key_secret" > /dev/null 2>&1; then
+        local value
+        value=$(openssl rand -hex 32)
+        echo -n "$value" | gcloud secrets create "$key_secret" --data-file=-
+        log_info "OAuth session encryption key created: $key_secret"
+    else
+        log_info "OAuth session encryption key already exists: $key_secret (preserving value)"
+    fi
 }
 
 ensure_probe_secret() {
@@ -814,6 +842,7 @@ main() {
     ensure_firestore_api_key_secret
     ensure_inference_api_key_secret_access
     ensure_feed_context_secret
+    ensure_oauth_session_key_secret
     ensure_probe_secret
     ensure_load_test_secret
 
