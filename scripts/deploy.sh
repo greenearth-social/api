@@ -134,6 +134,15 @@ default_oauth_revoke_url() {
 resolve_oauth_revoke_url() {
     if [ -z "$GE_OAUTH_REVOKE_URL" ]; then
         GE_OAUTH_REVOKE_URL="$(default_oauth_revoke_url)"
+    elif { [ "$ENVIRONMENT" = "stage" ] || [ "$ENVIRONMENT" = "prod" ]; } \
+        && [[ "$GE_OAUTH_REVOKE_URL" != https://* ]]; then
+        # A leftover devenv value (e.g. http://firebase:15001/...) must never reach a
+        # real deploy: it would be sent with no Google ID token attached and the
+        # function would 404/refuse silently instead of revoking anything.
+        log_error "GE_OAUTH_REVOKE_URL must be an https:// URL when deploying to $ENVIRONMENT."
+        log_error "Got: $GE_OAUTH_REVOKE_URL"
+        log_error "Unset it to use the default, or pass the correct https:// URL via --oauth-revoke-url."
+        exit 1
     fi
     log_info "Using OAuth revoke function URL: $GE_OAUTH_REVOKE_URL"
 }
