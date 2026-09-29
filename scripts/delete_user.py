@@ -25,8 +25,23 @@ needs to revoke (i.e. unless ``--skip-oauth-revocation`` applies):
     GE_ADMIN_API_KEY     an admin gea_... key (never logged or printed)
 
 If revocation reports outcome ``failed``, no data is deleted and the script
-exits non-zero — re-running is always safe, including after a ``failed``
-caused by a concurrent login that replaced the grant mid-revoke.
+exits non-zero, printing a secret-free reason (``not_configured: <VAR>``,
+``status_<code>``, a transport exception class, or ``invalid_response``).
+Re-running is always safe, including after a ``failed`` caused by a
+concurrent login that replaced the grant mid-revoke.
+
+The script never deletes an active grant. ``GE_API_URL`` and
+``--environment`` are configured independently, so after revocation it
+re-reads ``oauth_grants/{did}`` from the Firestore it is about to delete from:
+if an active grant is still there (typically the api is a different
+environment, which answered ``no_session``), it exits non-zero and deletes
+nothing. The grant doc itself is deleted last and only if it is still a
+tombstone at that moment (update_time precondition); a login that lands
+mid-run leaves its new grant in place and the script exits non-zero so it can
+be re-run.
+
+Each run is audited in ``oauth_revocations`` with actor ``admin:<key_id>``,
+so who ran it is only recorded if every operator uses their own admin key.
 """
 from __future__ import annotations
 
@@ -39,6 +54,7 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import httpx  # noqa: E402
+from google.api_core.exceptions import FailedPrecondition  # noqa: E402
 from google.cloud.firestore import FieldFilter  # noqa: E402
 
 from app.lib.did import is_valid_did  # noqa: E402
@@ -87,6 +103,35 @@ NOT_DELETED_FROM_CODE = [
 class StoreResult:
     store: str
     found: int
+    left_in_place: str | None = None
+
+
+@dataclass(frozen=True)
+class RevokeResult:
+    """``reason`` explains a ``failed`` outcome and never contains a secret."""
+
+    outcome: str
+    reason: str | None = None
+
+
+def _firestore_project() -> str:
+    return os.environ.get("GE_FIRESTORE_PROJECT", os.environ.get("PROJECT_ID", "(default)"))
+
+
+def _firestore_database() -> str:
+    return os.environ.get("GE_FIRESTORE_DATABASE", "(default)")
+
+
+def revoke_target() -> str:
+    return os.environ.get("GE_API_URL") or "(unset)"
+
+
+def target_line() -> str:
+    return (
+        f"Target: project={_firestore_project()} database={_firestore_database()} "
+        f"emulator={os.environ.get('GE_FIRESTORE_EMULATOR_HOST') or 'no'} "
+        f"revoke={revoke_target()}"
+    )
 
 
 class FirebaseAuthBackend:
@@ -151,23 +196,29 @@ async def _delete_doc(doc_ref, execute: bool) -> int:
     return 1
 
 
-async def grant_state(db, did: str) -> str:
-    """Read the stored OAuth grant doc's status: "active", "revoked", or "absent"."""
-    snap = await db.collection(OAUTH_GRANTS_COLLECTION).document(did).get()
+def _snap_state(snap) -> str:
     if not snap.exists:
         return "absent"
     return "revoked" if (snap.to_dict() or {}).get("status") == "revoked" else "active"
 
 
-async def revoke_via_api(did: str, client: httpx.AsyncClient | None = None) -> str:
+async def grant_state(db, did: str) -> str:
+    """Read the stored OAuth grant doc's status: "active", "revoked", or "absent"."""
+    return _snap_state(await db.collection(OAUTH_GRANTS_COLLECTION).document(did).get())
+
+
+async def revoke_via_api(did: str, client: httpx.AsyncClient | None = None) -> RevokeResult:
     """Revoke ``did``'s OAuth grant via this api's own admin-authenticated endpoint.
 
     Never raises: any failure (missing config, transport error, unexpected
-    status/body) maps to outcome "failed", same as the endpoint's own 502.
+    status/body) maps to outcome "failed", same as the endpoint's own 502,
+    with a reason that never includes the key or response text.
     """
     base, key = os.environ.get("GE_API_URL"), os.environ.get("GE_ADMIN_API_KEY")
-    if not base or not key:
-        return "failed"
+    if not base:
+        return RevokeResult("failed", "not_configured: GE_API_URL")
+    if not key:
+        return RevokeResult("failed", "not_configured: GE_ADMIN_API_KEY")
     http = client or httpx.AsyncClient()
     try:
         response = await http.post(
@@ -176,12 +227,20 @@ async def revoke_via_api(did: str, client: httpx.AsyncClient | None = None) -> s
             headers={"X-API-Key": key},
             timeout=REVOKE_TIMEOUT_SECONDS,
         )
-        outcome = response.json().get("outcome") if response.status_code in (200, 502) else None
-        return outcome if response.status_code == 200 and outcome in SUCCESS_OUTCOMES else "failed"
-    except Exception:  # noqa: BLE001
-        return "failed"
+    except Exception as exc:  # noqa: BLE001
+        return RevokeResult("failed", type(exc).__name__)
     finally:
         await http.aclose()
+    if response.status_code != 200:
+        return RevokeResult("failed", f"status_{response.status_code}")
+    try:
+        body = response.json()
+    except ValueError:
+        return RevokeResult("failed", "invalid_response")
+    outcome = body.get("outcome") if isinstance(body, dict) else None
+    if outcome not in SUCCESS_OUTCOMES:
+        return RevokeResult("failed", "invalid_response")
+    return RevokeResult(outcome)
 
 
 async def _delete_query(db, query, execute: bool) -> int:
@@ -246,19 +305,43 @@ async def delete_user_data(db, did: str, execute: bool, auth_backend) -> list[St
         results.append(
             StoreResult(f"firestore {name} where user_did", await _delete_query(db, query, execute))
         )
-    results.append(
-        StoreResult(
-            f"firestore {OAUTH_GRANTS_COLLECTION}/{did}",
-            await _delete_doc(db.collection(OAUTH_GRANTS_COLLECTION).document(did), execute),
-        )
-    )
+    results.append(await _delete_grant(db, did, execute))
     return results
+
+
+async def _delete_grant(db, did: str, execute: bool) -> StoreResult:
+    """Delete ``oauth_grants/{did}`` only while it is a tombstone.
+
+    A login between revocation and this point stores a fresh active grant —
+    the only material able to revoke it — so an active doc is left alone, and
+    the delete carries an update_time precondition so a login landing between
+    this read and the delete fails it instead of being destroyed.
+    """
+    store = f"firestore {OAUTH_GRANTS_COLLECTION}/{did}"
+    ref = db.collection(OAUTH_GRANTS_COLLECTION).document(did)
+    snap = await ref.get()
+    state = _snap_state(snap)
+    if state == "absent":
+        return StoreResult(store, 0)
+    if not execute:
+        return StoreResult(store, 1)
+    if state == "active":
+        return StoreResult(store, 1, "an active grant appeared during the run")
+    try:
+        await ref.delete(option=db.write_option(last_update_time=snap.update_time))
+    except FailedPrecondition:
+        return StoreResult(store, 1, "the grant changed during the run")
+    return StoreResult(store, 1)
 
 
 def format_report(did: str, execute: bool, results: list[StoreResult], grant_line: str) -> str:
     verb = "deleted" if execute else "would delete"
     lines = [f"{'EXECUTE' if execute else 'DRY RUN'} for {did}", ""]
-    lines += [f"  {r.store:<55} {r.found:>6} {verb if r.found else 'nothing to delete'}" for r in results]
+    for r in results:
+        status = verb if r.found else "nothing to delete"
+        if r.left_in_place:
+            status = f"left in place: {r.left_in_place}"
+        lines.append(f"  {r.store:<55} {r.found:>6} {status}")
     lines += ["", f"OAuth grant: {grant_line}"]
     lines += ["", "NOT deleted by this script (handle separately):"]
     lines += [f"  - {item}" for item in NOT_DELETED_FROM_CODE]
@@ -310,32 +393,43 @@ async def run(args: argparse.Namespace, db, auth_backend, revoker=revoke_via_api
         elif args.skip_oauth_revocation:
             grant_line = f"revocation skipped (grant {state})"
         else:
-            outcome = await revoker(args.did)
-            if outcome not in SUCCESS_OUTCOMES:
+            result = await revoker(args.did)
+            if result.outcome not in SUCCESS_OUTCOMES:
                 print(
-                    "ERROR: OAuth revocation failed; no data was deleted. Fix and re-run "
-                    "(re-running is always safe).",
+                    f"ERROR: OAuth revocation failed (reason: {result.reason or 'unknown'}); "
+                    "no data was deleted. Fix and re-run (re-running is always safe).",
                     file=sys.stderr,
                 )
                 return 1
-            grant_line = outcome
+            if await grant_state(db, args.did) == "active":
+                print(
+                    f"ERROR: revocation reported {result.outcome} but an active grant is still "
+                    f"stored in {_firestore_project()}/{_firestore_database()}; "
+                    f"GE_API_URL ({revoke_target()}) and --environment probably target "
+                    "different environments — nothing was deleted.",
+                    file=sys.stderr,
+                )
+                return 1
+            grant_line = result.outcome
         results = await delete_user_data(db, args.did, args.execute, auth_backend)
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     print(format_report(args.did, args.execute, results, grant_line))
-    return 0
+    left = [r for r in results if r.left_in_place]
+    for r in left:
+        print(
+            f"ERROR: {r.store} was left in place ({r.left_in_place}, likely a new login); "
+            "it still needs revoking. Re-run with --execute (re-running is safe).",
+            file=sys.stderr,
+        )
+    return 1 if left else 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     _configure_environment(args.environment)
-    print(
-        "Target: project="
-        f"{os.environ.get('GE_FIRESTORE_PROJECT', os.environ.get('PROJECT_ID', '(default)'))} "
-        f"database={os.environ.get('GE_FIRESTORE_DATABASE', '(default)')} "
-        f"emulator={os.environ.get('GE_FIRESTORE_EMULATOR_HOST') or 'no'}"
-    )
+    print(target_line())
     return asyncio.run(run(args, init_firestore_client(), FirebaseAuthBackend()))
 
 
