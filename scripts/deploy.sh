@@ -30,6 +30,18 @@ GE_TWO_TOWER_KNN_INDEX="${GE_TWO_TOWER_KNN_INDEX:-posts_recent_quality}"
 # Inference configuration
 GE_INFERENCE_BASE_URL=""
 
+# OAuth revoke function URL (the private `oauthRevoke` Cloud Function owned by the
+# frontend repo; see greenearth-social/api#519). Defaults to the function's
+# deterministic Cloud Functions v2 HTTP trigger URL so this script never needs to
+# know a per-deploy run.app hash. Whether Cloud Run's ID-token audience check
+# accepts that cloudfunctions.net hostname for a v2 function is UNVERIFIED as of
+# this writing -- if a revoke call comes back 401/403 from Google's front end,
+# override with --oauth-revoke-url (or the GE_OAUTH_REVOKE_URL env var) using the
+# run.app URL from:
+#   gcloud run services describe oauthrevoke<stage-suffix> --region us-central1 \
+#     --project greenearth-471522 --format='value(status.url)'
+GE_OAUTH_REVOKE_URL="${GE_OAUTH_REVOKE_URL:-}"
+
 # Short git sha of the deployed code, resolved by require_clean_worktree().
 # Stamped onto the Cloud Run revision (env var + label) and onto debug feed
 # records so we can identify exactly what code is live (see issue #228).
@@ -111,6 +123,30 @@ resolve_inference_base_url() {
     log_info "Using mapped inference URL: $GE_INFERENCE_BASE_URL"
 }
 
+default_oauth_revoke_url() {
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        echo "https://us-central1-greenearth-471522.cloudfunctions.net/oauthRevoke"
+    else
+        echo "https://us-central1-greenearth-471522.cloudfunctions.net/oauthRevokeStage"
+    fi
+}
+
+resolve_oauth_revoke_url() {
+    if [ -z "$GE_OAUTH_REVOKE_URL" ]; then
+        GE_OAUTH_REVOKE_URL="$(default_oauth_revoke_url)"
+    elif { [ "$ENVIRONMENT" = "stage" ] || [ "$ENVIRONMENT" = "prod" ]; } \
+        && [[ "$GE_OAUTH_REVOKE_URL" != https://* ]]; then
+        # A leftover devenv value (e.g. http://firebase:15001/...) must never reach a
+        # real deploy: it would be sent with no Google ID token attached and the
+        # function would 404/refuse silently instead of revoking anything.
+        log_error "GE_OAUTH_REVOKE_URL must be an https:// URL when deploying to $ENVIRONMENT."
+        log_error "Got: $GE_OAUTH_REVOKE_URL"
+        log_error "Unset it to use the default, or pass the correct https:// URL via --oauth-revoke-url."
+        exit 1
+    fi
+    log_info "Using OAuth revoke function URL: $GE_OAUTH_REVOKE_URL"
+}
+
 require_clean_worktree() {
     log_info "Verifying git working tree is clean..."
 
@@ -147,6 +183,7 @@ validate_config() {
     gcloud config set project "$PROJECT_ID"
 
     resolve_inference_base_url
+    resolve_oauth_revoke_url
 
     log_info "Configuration validation complete."
 }
@@ -308,6 +345,10 @@ deploy_api_service() {
     if [ -n "$GE_INFERENCE_BASE_URL" ]; then
         deploy_cmd="$deploy_cmd --set-env-vars=GE_INFERENCE_BASE_URL=$GE_INFERENCE_BASE_URL"
     fi
+    # See the GE_OAUTH_REVOKE_URL comment near the top of this script (issue #519):
+    # resolve_oauth_revoke_url() has already filled this in, defaulting to the
+    # function's deterministic cloudfunctions.net URL if not overridden.
+    deploy_cmd="$deploy_cmd --set-env-vars=GE_OAUTH_REVOKE_URL=$GE_OAUTH_REVOKE_URL"
 
     # Add secrets with environment-specific names
     deploy_cmd="$deploy_cmd --set-secrets=GE_ELASTICSEARCH_API_KEY=$es_api_key_secret:latest"
@@ -665,6 +706,10 @@ while [[ $# -gt 0 ]]; do
             GE_TWO_TOWER_KNN_INDEX="$2"
             shift 2
             ;;
+        --oauth-revoke-url)
+            GE_OAUTH_REVOKE_URL="$2"
+            shift 2
+            ;;
         --min-instances)
             API_INSTANCES_MIN="$2"
             shift 2
@@ -691,6 +736,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --elasticsearch-url URL  Elasticsearch URL (default: INTERNAL_LB_PLACEHOLDER)"
             echo "  --two-tower-knn-index IDX  Index for two-tower kNN (default: posts_recent_quality;"
             echo "                             use posts_recent if the quality corpus is not backfilled)"
+            echo "  --oauth-revoke-url URL   OAuth revoke function URL override (default: the"
+            echo "                             environment's cloudfunctions.net oauthRevoke URL; set"
+            echo "                             this to a run.app URL if that default is rejected)"
             echo "  --min-instances N        Minimum instances (default: 1)"
             echo "  --max-instances N        Maximum instances (default: 20)"
             echo "  --timeout SECONDS        Cloud Run request timeout (default: 60)"

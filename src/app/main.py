@@ -38,7 +38,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 from .routers import (
-    candidates, diversify, embeddings, feed_transparency, health, rank, redirect, skylight, xrpc,
+    candidates, diversify, embeddings, feed_transparency, health, oauth, rank, redirect, skylight,
+    xrpc,
 )
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
@@ -423,6 +424,7 @@ app.include_router(embeddings.router)
 app.include_router(diversify.router)
 app.include_router(feed_transparency.router)
 app.include_router(health.router)
+app.include_router(oauth.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)
 app.include_router(redirect.router)

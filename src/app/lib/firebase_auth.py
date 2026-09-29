@@ -30,7 +30,7 @@ from .firestore import user_doc_id
 
 logger = logging.getLogger(__name__)
 
-_bearer = HTTPBearer(auto_error=False)
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def init_firebase_auth() -> None:
@@ -48,16 +48,8 @@ def init_firebase_auth() -> None:
     logger.info("Firebase Admin SDK initialized for project %s", project or "(default)")
 
 
-async def verify_firebase_auth(
-    authorization: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
-) -> str:
-    """FastAPI dependency: verify a Firebase ID token and return the Firestore
-    user-document key.
-
-    Returns
-    -------
-    str
-        The stripped user document ID (DID without ``did:plc:`` prefix).
+def uid_from_credentials(authorization: HTTPAuthorizationCredentials | None) -> str:
+    """Verify a Firebase ID token and return its full DID ``uid``.
 
     Raises
     ------
@@ -86,7 +78,34 @@ async def verify_firebase_auth(
             detail="Token missing valid DID",
         )
 
-    return user_doc_id(uid)
+    return uid
+
+
+async def verify_firebase_auth(
+    authorization: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> str:
+    """FastAPI dependency: verify a Firebase ID token and return the Firestore
+    user-document key.
+
+    Returns
+    -------
+    str
+        The stripped user document ID (DID without ``did:plc:`` prefix).
+
+    Raises
+    ------
+    HTTPException 401
+        When the header is missing, the token is invalid/expired, or the
+        token's ``uid`` does not start with ``did:plc:``.
+    """
+    return user_doc_id(uid_from_credentials(authorization))
+
+
+async def verify_firebase_uid(
+    authorization: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> str:
+    """Like ``verify_firebase_auth`` but returns the full DID (the Firebase uid)."""
+    return uid_from_credentials(authorization)
 
 
 FirebaseUser = Annotated[str, Depends(verify_firebase_auth)]

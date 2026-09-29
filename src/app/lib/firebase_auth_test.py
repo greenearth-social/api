@@ -87,3 +87,24 @@ def test_init_firebase_auth_is_idempotent():
         mock_fb.initialize_app.reset_mock()
         init_firebase_auth()
         assert not mock_fb.initialize_app.called
+
+
+@pytest.mark.asyncio
+async def test_verify_firebase_uid_returns_the_full_did():
+    from .firebase_auth import verify_firebase_uid
+
+    with patch("app.lib.firebase_auth.auth") as mock_auth:
+        mock_auth.verify_id_token.return_value = {"uid": "did:plc:abc123"}
+
+        result = await verify_firebase_uid(_cred())
+        assert result == "did:plc:abc123"
+
+
+@pytest.mark.asyncio
+async def test_verify_firebase_uid_missing_header_raises_401():
+    from .firebase_auth import verify_firebase_uid
+
+    with pytest.raises(HTTPException) as exc_info:
+        await verify_firebase_uid(None)
+
+    assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED

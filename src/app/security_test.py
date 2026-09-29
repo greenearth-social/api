@@ -2,11 +2,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
 
 from .documents import ApiKeyDocument
 from .main import app
-from .security import verify_admin_api_key, verify_api_key
+from .security import Caller, verify_admin_api_key, verify_admin_or_user, verify_api_key
 
 
 @pytest.fixture
@@ -98,3 +99,58 @@ class TestVerifyAdminApiKey:
         with patch("app.security.authenticate_api_key", new=AsyncMock(return_value=doc)):
             result = await verify_admin_api_key(_make_request(), "gea_valid")
         assert result == "a1b2c3d4"
+
+
+def _bearer(token: str = "firebase-token") -> HTTPAuthorizationCredentials:
+    return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+
+class TestVerifyAdminOrUser:
+    @pytest.mark.asyncio
+    async def test_admin_key_returns_an_admin_caller(self):
+        with patch("app.security.authenticate_api_key", new=AsyncMock(return_value=_admin_doc(is_admin=True))):
+            caller = await verify_admin_or_user(_make_request(), "gea_valid", None)
+        assert caller == Caller("admin", "a1b2c3d4") and caller.actor == "admin:a1b2c3d4"
+
+    @pytest.mark.asyncio
+    async def test_non_admin_key_is_403(self):
+        with patch("app.security.authenticate_api_key", new=AsyncMock(return_value=_admin_doc(is_admin=False))):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify_admin_or_user(_make_request(), "gea_valid", None)
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+
+    @pytest.mark.asyncio
+    async def test_an_api_key_never_falls_back_to_the_bearer_token(self):
+        with (
+            patch("app.security.authenticate_api_key", new=AsyncMock(return_value=None)),
+            patch("app.lib.firebase_auth.auth.verify_id_token", return_value={"uid": "did:plc:abc"}),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify_admin_or_user(_make_request(), "gea_bad", _bearer())
+        assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+    @pytest.mark.asyncio
+    async def test_bearer_token_returns_a_user_caller_with_the_full_did(self):
+        with patch("app.lib.firebase_auth.auth.verify_id_token", return_value={"uid": "did:plc:abc"}):
+            caller = await verify_admin_or_user(_make_request(), None, _bearer())
+        assert caller == Caller("user", "did:plc:abc") and caller.actor == "user:did:plc:abc"
+
+    @pytest.mark.asyncio
+    async def test_no_credentials_is_401(self):
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_admin_or_user(_make_request(), None, None)
+        assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+    @pytest.mark.asyncio
+    async def test_bearer_without_a_did_uid_is_401(self):
+        with patch("app.lib.firebase_auth.auth.verify_id_token", return_value={"uid": "someone"}):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify_admin_or_user(_make_request(), None, _bearer())
+        assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+    @pytest.mark.asyncio
+    async def test_invalid_bearer_token_is_401(self):
+        with patch("app.lib.firebase_auth.auth.verify_id_token", side_effect=ValueError("bad")):
+            with pytest.raises(HTTPException) as exc_info:
+                await verify_admin_or_user(_make_request(), None, _bearer())
+        assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
