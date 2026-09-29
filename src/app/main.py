@@ -38,7 +38,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 from .routers import (
-    candidates, diversify, embeddings, feed_transparency, health, rank, redirect, skylight, xrpc,
+    candidates, diversify, embeddings, feed_transparency, health, llm_query_vectors, rank,
+    redirect, skylight, xrpc,
 )
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
@@ -50,11 +51,13 @@ from .lib.firebase_auth import init_firebase_auth
 from .lib.es_client import SlowQueryLoggingES
 from .lib.eventloop_monitor import start_eventloop_monitor, stop_eventloop_monitor
 from .lib.candidates.popularity_cache import PopularityCache, set_popularity_cache
+from .lib.candidates.llm_query_vector import set_llm_query_vector_db
 from .lib.feed_cache import FirestoreFeedCache
 from .lib.followed_users_cache import FollowedUsersCache, set_followed_users_cache
 from .lib.firestore import init_firestore_client
 from .lib.http_client import close_http_client, init_http_client
 from .lib.perspective import close_perspective_client
+from .lib.llm_query_vector_fit import close_anthropic_client
 from .lib import inflight
 from .lib.metrics import MetricCollector, get_metric_collector, set_metric_collector
 from .lib.posthog_client import get_posthog_client, init_posthog_client, set_posthog_client
@@ -105,6 +108,21 @@ def _reject_dev_session_secret_in_deployment() -> None:
         )
 
 
+def _reject_llm_cg_open_in_deployment() -> None:
+    """Refuse to run with the llm-cg gate forced open outside local dev.
+
+    GE_LLM_CG_OPEN=true skips the PostHog flag and lets every signed-in user
+    fit prompt vectors (~$0.13 in model calls each; see
+    lib.posthog_client.llm_cg_enabled). Only for the devenv, which has no
+    PostHog; deployed, the flag decides who is in the beta.
+    """
+    if os.environ.get("GE_LLM_CG_OPEN", "").lower() == "true" and _is_deployed_environment():
+        raise RuntimeError(
+            "GE_LLM_CG_OPEN must not be set in a deployed environment: "
+            "it opens the prompt-fit endpoint to every user"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan handler that validates required environment variables and
@@ -119,6 +137,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("GE_FEED_CONTEXT_SECRET environment variable is required")
 
     _reject_dev_session_secret_in_deployment()
+    _reject_llm_cg_open_in_deployment()
 
     es_url = os.environ.get("GE_ELASTICSEARCH_URL", "https://localhost:9200")
     es_api_key = os.environ.get("GE_ELASTICSEARCH_API_KEY")
@@ -164,6 +183,7 @@ async def lifespan(app: FastAPI):
     set_followed_users_cache(app.state.followed_users_cache)
     app.state.user_history_cache = FirestoreUserHistoryCache(app.state.firestore)
     set_user_history_cache(app.state.user_history_cache)
+    set_llm_query_vector_db(app.state.firestore)
     try:
         init_firebase_auth()
     except Exception:
@@ -187,6 +207,7 @@ async def lifespan(app: FastAPI):
             await app.state.popularity_cache.drain()
         except Exception:
             pass
+        set_llm_query_vector_db(None)
         set_followed_users_cache(None)
         try:
             await app.state.followed_users_cache.drain()
@@ -211,6 +232,10 @@ async def lifespan(app: FastAPI):
             pass
         try:
             await close_perspective_client()
+        except Exception:
+            pass
+        try:
+            await close_anthropic_client()
         except Exception:
             pass
         try:
@@ -302,6 +327,15 @@ _TAGS = [
             "index. These endpoints are independent of the candidate/rank/"
             "diversify pipeline and can be used on their own by applications "
             "that need direct content search (e.g. the Skylight app)."
+        ),
+    },
+    {
+        "name": "llm-query-vectors",
+        "description": (
+            "Fit a MiniLM query vector to a free-text prompt: an LLM expands the "
+            "prompt to keywords, scores a sample of matching posts, and a ridge "
+            "regression turns (embedding, score) pairs into a vector stored per "
+            "user in Firestore for candidate retrieval. Admin API key."
         ),
     },
     {
@@ -433,6 +467,7 @@ app.include_router(embeddings.router)
 app.include_router(diversify.router)
 app.include_router(feed_transparency.router)
 app.include_router(health.router)
+app.include_router(llm_query_vectors.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)
 app.include_router(redirect.router)

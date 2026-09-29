@@ -9,7 +9,13 @@ from fastapi.testclient import TestClient
 from . import main
 from .lib import average_user_embedding as prior_module
 from .lib import inflight
-from .main import _es_connections_per_node, _is_deployed_environment, _resolve_endpoint, app
+from .main import (
+    _es_connections_per_node,
+    _is_deployed_environment,
+    _reject_llm_cg_open_in_deployment,
+    _resolve_endpoint,
+    app,
+)
 
 
 def _request_for(path: str, method: str = "GET") -> Request:
@@ -78,6 +84,29 @@ def test_is_deployed_environment_checks_ge_environment_fallback(monkeypatch):
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     monkeypatch.setenv("GE_ENVIRONMENT", "prod")
     assert _is_deployed_environment() is True
+
+
+# The guard is called directly rather than through the lifespan: a clean
+# startup goes on to build real GCP clients, which needs credentials CI lacks.
+@pytest.mark.parametrize("env_value", ["prod", "stage"])
+def test_llm_cg_open_is_rejected_when_deployed(monkeypatch, env_value):
+    monkeypatch.setenv("GE_LLM_CG_OPEN", "true")
+    monkeypatch.setenv("ENVIRONMENT", env_value)
+    with pytest.raises(RuntimeError, match="GE_LLM_CG_OPEN"):
+        _reject_llm_cg_open_in_deployment()
+
+
+def test_llm_cg_open_is_fine_locally(monkeypatch):
+    monkeypatch.setenv("GE_LLM_CG_OPEN", "true")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("GE_ENVIRONMENT", raising=False)
+    _reject_llm_cg_open_in_deployment()
+
+
+def test_deployed_is_fine_without_llm_cg_open(monkeypatch):
+    monkeypatch.setenv("GE_LLM_CG_OPEN", "")
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    _reject_llm_cg_open_in_deployment()
 
 
 def test_inflight_middleware_tracks_and_releases_requests():

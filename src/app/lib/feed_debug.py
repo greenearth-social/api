@@ -267,7 +267,6 @@ class FeedDebugRecorder:
         request_id: str,
         generated_at: datetime,
         expires_at: datetime,
-        applied_social_radius: int | None = None,
         api_release_sha: str | None = None,
     ) -> "FeedSnapshotDocument":
         """Assemble a lightweight :class:`FeedSnapshotDocument` with only the
@@ -484,7 +483,6 @@ class FeedDebugRecorder:
             diversify=self.diversify,
             generator_legend=generator_legend,
             generator_diagnostics=diagnostics,
-            applied_social_radius=applied_social_radius,
             items_meta=items_meta,
         )
 

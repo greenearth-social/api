@@ -9,7 +9,7 @@ from ..documents import (
     SourceWeightsDocument,
     UserDocument,
 )
-from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES
+from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
 from ..models import FeedControlName
 
 DEFAULT_SOURCE_WEIGHTS = SourceWeightsDocument(
@@ -32,9 +32,9 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | SourceWeightsDocument] = {
 
 def source_weights_for_social_radius(social_radius: int) -> SourceWeightsDocument:
     """Translate a legacy Social Radius preset into the atomic source shape."""
-    generators = SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(
+    generators = SOCIAL_RADIUS_PRESETS.get(
         social_radius,
-        SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3],
+        SOCIAL_RADIUS_PRESETS[3],
     )
     by_name = {generator.name: generator.weight for generator in generators}
     return SourceWeightsDocument(

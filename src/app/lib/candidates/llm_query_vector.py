@@ -1,50 +1,48 @@
 """LLM query vector candidate generator.
 
-Reads a precomputed query vector from Firestore (written by the prompt
-ingestion service) and runs a kNN search in Elasticsearch using the
-MiniLM-L12 embedding field.
+Reads the user's newest fitted query vector from Firestore and runs a kNN
+search in Elasticsearch using the MiniLM-L12 embedding field.
 """
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 
 from ...models import MaxAgeHours
 from ..embeddings import MINILM_L12_EMBEDDING_FIELD
-from ..firestore import get_latest_llm_query_vector
 from .base import CandidateGenerator, CandidateResult
 from .es_candidates import knn_search_posts
 
+if TYPE_CHECKING:
+    from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
+
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Db singleton — injected by main.py at startup, same pattern as
-# popularity_cache.py's set_popularity_cache / get_popularity_cache.
-# ---------------------------------------------------------------------------
-# TODO: register this generator in candidates/__init__.py and wire
-# set_llm_query_vector_db(app.state.firestore) in main.py's lifespan handler.
-
-_db = None
+# Candidate generators are constructed at import time and ``generate`` only
+# receives the Elasticsearch client, so the Firestore client is reached the
+# same way the popularity and followed-users caches are: a process-level
+# handle installed during app startup.  When it is unset (unit tests,
+# scripts) the generator returns an empty result.
+_db: AsyncClient | None = None
 
 
-def set_llm_query_vector_db(db) -> None:
+def set_llm_query_vector_db(db: AsyncClient | None) -> None:
     global _db
     _db = db
 
 
-def get_llm_query_vector_db():
+def get_llm_query_vector_db() -> AsyncClient | None:
     return _db
 
-
-# ---------------------------------------------------------------------------
-# Generator
-# ---------------------------------------------------------------------------
 
 class LlmQueryVectorCandidateGenerator(CandidateGenerator):
     """Candidate generator driven by a user's LLM-generated query vector.
 
     Reads the most recently updated query vector from Firestore and searches
     Elasticsearch using the MiniLM-L12 embedding field.  If no vector is
-    found the generator returns an empty result so the pipeline can fall back
-    to other sources.
+    found the generator returns an empty result so the pipeline can fall
+    back to other sources.
     """
 
     @property
@@ -62,13 +60,18 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
     ) -> CandidateResult:
         db = get_llm_query_vector_db()
         if db is None:
-            logger.warning("llm_query_vector generator called before db was configured")
+            logger.warning("llm_query_vector generator called before Firestore was configured")
             return CandidateResult(
                 generator_name=self.name,
                 candidates=[],
                 status="not_run",
-                reason="db_not_configured",
+                reason="firestore_not_configured",
             )
+
+        # Imported here (not at module top) to avoid an import cycle:
+        # documents -> candidates.base -> candidates -> llm_query_vector
+        # -> lib.firestore -> documents.  Same pattern as popularity_cache.
+        from ..firestore import get_latest_llm_query_vector
 
         latest = await get_latest_llm_query_vector(db, user_did)
         if latest is None:
@@ -90,4 +93,8 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
             max_age_hours=max_age_hours,
         )
 
-        return CandidateResult(generator_name=self.name, candidates=candidates)
+        reason = None
+        if not candidates:
+            reason = "no_posts_match_query_vector"
+
+        return CandidateResult(generator_name=self.name, candidates=candidates, reason=reason)

@@ -34,6 +34,7 @@ Every event carries two annotations, applied by :func:`annotate_event_properties
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 
 from posthog import Posthog
@@ -43,8 +44,7 @@ logger = logging.getLogger(__name__)
 _posthog_client: Posthog | None = None
 
 FAIL_FAST_FLAG = "fail-fast-feed"
-NETWORK_LIKES_FLAG = "network-likes-in-your-feed"
-EXPANDED_CANDIDATE_BATCH_FLAG = "expanded-candidate-batch"
+LLM_CG_FLAG = "llm-cg"
 
 EVENT_SURFACE = "greenearth_api"
 EVENT_SCHEMA_VERSION = 1
@@ -205,3 +205,16 @@ def evaluate_feature_flags(
     except Exception:
         logger.warning("PostHog feature flag evaluation failed for %s", user_did)
         return values
+
+
+def llm_cg_enabled(client: Posthog | None, user_did: str) -> bool:
+    """Whether the prompt-based (LLM) candidate generator is open to *user_did*.
+
+    Gated by the ``llm-cg`` flag, rolled out to the internal cohort while the
+    feature is in beta. Off unless PostHog says otherwise, so a missing key can
+    never open it by accident. ``GE_LLM_CG_OPEN=true`` opens it to every user
+    of the instance, for local development only.
+    """
+    if os.environ.get("GE_LLM_CG_OPEN", "").lower() == "true":
+        return True
+    return evaluate_feature_flags(client, user_did, [LLM_CG_FLAG])[LLM_CG_FLAG]
