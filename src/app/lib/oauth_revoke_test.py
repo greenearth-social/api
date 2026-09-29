@@ -17,12 +17,14 @@ def make_db(add_side_effect=None):
     return db
 
 
-def client_returning(status=200, json=None, exc=None, seen=None):
+def client_returning(status=200, json=None, exc=None, seen=None, content=None):
     def handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(request)
         if exc:
             raise exc
+        if content is not None:
+            return httpx.Response(status, content=content)
         return httpx.Response(status, json=json if json is not None else {})
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -75,6 +77,7 @@ async def test_plain_http_targets_skip_the_id_token(monkeypatch):
     [
         ({"status": 500}, "status_500"),
         ({"status": 200, "json": {"outcome": "bogus"}}, "invalid_response"),
+        ({"status": 200, "content": b"not json"}, "JSONDecodeError"),
         ({"exc": httpx.ReadTimeout("slow")}, "ReadTimeout"),
         ({"exc": httpx.ConnectError("down")}, "ConnectError"),
     ],
@@ -109,7 +112,29 @@ async def test_audit_write_failure_still_returns_the_outcome_and_logs_an_error(c
             assert await revoke_oauth_grant(db, DID, "admin:k1", client=client) == "revoked"
     record = next(r for r in caplog.records if r.levelno == logging.ERROR)
     assert DID in record.getMessage() and "admin:k1" in record.getMessage()
+    assert "RuntimeError" in record.getMessage()
     assert "id-token-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_outcome_logs_a_warning_with_no_tokens(caplog):
+    db = make_db()
+    async with client_returning(status=500) as client:
+        with caplog.at_level(logging.WARNING):
+            assert await revoke_oauth_grant(db, DID, "admin:k1", client=client) == "failed"
+    record = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    assert DID in record.getMessage() and "admin:k1" in record.getMessage()
+    assert "status_500" in record.getMessage()
+    assert "id-token-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_non_failed_outcomes_do_not_log_a_warning(caplog):
+    db = make_db()
+    async with client_returning(json={"outcome": "revoked"}) as client:
+        with caplog.at_level(logging.WARNING):
+            await revoke_oauth_grant(db, DID, "admin:k1", client=client)
+    assert not any(r.levelno == logging.WARNING for r in caplog.records)
 
 
 @pytest.mark.asyncio

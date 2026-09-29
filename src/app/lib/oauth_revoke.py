@@ -58,6 +58,13 @@ async def revoke_oauth_grant(
     db, did: str, actor: str, *, client: httpx.AsyncClient | None = None
 ) -> str:
     outcome, error = await _call_function(did, client)
+    if outcome == "failed":
+        logger.warning(
+            "oauth revocation failed did=%s actor=%s error=%s",
+            did,
+            actor,
+            error,
+        )
     entry = {
         "did": did,
         "actor": actor,
@@ -67,13 +74,14 @@ async def revoke_oauth_grant(
     }
     try:
         await db.collection(OAUTH_REVOCATIONS_COLLECTION).add(entry)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.error(
-            "oauth revocation audit write failed did=%s actor=%s outcome=%s error=%s at=%s",
+            "oauth revocation audit write failed did=%s actor=%s outcome=%s error=%s at=%s write_error=%s",
             did,
             actor,
             outcome,
             error,
             entry["created_at"].isoformat(),
+            type(exc).__name__,
         )
     return outcome
