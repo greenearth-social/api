@@ -30,7 +30,7 @@ from .firestore import user_doc_id
 
 logger = logging.getLogger(__name__)
 
-_bearer = HTTPBearer(auto_error=False)
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def init_firebase_auth() -> None:
@@ -82,7 +82,7 @@ def uid_from_credentials(authorization: HTTPAuthorizationCredentials | None) -> 
 
 
 async def verify_firebase_auth(
-    authorization: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    authorization: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
 ) -> str:
     """FastAPI dependency: verify a Firebase ID token and return the Firestore
     user-document key.
@@ -102,7 +102,7 @@ async def verify_firebase_auth(
 
 
 async def verify_firebase_uid(
-    authorization: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    authorization: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
 ) -> str:
     """Like ``verify_firebase_auth`` but returns the full DID (the Firebase uid)."""
     return uid_from_credentials(authorization)

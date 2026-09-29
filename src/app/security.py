@@ -2,16 +2,15 @@ from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials
 
 from .documents import ApiKeyDocument
 from .lib.api_keys import authenticate_api_key
-from .lib.firebase_auth import uid_from_credentials
+from .lib.firebase_auth import bearer_scheme, uid_from_credentials
 
 API_KEY_HEADER_NAME = "X-API-Key"
 
 api_key_header = APIKeyHeader(name=API_KEY_HEADER_NAME, auto_error=False)
-_bearer = HTTPBearer(auto_error=False)
 
 
 async def _authenticate(request: Request, api_key: str | None) -> ApiKeyDocument:
@@ -63,7 +62,7 @@ class Caller:
 async def verify_admin_or_user(
     request: Request,
     api_key: Annotated[str | None, Depends(api_key_header)],
-    authorization: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    authorization: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
 ) -> Caller:
     """FastAPI dependency: resolve *who* is calling, admin API key or Firebase user.
 
