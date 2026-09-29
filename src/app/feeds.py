@@ -47,7 +47,7 @@ LOGGED_OUT_POST_URI: str | None = ux_post_uri(ux_posts.LOGGED_OUT)
 # Social-radius preset generator weights for your-feed.
 # Index 3 (balanced) matches the default weights defined in the "your-feed"
 # FeedConfig below — keep them in sync when tuning.
-SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
+SOCIAL_RADIUS_PRESETS: dict[int, list[GeneratorSpec]] = {
     0: [  # Friends — only from people you follow
         *FOLLOWED_USERS_ONLY_GENERATORS,
     ],
@@ -77,32 +77,6 @@ SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
     ],
 }
 
-SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
-    0: [  # Friends — only from people you follow
-        GeneratorSpec(name="followed_users", weight=1.00),
-    ],
-    1: [  # Closer
-        GeneratorSpec(name="followed_users", weight=0.80),
-        GeneratorSpec(name="two_tower", weight=0.10),
-        GeneratorSpec(name="popularity", weight=0.10),
-    ],
-    2: [
-        GeneratorSpec(name="followed_users", weight=0.60),
-        GeneratorSpec(name="two_tower", weight=0.20),
-        GeneratorSpec(name="popularity", weight=0.20),
-    ],
-    3: [  # Balanced — same as your-feed defaults
-        GeneratorSpec(name="followed_users", weight=0.40),
-        GeneratorSpec(name="two_tower", weight=0.30),
-        GeneratorSpec(name="popularity", weight=0.30),
-    ],
-    4: [  # Everyone — mostly discovery
-        GeneratorSpec(name="followed_users", weight=0.20),
-        GeneratorSpec(name="two_tower", weight=0.40),
-        GeneratorSpec(name="popularity", weight=0.40),
-    ],
-}
-
 # NOTE: published display names are limited to 24 graphemes. Internal ("debug")
 # feeds are published as "GE <internal_display_name> <git_sha>" (see issue #228),
 # so keep internal_display_name to 13 chars or fewer. feeds_test.py enforces this.
@@ -124,7 +98,7 @@ FEEDS: dict[str, FeedConfig] = {
         avatar="assets/icons/unranked-your-feed.png",
         preference_source="your-feed",
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
+            generators=SOCIAL_RADIUS_PRESETS.get(DEFAULT_SOCIAL_RADIUS),
             infill="popularity",
             num_candidates=30,
             video_only=False,
@@ -194,7 +168,7 @@ FEEDS: dict[str, FeedConfig] = {
         min_rank_score=PERSONALIZED_MIN_RANK_SCORE,
         min_mmr_score=PERSONALIZED_MIN_MMR_SCORE,
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
+            generators=SOCIAL_RADIUS_PRESETS.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
             num_candidates=30,
             video_only=False,
@@ -240,7 +214,7 @@ FEEDS: dict[str, FeedConfig] = {
         # Same generator mix as your-feed, so cutoff behavior here previews what
         # real users would see.
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
+            generators=SOCIAL_RADIUS_PRESETS.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
             num_candidates=30,
             video_only=False,

@@ -181,9 +181,9 @@ async def test_preview_exclusions_ignore_seen_and_retain_discarded():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("expanded_batch", "expected_candidates"), [(False, 100), (True, 200)])
+@pytest.mark.parametrize("has_posthog_client", [False, True])
 async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache(
-    expanded_batch: bool, expected_candidates: int
+    has_posthog_client: bool,
 ):
     from .xrpc import generate_feed_preview
 
@@ -242,15 +242,12 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
         patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
         patch(
             "app.routers.xrpc.get_posthog_client",
-            return_value=MagicMock() if expanded_batch else None,
+            return_value=MagicMock() if has_posthog_client else None,
         ),
         patch(
             "app.routers.xrpc.evaluate_feature_flags",
-            return_value={
-                "expanded-candidate-batch": expanded_batch,
-                "network-likes-in-your-feed": True,
-            },
-        ),
+            return_value={"fail-fast-feed": False},
+        ) as evaluate_flags,
         patch("app.routers.xrpc._generation_exclusions", exclusions),
         patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", pipeline),
         patch(
@@ -281,7 +278,12 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
         ("network_likes", 0.1),
     ]
     assert gen_request.exclude_uris == ["at://already-discarded"]
-    assert gen_request.num_candidates == expected_candidates
+    assert gen_request.num_candidates == 200
+    if has_posthog_client:
+        assert evaluate_flags.call_args.args[1:] == ("did:plc:testuser", ["fail-fast-feed"])
+        evaluate_flags.assert_called_once()
+    else:
+        evaluate_flags.assert_not_called()
     exclusions.assert_awaited_once()
     assert exclusions.await_args is not None
     assert exclusions.await_args.kwargs == {"include_seen": False}
@@ -359,11 +361,7 @@ def test_configured_generation_preserves_exact_single_source_weights(
         },
     )
 
-    configured = _configured_generation(
-        "your-feed",
-        user,
-        network_likes_enabled=False,
-    )
+    configured = _configured_generation("your-feed", user)
 
     assert [
         (generator.name, generator.weight)
@@ -385,17 +383,9 @@ def test_configured_generation_applies_politics_to_request_local_rank_template(p
         },
     )
 
-    configured = _configured_generation(
-        "your-feed",
-        user,
-        network_likes_enabled=True,
-    )
+    configured = _configured_generation("your-feed", user)
 
-    neutral = _configured_generation(
-        "your-feed",
-        None,
-        network_likes_enabled=True,
-    )
+    neutral = _configured_generation("your-feed", None)
 
     assert configured.effective_preferences.politics == politics
     assert configured.feed_cfg.rank_request_template is not None
@@ -427,16 +417,8 @@ def test_100_percent_following_and_best_of_friends_share_pipeline_configuration(
         },
     )
 
-    following = _configured_generation(
-        "your-feed",
-        user,
-        network_likes_enabled=True,
-    )
-    friends = _configured_generation(
-        "best-of-friends",
-        user,
-        network_likes_enabled=True,
-    )
+    following = _configured_generation("your-feed", user)
+    friends = _configured_generation("best-of-friends", user)
 
     assert (
         following.generators_override["generators"]
@@ -1177,11 +1159,7 @@ class TestGetFeedSkeleton:
             generated_at=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             mode="accepted",
-            preference_fingerprint=_configured_generation(
-                FEED_RKEY,
-                None,
-                network_likes_enabled=True,
-            ).preference_fingerprint,
+            preference_fingerprint=_configured_generation(FEED_RKEY, None).preference_fingerprint,
         )
 
         with (
@@ -1515,19 +1493,18 @@ class TestGetFeedSkeleton:
         assert len(data["feed"]) == 30
 
     @pytest.mark.parametrize(
-        ("limit", "max_batch_size", "expected"),
+        ("limit", "expected"),
         (
-            (10, 100, 50),
-            (20, 200, 100),
-            (30, 100, 100),
-            (30, 200, 150),
-            (50, 200, 200),
+            (10, 50),
+            (20, 100),
+            (30, 150),
+            (50, 200),
         ),
     )
-    def test_candidate_batch_size(self, limit, max_batch_size, expected):
+    def test_candidate_batch_size(self, limit, expected):
         from .xrpc import _batch_size
 
-        assert _batch_size(limit, max_batch_size) == expected
+        assert _batch_size(limit) == expected
 
     # --- de-duplication ---
 
@@ -2007,11 +1984,7 @@ class TestFeedSkeletonCursor:
             feed_name=FEED_RKEY,
             generated_at=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            preference_fingerprint=_configured_generation(
-                FEED_RKEY,
-                None,
-                network_likes_enabled=True,
-            ).preference_fingerprint,
+            preference_fingerprint=_configured_generation(FEED_RKEY, None).preference_fingerprint,
         )
         empty = FeedSnapshotDocument(
             request_id=cache_id,
@@ -4960,7 +4933,8 @@ class TestSourceWeightsOverride:
     def test_applies_social_radius_preset_0(self, mock_pipeline, mock_get_user):
         """social_radius=0 (Friends) → followed_users-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+        from ..feeds import SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -4976,7 +4950,7 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[0]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[0]
         assert gen_request.max_age_hours == 12
 
     @patch("app.routers.xrpc.get_user")
@@ -4984,7 +4958,8 @@ class TestSourceWeightsOverride:
     def test_applies_social_radius_preset_4(self, mock_pipeline, mock_get_user):
         """social_radius=4 (Everyone) → popularity-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+        from ..feeds import SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -4999,7 +4974,7 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[4]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[4]
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
@@ -5076,11 +5051,8 @@ class TestSourceWeightsOverride:
     def test_default_radius_when_missing(self, mock_pipeline, mock_get_user):
         """User doc without social_radius field → defaults to 3 (balanced)."""
         from ..documents import UserDocument
-        from .xrpc import (
-            DEFAULT_SOCIAL_RADIUS,
-            SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
-            PipelineResult,
-        )
+        from ..feeds import DEFAULT_SOCIAL_RADIUS, SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5096,7 +5068,7 @@ class TestSourceWeightsOverride:
         gen_request = mock_pipeline.call_args.args[1]
         assert (
             gen_request.generators
-            == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+            == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
         )
         assert gen_request.max_age_hours == 168
 
@@ -5128,11 +5100,8 @@ class TestSourceWeightsOverride:
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
     def test_fallen_back_to_defaults_when_user_has_no_doc(self, mock_pipeline, mock_get_user):
         """User doc is None → no override, defaults used."""
-        from .xrpc import (
-            DEFAULT_SOCIAL_RADIUS,
-            SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
-            PipelineResult,
-        )
+        from ..feeds import DEFAULT_SOCIAL_RADIUS, SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = None
         mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
@@ -5146,7 +5115,7 @@ class TestSourceWeightsOverride:
         gen_request = mock_pipeline.call_args.args[1]
         assert (
             gen_request.generators
-            == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+            == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
         )
 
     @pytest.mark.parametrize(
@@ -5155,12 +5124,12 @@ class TestSourceWeightsOverride:
     )
     @patch(
         "app.routers.xrpc.evaluate_feature_flags",
-        return_value={"fail-fast-feed": False, "network-likes-in-your-feed": True},
+        return_value={"fail-fast-feed": False},
     )
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
-    def test_enabled_network_likes_flag_uses_network_likes_presets(
+    def test_network_likes_presets_only_evaluate_fail_fast_flag(
         self,
         mock_pipeline,
         mock_get_user,
@@ -5169,7 +5138,8 @@ class TestSourceWeightsOverride:
         feed_uri,
     ):
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+        from ..feeds import SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5184,15 +5154,11 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
         mock_feature_flags.assert_called_once_with(
             mock_get_posthog_client.return_value,
             "did:plc:testuser",
-            [
-                "fail-fast-feed",
-                "expanded-candidate-batch",
-                "network-likes-in-your-feed",
-            ],
+            ["fail-fast-feed"],
         )
 
     @pytest.mark.parametrize(
@@ -5212,7 +5178,8 @@ class TestSourceWeightsOverride:
         feed_uri,
     ):
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+        from ..feeds import SOCIAL_RADIUS_PRESETS
+        from .xrpc import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5227,59 +5194,18 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
         mock_get_posthog_client.assert_any_call()
         mock_feature_flags.assert_not_called()
 
     @patch(
         "app.routers.xrpc.evaluate_feature_flags",
-        return_value={"fail-fast-feed": False, "network-likes-in-your-feed": False},
+        return_value={"fail-fast-feed": False},
     )
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
-    def test_disabled_network_likes_flag_uses_rollback_presets(
-        self,
-        mock_pipeline,
-        mock_get_user,
-        mock_get_posthog_client,
-        mock_feature_flags,
-    ):
-        from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES, PipelineResult
-
-        mock_get_user.return_value = UserDocument(
-            user_did="did:plc:testuser",
-            social_radius=3,
-        )
-        mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
-
-        resp = client.get(
-            "/xrpc/app.bsky.feed.getFeedSkeleton",
-            params={"feed": RANKED_FEED_URI, "limit": 30},
-        )
-
-        assert resp.status_code == 200
-        gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[3]
-        mock_feature_flags.assert_called_once_with(
-            mock_get_posthog_client.return_value,
-            "did:plc:testuser",
-            [
-                "fail-fast-feed",
-                "expanded-candidate-batch",
-                "network-likes-in-your-feed",
-            ],
-        )
-
-    @patch(
-        "app.routers.xrpc.evaluate_feature_flags",
-        return_value={"fail-fast-feed": False, "network-likes-in-your-feed": False},
-    )
-    @patch("app.routers.xrpc.get_posthog_client")
-    @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
-    def test_disabled_network_likes_flag_preserves_explicit_custom_weights(
+    def test_posthog_client_preserves_explicit_custom_weights(
         self,
         mock_pipeline,
         mock_get_user,
@@ -5853,8 +5779,8 @@ class TestPosthogTracking:
                 assert call_kwargs.args[4] == "at://did/post/1"
 
 
-class TestExpandedCandidateBatchFeatureFlag:
-    """The treatment raises the cap for every authenticated feed."""
+class TestCandidateBatch:
+    """Every authenticated feed uses the same 200-candidate cap."""
 
     @pytest.fixture(autouse=True)
     def _mock_authenticated_user(self):
@@ -5874,18 +5800,17 @@ class TestExpandedCandidateBatchFeatureFlag:
         ):
             yield
 
-    @pytest.mark.parametrize(("enabled", "expected"), ((False, 100), (True, 200)))
-    def test_flag_controls_initial_candidate_batch(self, enabled, expected):
+    @pytest.mark.parametrize("has_posthog_client", [False, True])
+    def test_initial_candidate_batch(self, has_posthog_client):
         from .xrpc import PipelineResult
 
         pipeline = AsyncMock(return_value=PipelineResult([], []))
-        flags = {
-            "fail-fast-feed": False,
-            "network-likes-in-your-feed": False,
-            "expanded-candidate-batch": enabled,
-        }
+        flags = {"fail-fast-feed": False}
         with (
-            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch(
+                "app.routers.xrpc.get_posthog_client",
+                return_value=MagicMock() if has_posthog_client else None,
+            ),
             patch("app.routers.xrpc.evaluate_feature_flags", return_value=flags),
             patch("app.routers.xrpc._run_ranking_pipeline", pipeline),
         ):
@@ -5895,12 +5820,12 @@ class TestExpandedCandidateBatchFeatureFlag:
             )
 
         assert response.status_code == 200
-        assert pipeline.call_args.args[1].num_candidates == expected
+        assert pipeline.call_args.args[1].num_candidates == 200
 
-    def test_flag_controls_cursor_regeneration_batch(self):
+    def test_cursor_regeneration_batch(self):
         from .xrpc import PipelineResult
 
-        cache_id = "expanded-batch-regeneration"
+        cache_id = "candidate-batch-regeneration"
         app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
             items=["at://cached/1"],
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
@@ -5909,11 +5834,7 @@ class TestExpandedCandidateBatchFeatureFlag:
         )
         cursor = FeedCursor(id=cache_id, offset=1).encode()
         pipeline = AsyncMock(return_value=PipelineResult([], []))
-        flags = {
-            "fail-fast-feed": False,
-            "network-likes-in-your-feed": False,
-            "expanded-candidate-batch": True,
-        }
+        flags = {"fail-fast-feed": False}
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
             patch("app.routers.xrpc.evaluate_feature_flags", return_value=flags),
@@ -5931,16 +5852,11 @@ class TestExpandedCandidateBatchFeatureFlag:
         assert response.status_code == 200
         assert pipeline.call_args.args[1].num_candidates == 200
 
-    def test_flag_controls_candidate_batch_for_other_feeds(self):
+    def test_candidate_batch_for_other_feeds(self):
         from .xrpc import PipelineResult
 
         pipeline = AsyncMock(return_value=PipelineResult([], []))
-        evaluate_flags = MagicMock(
-            return_value={
-                "fail-fast-feed": False,
-                "expanded-candidate-batch": True,
-            }
-        )
+        evaluate_flags = MagicMock(return_value={"fail-fast-feed": False})
         posthog_client = MagicMock()
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=posthog_client),
@@ -5956,7 +5872,7 @@ class TestExpandedCandidateBatchFeatureFlag:
         evaluate_flags.assert_called_once_with(
             posthog_client,
             "did:plc:testuser",
-            ["fail-fast-feed", "expanded-candidate-batch"],
+            ["fail-fast-feed"],
         )
         assert pipeline.call_args.args[1].num_candidates == 200
 
@@ -6003,10 +5919,7 @@ class TestFailFastFeatureFlag:
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
             patch(
                 "app.routers.xrpc.evaluate_feature_flags",
-                return_value={
-                    "fail-fast-feed": True,
-                    "network-likes-in-your-feed": False,
-                },
+                return_value={"fail-fast-feed": True},
             ),
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
@@ -6025,10 +5938,7 @@ class TestFailFastFeatureFlag:
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
             patch(
                 "app.routers.xrpc.evaluate_feature_flags",
-                return_value={
-                    "fail-fast-feed": False,
-                    "network-likes-in-your-feed": True,
-                },
+                return_value={"fail-fast-feed": False},
             ),
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):

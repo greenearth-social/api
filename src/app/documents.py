@@ -144,7 +144,6 @@ class FeedCacheDocument(BaseModel):
     expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")
     items_meta: list[PipelineItemMeta] = Field(default_factory=list)
     generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
-    applied_social_radius: int | None = None
     user_did: str | None = None
     feed_name: str | None = None
     generated_at: datetime | None = None
@@ -626,7 +625,6 @@ class FeedSnapshotDocument(BaseModel):
     diversify: bool = False
     generator_legend: list[GeneratorMeta] = Field(default_factory=list)
     generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
-    applied_social_radius: int | None = None
     items_meta: list[PipelineItemMeta] = Field(default_factory=list)
 
 

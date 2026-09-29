@@ -254,7 +254,6 @@ async def list_feeds(
                 generated_at=doc.generated_at,
                 feed_name=resolved_feed_name,
                 api_release_sha=doc.api_release_sha,
-                applied_social_radius=doc.applied_social_radius,
                 generator_diagnostics=[
                     GeneratorDiagnosticView(**diagnostic.model_dump())
                     for diagnostic in doc.generator_diagnostics
@@ -420,7 +419,6 @@ async def get_feed_preview(
         api_release_sha=cache_doc.api_release_sha,
         expires_at=cache_doc.expires_at,
         generator_diagnostics=cache_doc.generator_diagnostics,
-        applied_social_radius=cache_doc.applied_social_radius,
         items_meta=cache_doc.items_meta,
     )
     db: AsyncClient = request.app.state.firestore
