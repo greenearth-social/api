@@ -14,10 +14,12 @@ import json
 import logging
 import math
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
+from anthropic import AsyncAnthropic
 
 from . import llm_query_vector_fit as fit
 from .llm_query_vector_fit import (
@@ -74,6 +76,11 @@ class FakeAnthropic:
         self.finished: list[dict] = []
         self.messages = SimpleNamespace(create=self._create)
 
+    @property
+    def typed(self) -> AsyncAnthropic:
+        """This fake where the module's signatures ask for the real client."""
+        return cast(AsyncAnthropic, self)
+
     async def _create(self, **kwargs):
         self.started.append(kwargs)
         out = self._handler(kwargs)
@@ -128,7 +135,7 @@ async def test_expand_keywords_returns_bag_and_counts_usage():
     )
     usage = Usage()
 
-    keywords = await expand_keywords(client, "hopeful science", usage)
+    keywords = await expand_keywords(client.typed, "hopeful science", usage)
 
     assert keywords == bag
     assert (usage.input_tokens, usage.output_tokens, usage.calls) == (300, 120, 1)
@@ -143,7 +150,7 @@ async def test_expand_keywords_rejects_short_bag_and_empty_reply():
     short = [f"kw{i}" for i in range(fit.MIN_KEYWORDS - 1)]
     client = FakeAnthropic(lambda kw: _reply(json.dumps({"keywords": short})))
     with pytest.raises(ExpansionError, match="only"):
-        await expand_keywords(client, "x")
+        await expand_keywords(client.typed, "x")
 
     empty = FakeAnthropic(
         lambda kw: SimpleNamespace(
@@ -153,7 +160,7 @@ async def test_expand_keywords_rejects_short_bag_and_empty_reply():
         )
     )
     with pytest.raises(ExpansionError, match="empty"):
-        await expand_keywords(empty, "x")
+        await expand_keywords(empty.typed, "x")
 
 
 # --------------------------------------------------------------------------- #
@@ -308,7 +315,7 @@ async def test_score_posts_all_fast_scores_everything(monkeypatch):
     client = FakeAnthropic(lambda kw: _score_reply(int(_post_text(kw).split()[1]) + 1))
     usage = Usage()
 
-    out = await score_posts(client, "prompt", posts, usage)
+    out = await score_posts(client.typed, "prompt", posts, usage)
 
     assert out.scores == [1, 2, 3, 4, 5]
     assert (out.n_scored, out.n_cancelled, out.n_failed) == (5, 0, 0)
@@ -329,7 +336,7 @@ async def test_score_posts_cancels_stragglers_once_the_floor_is_met(monkeypatch)
     usage = Usage()
 
     started = asyncio.get_running_loop().time()
-    out = await score_posts(client, "prompt", posts, usage)
+    out = await score_posts(client.typed, "prompt", posts, usage)
     elapsed = asyncio.get_running_loop().time() - started
 
     assert elapsed < 0.5, "the straggler was not cancelled at the deadline"
@@ -359,7 +366,7 @@ async def test_score_posts_waits_past_the_deadline_until_the_floor_is_met(monkey
     client = FakeAnthropic(handler)
 
     started = asyncio.get_running_loop().time()
-    out = await score_posts(client, "prompt", posts, Usage())
+    out = await score_posts(client.typed, "prompt", posts, Usage())
     elapsed = asyncio.get_running_loop().time() - started
 
     assert 0.15 <= elapsed < 0.8
@@ -382,7 +389,7 @@ async def test_score_posts_counts_failures_and_unparseable_replies(monkeypatch):
             return _reply("", stop_reason="refusal")
         return _score_reply(3)
 
-    out = await score_posts(FakeAnthropic(handler), "prompt", posts, Usage())
+    out = await score_posts(FakeAnthropic(handler).typed, "prompt", posts, Usage())
 
     assert out.scores[:3] == [None, None, MIN_SCORE]  # a refusal is a verdict
     assert (out.n_scored, out.n_cancelled, out.n_failed) == (8, 0, 2)
@@ -399,7 +406,7 @@ async def test_score_posts_raises_below_the_floor_and_names_the_first_error(monk
     with pytest.raises(
         fit.ScoringError, match=r"scored 3 of 5 posts \(need 4\); first error: RuntimeError"
     ):
-        await score_posts(FakeAnthropic(handler), "prompt", posts, Usage())
+        await score_posts(FakeAnthropic(handler).typed, "prompt", posts, Usage())
 
 
 @pytest.mark.asyncio
@@ -410,7 +417,7 @@ async def test_score_posts_cancelled_from_outside_leaves_no_call_running(monkeyp
     posts = [_post(i, f"post {i}") for i in range(5)]
     client = FakeAnthropic(lambda kw: (5.0, _score_reply(5)))
 
-    task = asyncio.create_task(score_posts(client, "prompt", posts, Usage()))
+    task = asyncio.create_task(score_posts(client.typed, "prompt", posts, Usage()))
     await asyncio.sleep(0.05)
     assert len(client.started) == 5
     task.cancel()
