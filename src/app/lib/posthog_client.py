@@ -43,8 +43,6 @@ logger = logging.getLogger(__name__)
 _posthog_client: Posthog | None = None
 
 FAIL_FAST_FLAG = "fail-fast-feed"
-NETWORK_LIKES_FLAG = "network-likes-in-your-feed"
-EXPANDED_CANDIDATE_BATCH_FLAG = "expanded-candidate-batch"
 
 EVENT_SURFACE = "greenearth_api"
 EVENT_SCHEMA_VERSION = 1

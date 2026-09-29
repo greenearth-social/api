@@ -48,7 +48,6 @@ from ..feeds import (
     FEEDS,
     FOLLOWED_USERS_ONLY_GENERATORS,
     LOGGED_OUT_POST_URI,
-    SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES,
     SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,  # noqa: F401 - compatibility export
     canonical_feed_name,
 )
@@ -88,9 +87,7 @@ from ..lib.pipeline_context import (
     pipeline_context_scope,
 )
 from ..lib.posthog_client import (
-    EXPANDED_CANDIDATE_BATCH_FLAG,
     FAIL_FAST_FLAG,
-    NETWORK_LIKES_FLAG,
     evaluate_feature_flags,
     get_posthog_client,
     track_interaction,
@@ -688,9 +685,6 @@ def _with_politics_multiplier(feed_cfg: FeedConfig, politics: float) -> FeedConf
 
 def _source_generators(
     weights: SourceWeightsDocument,
-    *,
-    include_network_likes: bool,
-    fallback_radius: int,
 ) -> list[GeneratorSpec]:
     """Build a request-local candidate mix from an atomic source preference."""
     if (
@@ -704,14 +698,8 @@ def _source_generators(
         ("followed_users", weights.following),
         ("two_tower", weights.authors_topics),
         ("popularity", weights.popular),
+        ("network_likes", weights.network_likes),
     ]
-    if include_network_likes:
-        configured.append(("network_likes", weights.network_likes))
-    else:
-        total = sum(weight for _, weight in configured)
-        if total <= 0:
-            return SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[fallback_radius]
-        configured = [(name, weight / total) for name, weight in configured]
 
     return [GeneratorSpec(name=name, weight=weight) for name, weight in configured if weight > 0]
 
@@ -730,7 +718,6 @@ def _configured_generation(
     feed_name: str,
     user_doc: UserDocument | None,
     *,
-    network_likes_enabled: bool,
     preference_patch: FeedPreferencesDocument | None = None,
 ) -> _ConfiguredGeneration:
     """Resolve every settings-controlled input shared by serving and Preview."""
@@ -774,19 +761,7 @@ def _configured_generation(
         if not has_custom_weights:
             applied_social_radius = legacy_radius
 
-        if network_likes_enabled or has_custom_weights:
-            generators = _source_generators(
-                source_weights,
-                # The rollout flag controls legacy/default mixes only. Once a
-                # user has explicitly saved source weights, dropping their
-                # Network Likes allocation would make MySky disagree with the
-                # Settings UI (100% would even fall back to a legacy preset).
-                include_network_likes=network_likes_enabled or has_custom_weights,
-                fallback_radius=legacy_radius,
-            )
-        else:
-            generators = SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES[legacy_radius]
-        generators_override = {"generators": generators}
+        generators_override = {"generators": _source_generators(source_weights)}
 
     freshness_index = (
         int(effective.freshness)
@@ -973,13 +948,12 @@ def _snapshot_page(
 # ---------------------------------------------------------------------------
 
 BATCH_MULTIPLIER = 5  # how many pages of results to fetch for each cursor session
-MAX_BATCH_SIZE = 100  # default maximum number of results per cursor session
-EXPANDED_MAX_BATCH_SIZE = 200
+MAX_BATCH_SIZE = 200  # maximum number of candidates per cursor session
 
 
-def _batch_size(limit: int, max_batch_size: int = MAX_BATCH_SIZE) -> int:
+def _batch_size(limit: int) -> int:
     """How many candidates to pre-generate for a new cursor session."""
-    return min(limit * BATCH_MULTIPLIER, max_batch_size)
+    return min(limit * BATCH_MULTIPLIER, MAX_BATCH_SIZE)
 
 
 def _get_feed_cache(request: Request) -> FeedCache:
@@ -1144,39 +1118,22 @@ async def generate_feed_preview(
 
     user_doc = await get_user(db, user_did)
 
-    uses_network_likes_flag = feed_name in (
-        "your-feed",
-        "unranked-your-feed",
-        "cutoff-preview",
-    )
-    flag_keys = [FAIL_FAST_FLAG, EXPANDED_CANDIDATE_BATCH_FLAG]
-    if uses_network_likes_flag:
-        flag_keys.append(NETWORK_LIKES_FLAG)
-
     posthog_client = get_posthog_client()
     feature_flags = (
         await asyncio.to_thread(
             evaluate_feature_flags,
             posthog_client,
             user_did,
-            flag_keys,
+            [FAIL_FAST_FLAG],
         )
         if posthog_client is not None
         else {}
     )
     set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
-    max_batch_size = (
-        EXPANDED_MAX_BATCH_SIZE
-        if feature_flags.get(EXPANDED_CANDIDATE_BATCH_FLAG, False)
-        else MAX_BATCH_SIZE
-    )
 
     configured = _configured_generation(
         feed_name,
         user_doc,
-        network_likes_enabled=(
-            True if posthog_client is None else feature_flags.get(NETWORK_LIKES_FLAG, False)
-        ),
         preference_patch=preference_patch,
     )
     exclude_uris = await _generation_exclusions(
@@ -1191,7 +1148,7 @@ async def generate_feed_preview(
             # A preview is inspectable page by page, so retain the complete
             # initial ranked batch instead of sizing generation around only
             # the first visible page.
-            "num_candidates": max_batch_size,
+            "num_candidates": MAX_BATCH_SIZE,
             "exclude_uris": exclude_uris,
             "max_age_hours": configured.max_age_hours,
             **configured.generators_override,
@@ -1824,15 +1781,6 @@ async def get_feed_skeleton(
             )
         )
 
-    uses_network_likes_flag = feed_name in (
-        "your-feed",
-        "unranked-your-feed",
-        "cutoff-preview",
-    )
-    flag_keys = [FAIL_FAST_FLAG, EXPANDED_CANDIDATE_BATCH_FLAG]
-    if uses_network_likes_flag:
-        flag_keys.append(NETWORK_LIKES_FLAG)
-
     posthog_client = get_posthog_client()
     # Flags are evaluated per user, and an anonymous caller isn't one: it would
     # be a single synthetic identity shared by every logged-out request. Take
@@ -1842,17 +1790,12 @@ async def get_feed_skeleton(
             evaluate_feature_flags,
             posthog_client,
             user_did,
-            flag_keys,
+            [FAIL_FAST_FLAG],
         )
         if posthog_client is not None and not is_anonymous
         else {}
     )
     set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
-    max_batch_size = (
-        EXPANDED_MAX_BATCH_SIZE
-        if feature_flags.get(EXPANDED_CANDIDATE_BATCH_FLAG, False)
-        else MAX_BATCH_SIZE
-    )
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
@@ -1871,9 +1814,6 @@ async def get_feed_skeleton(
     configured = _configured_generation(
         feed_name,
         user_doc,
-        network_likes_enabled=(
-            True if posthog_client is None else feature_flags.get(NETWORK_LIKES_FLAG, False)
-        ),
     )
     feed_cfg = configured.feed_cfg
     generators_override = configured.generators_override
@@ -1941,7 +1881,7 @@ async def get_feed_skeleton(
                     # paging through this cursor. Start a new cache session
                     # immediately, retaining only already-delivered URIs as
                     # exclusions so the new slate cannot repeat them.
-                    batch = _batch_size(limit, max_batch_size)
+                    batch = _batch_size(limit)
                     delivered_uris = cached_uris[: min(parsed.offset, len(cached_uris))]
                     excluded = await generation_exclusions()
                     exclude_uris = list(dict.fromkeys([*delivered_uris, *excluded]))
@@ -2088,7 +2028,7 @@ async def get_feed_skeleton(
                     )
 
                 # Offset is at or past the end — regenerate with exclusions.
-                batch = _batch_size(limit, max_batch_size)
+                batch = _batch_size(limit)
                 excluded = await generation_exclusions()
                 # Dedup while preserving order; the cached batch and the
                 # seen/discarded posts can overlap.
@@ -2281,7 +2221,7 @@ async def get_feed_skeleton(
                             )
                         return response
 
-            batch = _batch_size(limit, max_batch_size)
+            batch = _batch_size(limit)
             exclude_uris = await generation_exclusions()
             gen_request = feed_cfg.gen_request_template.model_copy(
                 update={

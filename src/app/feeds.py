@@ -77,32 +77,6 @@ SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
     ],
 }
 
-SOCIAL_RADIUS_PRESETS_NO_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
-    0: [  # Friends — only from people you follow
-        GeneratorSpec(name="followed_users", weight=1.00),
-    ],
-    1: [  # Closer
-        GeneratorSpec(name="followed_users", weight=0.80),
-        GeneratorSpec(name="two_tower", weight=0.10),
-        GeneratorSpec(name="popularity", weight=0.10),
-    ],
-    2: [
-        GeneratorSpec(name="followed_users", weight=0.60),
-        GeneratorSpec(name="two_tower", weight=0.20),
-        GeneratorSpec(name="popularity", weight=0.20),
-    ],
-    3: [  # Balanced — same as your-feed defaults
-        GeneratorSpec(name="followed_users", weight=0.40),
-        GeneratorSpec(name="two_tower", weight=0.30),
-        GeneratorSpec(name="popularity", weight=0.30),
-    ],
-    4: [  # Everyone — mostly discovery
-        GeneratorSpec(name="followed_users", weight=0.20),
-        GeneratorSpec(name="two_tower", weight=0.40),
-        GeneratorSpec(name="popularity", weight=0.40),
-    ],
-}
-
 # NOTE: published display names are limited to 24 graphemes. Internal ("debug")
 # feeds are published as "GE <internal_display_name> <git_sha>" (see issue #228),
 # so keep internal_display_name to 13 chars or fewer. feeds_test.py enforces this.

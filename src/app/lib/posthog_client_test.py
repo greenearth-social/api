@@ -9,7 +9,6 @@ from app.lib.posthog_client import (
     EVENT_SCHEMA_VERSION,
     EVENT_SURFACE,
     FAIL_FAST_FLAG,
-    NETWORK_LIKES_FLAG,
     annotate_event_properties,
     evaluate_feature_flags,
     get_posthog_client,
@@ -23,6 +22,7 @@ from app.lib.posthog_client import (
 
 NOW = datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)
 USER_DID = "did:plc:abc123"
+SECONDARY_TEST_FLAG = "test-secondary-flag"
 ANNOTATIONS = {"surface": EVENT_SURFACE, "schema_version": EVENT_SCHEMA_VERSION}
 
 
@@ -211,11 +211,11 @@ def test_feature_flags_are_still_evaluated_on_the_did():
     # A rename must not re-roll a user's flag bucket, so flag evaluation stays
     # keyed on the DID even though the handle now rides along on every event.
     mock = MagicMock()
-    mock.get_all_flags.return_value = {FAIL_FAST_FLAG: True, NETWORK_LIKES_FLAG: True}
-    evaluate_feature_flags(mock, USER_DID, [FAIL_FAST_FLAG, NETWORK_LIKES_FLAG])
+    mock.get_all_flags.return_value = {FAIL_FAST_FLAG: True, SECONDARY_TEST_FLAG: True}
+    evaluate_feature_flags(mock, USER_DID, [FAIL_FAST_FLAG, SECONDARY_TEST_FLAG])
     mock.get_all_flags.assert_called_once_with(
         USER_DID,
-        flag_keys_to_evaluate=[FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
+        flag_keys_to_evaluate=[FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
     )
 
 
@@ -313,10 +313,10 @@ def test_evaluate_feature_flags_none_client_returns_false_values():
     assert evaluate_feature_flags(
         None,
         "did:plc:abc123",
-        [FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
+        [FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
     ) == {
         FAIL_FAST_FLAG: False,
-        NETWORK_LIKES_FLAG: False,
+        SECONDARY_TEST_FLAG: False,
     }
 
 
@@ -324,22 +324,22 @@ def test_evaluate_feature_flags_uses_one_sdk_request():
     mock = MagicMock()
     mock.get_all_flags.return_value = {
         FAIL_FAST_FLAG: False,
-        NETWORK_LIKES_FLAG: True,
+        SECONDARY_TEST_FLAG: True,
     }
 
     result = evaluate_feature_flags(
         mock,
         "did:plc:abc123",
-        [FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
+        [FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
     )
 
     assert result == {
         FAIL_FAST_FLAG: False,
-        NETWORK_LIKES_FLAG: True,
+        SECONDARY_TEST_FLAG: True,
     }
     mock.get_all_flags.assert_called_once_with(
         "did:plc:abc123",
-        flag_keys_to_evaluate=[FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
+        flag_keys_to_evaluate=[FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
     )
 
 
@@ -349,8 +349,8 @@ def test_evaluate_feature_flags_sdk_exception_returns_false_values():
     assert evaluate_feature_flags(
         mock,
         "did:plc:abc123",
-        [FAIL_FAST_FLAG, NETWORK_LIKES_FLAG],
+        [FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
     ) == {
         FAIL_FAST_FLAG: False,
-        NETWORK_LIKES_FLAG: False,
+        SECONDARY_TEST_FLAG: False,
     }
