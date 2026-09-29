@@ -69,10 +69,6 @@ RETENTION_DAYS = 30
 # every read. Keeps the array (and the read-time merge) bounded.
 MAX_PENDING_ADDS = 500
 
-# Age at which staleness is loud enough to alert on: refreshes have been
-# failing for long enough that jetstream cannot be the explanation either.
-STALE_ALERT_SECONDS = 86_400  # 24 hours
-
 # Single-flight key for the population sweep. A NUL byte cannot appear in a
 # Firestore document ID, so this can never collide with a user's key.
 _SWEEP_KEY = "\x00sweep"
@@ -215,7 +211,7 @@ class FollowedUsersCache:
         # Recorded for every served entry, fresh or not: a series containing
         # only overdue entries says nothing about how fresh the healthy
         # population is, and reads as alarming even when nothing is wrong.
-        self._note_age(entry, user_did)
+        self._note_age(entry)
 
         reason = self._staleness(entry)
         if reason is None:
@@ -275,19 +271,13 @@ class FollowedUsersCache:
             return "stale"
         return None
 
-    def _note_age(self, entry: "FollowedUsersCacheDocument", user_did: str) -> None:
+    def _note_age(self, entry: "FollowedUsersCacheDocument") -> None:
+        # Refreshes run on demand, so age alone does not indicate a failure.
         age = _age_seconds(entry.generated_at, datetime.now(timezone.utc))
         if age is None:
             return
         if mc := get_metric_collector():
             mc.record("follows_cache.age_seconds", age)
-        if age >= STALE_ALERT_SECONDS:
-            logger.error(
-                "Followed-users cache for %s is %.0fs old (>= %ds); refreshes are not completing",
-                user_did,
-                age,
-                STALE_ALERT_SECONDS,
-            )
 
     async def _fetch(self, user_did: str, timeout_seconds: float | None = None) -> FollowsFetch:
         return await fetch_followed_user_dids(
