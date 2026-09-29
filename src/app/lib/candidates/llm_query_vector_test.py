@@ -109,6 +109,20 @@ class TestLlmQueryVectorCandidateGenerator:
         )
         assert result.generator_name == GENERATOR_NAME
         assert result.candidates == candidates
+        assert result.status == "success"
+        assert result.reason is None
+
+    @pytest.mark.asyncio
+    async def test_reports_reason_when_no_posts_match(self, generator):
+        doc = _make_vector_doc("key1", [0.1, 0.2], updated_at=datetime.now(UTC))
+        set_llm_query_vector_db(DB)
+
+        with _latest(doc), patch(KNN_SEARCH_POSTS, new_callable=AsyncMock, return_value=[]):
+            result = await generator.generate(object(), "did:plc:user1")
+
+        assert result.candidates == []
+        assert result.status == "success"
+        assert result.reason == "no_posts_match_query_vector"
 
     @pytest.mark.asyncio
     async def test_uses_vector_returned_by_firestore(self, generator):

@@ -73,4 +73,5 @@ __all__ = [
     "FollowedUsersCandidateGenerator",
     "NetworkLikesCandidateGenerator",
     "TwoTowerCandidateGenerator",
+    "LlmQueryVectorCandidateGenerator",
 ]

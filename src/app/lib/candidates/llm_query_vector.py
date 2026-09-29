@@ -93,4 +93,8 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
             max_age_hours=max_age_hours,
         )
 
-        return CandidateResult(generator_name=self.name, candidates=candidates)
+        reason = None
+        if not candidates:
+            reason = "no_posts_match_query_vector"
+
+        return CandidateResult(generator_name=self.name, candidates=candidates, reason=reason)
