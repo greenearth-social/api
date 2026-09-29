@@ -13,6 +13,7 @@ from app.lib.posthog_client import (
     evaluate_feature_flags,
     get_posthog_client,
     init_posthog_client,
+    llm_cg_enabled,
     set_posthog_client,
     track_interaction,
     track_redirect,
@@ -354,3 +355,30 @@ def test_evaluate_feature_flags_sdk_exception_returns_false_values():
         FAIL_FAST_FLAG: False,
         SECONDARY_TEST_FLAG: False,
     }
+
+
+def test_llm_cg_enabled_is_closed_without_posthog_client(monkeypatch):
+    monkeypatch.delenv("GE_LLM_CG_OPEN", raising=False)
+    assert llm_cg_enabled(None, USER_DID) is False
+
+
+def test_llm_cg_enabled_local_override_opens_it(monkeypatch):
+    monkeypatch.setenv("GE_LLM_CG_OPEN", "true")
+    assert llm_cg_enabled(None, USER_DID) is True
+
+
+def test_llm_cg_enabled_follows_the_flag(monkeypatch):
+    monkeypatch.delenv("GE_LLM_CG_OPEN", raising=False)
+    mock = MagicMock()
+    mock.get_all_flags.return_value = {"llm-cg": True}
+    assert llm_cg_enabled(mock, USER_DID) is True
+    mock.get_all_flags.assert_called_once_with(USER_DID, flag_keys_to_evaluate=["llm-cg"])
+
+
+def test_llm_cg_enabled_is_closed_when_flag_missing_or_failing(monkeypatch):
+    monkeypatch.delenv("GE_LLM_CG_OPEN", raising=False)
+    mock = MagicMock()
+    mock.get_all_flags.return_value = {}
+    assert llm_cg_enabled(mock, USER_DID) is False
+    mock.get_all_flags.side_effect = RuntimeError("quota")
+    assert llm_cg_enabled(mock, USER_DID) is False

@@ -489,8 +489,9 @@ def test_create_feed_preview_accepts_unsaved_preferences(mock_generate, client):
 @pytest.mark.parametrize(
     "source_weights",
     [
-        {"following": 1, "network_likes": 0, "authors_topics": 0, "popular": 0},
-        {"following": 0, "network_likes": 1, "authors_topics": 0, "popular": 0},
+        {"following": 1, "network_likes": 0, "authors_topics": 0, "popular": 0, "llm": 0},
+        {"following": 0, "network_likes": 1, "authors_topics": 0, "popular": 0, "llm": 0},
+        {"following": 0, "network_likes": 0, "authors_topics": 0, "popular": 0, "llm": 1},
     ],
 )
 @patch("app.routers.feed_transparency.generate_feed_preview", new_callable=AsyncMock)
@@ -1281,6 +1282,7 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
                     "network_likes": 0.2,
                     "authors_topics": 0.25,
                     "popular": 0.25,
+                    "llm": 0.0,
                 },
                 "freshness": 5,
                 "politics": 1.0,
@@ -1314,6 +1316,7 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
                 "network_likes": 0.0,
                 "authors_topics": 0.0,
                 "popular": 0.0,
+                "llm": 0.0,
             },
             "freshness": 3,
             "politics": 1.25,
@@ -1420,6 +1423,13 @@ def test_patch_preferences_rejects_out_of_range(mock_patch_prefs, client):
         {"following": 0.0, "network_likes": 1.0, "authors_topics": 0.0, "popular": 0.0},
         {"following": 0.0, "network_likes": 0.0, "authors_topics": 1.0, "popular": 0.0},
         {"following": 0.0, "network_likes": 0.0, "authors_topics": 0.0, "popular": 1.0},
+        {
+            "following": 0.0,
+            "network_likes": 0.0,
+            "authors_topics": 0.0,
+            "popular": 0.0,
+            "llm": 1.0,
+        },
     ],
 )
 @patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")

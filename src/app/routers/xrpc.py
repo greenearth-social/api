@@ -697,6 +697,7 @@ def _source_generators(
         ("two_tower", weights.authors_topics),
         ("popularity", weights.popular),
         ("network_likes", weights.network_likes),
+        ("llm_query_vector", weights.llm),
     ]
 
     return [GeneratorSpec(name=name, weight=weight) for name, weight in configured if weight > 0]
