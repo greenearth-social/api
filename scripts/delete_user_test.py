@@ -1,12 +1,13 @@
 import asyncio
 import os
 
+import httpx
 import pytest
 from google.cloud.firestore import FieldFilter
 
 import delete_user
 from app.lib.user_history_cache import USER_HISTORY_CACHE_COLLECTION, _user_history_cache_key
-from delete_user import NOT_DELETED_FROM_CODE, parse_args, run
+from delete_user import NOT_DELETED_FROM_CODE, grant_state, parse_args, revoke_via_api, run
 
 DID = "did:plc:target"
 KEY = "target"
@@ -167,10 +168,24 @@ def args(execute=False, did=DID):
     return parse_args(["--did", did] + (["--execute"] if execute else []))
 
 
+class _FakeRevoker:
+    def __init__(self, outcome: str) -> None:
+        self.outcome = outcome
+        self.calls: list[str] = []
+
+    async def __call__(self, did: str) -> str:
+        self.calls.append(did)
+        return self.outcome
+
+
+def revoker_returning(outcome: str) -> _FakeRevoker:
+    return _FakeRevoker(outcome)
+
+
 def test_dry_run_is_the_default_and_makes_no_changes(capsys):
     db, auth = seeded_db(), FakeAuth({DID})
     before = dict(db.docs)
-    assert asyncio.run(run(args(), db, auth)) == 0
+    assert asyncio.run(run(args(), db, auth, revoker_returning("no_session"))) == 0
     assert db.docs == before
     assert auth.deleted == [] and db.commits == [] and db.recursive_deletes == []
     out = capsys.readouterr().out
@@ -179,7 +194,7 @@ def test_dry_run_is_the_default_and_makes_no_changes(capsys):
 
 def test_execute_deletes_only_the_target_users_data():
     db, auth = seeded_db(), FakeAuth({DID})
-    assert asyncio.run(run(args(execute=True), db, auth)) == 0
+    assert asyncio.run(run(args(execute=True), db, auth, revoker_returning("no_session"))) == 0
     assert not [p for p in db.docs if p[:2] == ("users", KEY)]
     assert ("followed_users_cache", KEY) not in db.docs
     assert ("feed_cache", "c1") not in db.docs
@@ -194,26 +209,26 @@ def test_execute_deletes_only_the_target_users_data():
 
 def test_execute_is_idempotent(capsys):
     db, auth = seeded_db(), FakeAuth({DID})
-    assert asyncio.run(run(args(execute=True), db, auth)) == 0
+    assert asyncio.run(run(args(execute=True), db, auth, revoker_returning("no_session"))) == 0
     capsys.readouterr()
-    assert asyncio.run(run(args(execute=True), db, auth)) == 0
+    assert asyncio.run(run(args(execute=True), db, auth, revoker_returning("no_session"))) == 0
     assert auth.deleted == [DID]
     assert "0" in capsys.readouterr().out
 
 
 def test_large_interaction_sets_are_deleted_in_batches_of_500():
     db, auth = seeded_db(interactions=1203), FakeAuth()
-    asyncio.run(run(args(execute=True), db, auth))
+    asyncio.run(run(args(execute=True), db, auth, revoker_returning("no_session")))
     assert db.commits == [500, 500, 203, 1]
     assert not [p for p in db.docs if p[0] == "interactions" and db.docs[p]["user_did"] == DID]
 
 
 def test_report_always_lists_what_cannot_be_deleted(capsys):
-    asyncio.run(run(args(), seeded_db(), FakeAuth()))
+    asyncio.run(run(args(), seeded_db(), FakeAuth(), revoker_returning("no_session")))
     out = capsys.readouterr().out
     for line in NOT_DELETED_FROM_CODE:
         assert line in out
-    assert "NOT revoked" in out
+    assert "OAuth grant: none stored" in out
 
 
 def test_both_mode_flags_are_rejected():
@@ -234,7 +249,8 @@ def test_a_failing_store_returns_nonzero(capsys):
         def exists(self, uid):
             raise RuntimeError("auth down")
 
-    assert asyncio.run(run(args(execute=True), seeded_db(), ExplodingAuth())) == 1
+    revoker = revoker_returning("no_session")
+    assert asyncio.run(run(args(execute=True), seeded_db(), ExplodingAuth(), revoker)) == 1
     assert "auth down" in capsys.readouterr().err
 
 
@@ -279,3 +295,149 @@ def test_stage_and_prod_set_project_and_database_and_clear_emulator_host(
     assert os.environ["GE_FIRESTORE_DATABASE"] == expected_database
     assert "GE_FIRESTORE_EMULATOR_HOST" not in os.environ
     assert "FIRESTORE_EMULATOR_HOST" not in os.environ
+
+
+def with_grant(db, status="active"):
+    doc = {"did": DID, "status": status}
+    if status == "active":
+        doc["ciphertext"] = "opaque"
+    db.docs[("oauth_grants", DID)] = doc
+    return db
+
+
+def run_args(*flags, did=DID):
+    return parse_args(["--did", did, *flags])
+
+
+@pytest.mark.parametrize("outcome", ["revoked", "already_revoked", "no_session"])
+def test_execute_revokes_first_then_deletes_data_and_the_grant(outcome, capsys):
+    db = with_grant(seeded_db())
+    revoker = revoker_returning(outcome)
+    assert asyncio.run(run(run_args("--execute"), db, FakeAuth([DID]), revoker)) == 0
+    assert revoker.calls == [DID]
+    assert ("users", KEY) not in db.docs
+    assert ("oauth_grants", DID) not in db.docs
+    assert ("users", "other") in db.docs
+    assert outcome in capsys.readouterr().out
+
+
+def test_failed_revocation_exits_nonzero_and_deletes_nothing(capsys):
+    db = with_grant(seeded_db())
+    before = dict(db.docs)
+    auth = FakeAuth([DID])
+    assert asyncio.run(run(run_args("--execute"), db, auth, revoker_returning("failed"))) == 1
+    assert db.docs == before and auth.deleted == []
+    assert "revocation failed" in capsys.readouterr().err.lower()
+
+
+def test_revocation_happens_before_any_deletion():
+    db = with_grant(seeded_db())
+    order = []
+
+    async def revoker(did):
+        order.append(("revoke", ("users", KEY) in db.docs))
+        return "revoked"
+
+    asyncio.run(run(run_args("--execute"), db, FakeAuth([DID]), revoker))
+    assert order == [("revoke", True)]
+
+
+def test_dry_run_never_calls_the_revoker_and_reports_the_grant(capsys):
+    db = with_grant(seeded_db())
+    before = dict(db.docs)
+    revoker = revoker_returning("revoked")
+    assert asyncio.run(run(run_args(), db, FakeAuth([DID]), revoker)) == 0
+    assert revoker.calls == [] and db.docs == before
+    assert "would revoke" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("status, expected", [("active", "active"), ("revoked", "revoked")])
+def test_grant_state_reads_the_grant_document(status, expected):
+    assert asyncio.run(grant_state(with_grant(seeded_db(), status), DID)) == expected
+
+
+def test_grant_state_absent_when_there_is_no_document():
+    assert asyncio.run(grant_state(seeded_db(), DID)) == "absent"
+
+
+def test_skip_flag_is_refused_when_an_active_grant_exists(capsys):
+    db = with_grant(seeded_db())
+    before = dict(db.docs)
+    revoker = revoker_returning("revoked")
+    code = asyncio.run(run(run_args("--execute", "--skip-oauth-revocation"), db, FakeAuth([DID]), revoker))
+    assert code == 1 and db.docs == before and revoker.calls == []
+    assert "active" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("status", [None, "revoked"])
+def test_skip_flag_allowed_without_an_active_grant_and_makes_no_revoke_call(status):
+    db = with_grant(seeded_db(), status) if status else seeded_db()
+    revoker = revoker_returning("revoked")
+    code = asyncio.run(run(run_args("--execute", "--skip-oauth-revocation"), db, FakeAuth([DID]), revoker))
+    assert code == 0 and revoker.calls == []
+    assert ("users", KEY) not in db.docs and ("oauth_grants", DID) not in db.docs
+
+
+def test_rerun_after_success_is_a_clean_noop():
+    db = with_grant(seeded_db())
+    asyncio.run(run(run_args("--execute"), db, FakeAuth([DID]), revoker_returning("revoked")))
+    assert asyncio.run(run(run_args("--execute"), db, FakeAuth(), revoker_returning("no_session"))) == 0
+
+
+def test_report_lists_the_audit_log_as_retained(capsys):
+    asyncio.run(run(run_args(), seeded_db(), FakeAuth(), revoker_returning("no_session")))
+    assert "oauth_revocations" in capsys.readouterr().out
+
+
+def test_failed_revocation_report_never_prints_the_admin_key(capsys):
+    db = with_grant(seeded_db())
+    asyncio.run(run(run_args("--execute"), db, FakeAuth([DID]), revoker_returning("failed")))
+    captured = capsys.readouterr()
+    assert "gea_secret" not in captured.out and "gea_secret" not in captured.err
+
+
+def _transport(status, body):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(status, json=body)
+
+    return httpx.MockTransport(handler), seen
+
+
+@pytest.fixture(autouse=True)
+def _api_env(monkeypatch):
+    monkeypatch.setenv("GE_API_URL", "http://api.test")
+    monkeypatch.setenv("GE_ADMIN_API_KEY", "gea_secret")
+
+
+def test_revoke_via_api_posts_the_did_with_the_admin_key():
+    t, seen = _transport(200, {"did": DID, "outcome": "revoked"})
+    out = asyncio.run(revoke_via_api(DID, client=httpx.AsyncClient(transport=t)))
+    assert out == "revoked"
+    assert str(seen[0].url) == "http://api.test/api/oauth/revoke"
+    assert seen[0].headers["x-api-key"] == "gea_secret"
+
+
+@pytest.mark.parametrize(
+    "status, body", [(502, {"outcome": "failed"}), (403, {}), (500, {}), (200, {"outcome": "bogus"})]
+)
+def test_revoke_via_api_maps_everything_else_to_failed(status, body):
+    t, _ = _transport(status, body)
+    assert asyncio.run(revoke_via_api(DID, client=httpx.AsyncClient(transport=t))) == "failed"
+
+
+def test_revoke_via_api_without_configuration_is_failed(monkeypatch):
+    monkeypatch.delenv("GE_ADMIN_API_KEY")
+    assert asyncio.run(revoke_via_api(DID)) == "failed"
+
+
+def test_revoke_via_api_transport_errors_are_failed():
+    def boom(request):
+        raise httpx.ConnectError("down")
+
+    assert (
+        asyncio.run(revoke_via_api(DID, client=httpx.AsyncClient(transport=httpx.MockTransport(boom))))
+        == "failed"
+    )

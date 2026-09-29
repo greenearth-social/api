@@ -16,9 +16,17 @@ Reads Firestore connection from the same env vars as scripts/apikeys.py
 database "greenearth-prod"; ``--environment prod`` sets it explicitly. Firebase Auth uses
 Application Default Credentials (or FIREBASE_AUTH_EMULATOR_HOST for the emulator).
 
-This script deletes data only. It does not revoke the user's OAuth grant at the
-authorization server — that is added by a later stacked change once the revoke
-endpoint exists.
+Before deleting anything, this script revokes the user's OAuth grant by
+calling this api's own ``POST /api/oauth/revoke`` endpoint with an admin
+``X-API-Key``. That requires two environment variables when ``--execute``
+needs to revoke (i.e. unless ``--skip-oauth-revocation`` applies):
+
+    GE_API_URL          base URL of the api to call, e.g. https://greenearth-api-stage-...run.app
+    GE_ADMIN_API_KEY     an admin gea_... key (never logged or printed)
+
+If revocation reports outcome ``failed``, no data is deleted and the script
+exits non-zero — re-running is always safe, including after a ``failed``
+caused by a concurrent login that replaced the grant mid-revoke.
 """
 from __future__ import annotations
 
@@ -30,6 +38,7 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import httpx  # noqa: E402
 from google.cloud.firestore import FieldFilter  # noqa: E402
 
 from app.lib.did import is_valid_did  # noqa: E402
@@ -55,6 +64,10 @@ _ENVIRONMENTS = {
     "prod": "greenearth-prod",
 }
 
+OAUTH_GRANTS_COLLECTION = "oauth_grants"
+REVOKE_TIMEOUT_SECONDS = 30.0
+SUCCESS_OUTCOMES = frozenset({"revoked", "already_revoked", "no_session"})
+
 NOT_DELETED_FROM_CODE = [
     "PostHog persons/events (distinct_id = DID): delete in the PostHog UI/API",
     "Elasticsearch posts/likes/inferences: public firehose mirror, not deleted by this script",
@@ -64,6 +77,9 @@ NOT_DELETED_FROM_CODE = [
     "feed_cache entries written before user_did was recorded: expire via TTL",
     "Firebase ID tokens already issued stay valid up to 1h and can re-create the user "
     "doc via upsert_user: re-run with --execute after an hour",
+    "OAuth grants created before revocation shipped have no stored token and cannot be "
+    "revoked from code: the user must revoke the app in Bluesky settings",
+    "oauth_revocations audit entries (DID, actor, outcome, timestamp): retained by design",
 ]
 
 
@@ -135,6 +151,39 @@ async def _delete_doc(doc_ref, execute: bool) -> int:
     return 1
 
 
+async def grant_state(db, did: str) -> str:
+    """Read the stored OAuth grant doc's status: "active", "revoked", or "absent"."""
+    snap = await db.collection(OAUTH_GRANTS_COLLECTION).document(did).get()
+    if not snap.exists:
+        return "absent"
+    return "revoked" if (snap.to_dict() or {}).get("status") == "revoked" else "active"
+
+
+async def revoke_via_api(did: str, client: httpx.AsyncClient | None = None) -> str:
+    """Revoke ``did``'s OAuth grant via this api's own admin-authenticated endpoint.
+
+    Never raises: any failure (missing config, transport error, unexpected
+    status/body) maps to outcome "failed", same as the endpoint's own 502.
+    """
+    base, key = os.environ.get("GE_API_URL"), os.environ.get("GE_ADMIN_API_KEY")
+    if not base or not key:
+        return "failed"
+    http = client or httpx.AsyncClient()
+    try:
+        response = await http.post(
+            f"{base.rstrip('/')}/api/oauth/revoke",
+            json={"did": did},
+            headers={"X-API-Key": key},
+            timeout=REVOKE_TIMEOUT_SECONDS,
+        )
+        outcome = response.json().get("outcome") if response.status_code in (200, 502) else None
+        return outcome if response.status_code == 200 and outcome in SUCCESS_OUTCOMES else "failed"
+    except Exception:  # noqa: BLE001
+        return "failed"
+    finally:
+        await http.aclose()
+
+
 async def _delete_query(db, query, execute: bool) -> int:
     count = pending = 0
     batch = db.batch()
@@ -197,16 +246,22 @@ async def delete_user_data(db, did: str, execute: bool, auth_backend) -> list[St
         results.append(
             StoreResult(f"firestore {name} where user_did", await _delete_query(db, query, execute))
         )
+    results.append(
+        StoreResult(
+            f"firestore {OAUTH_GRANTS_COLLECTION}/{did}",
+            await _delete_doc(db.collection(OAUTH_GRANTS_COLLECTION).document(did), execute),
+        )
+    )
     return results
 
 
-def format_report(did: str, execute: bool, results: list[StoreResult]) -> str:
+def format_report(did: str, execute: bool, results: list[StoreResult], grant_line: str) -> str:
     verb = "deleted" if execute else "would delete"
     lines = [f"{'EXECUTE' if execute else 'DRY RUN'} for {did}", ""]
     lines += [f"  {r.store:<55} {r.found:>6} {verb if r.found else 'nothing to delete'}" for r in results]
+    lines += ["", f"OAuth grant: {grant_line}"]
     lines += ["", "NOT deleted by this script (handle separately):"]
     lines += [f"  - {item}" for item in NOT_DELETED_FROM_CODE]
-    lines += ["  - OAuth grant at the authorization server: NOT revoked by this script"]
     return "\n".join(lines)
 
 
@@ -225,19 +280,50 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Target environment: dev uses the local Firestore emulator (default); "
         "stage/prod connect to the corresponding Firestore database",
     )
+    parser.add_argument(
+        "--skip-oauth-revocation",
+        action="store_true",
+        help="skip revocation; only allowed when no active grant is stored",
+    )
     args = parser.parse_args(argv)
     if not is_valid_did(args.did):
         parser.error(f"--did is not a well-formed DID: {args.did!r}")
     return args
 
 
-async def run(args: argparse.Namespace, db, auth_backend) -> int:
+async def run(args: argparse.Namespace, db, auth_backend, revoker=revoke_via_api) -> int:
     try:
+        state = await grant_state(db, args.did)
+        if args.skip_oauth_revocation and state == "active":
+            print(
+                "ERROR: an active OAuth grant is stored for this DID; refusing "
+                "--skip-oauth-revocation. Run without it so the grant is revoked first.",
+                file=sys.stderr,
+            )
+            return 1
+        if not args.execute:
+            grant_line = {
+                "active": "would revoke (active grant)",
+                "revoked": "already revoked",
+                "absent": "none stored",
+            }[state]
+        elif args.skip_oauth_revocation:
+            grant_line = f"revocation skipped (grant {state})"
+        else:
+            outcome = await revoker(args.did)
+            if outcome not in SUCCESS_OUTCOMES:
+                print(
+                    "ERROR: OAuth revocation failed; no data was deleted. Fix and re-run "
+                    "(re-running is always safe).",
+                    file=sys.stderr,
+                )
+                return 1
+            grant_line = outcome
         results = await delete_user_data(db, args.did, args.execute, auth_backend)
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
-    print(format_report(args.did, args.execute, results))
+    print(format_report(args.did, args.execute, results, grant_line))
     return 0
 
 
