@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import pytest
 from google.cloud.firestore import FieldFilter
@@ -212,3 +213,46 @@ def test_a_failing_store_returns_nonzero(capsys):
 
     assert asyncio.run(run(args(execute=True), seeded_db(), ExplodingAuth())) == 1
     assert "auth down" in capsys.readouterr().err
+
+
+def test_environment_flag_defaults_to_dev():
+    assert args().environment == "dev"
+
+
+@pytest.mark.parametrize("flag", ["--environment", "--env"])
+def test_environment_flag_and_its_alias_both_select_stage(flag):
+    assert parse_args(["--did", DID, flag, "stage"]).environment == "stage"
+
+
+def test_dev_environment_leaves_firestore_env_untouched(monkeypatch):
+    monkeypatch.setenv("GE_FIRESTORE_PROJECT", "existing-project")
+    monkeypatch.setenv("GE_FIRESTORE_DATABASE", "existing-db")
+    monkeypatch.setenv("GE_FIRESTORE_EMULATOR_HOST", "localhost:8080")
+    monkeypatch.setenv("FIRESTORE_EMULATOR_HOST", "localhost:8080")
+
+    delete_user._configure_environment("dev")
+
+    assert os.environ["GE_FIRESTORE_PROJECT"] == "existing-project"
+    assert os.environ["GE_FIRESTORE_DATABASE"] == "existing-db"
+    assert os.environ["GE_FIRESTORE_EMULATOR_HOST"] == "localhost:8080"
+    assert os.environ["FIRESTORE_EMULATOR_HOST"] == "localhost:8080"
+
+
+@pytest.mark.parametrize(
+    "env,expected_database",
+    [("stage", "greenearth-stage"), ("prod", "greenearth-prod")],
+)
+def test_stage_and_prod_set_project_and_database_and_clear_emulator_host(
+    monkeypatch, env, expected_database
+):
+    monkeypatch.delenv("GE_FIRESTORE_PROJECT", raising=False)
+    monkeypatch.delenv("GE_FIRESTORE_DATABASE", raising=False)
+    monkeypatch.setenv("GE_FIRESTORE_EMULATOR_HOST", "localhost:8080")
+    monkeypatch.setenv("FIRESTORE_EMULATOR_HOST", "localhost:8080")
+
+    delete_user._configure_environment(env)
+
+    assert os.environ["GE_FIRESTORE_PROJECT"] == "greenearth-471522"
+    assert os.environ["GE_FIRESTORE_DATABASE"] == expected_database
+    assert "GE_FIRESTORE_EMULATOR_HOST" not in os.environ
+    assert "FIRESTORE_EMULATOR_HOST" not in os.environ
