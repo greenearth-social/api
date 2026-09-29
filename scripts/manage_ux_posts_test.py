@@ -179,6 +179,7 @@ class TestSync:
 
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
+            patch.object(manage_ux_posts, "misgated_posts", return_value=[]),
             patch.object(managed_posts, "login", return_value=client),
         ):
             assert manage_ux_posts.cmd_sync(self._args()) == 0
@@ -193,6 +194,7 @@ class TestSync:
         client = MagicMock()
         with (
             patch.object(manage_ux_posts, "fetch_repo_posts", return_value=existing),
+            patch.object(manage_ux_posts, "misgated_posts", return_value=[]),
             patch.object(managed_posts, "login", return_value=client),
         ):
             assert manage_ux_posts.cmd_sync(self._args()) == 0

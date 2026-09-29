@@ -371,7 +371,7 @@ def test_configured_generation_preserves_exact_single_source_weights(
     assert configured.preference_fingerprint
 
 
-@pytest.mark.parametrize("politics", [0.0, 2.0])
+@pytest.mark.parametrize("politics", [0.0, 1.0, 2.0])
 def test_configured_generation_applies_politics_to_request_local_rank_template(politics):
     from .xrpc import _configured_generation
 
@@ -384,13 +384,14 @@ def test_configured_generation_applies_politics_to_request_local_rank_template(p
     )
 
     configured = _configured_generation("your-feed", user)
-
-    neutral = _configured_generation("your-feed", None)
+    defaults = _configured_generation("your-feed", None)
 
     assert configured.effective_preferences.politics == politics
     assert configured.feed_cfg.rank_request_template is not None
     assert configured.feed_cfg.rank_request_template.politics == politics
-    assert configured.preference_fingerprint != neutral.preference_fingerprint
+    assert defaults.feed_cfg.rank_request_template is not None
+    assert defaults.feed_cfg.rank_request_template.politics == 0.5
+    assert configured.preference_fingerprint != defaults.preference_fingerprint
     assert FEEDS["your-feed"].rank_request_template is original_rank_template
     assert original_rank_template is not None
     assert original_rank_template.politics == 1.0
@@ -524,7 +525,12 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         like_count=10,
         generator_name="two_tower",
     )
-    predict_user_tower = AsyncMock(return_value={"outputs": [[0.1, 0.2]]})
+    predict_user_tower = AsyncMock(return_value={
+        "outputs": [[0.1, 0.2]],
+        "model_type": "user-tower",
+        "model_uuid": "1" * 32,
+        "paired_post_model_uuid": "2" * 32,
+    })
     predict_heavy_ranker = AsyncMock(return_value=[0.9])
     fetch_recent_likes = AsyncMock(
         return_value=(
@@ -559,8 +565,8 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     )
     monkeypatch.setattr(
         candidate_two_tower_module,
-        "get_cached_post_tower_uuid",
-        AsyncMock(return_value="post-tower-v1"),
+        "get_average_user_embedding",
+        lambda: None,
     )
     monkeypatch.setattr(
         candidate_two_tower_module,
@@ -5024,7 +5030,7 @@ class TestSourceWeightsOverride:
         mock_get_user,
         mock_feature_flags,
     ):
-        """Cold-start always uses popularity for a brand-new user."""
+        """Cold-start keeps its fixed popularity and average-embedding mix."""
         from ..documents import UserDocument
         from .xrpc import PipelineResult
 
@@ -5042,7 +5048,8 @@ class TestSourceWeightsOverride:
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
         assert [(generator.name, generator.weight) for generator in gen_request.generators] == [
-            ("popularity", 1.0),
+            ("popularity", 0.5),
+            ("two_tower_empty_history", 0.5),
         ]
         mock_feature_flags.assert_not_called()
 

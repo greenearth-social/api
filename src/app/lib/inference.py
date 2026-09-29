@@ -11,16 +11,15 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Literal, assert_never
+from typing import Literal
 from uuid import UUID
 
 import httpx
 
-from .feed_debug import current_recorder
 from .http_client import get_http_client
 from .request_context import get_request_id
 from .telemetry import timed
-from .user_history_cache import UserHistory, fetch_user_history_features
+from .user_history_cache import UserHistory
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +227,8 @@ async def predict_user_embedding(
     The caller supplies history from the shared production history loader. This path
     never synthesizes empty history and never reads the readiness UUID cache.
     """
+    # Shared by the export endpoint and candidate retrieval. Keep the prediction
+    # actual-only here; choosing or blending a prior belongs to the generator.
     embedded_history = history.items_with_embeddings
     like_count = len(history.items)
     embedding_count = len(embedded_history)
@@ -312,80 +313,6 @@ async def predict_heavy_ranker_single_user(
         raise_inference_response_error("ranker", resp.status_code, resp.text)
     payload = _decode_inference_json("ranker", resp)
     return _extract_inference_outputs("ranker", payload)
-
-
-async def compute_user_embedding(
-    user_did: str,
-    es,
-    inference_base_url: str,
-    inference_api_key: str,
-    source: str,
-    history_mode: HistoryMode,
-    allow_empty_history: bool = True,
-) -> list[float] | None:
-    async with timed(logger, "two_tower_user_side", user_did=user_did):
-        rec = current_recorder()
-
-        # override allow_empty_history when we are running just for cold start debug feed
-        if history_mode == "empty":
-            allow_empty_history = True
-
-        match history_mode:
-            case "actual":
-                user_history_vectors: list[list[float]] = []
-                history_author_dids: list[str] = []
-                user_history = await fetch_user_history_features(es, user_did)
-                user_history_liked_uris = user_history.liked_uris
-
-                if not user_history_liked_uris:
-                    logger.info("No likes found for user %s", user_did)
-                    if rec is not None:
-                        rec.record_user_features(source, [], 0)
-                    if not allow_empty_history:
-                        return None
-                else:
-                    embedded_history = user_history.items_with_embeddings
-                    if rec is not None:
-                        rec.record_user_features(
-                            source, user_history_liked_uris, len(embedded_history)
-                        )
-                    if not embedded_history:
-                        logger.info(
-                            "No embeddings found for %d liked posts of user %s",
-                            len(user_history_liked_uris),
-                            user_did,
-                        )
-                        if not allow_empty_history:
-                            return None
-                    else:
-                        user_history_vectors = [
-                            item.embedding
-                            for item in embedded_history
-                            if item.embedding is not None
-                        ]
-                        history_author_dids = [
-                            item.author_did for item in embedded_history
-                        ]
-            case "empty":
-                user_history_vectors = []
-                history_author_dids = []
-                if rec is not None:
-                    rec.record_user_features(source, [], 0)
-            case _:
-                assert_never(history_mode)
-
-        payload = await predict_user_tower_single(
-            user_history_vectors,
-            history_author_dids,
-            base_url=inference_base_url,
-            api_key=inference_api_key,
-        )
-        output_user_embedding_list = _extract_inference_outputs("user-tower", payload)
-        if len(output_user_embedding_list) != 1:
-            raise RuntimeError(
-                f"user inference returned {len(output_user_embedding_list)} embeddings; expected 1",
-            )
-        return output_user_embedding_list[0]
 
 
 async def get_post_tower_uuid(

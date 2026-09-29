@@ -12,20 +12,21 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from ..average_user_embedding import AverageUserEmbedding
 from ..elasticsearch import (
     POSTS_KNN_INDEX,
     POSTS_QUALITY_KNN_INDEX,
     two_tower_knn_index,
 )
 from ..embeddings import GE_POST_EMBEDDING_FIELD
+from ..user_history_cache import UserHistory
 from .es_candidates import knn_search_posts
 from .es_candidates_test import FakeEs
 from .two_tower import MIN_LIKE_COUNT, TwoTowerCandidateGenerator
 
-INFERENCE_SETTINGS = ("https://inference", "api-key")
-GET_INFERENCE_SETTINGS = "app.lib.candidates.two_tower.get_inference_settings"
-COMPUTE_USER_EMBEDDING = "app.lib.candidates.two_tower.compute_user_embedding"
-GET_CACHED_POST_TOWER_UUID = "app.lib.candidates.two_tower.get_cached_post_tower_uuid"
+GET_PRIOR = "app.lib.candidates.two_tower.get_average_user_embedding"
+FETCH_HISTORY = "app.lib.candidates.two_tower.fetch_user_history_features"
+PRIOR = AverageUserEmbedding((0.6, 0.8), 2, "1" * 32, "2" * 32, "run-id", 406)
 KNN_SEARCH_POSTS = "app.lib.candidates.two_tower.knn_search_posts"
 
 
@@ -49,11 +50,13 @@ class TestTwoTowerKnnIndexSelection:
 class TestKnnSearchPostsIndexParam:
     @pytest.mark.asyncio
     async def test_searches_the_index_it_is_given(self):
-        es = FakeEs(responses={
-            POSTS_QUALITY_KNN_INDEX: {
-                "hits": {"hits": [{"_score": 0.9, "_source": {"at_uri": "at://post/1"}}]}
+        es = FakeEs(
+            responses={
+                POSTS_QUALITY_KNN_INDEX: {
+                    "hits": {"hits": [{"_score": 0.9, "_source": {"at_uri": "at://post/1"}}]}
+                }
             }
-        })
+        )
 
         candidates = await knn_search_posts(
             es,
@@ -116,9 +119,8 @@ class TestTwoTowerUsesQualityIndex:
         generator = TwoTowerCandidateGenerator(name="two_tower", history_mode="actual")
 
         with (
-            patch(GET_INFERENCE_SETTINGS, return_value=INFERENCE_SETTINGS),
-            patch(GET_CACHED_POST_TOWER_UUID, new_callable=AsyncMock, return_value="uuid-1"),
-            patch(COMPUTE_USER_EMBEDDING, new_callable=AsyncMock, return_value=[0.1, 0.2]),
+            patch(GET_PRIOR, return_value=PRIOR),
+            patch(FETCH_HISTORY, new_callable=AsyncMock, return_value=UserHistory([])),
             patch(KNN_SEARCH_POSTS, new_callable=AsyncMock, return_value=[]) as knn_search,
         ):
             await generator.generate(object(), "did:plc:user1", num_candidates=10)
@@ -139,9 +141,8 @@ class TestTwoTowerUsesQualityIndex:
         generator = TwoTowerCandidateGenerator(name="two_tower", history_mode="actual")
 
         with (
-            patch(GET_INFERENCE_SETTINGS, return_value=INFERENCE_SETTINGS),
-            patch(GET_CACHED_POST_TOWER_UUID, new_callable=AsyncMock, return_value="uuid-1"),
-            patch(COMPUTE_USER_EMBEDDING, new_callable=AsyncMock, return_value=[0.1, 0.2]),
+            patch(GET_PRIOR, return_value=PRIOR),
+            patch(FETCH_HISTORY, new_callable=AsyncMock, return_value=UserHistory([])),
             patch(KNN_SEARCH_POSTS, new_callable=AsyncMock, return_value=[]) as knn_search,
         ):
             await generator.generate(object(), "did:plc:user1", num_candidates=10)
@@ -152,3 +153,52 @@ class TestTwoTowerUsesQualityIndex:
         # Pinned back to the full corpus, MIN_LIKE_COUNT is the only thing
         # enforcing any traction preference at all — it must still be applied.
         assert kwargs["min_like_count"] == MIN_LIKE_COUNT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("index", [POSTS_QUALITY_KNN_INDEX, POSTS_KNN_INDEX])
+async def test_generator_emits_exact_prior_vector_and_retrieval_filters(monkeypatch, index):
+    # Empty history selects the prior without inference. Keep the real kNN query
+    # builder so assertions cover the ES request, not just helper arguments.
+    monkeypatch.setenv("GE_TWO_TOWER_KNN_INDEX", index)
+    generator = TwoTowerCandidateGenerator(name="two_tower", history_mode="actual")
+    es = FakeEs(
+        responses={
+            index: {"hits": {"hits": [{"_score": 0.8, "_source": {"at_uri": "at://post/result"}}]}}
+        }
+    )
+    with (
+        patch(GET_PRIOR, return_value=PRIOR),
+        patch(FETCH_HISTORY, new_callable=AsyncMock, return_value=UserHistory([])),
+    ):
+        result = await generator.generate(
+            es,
+            "did:plc:user1",
+            num_candidates=12,
+            video_only=True,
+            exclude_uris=["at://post/seen"],
+            max_age_hours=24,
+        )
+    assert len(es.calls) == 1
+    call = es.calls[0]
+    assert call["index"] == index
+    assert call["size"] == 12
+    knn = call["knn"]
+    assert knn["query_vector"] == list(PRIOR.embedding)
+    assert knn["field"] == GE_POST_EMBEDDING_FIELD
+    assert knn["k"] == 12
+    assert knn["num_candidates"] == 120
+    filters = [
+        {"range": {"created_at": {"gte": "now-24h"}}},
+        {"term": {"contains_video": True}},
+        {"term": {"ge_post_embedding_model_uuid": PRIOR.post_model_uuid}},
+    ]
+    if index == POSTS_KNN_INDEX:
+        filters.append({"range": {"like_count": {"gte": MIN_LIKE_COUNT}}})
+    assert knn["filter"] == {
+        "bool": {
+            "filter": filters,
+            "must_not": [{"terms": {"at_uri": ["at://post/seen"]}}],
+        }
+    }
+    assert result.candidates[0].generator_name == "two_tower"

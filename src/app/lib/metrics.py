@@ -175,6 +175,9 @@ def histogram_boundaries(name: str) -> tuple[float, ...] | None:
     """
     if name == "eventloop.lag_ms":
         return EVENTLOOP_LAG_MS_BOUNDARIES
+    if name == "candidates.two_tower.history_size":
+        # Separate no usable history from one like, up to the 64-like window.
+        return (0, 1, 2, 4, 8, 16, 32, 64)
     if name.endswith("in_flight") or name.endswith("_size"):
         return CONCURRENCY_BOUNDARIES
     if name.endswith("_share") or name.endswith("_score") or name.endswith("_ratio"):
