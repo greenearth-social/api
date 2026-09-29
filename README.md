@@ -419,6 +419,7 @@ Available configuration inputs across `gcp_setup.sh` and `deploy.sh`:
 - `GE_INFERENCE_BASE_URL` - Explicit inference endpoint override (highest priority)
 - `GE_INFERENCE_DOMAIN` - Domain-mapped inference host used when base URL override is not set
 - `GE_ENABLE_INFERENCE_DOMAIN_MAPPING` - Toggle mapped-domain resolution in `deploy.sh` (default: true)
+- `GE_OAUTH_REVOKE_URL` - URL of the private frontend `oauthRevoke` Cloud Function that performs RFC 7009 revocation (see [issue #519](https://github.com/greenearth-social/api/issues/519)). `deploy.sh` defaults this to the environment's deterministic `cloudfunctions.net` URL; override with `--oauth-revoke-url` (or this env var) with a `run.app` URL if the function rejects that audience
 - `API_INSTANCES_MIN` - Minimum instances (default: 1)
 - `API_INSTANCES_MAX` - Maximum instances (default: 20)
 
