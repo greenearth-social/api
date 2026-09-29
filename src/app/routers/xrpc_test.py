@@ -4923,7 +4923,7 @@ class TestSourceWeightsOverride:
     def test_applies_social_radius_preset_0(self, mock_pipeline, mock_get_user):
         """social_radius=0 (Friends) → followed_users-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -4939,7 +4939,7 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[0]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[0]
         assert gen_request.max_age_hours == 12
 
     @patch("app.routers.xrpc.get_user")
@@ -4947,7 +4947,7 @@ class TestSourceWeightsOverride:
     def test_applies_social_radius_preset_4(self, mock_pipeline, mock_get_user):
         """social_radius=4 (Everyone) → popularity-heavy weights."""
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -4962,7 +4962,7 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[4]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[4]
 
     @patch("app.routers.xrpc.get_user")
     @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
@@ -5041,7 +5041,7 @@ class TestSourceWeightsOverride:
         from ..documents import UserDocument
         from .xrpc import (
             DEFAULT_SOCIAL_RADIUS,
-            SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
+            SOCIAL_RADIUS_PRESETS,
             PipelineResult,
         )
 
@@ -5059,7 +5059,7 @@ class TestSourceWeightsOverride:
         gen_request = mock_pipeline.call_args.args[1]
         assert (
             gen_request.generators
-            == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+            == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
         )
         assert gen_request.max_age_hours == 168
 
@@ -5093,7 +5093,7 @@ class TestSourceWeightsOverride:
         """User doc is None → no override, defaults used."""
         from .xrpc import (
             DEFAULT_SOCIAL_RADIUS,
-            SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
+            SOCIAL_RADIUS_PRESETS,
             PipelineResult,
         )
 
@@ -5109,7 +5109,7 @@ class TestSourceWeightsOverride:
         gen_request = mock_pipeline.call_args.args[1]
         assert (
             gen_request.generators
-            == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+            == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
         )
 
     @pytest.mark.parametrize(
@@ -5132,7 +5132,7 @@ class TestSourceWeightsOverride:
         feed_uri,
     ):
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5147,7 +5147,7 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
         mock_feature_flags.assert_called_once_with(
             mock_get_posthog_client.return_value,
             "did:plc:testuser",
@@ -5171,7 +5171,7 @@ class TestSourceWeightsOverride:
         feed_uri,
     ):
         from ..documents import UserDocument
-        from .xrpc import SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES, PipelineResult
+        from .xrpc import SOCIAL_RADIUS_PRESETS, PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5186,7 +5186,7 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert gen_request.generators == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[3]
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[3]
         mock_get_posthog_client.assert_any_call()
         mock_feature_flags.assert_not_called()
 

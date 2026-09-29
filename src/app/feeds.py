@@ -47,7 +47,7 @@ LOGGED_OUT_POST_URI: str | None = ux_post_uri(ux_posts.LOGGED_OUT)
 # Social-radius preset generator weights for your-feed.
 # Index 3 (balanced) matches the default weights defined in the "your-feed"
 # FeedConfig below — keep them in sync when tuning.
-SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES: dict[int, list[GeneratorSpec]] = {
+SOCIAL_RADIUS_PRESETS: dict[int, list[GeneratorSpec]] = {
     0: [  # Friends — only from people you follow
         *FOLLOWED_USERS_ONLY_GENERATORS,
     ],
@@ -98,7 +98,7 @@ FEEDS: dict[str, FeedConfig] = {
         avatar="assets/icons/unranked-your-feed.png",
         preference_source="your-feed",
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
+            generators=SOCIAL_RADIUS_PRESETS.get(DEFAULT_SOCIAL_RADIUS),
             infill="popularity",
             num_candidates=30,
             video_only=False,
@@ -149,7 +149,7 @@ FEEDS: dict[str, FeedConfig] = {
         min_rank_score=PERSONALIZED_MIN_RANK_SCORE,
         min_mmr_score=PERSONALIZED_MIN_MMR_SCORE,
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
+            generators=SOCIAL_RADIUS_PRESETS.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
             num_candidates=30,
             video_only=False,
@@ -195,7 +195,7 @@ FEEDS: dict[str, FeedConfig] = {
         # Same generator mix as your-feed, so cutoff behavior here previews what
         # real users would see.
         gen_request_template=CandidateGenerateRequest.model_construct(
-            generators=SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.get(DEFAULT_SOCIAL_RADIUS),
+            generators=SOCIAL_RADIUS_PRESETS.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
             num_candidates=30,
             video_only=False,

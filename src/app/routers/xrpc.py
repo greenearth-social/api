@@ -48,7 +48,7 @@ from ..feeds import (
     FEEDS,
     FOLLOWED_USERS_ONLY_GENERATORS,
     LOGGED_OUT_POST_URI,
-    SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,  # noqa: F401 - compatibility export
+    SOCIAL_RADIUS_PRESETS,  # noqa: F401 - compatibility export
     canonical_feed_name,
 )
 from ..lib.atproto_auth import verify_auth_header

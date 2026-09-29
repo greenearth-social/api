@@ -5,7 +5,7 @@ from app.feeds import (
     DEFAULT_SOCIAL_RADIUS,
     FEEDS,
     LOGGED_OUT_POST_URI,
-    SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES,
+    SOCIAL_RADIUS_PRESETS,
     canonical_feed_name,
 )
 
@@ -84,7 +84,7 @@ class TestFeedsRegistry:
         assert not LOGGED_OUT_POST_URI.endswith(placeholder_suffix)
 
     def test_social_radius_splits_everyone_weight_evenly(self):
-        for generators in SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES.values():
+        for generators in SOCIAL_RADIUS_PRESETS.values():
             weights = {generator.name: generator.weight for generator in generators}
             assert weights.get("two_tower", 0.0) == pytest.approx(weights.get("popularity", 0.0))
             assert sum(weights.values()) == pytest.approx(1.0)
@@ -92,19 +92,19 @@ class TestFeedsRegistry:
     def test_friends_social_radius_has_no_everyone_generators(self):
         assert [
             (generator.name, generator.weight)
-            for generator in SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[0]
+            for generator in SOCIAL_RADIUS_PRESETS[0]
         ] == [("followed_users", 1.0)]
 
     def test_static_feed_defaults_include_network_likes(self):
         assert (
             FEEDS["your-feed"].gen_request_template.generators
-            == SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[DEFAULT_SOCIAL_RADIUS]
+            == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
         )
 
     def test_social_radius_presets_include_network_likes_outside_friends(self):
         for radius in range(1, 5):
             generators = {
-                generator.name for generator in SOCIAL_RADIUS_PRESETS_WITH_NETWORK_LIKES[radius]
+                generator.name for generator in SOCIAL_RADIUS_PRESETS[radius]
             }
             assert "network_likes" in generators
 
