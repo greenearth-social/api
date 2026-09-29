@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -85,6 +86,24 @@ def test_fit_reports_pool_too_small(mock_fit, mock_add, client):
 
     assert response.status_code == 422
     assert "12 posts" in response.json()["detail"]
+    mock_add.assert_not_awaited()
+
+
+@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
+def test_fit_is_504_and_stores_nothing_past_the_deadline(mock_fit, mock_add, client, monkeypatch):
+    monkeypatch.setattr("app.routers.llm_query_vectors.FIT_TIMEOUT_S", 0.01)
+
+    async def slow_fit(*_args):
+        await asyncio.sleep(1)
+        return _fit_result()
+
+    mock_fit.side_effect = slow_fit
+
+    response = client.post(PATH, json={"prompt": "hopeful science"})
+
+    assert response.status_code == 504
+    assert "nothing stored" in response.json()["detail"]
     mock_add.assert_not_awaited()
 
 

@@ -32,6 +32,12 @@ router = APIRouter(tags=["llm-query-vectors"])
 # make me feel happy"). The cap keeps the expansion and the 80 scoring calls,
 # which each embed the prompt, at their measured token counts.
 MAX_PROMPT_CHARS = 2000
+# Hard stop for one fit. Normal fits take ~10 s; the scoring step's own
+# deadline is soft (below MIN_SCORED_FRACTION it keeps waiting for in-flight
+# calls, each of which can retry for minutes), so without this a slow model
+# day could run past Cloud Run's 60 s and finish, and store, after the caller
+# already got a 504.
+FIT_TIMEOUT_S = 25.0
 
 
 async def require_llm_cg_user(user_doc_id: FirebaseUser) -> str:
@@ -99,6 +105,7 @@ class QueryVectorFitResponse(BaseModel):
         },
         502: {"description": "Upstream Elasticsearch or model request failed; nothing stored"},
         503: {"description": "Firestore unavailable"},
+        504: {"description": "The fit did not finish within FIT_TIMEOUT_S; nothing stored"},
     },
 )
 async def fit_llm_query_vector(
@@ -119,7 +126,14 @@ async def fit_llm_query_vector(
         raise HTTPException(status_code=422, detail="prompt must not be blank")
 
     try:
-        result = await fit_query_vector(request.app.state.es, prompt)
+        async with asyncio.timeout(FIT_TIMEOUT_S):
+            result = await fit_query_vector(request.app.state.es, prompt)
+    except TimeoutError as exc:
+        logger.warning("llm_qv_fit timed out user_did=%s after %.0fs", user_did, FIT_TIMEOUT_S)
+        raise HTTPException(
+            status_code=504,
+            detail=f"fit did not finish within {FIT_TIMEOUT_S:.0f}s; nothing stored, try again",
+        ) from exc
     except PoolTooSmallError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except FitError as exc:

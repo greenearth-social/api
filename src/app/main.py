@@ -103,6 +103,21 @@ def _reject_dev_session_secret_in_deployment() -> None:
         )
 
 
+def _reject_llm_cg_open_in_deployment() -> None:
+    """Refuse to run with the llm-cg gate forced open outside local dev.
+
+    GE_LLM_CG_OPEN=true skips the PostHog flag and lets every signed-in user
+    fit prompt vectors (~$0.13 in model calls each; see
+    lib.posthog_client.llm_cg_enabled). Only for the devenv, which has no
+    PostHog; deployed, the flag decides who is in the beta.
+    """
+    if os.environ.get("GE_LLM_CG_OPEN", "").lower() == "true" and _is_deployed_environment():
+        raise RuntimeError(
+            "GE_LLM_CG_OPEN must not be set in a deployed environment: "
+            "it opens the prompt-fit endpoint to every user"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan handler that validates required environment variables and
@@ -117,6 +132,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("GE_FEED_CONTEXT_SECRET environment variable is required")
 
     _reject_dev_session_secret_in_deployment()
+    _reject_llm_cg_open_in_deployment()
 
     es_url = os.environ.get("GE_ELASTICSEARCH_URL", "https://localhost:9200")
     es_api_key = os.environ.get("GE_ELASTICSEARCH_API_KEY")

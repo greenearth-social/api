@@ -285,8 +285,11 @@ async def expand_keywords(
 # --------------------------------------------------------------------------- #
 
 POOL_N = 1000
-# Fetch 20% + 5 more than POOL_N so the dedup below still leaves a full pool.
+# Fetch 20% more than POOL_N so the dedup below still leaves a full pool.
 _POOL_OVERFETCH = 1.2
+# Elasticsearch's default index.max_result_window: a plain search cannot page
+# past it, so the pool request is capped there whatever POOL_N says.
+_ES_MAX_RESULT_WINDOW = 10_000
 # Two posts whose token sets overlap this much (Jaccard) are the same post
 # for our purposes: reposts, templated announcements, copied headlines. The
 # index ranks such clones adjacently, and MMR (step 3) only penalises them,
@@ -449,7 +452,7 @@ def near_dup_keep(sim: np.ndarray, threshold: float, stop_after: int) -> list[in
 
 async def fetch_pool(es, keywords: list[str]) -> tuple[list[Post], np.ndarray]:
     """The deduplicated BM25 pool and its pairwise lexical similarity matrix."""
-    size = min(int(POOL_N * _POOL_OVERFETCH) + 5, 10_000)
+    size = min(int(POOL_N * _POOL_OVERFETCH), _ES_MAX_RESULT_WINDOW)
     resp = await es.search(
         index=POSTS_KNN_INDEX,
         op="llm_qv_pool",
@@ -490,7 +493,8 @@ MMR_LAMBDA = 0.5
 # proportionally (random block kept at 1.5x the keyword block).
 MIN_KEYWORD_POSTS = 20
 # Overfetch for the random block, for posts that turn out to have no
-# embedding.
+# embedding. The +5 at the call site is a floor for small blocks: at the
+# minimum sample (30 random posts) 20% is only 6 spare.
 _RANDOM_OVERFETCH = 1.2
 
 
@@ -598,8 +602,9 @@ MIN_SCORED_FRACTION = 0.8
 # plus the expansion); the worst case, every call at the input bound below
 # and running to _SCORE_MAX_TOKENS, is ~$0.65. This exists so a
 # misconfiguration (a much larger sample, a pricier model id) fails loudly
-# instead of quietly spending: checked once before the scoring calls are
-# fired, against that worst case, and once after, against what they cost.
+# instead of quietly spending: checked before the scoring calls are fired,
+# against that worst case. After them the real cost is only logged; the
+# spend is sunk by then and the vector is still good.
 MAX_COST_USD = 2.0
 # claude-sonnet-5 list price per million tokens, 2026-09-01. Only used for the
 # response's cost figure and the breaker above.
@@ -643,7 +648,7 @@ _SCORE_RE = re.compile(r'"score"\s*:\s*(\d+)')
 
 
 class ScoringError(FitError):
-    """Too few posts could be scored, or the fit blew its cost cap."""
+    """Too few posts could be scored, or scoring would blow the cost cap."""
 
 
 def parse_score(raw: str) -> int | None:
@@ -717,14 +722,19 @@ async def score_posts(
         )
 
     tasks = [asyncio.create_task(one(p)) for p in posts]
-    done, pending = await asyncio.wait(tasks, timeout=SCORE_DEADLINE_S)
-    while pending and n_scored_in(done) < floor:
-        more, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-        done |= more
-    for t in pending:
-        t.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=SCORE_DEADLINE_S)
+        while pending and n_scored_in(done) < floor:
+            more, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            done |= more
+    finally:
+        # Also reached when the router's deadline cancels this coroutine
+        # mid-wait; without it the in-flight calls would keep running, and
+        # billing, after the response has gone out.
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     scores: list[int | None] = []
     n_cancelled = n_failed = 0
@@ -885,7 +895,12 @@ async def fit_query_vector(es, prompt: str) -> FitResult:
     outcome = await score_posts(client, prompt, keyword_posts, usage)
     cost = cost_usd(usage)
     if cost > MAX_COST_USD:
-        raise ScoringError(f"fit cost ${cost:.2f} exceeds the ${MAX_COST_USD:.2f} cap")
+        # The calls are already billed, so failing here would only throw the
+        # vector away. The preflight above is the breaker; this catches the
+        # case where its bounds were wrong, loudly, without wasting the spend.
+        logger.error(
+            "llm_qv_fit cost $%.2f exceeds the $%.2f cap; fitting anyway", cost, MAX_COST_USD
+        )
 
     labelled = [(p, s) for p, s in zip(keyword_posts, outcome.scores, strict=True) if s is not None]
     embeddings = [p.embedding for p, _ in labelled]
