@@ -1212,6 +1212,19 @@ Successful startup loads and retrieval counts are logged at `INFO`. Stage and
 production default to `WARNING`; set `GE_LOG_LEVEL=INFO` on the API process or
 Cloud Run revision to see those messages. Artifact-loading failures are warnings.
 
+Cloud Monitoring records three metrics under `candidates.two_tower`:
+
+- `mode_count`: counter labeled by `generator_name`, `retrieval_mode` (`blended`,
+  `actual_only`, `prior_only`, or `skipped`), and `reason` (`none` or the fallback/skip reason).
+- `history_size`: histogram of usable history embeddings, with boundaries 0, 1, 2, 4, 8, 16, 32, 64.
+- `prior_weight_ratio`: histogram of the prior's weight (0 for actual-only, 1 for prior-only,
+  otherwise `2 / (2 + num_likes)`). Skipped calls have no weight sample.
+
+History is recorded after loading; mode and weight are recorded after vector selection,
+before Elasticsearch search. These measure generator invocations, not unique users or cached
+feed views. Filter by `generator_name` to separate forced empty-history runs, and use the
+existing `traffic` label to exclude probes and load tests. No user IDs are metric labels.
+
 ## User-History Feature Cache
 
 The two-tower generator and heavy ranker share a per-user Firestore document

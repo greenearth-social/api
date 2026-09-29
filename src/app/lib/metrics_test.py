@@ -357,6 +357,7 @@ class TestHistogramBoundaries:
         "name",
         [
             "feed.snapshot.posts_fulfilled_ratio",
+            "candidates.two_tower.prior_weight_ratio",
             "any.metric.some_ratio",
         ],
     )
@@ -444,6 +445,14 @@ class TestHistogramBoundariesApplied:
             collector.record("es.client.in_flight", value)
         point = self._points(reader, "es.client.in_flight")
         assert len([i for i, count in enumerate(point.bucket_counts) if count]) == 3
+
+    def test_two_tower_history_separates_zero_one_and_full_history(self):
+        collector, reader = _make_collector()
+        for value in (0, 1, 2, 64):
+            collector.record("candidates.two_tower.history_size", value)
+        point = self._points(reader, "candidates.two_tower.history_size")
+        assert tuple(point.explicit_bounds) == (0, 1, 2, 4, 8, 16, 32, 64)
+        assert tuple(point.bucket_counts) == (1, 1, 1, 0, 0, 0, 0, 1, 0)
 
     def test_counters_are_unaffected(self):
         collector, reader = _make_collector()

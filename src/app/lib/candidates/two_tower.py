@@ -18,6 +18,7 @@ from ..inference import (
     get_inference_settings,
     predict_user_embedding,
 )
+from ..metrics import get_metric_collector
 from ..telemetry import timed
 from ..user_history_cache import fetch_user_history_features
 from .base import CandidateGenerator, CandidateResult
@@ -100,6 +101,9 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                 rec.record_user_features(
                     self.name, history.liked_uris if history is not None else [], num_likes
                 )
+            mc = get_metric_collector()
+            if mc:
+                mc.record("candidates.two_tower.history_size", num_likes, generator_name=self.name)
 
             if history is not None and num_likes:
                 # Prior fallback handles an unavailable prior, not broken user
@@ -176,6 +180,19 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             else:
                 # No vector to search with. Other configured sources can still
                 # contribute through the existing candidate pipeline.
+                reason = (
+                    "no_user_like_history"
+                    if self.history_mode == "actual"
+                    else "average_user_embedding_unavailable"
+                )
+                if mc:
+                    mc.record(
+                        "candidates.two_tower.mode_count",
+                        1,
+                        generator_name=self.name,
+                        retrieval_mode="skipped",
+                        reason=reason,
+                    )
                 logger.info(
                     "%s skipped: no usable history or average embedding; prior_error=%s",
                     self.name,
@@ -185,12 +202,25 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                     generator_name=self.name,
                     candidates=[],
                     status="not_run",
-                    reason=(
-                        "no_user_like_history"
-                        if self.history_mode == "actual"
-                        else "average_user_embedding_unavailable"
-                    ),
+                    reason=reason,
                 )
+
+        prior_weight = (
+            AVG_USER_EMBEDDING_WEIGHT / (AVG_USER_EMBEDDING_WEIGHT + num_likes)
+            if retrieval_mode != "actual_only"
+            else 0.0
+        )
+        # Measure vector selection per invocation, before ES search. Failures
+        # are tracked by the shared pipeline; skipped calls have no weight sample.
+        if mc:
+            metric_attrs = {"generator_name": self.name, "retrieval_mode": retrieval_mode}
+            mc.record(
+                "candidates.two_tower.mode_count",
+                1,
+                **metric_attrs,
+                reason=fallback_reason or "none",
+            )
+            mc.record("candidates.two_tower.prior_weight_ratio", prior_weight, **metric_attrs)
 
         logger.debug(
             "%s retrieval mode=%s history_embeddings=%d prior_weight=%s prior_run_id=%s "
@@ -198,9 +228,7 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             self.name,
             retrieval_mode,
             num_likes,
-            AVG_USER_EMBEDDING_WEIGHT / (AVG_USER_EMBEDDING_WEIGHT + num_likes)
-            if retrieval_mode != "actual_only"
-            else 0,
+            prior_weight,
             prior.run_id if prior is not None else None,
             post_tower_uuid,
             len(user_embedding),

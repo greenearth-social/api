@@ -3,7 +3,7 @@
 import logging
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
@@ -75,6 +75,7 @@ def dependencies(monkeypatch, prior):
         prior=Mock(return_value=prior),
         prior_error=Mock(return_value=None),
         recorder=Mock(),
+        metrics=Mock(),
         knn=AsyncMock(
             return_value=[
                 CandidatePost(at_uri="at://post/result", score=0.9, generator_name="two_tower")
@@ -87,6 +88,7 @@ def dependencies(monkeypatch, prior):
     monkeypatch.setattr(two_tower, "get_average_user_embedding", mocks.prior)
     monkeypatch.setattr(two_tower, "get_average_user_embedding_error", mocks.prior_error)
     monkeypatch.setattr(two_tower, "current_recorder", lambda: mocks.recorder)
+    monkeypatch.setattr(two_tower, "get_metric_collector", lambda: mocks.metrics)
     monkeypatch.setattr(two_tower, "knn_search_posts", mocks.knn)
     monkeypatch.delenv("GE_TWO_TOWER_KNN_INDEX", raising=False)
     return mocks
@@ -131,6 +133,15 @@ async def test_exact_blend_uses_usable_history_count(generator, dependencies, co
         dependencies.settings.assert_not_called()
     assert result.reason is None
     assert result.mode == "primary"
+    attrs = {
+        "generator_name": "two_tower",
+        "retrieval_mode": "blended" if count else "prior_only",
+    }
+    assert dependencies.metrics.record.call_args_list == [
+        call("candidates.two_tower.history_size", count, generator_name="two_tower"),
+        call("candidates.two_tower.mode_count", 1, **attrs, reason="none"),
+        call("candidates.two_tower.prior_weight_ratio", pytest.approx(expected[0]), **attrs),
+    ]
 
 
 @pytest.mark.asyncio
@@ -150,6 +161,15 @@ async def test_missing_history_embeddings_do_not_increase_weight(generator, depe
     assert dependencies.knn.await_args.args[1] == pytest.approx([2 / 3, 1 / 3])
     dependencies.recorder.record_user_features.assert_called_once_with(
         "two_tower", dependencies.history.return_value.liked_uris, 1
+    )
+    dependencies.metrics.record.assert_any_call(
+        "candidates.two_tower.history_size", 1, generator_name="two_tower"
+    )
+    dependencies.metrics.record.assert_any_call(
+        "candidates.two_tower.prior_weight_ratio",
+        pytest.approx(2 / 3),
+        generator_name="two_tower",
+        retrieval_mode="blended",
     )
 
 
@@ -177,6 +197,12 @@ async def test_empty_variant_does_not_fetch_history_or_infer(dependencies, prior
     dependencies.settings.assert_not_called()
     dependencies.recorder.record_user_features.assert_called_once_with(
         "two_tower_empty_history", [], 0
+    )
+    dependencies.metrics.record.assert_any_call(
+        "candidates.two_tower.prior_weight_ratio",
+        1.0,
+        generator_name="two_tower_empty_history",
+        retrieval_mode="prior_only",
     )
 
 
@@ -211,6 +237,17 @@ async def test_no_history_and_no_prior_returns_no_candidates(dependencies, histo
     dependencies.knn.assert_not_awaited()
     dependencies.prediction.assert_not_awaited()
     dependencies.settings.assert_not_called()
+    # A skipped retrieval must not look like an actual-only weight of zero.
+    assert dependencies.metrics.record.call_args_list == [
+        call("candidates.two_tower.history_size", 0, generator_name="two_tower"),
+        call(
+            "candidates.two_tower.mode_count",
+            1,
+            generator_name="two_tower",
+            retrieval_mode="skipped",
+            reason=reason,
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -225,6 +262,12 @@ async def test_actual_only_when_prior_unavailable(generator, dependencies, caplo
     assert result.status == "success"
     assert result.reason == "average_user_embedding_unavailable"
     assert prior_error in caplog.text
+    attrs = {"generator_name": "two_tower", "retrieval_mode": "actual_only"}
+    assert dependencies.metrics.record.call_args_list == [
+        call("candidates.two_tower.history_size", 2, generator_name="two_tower"),
+        call("candidates.two_tower.mode_count", 1, **attrs, reason=result.reason),
+        call("candidates.two_tower.prior_weight_ratio", 0.0, **attrs),
+    ]
 
 
 @pytest.mark.asyncio
@@ -258,6 +301,19 @@ async def test_incompatible_prior_falls_back_to_actual(
     assert dependencies.knn.await_args.args[1] == [0.0, 1.0]
     assert dependencies.knn.await_args.kwargs["ge_post_embedding_model_uuid"] == POST_MODEL
     assert result.reason == reason
+    dependencies.metrics.record.assert_any_call(
+        "candidates.two_tower.mode_count",
+        1,
+        generator_name="two_tower",
+        retrieval_mode="actual_only",
+        reason=reason,
+    )
+    dependencies.metrics.record.assert_any_call(
+        "candidates.two_tower.prior_weight_ratio",
+        0.0,
+        generator_name="two_tower",
+        retrieval_mode="actual_only",
+    )
 
 
 @pytest.mark.asyncio
@@ -271,6 +327,12 @@ async def test_invalid_blend_falls_back_to_valid_actual(generator, dependencies,
     result = await generator.generate(object(), "did:plc:user1")
     assert dependencies.knn.await_args.args[1] == actual
     assert result.reason == "average_user_embedding_invalid_blend"
+    dependencies.metrics.record.assert_any_call(
+        "candidates.two_tower.prior_weight_ratio",
+        0.0,
+        generator_name="two_tower",
+        retrieval_mode="actual_only",
+    )
 
 
 @pytest.mark.asyncio
@@ -284,6 +346,9 @@ async def test_invalid_actual_fails_instead_of_substituting_prior(generator, dep
     with pytest.raises(InferenceResponseFormatError, match="finite nonzero user embedding"):
         await generator.generate(object(), "did:plc:user1")
     dependencies.knn.assert_not_awaited()
+    assert dependencies.metrics.record.call_args_list == [
+        call("candidates.two_tower.history_size", 2, generator_name="two_tower")
+    ]
 
 
 @pytest.mark.asyncio
@@ -363,7 +428,10 @@ async def test_dependency_errors_propagate(generator, dependencies, dependency):
 
 
 @pytest.mark.asyncio
-async def test_no_debug_recorder_is_required(generator, dependencies, monkeypatch):
+async def test_no_debug_recorder_or_metrics_collector_is_required(
+    generator, dependencies, monkeypatch
+):
     monkeypatch.setattr(two_tower, "current_recorder", lambda: None)
+    monkeypatch.setattr(two_tower, "get_metric_collector", lambda: None)
     result = await generator.generate(object(), "did:plc:user1")
     assert result.status == "success"
