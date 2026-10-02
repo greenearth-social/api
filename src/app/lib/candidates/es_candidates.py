@@ -65,11 +65,14 @@ async def knn_search_posts(
     if exclude_uris:
         must_not.append({"terms": {"at_uri": exclude_uris}})
 
+    # Temporary (2026-10-02): the LLM CG walks prod's 32M-post MiniLM graph, where a
+    # 10x-wide walk takes 5-35 s and a 3x one ~0.1 s. Revert with greenearth-social/ingex#513.
+    factor = 3 if generator_name == "llm_query_vector" else 10
     knn_clause: dict = {
         "field": search_field,
         "query_vector": query_vector,
         "k": num_candidates,
-        "num_candidates": max(100, num_candidates * 10),
+        "num_candidates": max(100, num_candidates * factor),
     }
     if filters or must_not:
         knn_clause["filter"] = {
