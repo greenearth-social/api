@@ -192,7 +192,7 @@ class TestUxPosts:
             position=1, uri=self._uri(name), source=None, meta=None, ux_post=name
         ).plain
         assert "UX post: pin-your-feed" in text
-        assert "SETTINGS" in text
+        assert "Settings" in text
         assert "not in Elasticsearch" not in text
 
     def test_placeholder_says_what_it_stands_in_for(self):

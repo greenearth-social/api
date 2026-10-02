@@ -41,6 +41,15 @@ def client() -> Generator[TestClient]:
     app.dependency_overrides.pop(verify_firebase_auth, None)
 
 
+@patch("app.routers.feed_transparency.mark_settings_visited", new_callable=AsyncMock)
+def test_settings_visit_is_authenticated_and_idempotent_at_the_api_boundary(mock_mark, client):
+    response = client.post("/api/feeds/settings-visit")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    mock_mark.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -468,13 +477,14 @@ def test_list_feeds_preserves_fully_overlapping_middle_snapshot(mock_query, clie
 
 
 @patch("app.routers.feed_transparency.generate_feed_preview", new_callable=AsyncMock)
-def test_create_feed_preview_accepts_unsaved_preferences(mock_generate, client):
+@pytest.mark.parametrize("purpose", [0.0, 0.65, 1.0])
+def test_create_feed_preview_accepts_unsaved_preferences(mock_generate, purpose, client):
     snapshot = _snapshot_doc(request_id="preview-1")
     mock_generate.return_value = snapshot
 
     response = client.post(
         "/api/feeds/your-feed/preview",
-        json={"freshness": 2, "purpose": 0.65},
+        json={"freshness": 2, "purpose": purpose},
     )
 
     assert response.status_code == 200
@@ -483,7 +493,7 @@ def test_create_feed_preview_accepts_unsaved_preferences(mock_generate, client):
     assert mock_generate.await_args.args[1:3] == ("did:plc:test-user", "your-feed")
     patch_doc = mock_generate.await_args.args[3]
     assert patch_doc.freshness == 2
-    assert patch_doc.purpose == 0.65
+    assert patch_doc.purpose == purpose
 
 
 @pytest.mark.parametrize(
@@ -1368,6 +1378,28 @@ def test_patch_preferences_updates_politics_for_your_feed(
     mock_delete_seen.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
 
 
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@pytest.mark.parametrize("feed_name", ["your-feed", "best-of-friends"])
+@pytest.mark.parametrize("purpose", [0.0, 1.0])
+def test_patch_preferences_accepts_pure_purpose(
+    mock_patch_prefs, mock_delete_seen, feed_name, purpose, client
+):
+    mock_patch_prefs.return_value = FeedPreferencesDocument(purpose=purpose)
+
+    response = client.patch(
+        f"/api/feeds/preferences/{feed_name}",
+        json={"purpose": purpose},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"purpose": purpose}
+    args = mock_patch_prefs.await_args.args
+    assert args[1:3] == ("did:plc:test-user", feed_name)
+    assert args[3].model_dump(exclude_none=True) == {"purpose": purpose}
+    mock_delete_seen.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
+
+
 @patch("app.routers.feed_transparency.patch_user_feed_preferences")
 @pytest.mark.parametrize("politics", [-0.01, 2.01])
 def test_patch_preferences_rejects_out_of_range_politics(
@@ -1376,6 +1408,18 @@ def test_patch_preferences_rejects_out_of_range_politics(
     response = client.patch(
         "/api/feeds/preferences/your-feed",
         json={"politics": politics},
+    )
+
+    assert response.status_code == 422
+    mock_patch_prefs.assert_not_awaited()
+
+
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@pytest.mark.parametrize("purpose", [-0.01, 1.01])
+def test_patch_preferences_rejects_out_of_range_purpose(mock_patch_prefs, purpose, client):
+    response = client.patch(
+        "/api/feeds/preferences/your-feed",
+        json={"purpose": purpose},
     )
 
     assert response.status_code == 422

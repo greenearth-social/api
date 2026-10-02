@@ -190,6 +190,21 @@ def test_predict_rejects_out_of_range_politics_multiplier(app, politics):
     assert response.status_code == 422
 
 
+def test_predict_rejects_all_zero_model_weights(app):
+    client = TestClient(app, headers=HEADERS)
+
+    response = client.post(
+        "/rank/predict",
+        json={
+            "user_did": "did:plc:user1",
+            "models": [{"name": "candidate_score", "weight": 0.0}],
+            "candidates": [{"at_uri": "at://post/1", "score": 0.4}],
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_predict_keeps_duplicate_candidate_count_and_collapses_scores_by_uri(app):
     """Combination is keyed by `at_uri`, so duplicate-uri candidates collapse to
     a single (last-write-wins) raw score per uri before normalization — but the
