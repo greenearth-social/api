@@ -33,6 +33,17 @@ try:
 except ValueError:
     _GENERATOR_TIMEOUT_SEC = 4.0
 
+# Temporary measure (2026-10-02): a cold MiniLM kNN over posts_recent takes 3-9 s
+# on prod, so the LLM CG gets the whole 9 s feed budget instead of the shared
+# cap. Other generators are unaffected. Remove with greenearth-social/ingex#513.
+_LLM_QUERY_VECTOR_TIMEOUT_SEC = 9.0
+
+
+def _timeout_for(spec: GeneratorSpec) -> float:
+    if spec.name == "llm_query_vector":
+        return _LLM_QUERY_VECTOR_TIMEOUT_SEC
+    return _GENERATOR_TIMEOUT_SEC
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -199,6 +210,7 @@ async def run_generate(
     async def _run_one(
         spec: GeneratorSpec, count: int, gen: CandidateGenerator
     ) -> list[CandidateResult]:
+        timeout_sec = _timeout_for(spec)
         try:
             async with timed(
                 logger,
@@ -217,7 +229,7 @@ async def run_generate(
                             exclude_uris=request.exclude_uris or None,
                             max_age_hours=request.max_age_hours,
                         ),
-                        timeout=_GENERATOR_TIMEOUT_SEC,
+                        timeout=timeout_sec,
                     )
                 ]
             if mc := get_metric_collector():
@@ -263,7 +275,7 @@ async def run_generate(
                 logger.warning(
                     "Candidate generator '%s' timed out after %.1fs",
                     spec.name,
-                    _GENERATOR_TIMEOUT_SEC,
+                    timeout_sec,
                 )
                 outcome = "timeout"
             else:
