@@ -1005,7 +1005,10 @@ def _select_pinned_post_uri(
         return None
     if feed_name != "your-feed":
         return feed_cfg.pinned_post_uri
-    if 2 <= requested_limit <= 15:
+    # Bluesky's Explore preview prefetches at most eight posts. Keep the
+    # one-item AppView reachability probe on the normal path, and do not treat
+    # larger first-page requests as Explore traffic.
+    if 2 <= requested_limit <= 8:
         return feed_cfg.explore_pinned_post_uri or feed_cfg.pinned_post_uri
     if user_doc is not None and user_doc.settings_visited_at is not None:
         return feed_cfg.returning_pinned_post_uri or feed_cfg.pinned_post_uri

@@ -77,7 +77,7 @@ TEST_EMBEDDING = encode_float32_b64([1.0, 0.0, 0.0])
 
 
 class TestContextualPinnedPostSelection:
-    def test_uses_ranges_and_settings_visit_without_presumed_pinned(self):
+    def test_uses_explore_page_size_and_settings_visit_without_presumed_pinned(self):
         from ..routers.xrpc import _select_pinned_post_uri
 
         cfg = FEEDS["your-feed"].model_copy(
@@ -95,8 +95,9 @@ class TestContextualPinnedPostSelection:
 
         assert _select_pinned_post_uri("your-feed", cfg, 1, new_user) == "at://first-time"
         assert _select_pinned_post_uri("your-feed", cfg, 2, returning_user) == "at://explore"
-        assert _select_pinned_post_uri("your-feed", cfg, 15, returning_user) == "at://explore"
-        assert _select_pinned_post_uri("your-feed", cfg, 16, new_user) == "at://first-time"
+        assert _select_pinned_post_uri("your-feed", cfg, 8, returning_user) == "at://explore"
+        assert _select_pinned_post_uri("your-feed", cfg, 9, new_user) == "at://first-time"
+        assert _select_pinned_post_uri("your-feed", cfg, 15, returning_user) == "at://returning"
         assert _select_pinned_post_uri("your-feed", cfg, 100, returning_user) == "at://returning"
 
     def test_other_feeds_keep_their_existing_pin(self):
