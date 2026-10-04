@@ -1297,8 +1297,16 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
                 "freshness": 5,
                 "politics": 0.5,
                 "purpose": 0.5,
+                "author_penalty": 0.7,
+                "topic_penalty": 0.7,
             },
-            "best-of-friends": {"freshness": 5, "purpose": 0.5, "politics": 0.5},
+            "best-of-friends": {
+                "freshness": 5,
+                "purpose": 0.5,
+                "politics": 0.5,
+                "author_penalty": 0.7,
+                "topic_penalty": 0.7,
+            },
         }
     }
 
@@ -1331,8 +1339,16 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
             "freshness": 3,
             "politics": 1.25,
             "purpose": 0.65,
+            "author_penalty": 0.7,
+            "topic_penalty": 0.7,
         },
-        "best-of-friends": {"freshness": 3, "purpose": 0.65, "politics": 1.25},
+        "best-of-friends": {
+            "freshness": 3,
+            "purpose": 0.65,
+            "politics": 1.25,
+            "author_penalty": 0.7,
+            "topic_penalty": 0.7,
+        },
     }
 
 
@@ -1381,6 +1397,29 @@ def test_patch_preferences_updates_politics_for_your_feed(
 @patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
 @patch("app.routers.feed_transparency.patch_user_feed_preferences")
 @pytest.mark.parametrize("feed_name", ["your-feed", "best-of-friends"])
+@pytest.mark.parametrize("field", ["author_penalty", "topic_penalty"])
+@pytest.mark.parametrize("value", [0.0, 1.0])
+def test_patch_preferences_accepts_penalty_boundaries(
+    mock_patch_prefs, mock_delete_seen, feed_name, field, value, client
+):
+    mock_patch_prefs.return_value = FeedPreferencesDocument.model_validate({field: value})
+
+    response = client.patch(
+        f"/api/feeds/preferences/{feed_name}",
+        json={field: value},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {field: value}
+    args = mock_patch_prefs.await_args.args
+    assert args[1:3] == ("did:plc:test-user", feed_name)
+    assert args[3].model_dump(exclude_none=True) == {field: value}
+    mock_delete_seen.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
+
+
+@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
+@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@pytest.mark.parametrize("feed_name", ["your-feed", "best-of-friends"])
 @pytest.mark.parametrize("purpose", [0.0, 1.0])
 def test_patch_preferences_accepts_pure_purpose(
     mock_patch_prefs, mock_delete_seen, feed_name, purpose, client
@@ -1402,9 +1441,7 @@ def test_patch_preferences_accepts_pure_purpose(
 
 @patch("app.routers.feed_transparency.patch_user_feed_preferences")
 @pytest.mark.parametrize("politics", [-0.01, 2.01])
-def test_patch_preferences_rejects_out_of_range_politics(
-    mock_patch_prefs, politics, client
-):
+def test_patch_preferences_rejects_out_of_range_politics(mock_patch_prefs, politics, client):
     response = client.patch(
         "/api/feeds/preferences/your-feed",
         json={"politics": politics},

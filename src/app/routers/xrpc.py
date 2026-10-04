@@ -580,7 +580,11 @@ async def _run_ranking_pipeline(
                 metric_attrs={"feed_name": feed_name},
                 n_candidates=len(ordered),
             ):
-                picks = mmr_rerank(ordered)
+                picks = mmr_rerank(
+                    ordered,
+                    author_penalty=feed_cfg.author_penalty_setting,
+                    topic_penalty=feed_cfg.topic_penalty_setting,
+                )
             final = [c for c, _ in picks]
             if feed_cfg.min_mmr_score is not None:
                 # Pick scores are not monotone (penalties decay with position),
@@ -728,6 +732,15 @@ def _configured_generation(
     if "politics" in controls:
         assert effective.politics is not None
         feed_cfg = _with_politics_multiplier(feed_cfg, effective.politics)
+    if "author_penalty" in controls or "topic_penalty" in controls:
+        assert effective.author_penalty is not None
+        assert effective.topic_penalty is not None
+        feed_cfg = feed_cfg.model_copy(
+            update={
+                "author_penalty_setting": effective.author_penalty,
+                "topic_penalty_setting": effective.topic_penalty,
+            }
+        )
 
     generators_override: dict[str, list[GeneratorSpec]] = {}
     if "source_weights" in controls:

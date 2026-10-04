@@ -152,7 +152,14 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="a0-yf",
         internal_display_name="a0 YF",
         avatar="assets/icons/mysky.png",
-        controls=("source_weights", "freshness", "purpose", "politics"),
+        controls=(
+            "source_weights",
+            "freshness",
+            "purpose",
+            "politics",
+            "author_penalty",
+            "topic_penalty",
+        ),
         pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED),
         explore_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_EXPLORE),
         returning_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_RETURNING),
@@ -168,7 +175,7 @@ FEEDS: dict[str, FeedConfig] = {
         # with the same thresholds.
         max_render_share=PERSONALIZED_MAX_RENDER_SHARE,
         min_rank_score=PERSONALIZED_MIN_RANK_SCORE,
-        min_mmr_score=PERSONALIZED_MIN_MMR_SCORE,
+        min_mmr_score=None,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=SOCIAL_RADIUS_PRESETS.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
@@ -185,7 +192,7 @@ FEEDS: dict[str, FeedConfig] = {
         internal_rkey="fd-bof",
         internal_display_name="fd BOF",
         avatar="assets/icons/best-of-friends.png",
-        controls=("freshness", "purpose", "politics"),
+        controls=("freshness", "purpose", "politics", "author_penalty", "topic_penalty"),
         pinned_post_uri=ux_post_uri(ux_posts.PIN_BEST_OF_FRIENDS),
         # Slate-cutoff starting points — tune from the feed.slate.kept_share and
         # feed.slate.cutoff_count metrics once live (see issue #248). min_rank_score
@@ -195,7 +202,7 @@ FEEDS: dict[str, FeedConfig] = {
         # once its own metrics are live.
         max_render_share=PERSONALIZED_MAX_RENDER_SHARE,
         min_rank_score=PERSONALIZED_MIN_RANK_SCORE,
-        min_mmr_score=PERSONALIZED_MIN_MMR_SCORE,
+        min_mmr_score=None,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=FOLLOWED_USERS_ONLY_GENERATORS,
             infill=None,
@@ -364,7 +371,7 @@ FEEDS: dict[str, FeedConfig] = {
             # Weights split candidate allocation; ranking can change display shares.
             generators=[
                 GeneratorSpec(name="popularity", weight=0.5),
-                GeneratorSpec(name="two_tower_empty_history", weight=0.5)
+                GeneratorSpec(name="two_tower_empty_history", weight=0.5),
             ],
             # A missing prior may leave only popularity's allocation. Do not
             # silently fill its missing half with another generator.

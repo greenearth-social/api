@@ -252,6 +252,8 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
         freshness=2,
         politics=1.5,
         purpose=0.8,
+        author_penalty=0.2,
+        topic_penalty=0.9,
         source_weights=SourceWeightsDocument(
             following=0.5,
             network_likes=0.1,
@@ -301,6 +303,8 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
     model_weights = {model.name: model.weight for model in feed_cfg.rank_request_template.models}
     assert model_weights["perspective"] == pytest.approx(0.8)
     assert feed_cfg.rank_request_template.politics == 1.5
+    assert feed_cfg.author_penalty_setting == 0.2
+    assert feed_cfg.topic_penalty_setting == 0.9
     assert gen_request.max_age_hours == 24
     assert [(generator.name, generator.weight) for generator in gen_request.generators] == [
         ("followed_users", 0.5),
@@ -556,12 +560,14 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         like_count=10,
         generator_name="two_tower",
     )
-    predict_user_tower = AsyncMock(return_value={
-        "outputs": [[0.1, 0.2]],
-        "model_type": "user-tower",
-        "model_uuid": "1" * 32,
-        "paired_post_model_uuid": "2" * 32,
-    })
+    predict_user_tower = AsyncMock(
+        return_value={
+            "outputs": [[0.1, 0.2]],
+            "model_type": "user-tower",
+            "model_uuid": "1" * 32,
+            "paired_post_model_uuid": "2" * 32,
+        }
+    )
     predict_heavy_ranker = AsyncMock(return_value=[0.9])
     fetch_recent_likes = AsyncMock(
         return_value=(
@@ -650,6 +656,8 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         logged_out_post_uri=None,
         controls=(),
         preference_source=None,
+        author_penalty_setting=0.7,
+        topic_penalty_setting=0.7,
         gen_request_template=gen_request,
         rank_request_template=RankPredictRequest(
             candidates=[],
@@ -3786,9 +3794,7 @@ class TestFeedDebugCapture:
                 MagicMock(), "did:plc:testuser", "r1", snapshot, limit=30
             )
 
-        collector.record.assert_any_call(
-            "feed.snapshot.truncated_count", 1, feed_name="your-feed"
-        )
+        collector.record.assert_any_call("feed.snapshot.truncated_count", 1, feed_name="your-feed")
         assert "reached item limit" in caplog.text
 
     @pytest.mark.asyncio
@@ -5192,10 +5198,7 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert (
-            gen_request.generators
-            == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
-        )
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
         assert gen_request.max_age_hours == 168
 
     @patch("app.routers.xrpc.get_user")
@@ -5239,10 +5242,7 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert (
-            gen_request.generators
-            == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
-        )
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
 
     @pytest.mark.parametrize(
         "feed_uri",

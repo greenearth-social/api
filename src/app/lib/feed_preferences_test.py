@@ -65,6 +65,36 @@ def test_resolver_uses_source_weight_defaults_without_a_user():
     resolved = resolve_feed_preferences(None, "your-feed")
 
     assert resolved.source_weights == DEFAULT_SOURCE_WEIGHTS
+    assert resolved.author_penalty == 0.7
+    assert resolved.topic_penalty == 0.7
+
+
+def test_resolver_keeps_penalties_independent_and_feed_scoped():
+    user = UserDocument(
+        user_did="did:plc:test",
+        feed_preferences={
+            "your-feed": FeedPreferencesDocument(author_penalty=0.2, topic_penalty=0.8),
+            "best-of-friends": FeedPreferencesDocument(author_penalty=0.9, topic_penalty=0.1),
+        },
+    )
+
+    assert resolve_feed_preferences(user, "your-feed").author_penalty == 0.2
+    assert resolve_feed_preferences(user, "your-feed").topic_penalty == 0.8
+    assert resolve_feed_preferences(user, "best-of-friends").author_penalty == 0.9
+    assert resolve_feed_preferences(user, "best-of-friends").topic_penalty == 0.1
+
+
+@pytest.mark.parametrize("field", ["author_penalty", "topic_penalty"])
+@pytest.mark.parametrize("value", [0.0, 1.0])
+def test_feed_preferences_accept_penalty_boundaries(field, value):
+    assert getattr(FeedPreferencesDocument(**{field: value}), field) == value
+
+
+@pytest.mark.parametrize("field", ["author_penalty", "topic_penalty"])
+@pytest.mark.parametrize("value", [-0.01, 1.01])
+def test_feed_preferences_reject_penalties_outside_boundaries(field, value):
+    with pytest.raises(ValidationError):
+        FeedPreferencesDocument(**{field: value})
 
 
 def test_resolver_prefers_feed_scoped_politics_over_legacy_value():

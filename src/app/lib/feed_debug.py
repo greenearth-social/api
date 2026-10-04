@@ -73,6 +73,11 @@ class FeedDebugRecorder:
         # similarity_score) in final selection order; populated only when
         # diversification runs.
         self.diversification: list[tuple[str, float, float, float, float, float]] = []
+        self.author_penalty_setting: float = 0.7
+        self.topic_penalty_setting: float = 0.7
+        self.relevance_weight: float = 0.3
+        self.author_penalty_weight: float = 0.35
+        self.topic_penalty_weight: float = 0.35
         # Candidates retrieved by generation (post-dedup), the denominator for
         # the slate-cutoff share.
         self.n_retrieved: int = 0
@@ -123,11 +128,23 @@ class FeedDebugRecorder:
         self.final_order = list(uris)
 
     def record_diversification(
-        self, entries: list[tuple[str, float, float, float, float, float]]
+        self,
+        entries: list[tuple[str, float, float, float, float, float]],
+        *,
+        author_penalty_setting: float = 0.7,
+        topic_penalty_setting: float = 0.7,
+        relevance_weight: float = 0.3,
+        author_penalty_weight: float = 0.35,
+        topic_penalty_weight: float = 0.35,
     ) -> None:
         """Record per-item diversification breakdown: (at_uri, relevance, score,
         author_penalty, content_penalty, similarity_score) in final selection order."""
         self.diversification = list(entries)
+        self.author_penalty_setting = author_penalty_setting
+        self.topic_penalty_setting = topic_penalty_setting
+        self.relevance_weight = relevance_weight
+        self.author_penalty_weight = author_penalty_weight
+        self.topic_penalty_weight = topic_penalty_weight
 
     def record_n_retrieved(self, n: int) -> None:
         self.n_retrieved = n
@@ -232,8 +249,20 @@ class FeedDebugRecorder:
                 author_penalty=author_penalty,
                 content_penalty=content_penalty,
                 similarity_score=similarity_score,
+                author_penalty_setting=self.author_penalty_setting,
+                topic_penalty_setting=self.topic_penalty_setting,
+                relevance_weight=self.relevance_weight,
+                author_penalty_weight=self.author_penalty_weight,
+                topic_penalty_weight=self.topic_penalty_weight,
             )
-            for at_uri, relevance, score, author_penalty, content_penalty, similarity_score in self.diversification
+            for (
+                at_uri,
+                relevance,
+                score,
+                author_penalty,
+                content_penalty,
+                similarity_score,
+            ) in self.diversification
         ]
 
         return FeedDebugDocument(
@@ -454,6 +483,11 @@ class FeedDebugRecorder:
                 author_penalty=author_penalty,
                 content_penalty=content_penalty,
                 similarity_score=similarity_score,
+                author_penalty_setting=self.author_penalty_setting,
+                topic_penalty_setting=self.topic_penalty_setting,
+                relevance_weight=self.relevance_weight,
+                author_penalty_weight=self.author_penalty_weight,
+                topic_penalty_weight=self.topic_penalty_weight,
             )
 
         items_meta = []
