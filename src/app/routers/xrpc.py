@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import os
+import random
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -118,6 +119,8 @@ ACCEPTED_SLATE_CLAIM_GRACE_SECONDS = 5
 SURVEY_POST_POSITION = 6  # 1-indexed position in the first page where the survey post appears
 SURVEY_POST_MIN_VISITS = 3  # minimum initial loads before the survey is shown
 SURVEY_POST_COOLDOWN_DAYS = 7  # days between survey showings (triggered by interactionSeen)
+FAVORITE_VIDEO_POST_PROBABILITY = 0.25  # share of eligible first-page loads that get the video
+FAVORITE_VIDEO_POST_MIN_POSITION = 6  # 1-indexed; the video always lands below the top 5
 
 
 @dataclass
@@ -1001,6 +1004,10 @@ def _is_explore_preview(cursor: str | None,requested_limit: int) -> bool:
     return cursor is None and 2 <= requested_limit <= 8
 
 
+def _has_visited_settings(user_doc: UserDocument | None) -> bool:
+    return user_doc is not None and user_doc.settings_visited_at is not None
+
+
 def _select_pinned_post_uri(
     feed_name: str,
     feed_cfg: FeedConfig,
@@ -1014,9 +1021,28 @@ def _select_pinned_post_uri(
         return feed_cfg.pinned_post_uri
     if is_explore_preview:
         return feed_cfg.explore_pinned_post_uri or feed_cfg.pinned_post_uri
-    if user_doc is not None and user_doc.settings_visited_at is not None:
+    if _has_visited_settings(user_doc):
         return feed_cfg.returning_pinned_post_uri or feed_cfg.pinned_post_uri
     return feed_cfg.pinned_post_uri
+
+
+def _select_favorite_video_post_uri(
+    feed_cfg: FeedConfig,
+    is_explore_preview: bool,
+    user_doc: UserDocument | None,
+) -> str | None:
+    """Roll for the "how to favorite this feed" video on a first-page load.
+
+    Only users outside Explore who have not visited Settings are eligible; they
+    get the video on ``FAVORITE_VIDEO_POST_PROBABILITY`` of their loads.
+    """
+    if feed_cfg.favorite_video_post_uri is None:
+        return None
+    if is_explore_preview or _has_visited_settings(user_doc):
+        return None
+    if random.random() >= FAVORITE_VIDEO_POST_PROBABILITY:
+        return None
+    return feed_cfg.favorite_video_post_uri
 
 
 # ---------------------------------------------------------------------------
@@ -2303,10 +2329,28 @@ async def get_feed_skeleton(
                     last_seen = user_doc.survey_post_last_seen_at if user_doc else None
                     show_survey = last_seen is None or last_seen < cutoff
 
-            # Pinned and survey posts are Bluesky presentation concerns and are
+            # The survey and the favorite video share one slot below the top 5, so a
+            # load shows at most one of them; the rarer, cooldown-gated survey wins.
+            # Pinned, survey, and video posts are Bluesky presentation concerns and are
             # deliberately excluded from observability snapshots and source diagnostics.
             survey_uri = feed_cfg.survey_post_uri if show_survey else None
-            n_injected = (1 if pinned_post_uri else 0) + (1 if survey_uri else 0)
+            favorite_video_uri = None
+            if (
+                not survey_uri
+                and not is_anonymous
+                and not is_probe
+                and not is_load_test
+                and not is_appview_one_item_check
+                and preferences_read_succeeded
+            ):
+                favorite_video_uri = _select_favorite_video_post_uri(
+                    feed_cfg, is_explore_preview, user_doc
+                )
+            n_injected = (
+                (1 if pinned_post_uri else 0)
+                + (1 if survey_uri else 0)
+                + (1 if favorite_video_uri else 0)
+            )
             if pinned_post_uri:
                 cache_uris = all_uris
                 generated_page = cache_uris[: max(0, limit - n_injected)]
@@ -2321,6 +2365,10 @@ async def get_feed_skeleton(
             if survey_uri:
                 insert_idx = min(SURVEY_POST_POSITION - 1, len(page))
                 page = [*page[:insert_idx], survey_uri, *page[insert_idx:]]
+            elif favorite_video_uri:
+                lowest_idx = min(FAVORITE_VIDEO_POST_MIN_POSITION - 1, len(page))
+                insert_idx = random.randint(lowest_idx, len(page))
+                page = [*page[:insert_idx], favorite_video_uri, *page[insert_idx:]]
 
             scores_by_uri = _similarity_scores_from_items_meta(generated_snapshot.items_meta)
             _record_similarity_metric(
