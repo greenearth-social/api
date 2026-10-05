@@ -107,6 +107,19 @@ class TestContent:
         )
         assert links == ()
 
+    def test_favorite_video_post_renders_the_expected_text_with_its_video(self):
+        text, links = managed_posts.content_signature(
+            ux_posts.read_content(ux_posts.FAVORITE_YOUR_FEED)
+        )
+        assert text == (
+            "📌 Want MySky every time you open Bluesky?\n\n"
+            "Watch how to pin it and make it your default feed."
+        )
+        assert links == ()
+        assert ux_posts.video_path(ux_posts.FAVORITE_YOUR_FEED) == (
+            ux_posts.CONTENT_DIR / "favorite-your-feed.mp4"
+        )
+
     def test_every_post_is_within_the_length_limit(self):
         for name in ux_posts.MANAGED_POSTS:
             text, _ = managed_posts.content_signature(ux_posts.read_content(name))

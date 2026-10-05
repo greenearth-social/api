@@ -5029,6 +5029,248 @@ class TestSurveyPost:
 
 
 # ---------------------------------------------------------------------------
+# "How to favorite this feed" video post injection
+# ---------------------------------------------------------------------------
+
+
+class TestFavoriteVideoPostSelection:
+    VIDEO_URI = "at://did:plc:notifyauthor/app.bsky.feed.post/favoritevideo"
+
+    def _cfg(self):
+        return FEEDS["your-feed"].model_copy(update={"favorite_video_post_uri": self.VIDEO_URI})
+
+    def test_offered_to_pre_settings_users_when_the_roll_succeeds(self):
+        from ..routers.xrpc import FAVORITE_VIDEO_POST_PROBABILITY, _select_favorite_video_post_uri
+
+        new_user = UserDocument(user_did="did:plc:new")
+        with patch("app.routers.xrpc.random") as rng:
+            rng.random.return_value = FAVORITE_VIDEO_POST_PROBABILITY - 0.01
+            assert _select_favorite_video_post_uri(self._cfg(), 30, new_user) == self.VIDEO_URI
+            assert _select_favorite_video_post_uri(self._cfg(), 30, None) == self.VIDEO_URI
+
+    def test_skipped_when_the_roll_fails(self):
+        from ..routers.xrpc import FAVORITE_VIDEO_POST_PROBABILITY, _select_favorite_video_post_uri
+
+        new_user = UserDocument(user_did="did:plc:new")
+        with patch("app.routers.xrpc.random") as rng:
+            rng.random.return_value = FAVORITE_VIDEO_POST_PROBABILITY
+            assert _select_favorite_video_post_uri(self._cfg(), 30, new_user) is None
+
+    def test_never_offered_to_explore_or_settings_visitors(self):
+        from ..routers.xrpc import _select_favorite_video_post_uri
+
+        new_user = UserDocument(user_did="did:plc:new")
+        returning_user = UserDocument(
+            user_did="did:plc:returning",
+            settings_visited_at=datetime(2026, 9, 20, tzinfo=UTC),
+        )
+        with patch("app.routers.xrpc.random") as rng:
+            rng.random.return_value = 0.0
+            assert _select_favorite_video_post_uri(self._cfg(), 8, new_user) is None
+            assert _select_favorite_video_post_uri(self._cfg(), 2, new_user) is None
+            assert _select_favorite_video_post_uri(self._cfg(), 30, returning_user) is None
+
+    def test_skipped_when_the_feed_has_no_video_post(self):
+        from ..routers.xrpc import _select_favorite_video_post_uri
+
+        cfg = FEEDS["your-feed"].model_copy(update={"favorite_video_post_uri": None})
+        with patch("app.routers.xrpc.random") as rng:
+            rng.random.return_value = 0.0
+            assert _select_favorite_video_post_uri(cfg, 30, None) is None
+
+    def test_registered_as_a_managed_video_post(self):
+        from .. import ux_posts
+
+        assert ux_posts.FAVORITE_YOUR_FEED in ux_posts.MANAGED_POSTS
+        assert ux_posts.FAVORITE_YOUR_FEED in ux_posts.VIDEO_POSTS
+
+
+@patch(
+    "app.routers.xrpc.verify_auth_header",
+    new_callable=AsyncMock,
+    return_value="did:plc:testuser",
+)
+@patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+@patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+@patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
+@patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
+@patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
+class TestFavoriteVideoPost:
+    VIDEO_URI = "at://did:plc:notifyauthor/app.bsky.feed.post/favoritevideo"
+    SURVEY_URI = "at://did:plc:notifyauthor/app.bsky.feed.post/surveypost"
+    PINNED_URI = "at://did:plc:notifyauthor/app.bsky.feed.post/pinned"
+    GENERATED = [f"at://did:plc:a/{i}" for i in range(40)]
+
+    def _patched_feeds(self, *, survey: bool = False, pinned: bool = True):
+        cfg = FEEDS["your-feed"].model_copy(
+            update={
+                "favorite_video_post_uri": self.VIDEO_URI,
+                "survey_post_uri": self.SURVEY_URI if survey else None,
+                "pinned_post_uri": self.PINNED_URI if pinned else None,
+                "explore_pinned_post_uri": None,
+                "returning_pinned_post_uri": None,
+            }
+        )
+        return {"your-feed": cfg, **{k: v for k, v in FEEDS.items() if k != "your-feed"}}
+
+    def _snapshot(self):
+        from ..documents import FeedSnapshotDocument
+
+        return FeedSnapshotDocument(
+            request_id="testid",
+            items=list(self.GENERATED),
+            feed_name="your-feed",
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+        )
+
+    def _activity(self, load_count: int = 5):
+        from ..documents import FeedActivityDocument
+
+        return FeedActivityDocument(
+            feed_name="your-feed",
+            first_seen_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            load_count=load_count,
+        )
+
+    def _load(self, feeds, *, limit: int = 30, roll: float = 0.0, position=min, cursor=None):
+        from app.routers import xrpc as xrpc_mod
+
+        params: dict[str, str | int] = {"feed": RANKED_FEED_URI, "limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        with (
+            patch.object(xrpc_mod, "FEEDS", feeds),
+            patch("app.routers.xrpc.random") as rng,
+        ):
+            rng.random.return_value = roll
+            rng.randint.side_effect = lambda lo, hi: position(lo, hi)
+            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params=params)
+        assert resp.status_code == 200
+        return resp.json()
+
+    def test_injected_directly_below_the_top_five(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds())["feed"]]
+
+        assert len(posts) == 30
+        assert posts[0] == self.PINNED_URI
+        assert posts[5] == self.VIDEO_URI
+        assert posts.count(self.VIDEO_URI) == 1
+
+    def test_random_position_can_reach_the_end_of_the_first_page(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds(), position=max)["feed"]]
+
+        assert len(posts) == 30
+        assert posts[-1] == self.VIDEO_URI
+        assert posts.count(self.VIDEO_URI) == 1
+
+    def test_not_injected_when_the_roll_fails(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        from app.routers.xrpc import FAVORITE_VIDEO_POST_PROBABILITY
+
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [
+            item["post"]
+            for item in self._load(self._patched_feeds(), roll=FAVORITE_VIDEO_POST_PROBABILITY)[
+                "feed"
+            ]
+        ]
+
+        assert self.VIDEO_URI not in posts
+        assert len(posts) == 30
+
+    def test_not_injected_after_settings_visit(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser", settings_visited_at=datetime.now(UTC)
+        )
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds())["feed"]]
+
+        assert self.VIDEO_URI not in posts
+
+    def test_not_injected_into_explore_previews(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds(), limit=8)["feed"]]
+
+        assert self.VIDEO_URI not in posts
+
+    def test_survey_takes_the_slot_when_both_are_eligible(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds(survey=True))["feed"]]
+
+        assert posts[5] == self.SURVEY_URI
+        assert self.VIDEO_URI not in posts
+
+    def test_injected_when_the_survey_is_not_eligible(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity(load_count=1)
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds(survey=True))["feed"]]
+
+        assert self.SURVEY_URI not in posts
+        assert posts[5] == self.VIDEO_URI
+
+    def test_excluded_from_snapshot_and_cursor_offset(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+        feeds = self._patched_feeds(pinned=False)
+
+        with patch(
+            "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+        ) as snap:
+            first = self._load(feeds, limit=10)
+
+        posts = [item["post"] for item in first["feed"]]
+        assert posts[5] == self.VIDEO_URI
+        assert len(posts) == 10
+        assert snap.await_args is not None
+        assert self.VIDEO_URI not in snap.await_args.args[3].items
+        assert FeedCursor.decode(first["cursor"]).offset == 9
+
+        second = self._load(feeds, limit=10, cursor=first["cursor"])
+        second_posts = [item["post"] for item in second["feed"]]
+        assert second_posts[0] == "at://did:plc:a/9"
+        assert self.VIDEO_URI not in second_posts
+
+
+# ---------------------------------------------------------------------------
 # Source-weight override and Social Radius migration
 # ---------------------------------------------------------------------------
 

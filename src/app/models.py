@@ -332,6 +332,12 @@ class FeedConfig(BaseModel):
         "who have loaded the feed at least 3 times and have not seen it in the past 7 days. "
         "Resolved by app.ux_posts.ux_post_uri() from the deploy-generated manifest.",
     )
+    favorite_video_post_uri: str | None = Field(
+        default=None,
+        description="AT URI of a \"how to favorite this feed\" video post injected at a random "
+        "first-page position below the top 5 on a share of loads by users who have not "
+        "visited Settings. Never shown alongside the survey post, which takes precedence.",
+    )
     logged_out: LoggedOutBehavior = Field(
         "explain",
         description="How this feed responds to an unauthenticated request: a single "
