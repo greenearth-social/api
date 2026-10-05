@@ -157,6 +157,7 @@ FEEDS: dict[str, FeedConfig] = {
         explore_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_EXPLORE),
         returning_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_RETURNING),
         survey_post_uri=ux_post_uri(ux_posts.SURVEY_YOUR_FEED),
+        favorite_video_post_uri=ux_post_uri(ux_posts.FAVORITE_YOUR_FEED),
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
         # min_rank_score=0.425 maps the old -0.15 floor into the current [0, 1]
