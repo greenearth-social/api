@@ -120,6 +120,42 @@ frontend; `GE_FIRESTORE_EMULATOR_HOST` ensures requests do not reach production.
 > Add `--export-on-exit` / `--import` flags if you want persistence between
 > sessions.
 
+### Query-vector quota concurrency tests
+
+With the emulator running, execute these opt-in tests from `api/`:
+
+```bash
+FIRESTORE_QUOTA_TEST_EMULATOR_HOST=127.0.0.1:8080 \
+  pipenv run pytest src/app/lib/llm_query_vector_limits_emulator_test.py -v
+```
+
+These tests require an explicit emulator address, use anonymous credentials and
+a unique demo project per test, and delete their own quota documents afterward.
+Without the explicit test environment variable they are skipped, including in
+the normal test suite.
+
+## LLM Query-Vector Fit Limits
+
+`POST /api/feeds/llm-query-vectors/fit` admits at most 12 attempts per user in a
+rolling six hours and 1,000 attempts globally per UTC calendar day. Firestore
+reserves both quotas atomically before fitting. Each admitted request consumes
+one attempt, including requests that later fail or are cancelled; attempts are
+not refunded. Invalid, unauthorized, feature-disabled, and rate-limited requests
+consume nothing. Quota documents are created lazily on first admission;
+existing fitted vectors are not backfilled.
+
+An exhausted quota returns HTTP 429 with a `Retry-After` header and structured
+`detail`: `code="llm_query_vector_rate_limited"`, `scopes` (`user`, `global`, or
+both), `message`, UTC `retry_at`, and `retry_after_seconds`. The retry time is the
+earliest capacity available from current usage, using the later reset when both
+quotas are exhausted; it does not reserve a future attempt. If Firestore cannot
+verify or reserve quota, the API returns 503 without starting fitting.
+
+Cloud Monitoring receives `llm_query_vector.fit.cap_reached_count` with
+`scope="user"` or `scope="global"` when an admitted request fills that quota.
+Both scopes are recorded when both fill together. Rejected requests do not emit
+this metric; a user can fill the rolling quota again after old attempts expire.
+
 ## API Key Management
 
 The API uses a Firestore-backed multi-key system. Each key is tied to an
