@@ -77,7 +77,7 @@ TEST_EMBEDDING = encode_float32_b64([1.0, 0.0, 0.0])
 
 
 class TestContextualPinnedPostSelection:
-    def test_uses_explore_page_size_and_settings_visit_without_presumed_pinned(self):
+    def test_uses_explore_preview_and_settings_visit_without_presumed_pinned(self):
         from ..routers.xrpc import _select_pinned_post_uri
 
         cfg = FEEDS["your-feed"].model_copy(
@@ -93,18 +93,16 @@ class TestContextualPinnedPostSelection:
             settings_visited_at=datetime(2026, 9, 20, tzinfo=UTC),
         )
 
-        assert _select_pinned_post_uri("your-feed", cfg, 1, new_user) == "at://first-time"
-        assert _select_pinned_post_uri("your-feed", cfg, 2, returning_user) == "at://explore"
-        assert _select_pinned_post_uri("your-feed", cfg, 8, returning_user) == "at://explore"
-        assert _select_pinned_post_uri("your-feed", cfg, 9, new_user) == "at://first-time"
-        assert _select_pinned_post_uri("your-feed", cfg, 15, returning_user) == "at://returning"
-        assert _select_pinned_post_uri("your-feed", cfg, 100, returning_user) == "at://returning"
+        assert _select_pinned_post_uri("your-feed", cfg, False, new_user) == "at://first-time"
+        assert _select_pinned_post_uri("your-feed", cfg, True, new_user) == "at://explore"
+        assert _select_pinned_post_uri("your-feed", cfg, True, returning_user) == "at://explore"
+        assert _select_pinned_post_uri("your-feed", cfg, False, returning_user) == "at://returning"
 
     def test_other_feeds_keep_their_existing_pin(self):
         from ..routers.xrpc import _select_pinned_post_uri
 
         cfg = FEEDS["random"].model_copy(update={"pinned_post_uri": "at://random"})
-        assert _select_pinned_post_uri("random", cfg, 8, None) == "at://random"
+        assert _select_pinned_post_uri("random", cfg, True, None) == "at://random"
 
 
 def _make_candidates(
@@ -6037,7 +6035,8 @@ class TestFailFastFeatureFlag:
         ):
             yield
 
-    def test_flag_enabled_calls_set_fail_fast_true(self):
+    @pytest.mark.parametrize("limit", [1, 9, 30])
+    def test_flag_enabled_calls_set_fail_fast_true(self, limit):
         """When PostHog returns True for the user, set_fail_fast_for_request(True) is called."""
         mock_ph = MagicMock()
 
@@ -6046,14 +6045,74 @@ class TestFailFastFeatureFlag:
             patch(
                 "app.routers.xrpc.evaluate_feature_flags",
                 return_value={"fail-fast-feed": True},
-            ),
+            ) as evaluate_flags,
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
-            client.get(
+            response = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": RANKED_FEED_URI},
+                params={"feed": RANKED_FEED_URI, "limit": limit},
             )
 
+        assert response.status_code == 200
+        evaluate_flags.assert_called_once_with(mock_ph, "did:plc:testuser", ["fail-fast-feed"])
+        mock_set.assert_called_once_with(True)
+
+    @pytest.mark.parametrize("feed_uri", [RANKED_FEED_URI, BEST_OF_FRIENDS_FEED_URI])
+    @pytest.mark.parametrize("limit", [2, 8])
+    def test_explore_previews_use_defaults_without_evaluating_flags(self, feed_uri, limit):
+        """Explore prefetches skip PostHog even for users whose flag would be enabled."""
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags",
+                return_value={"fail-fast-feed": True},
+            ) as evaluate_flags,
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": feed_uri, "limit": limit},
+            )
+
+        assert response.status_code == 200
+        evaluate_flags.assert_not_called()
+        mock_set.assert_called_once_with(False)
+
+    @pytest.mark.parametrize("limit", [2, 8])
+    def test_small_cursor_pages_still_evaluate_flags(self, limit):
+        from .xrpc import _configured_generation
+
+        # A small continuation page is scrolling, so it still uses the user's flags.
+        cache_id = "small-cursor-feature-flags"
+        uris = [f"at://cached/{index}" for index in range(10)]
+        app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
+            items=uris,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            user_did="did:plc:testuser",
+            feed_name=RANKED_FEED_RKEY,
+            preference_fingerprint=_configured_generation(
+                RANKED_FEED_RKEY, None
+            ).preference_fingerprint,
+        )
+        cursor = FeedCursor(id=cache_id, offset=1).encode()
+        mock_ph = MagicMock()
+
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags",
+                return_value={"fail-fast-feed": True},
+            ) as evaluate_flags,
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": limit, "cursor": cursor},
+            )
+
+        assert response.status_code == 200
+        assert [item["post"] for item in response.json()["feed"]] == uris[1 : 1 + limit]
+        evaluate_flags.assert_called_once_with(mock_ph, "did:plc:testuser", ["fail-fast-feed"])
         mock_set.assert_called_once_with(True)
 
     def test_flag_disabled_calls_set_fail_fast_false(self):
