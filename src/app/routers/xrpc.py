@@ -994,10 +994,17 @@ def _pinned_post_uris(feed_cfg: FeedConfig) -> set[str]:
     }
 
 
+def _is_explore_preview(cursor: str | None,requested_limit: int) -> bool:
+    # Bluesky's Explore preview prefetches at most eight posts. Keep the
+    # one-item AppView reachability probe on the normal path, and do not treat
+    # larger first-page requests as Explore traffic.
+    return cursor is None and 2 <= requested_limit <= 8
+
+
 def _select_pinned_post_uri(
     feed_name: str,
     feed_cfg: FeedConfig,
-    requested_limit: int,
+    is_explore_preview: bool,
     user_doc: UserDocument | None,
 ) -> str | None:
     """Choose the first-page top post for the Bluesky surface and user state."""
@@ -1005,10 +1012,7 @@ def _select_pinned_post_uri(
         return None
     if feed_name != "your-feed":
         return feed_cfg.pinned_post_uri
-    # Bluesky's Explore preview prefetches at most eight posts. Keep the
-    # one-item AppView reachability probe on the normal path, and do not treat
-    # larger first-page requests as Explore traffic.
-    if 2 <= requested_limit <= 8:
+    if is_explore_preview:
         return feed_cfg.explore_pinned_post_uri or feed_cfg.pinned_post_uri
     if user_doc is not None and user_doc.settings_visited_at is not None:
         return feed_cfg.returning_pinned_post_uri or feed_cfg.pinned_post_uri
@@ -1786,20 +1790,25 @@ async def get_feed_skeleton(
             )
         )
 
+    is_explore_preview = _is_explore_preview(cursor, limit)
     posthog_client = get_posthog_client()
     # Flags are evaluated per user, and an anonymous caller isn't one: it would
     # be a single synthetic identity shared by every logged-out request. Take
     # the flag defaults instead.
-    feature_flags = (
-        await asyncio.to_thread(
-            evaluate_feature_flags,
-            posthog_client,
-            user_did,
-            [FAIL_FAST_FLAG],
+    feature_flag_list = [FAIL_FAST_FLAG]
+    if is_explore_preview:
+        feature_flags = {key: False for key in feature_flag_list}
+    else:
+        feature_flags = (
+            await asyncio.to_thread(
+                evaluate_feature_flags,
+                posthog_client,
+                user_did,
+                feature_flag_list,
+            )
+            if posthog_client is not None and not is_anonymous
+            else {}
         )
-        if posthog_client is not None and not is_anonymous
-        else {}
-    )
     set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
@@ -1826,7 +1835,8 @@ async def get_feed_skeleton(
     preference_fingerprint = configured.preference_fingerprint
     contextual_pin_uris = _pinned_post_uris(feed_cfg)
     pinned_post_uri = (
-        _select_pinned_post_uri(feed_name, feed_cfg, limit, user_doc) if cursor is None else None
+        _select_pinned_post_uri(feed_name, feed_cfg, is_explore_preview, user_doc)
+        if cursor is None else None
     )
 
     feed_cache = _get_feed_cache(request)
