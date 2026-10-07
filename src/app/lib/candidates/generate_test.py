@@ -1095,3 +1095,80 @@ class TestHydrateEmbeddingsFailures:
 
         assert len(ctx.degradations) == 1
         assert ctx.degradations[0].stage == DegradationStage.EMBED_HYDRATION
+
+
+# ---------------------------------------------------------------------------
+# extra_generators (request-scoped generators, e.g. the slate API's `external`)
+# ---------------------------------------------------------------------------
+
+
+class _UriGenerator(CandidateGenerator):
+    def __init__(self, name: str, uris: list[str]):
+        self._name = name
+        self._uris = uris
+        self.calls: list[dict] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def generate(
+        self,
+        es,
+        user_did,
+        num_candidates=100,
+        video_only=False,
+        exclude_uris=None,
+        max_age_hours=168,
+    ):
+        self.calls.append({"num_candidates": num_candidates, "exclude_uris": exclude_uris})
+        return CandidateResult(
+            generator_name=self._name,
+            candidates=[
+                CandidatePost(at_uri=uri, generator_name=self._name)
+                for uri in self._uris[:num_candidates]
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_extra_generators_shadow_registry_for_specs_and_infill(monkeypatch):
+    registry = {"popularity": _UriGenerator("popularity", ["at://pop/1", "at://pop/2"])}
+    monkeypatch.setattr(generate_module, "get_generator", lambda name: registry.get(name))
+    external = _UriGenerator("external", ["at://ext/1", "at://pop/1", "at://ext/2"])
+    infill = _UriGenerator("backfill", ["at://fill/1", "at://fill/2"])
+
+    request = CandidateGenerateRequest(
+        generators=[
+            GeneratorSpec(name="external", weight=0.5),
+            GeneratorSpec(name="popularity", weight=0.5),
+        ],
+        user_did="did:plc:user",
+        num_candidates=6,
+        infill="backfill",
+    )
+    result = await run_generate(
+        request, es=object(), extra_generators={"external": external, "backfill": infill}
+    )
+
+    uris = [c.at_uri for c in result.candidates]
+    # external listed first wins the overlap on at://pop/1; infill tops up.
+    assert uris == [
+        "at://ext/1", "at://pop/1", "at://ext/2", "at://pop/2", "at://fill/1", "at://fill/2"
+    ]
+    assert external.calls[0]["num_candidates"] == 3
+    assert infill.calls[0]["exclude_uris"] == ["at://ext/1", "at://pop/1", "at://ext/2", "at://pop/2"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_name_still_raises_with_extra_generators(monkeypatch):
+    monkeypatch.setattr(generate_module, "get_generator", lambda name: None)
+    request = CandidateGenerateRequest(
+        generators=[GeneratorSpec(name="nope", weight=1.0)],
+        user_did="did:plc:user",
+        num_candidates=2,
+    )
+    with pytest.raises(generate_module.GeneratorNotFoundError):
+        await run_generate(
+            request, es=object(), extra_generators={"external": _UriGenerator("external", [])}
+        )

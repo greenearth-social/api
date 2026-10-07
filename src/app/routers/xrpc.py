@@ -18,17 +18,13 @@ import hashlib
 import hmac
 import json
 import logging
-import math
 import os
 import time
 import uuid
-from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from functools import wraps
 from threading import Lock
-from typing import NamedTuple
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -50,13 +46,10 @@ from ..feeds import (
     canonical_feed_name,
 )
 from ..lib.atproto_auth import verify_auth_header
-from ..lib.candidates import run_generate
-from ..lib.candidates.generate import hydrate_posts
 from ..lib.config import set_fail_fast_for_request
-from ..lib.diversify import mmr_rerank
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
-from ..lib.feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
+from ..lib.feed_debug import FeedDebugRecorder
 from ..lib.feed_preferences import configured_controls, resolve_feed_preferences
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
@@ -78,12 +71,10 @@ from ..lib.firestore import (
 )
 from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.metrics import get_metric_collector
-from ..lib.pipeline_context import (
-    DegradationEvent,
-    DegradationStage,
-    PipelineContext,
-    current_pipeline_context,
-    pipeline_context_scope,
+from ..lib.pipeline import (
+    feed_request_timeout_sec,
+    record_render_metrics,
+    run_pipeline_capturing,
 )
 from ..lib.posthog_client import (
     FAIL_FAST_FLAG,
@@ -92,9 +83,6 @@ from ..lib.posthog_client import (
     track_interaction,
     track_session,
 )
-from ..lib.rankers import run_predict
-from ..lib.release import api_release_sha
-from ..lib.request_cache import request_cache_scope
 from ..lib.request_context import set_traffic
 from ..lib.telemetry import timed
 from ..models import (
@@ -113,7 +101,6 @@ router = APIRouter(tags=["xrpc"])
 # Configuration
 # ---------------------------------------------------------------------------
 
-FEED_SNAPSHOT_RETENTION_SECONDS = 24 * 60 * 60  # 24 hours
 ACCEPTED_SLATE_CLAIM_GRACE_SECONDS = 5
 SURVEY_POST_POSITION = 6  # 1-indexed position in the first page where the survey post appears
 SURVEY_POST_MIN_VISITS = 3  # minimum initial loads before the survey is shown
@@ -411,223 +398,10 @@ class SendInteractionsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Feed pipeline
 # ---------------------------------------------------------------------------
-
-
-# When cutoffs empty a slate that still had candidates, serve the best pre-cutoff
-# posts anyway (fail open) rather than a blank feed. Flip to False to strictly
-# honor the thresholds and return an empty slate instead.
-EMPTY_SLATE_FAIL_OPEN = True
-
-
-class PipelineResult(NamedTuple):
-    """Output of one ranking-pipeline run."""
-
-    uris: list[str]  # final render list, after all cutoffs
-    # Candidates cut for scoring below the feed's min_rank_score; recorded as
-    # discarded so future generation stops re-fetching and re-ranking them.
-    low_score_uris: list[str]
-
-
-def _record_cutoff(feed_name: str, reason: str, uris: list[str]) -> None:
-    """Emit the slate-cutoff metric and debug-record the removed URIs."""
-    if not uris:
-        return
-    collector = get_metric_collector()
-    if collector:
-        collector.record("feed.slate.cutoff_count", len(uris), feed_name=feed_name, reason=reason)
-    rec = current_recorder()
-    if rec is not None:
-        rec.record_cutoff(reason, uris)
-
-
-async def _run_ranking_pipeline(
-    feed_cfg: FeedConfig,
-    gen_request: CandidateGenerateRequest,
-    es,
-    *,
-    feed_name: str,
-) -> PipelineResult:
-    """Generate candidates, optionally rank them, then diversify with MMR.
-
-    After ranking/diversification the slate is cut down by the feed's quality
-    gates (``min_rank_score``, ``min_mmr_score``, ``max_render_share``); posts
-    cut for low rank score are surfaced so the caller can persist them as
-    discarded.
-
-    Runs inside a per-request cache scope so that identical ES queries
-    issued by different stages (e.g. ``fetch_recent_liked_post_uris`` in
-    both the two-tower generator and the heavy ranker) collapse to a
-    single round-trip.
-    """
-    rec = current_recorder()
-    if rec is not None:
-        rec.set_generate_request(gen_request)
-        rec.diversify = feed_cfg.diversify
-        if feed_cfg.rank_request_template is not None:
-            rec.ranker_model = ", ".join(
-                spec.name for spec in feed_cfg.rank_request_template.models
-            )
-
-    ctx = current_pipeline_context()
-
-    async with request_cache_scope():
-        async with timed(
-            logger,
-            "run_generate",
-            num_candidates=gen_request.num_candidates,
-            n_generators=len(gen_request.generators),
-        ):
-            result = await run_generate(gen_request, es)
-        candidates = result.candidates
-
-        n_retrieved = len(candidates)
-        collector = get_metric_collector()
-        if collector:
-            # Candidate-starvation signals: how full the retrieval came back,
-            # and how large the exclusion list driving it has grown.
-            if gen_request.num_candidates > 0:
-                collector.record(
-                    "candidates.generate.retrieved_share",
-                    n_retrieved / gen_request.num_candidates,
-                    feed_name=feed_name,
-                )
-            collector.record(
-                "feed.slate.exclusion_size",
-                len(gen_request.exclude_uris or []),
-                feed_name=feed_name,
-            )
-        if rec is not None:
-            rec.record_n_retrieved(n_retrieved)
-
-        if not candidates:
-            return PipelineResult([], [])
-
-        # Generators fetch lightweight candidates. Backfill embeddings and topic
-        # scores in one batched ES call after deduping to the working set.
-        candidates = await hydrate_posts(es, candidates)
-
-        low_score_uris: list[str] = []
-        if feed_cfg.rank_request_template is not None:
-            candidates = [c for c in candidates if c.minilm_l12_embedding]
-            if not candidates:
-                return PipelineResult([], [])
-
-            rank_req = feed_cfg.rank_request_template.model_copy(
-                update={"candidates": candidates, "user_did": gen_request.user_did}
-            )
-            try:
-                async with timed(
-                    logger,
-                    "run_predict",
-                    n_candidates=len(candidates),
-                    n_models=len(rank_req.models),
-                ):
-                    rank_result = await run_predict(rank_req, es)
-                if rec is not None:
-                    rec.record_ranking(rank_result)
-                # Reorder CandidatePosts by model rank and stamp rank_score onto each
-                # so MMR uses the model's relevance scores, not the generator scores.
-                by_uri = {c.at_uri: c for c in candidates if c.at_uri}
-                ordered = [
-                    by_uri[r.at_uri].model_copy(update={"score": r.rank_score})
-                    for r in rank_result.rankings
-                    if r.at_uri in by_uri
-                ]
-            except Exception as exc:
-                logger.exception("Ranking stage failed; falling back to unranked ordering")
-                if ctx is not None:
-                    component = getattr(exc, "name", type(exc).__name__)
-                    ctx.record(
-                        DegradationEvent(
-                            stage=DegradationStage.RANK,
-                            component=component,
-                            cause=exc,
-                        )
-                    )
-                    # ctx.record re-raises when fail_fast=True, so this is the
-                    # fail-open path.
-                    ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
-                else:
-                    raise
-        else:
-            ordered = sorted(candidates, key=lambda c: c.score or 0.0, reverse=True)
-
-        # Kept for the fail-open fallback below: the best posts we retrieved,
-        # before any quality gate fired.
-        pre_cut_uris = [c.at_uri for c in ordered if c.at_uri]
-
-        if feed_cfg.rank_request_template is not None and feed_cfg.min_rank_score is not None:
-            # ordered is sorted desc by the combined score, so everything from
-            # the first sub-floor candidate on is below the floor.
-            cut_idx = next(
-                (i for i, c in enumerate(ordered) if (c.score or 0.0) < feed_cfg.min_rank_score),
-                len(ordered),
-            )
-            low_score_uris = [c.at_uri for c in ordered[cut_idx:] if c.at_uri]
-            ordered = ordered[:cut_idx]
-            _record_cutoff(feed_name, "rank_score", low_score_uris)
-
-        if rec is not None:
-            rec.record_order_after_rank([c.at_uri for c in ordered if c.at_uri])
-
-        if feed_cfg.diversify:
-            if collector:
-                collector.record("feed.mmr.input_size", len(ordered), feed_name=feed_name)
-            async with timed(
-                logger,
-                "feed.mmr.duration_ms",
-                record_metric=True,
-                metric_attrs={"feed_name": feed_name},
-                n_candidates=len(ordered),
-            ):
-                picks = mmr_rerank(ordered)
-            final = [c for c, _ in picks]
-            if feed_cfg.min_mmr_score is not None:
-                # Pick scores are not monotone (penalties decay with position),
-                # so cutting at the first sub-floor pick is a policy: stop the
-                # slate as soon as quality drops below the bar.
-                cut_idx = next(
-                    (i for i, (_, s) in enumerate(picks) if s < feed_cfg.min_mmr_score),
-                    len(picks),
-                )
-                _record_cutoff(
-                    feed_name, "mmr_score", [c.at_uri for c in final[cut_idx:] if c.at_uri]
-                )
-                final = final[:cut_idx]
-        else:
-            final = ordered
-
-        if feed_cfg.max_render_share is not None:
-            max_keep = max(1, math.floor(feed_cfg.max_render_share * n_retrieved))
-            if len(final) > max_keep:
-                _record_cutoff(feed_name, "share", [c.at_uri for c in final[max_keep:] if c.at_uri])
-                final = final[:max_keep]
-
-        final_uris = [c.at_uri for c in final if c.at_uri]
-
-        if collector and n_retrieved > 0:
-            collector.record(
-                "feed.slate.kept_share",
-                len(final_uris) / n_retrieved,
-                feed_name=feed_name,
-            )
-
-        if not final_uris and pre_cut_uris:
-            # The quality gates rejected everything we retrieved.
-            if collector:
-                collector.record("feed.slate.empty_after_cutoff_count", 1, feed_name=feed_name)
-            if EMPTY_SLATE_FAIL_OPEN:
-                logger.warning(
-                    "Slate cutoffs emptied feed '%s' (%d candidates retrieved); failing open",
-                    feed_name,
-                    n_retrieved,
-                )
-                final_uris = pre_cut_uris
-
-        if rec is not None:
-            rec.record_final_order(final_uris)
-
-    return PipelineResult(final_uris, low_score_uris)
+#
+# The pipeline itself (generate → rank → cutoffs → MMR) lives in
+# lib/pipeline.py, shared with the slate API. This router owns what wraps
+# it: preferences, pins, pagination, the feed cache and the debug document.
 
 
 def _with_purpose_weights(feed_cfg: FeedConfig, purpose: float) -> FeedConfig:
@@ -781,68 +555,30 @@ async def _run_pipeline_capturing(
     transparency API can re-render any served feed.  The full debug document
     (for the CLI tool) is written in a background task only when
     ``debug_enabled`` is true.
-
-    The recorder is always installed (not just when ``debug_enabled``) since
-    the snapshot is built for every request; ``_run_ranking_pipeline``'s own
-    return value carries the URIs cut for low rank score so the caller can
-    persist them as discarded, alongside the snapshot.
-
-    A PipelineContext is also installed for every render so degradation events
-    and the feed.render.degraded_count metric are always tracked. fail_fast=False
-    for now; PostHog per-user flag (issue 279) will pass it in when implemented.
     """
-    recorder = FeedDebugRecorder(feed_name=feed_name, regenerated=regenerated)
-    generated_at = datetime.now(UTC)
-    ctx = PipelineContext(feed_name=feed_name)
-
-    with feed_debug_scope(recorder), pipeline_context_scope(ctx):
-        pipeline_result = await _run_ranking_pipeline(
-            feed_cfg, gen_request, request.app.state.es, feed_name=feed_name
-        )
-
-    # Emit once only after the pipeline has returned successfully. A render can
-    # accumulate several degradation events, so attribute it to the first
-    # failure: this preserves the counter's "degraded renders" meaning (and its
-    # ratio denominator) while making the primary stage/component actionable.
-    # Later events remain in the PipelineContext for debug capture. Early-return
-    # fallbacks (for example, every generator yielding no candidates) still pass
-    # through here, unlike an emitter at the bottom of _run_ranking_pipeline.
-    if ctx.degradations and not ctx.fail_fast:
-        if collector := get_metric_collector():
-            primary = ctx.degradations[0]
-            collector.record(
-                "feed.render.degraded_count",
-                1,
-                feed_name=ctx.feed_name,
-                stage=primary.stage.value,
-                component=primary.component,
-            )
-
-    expires_at = generated_at + timedelta(seconds=FEED_SNAPSHOT_RETENTION_SECONDS)
-    snapshot = recorder.build_pipeline_metadata(
+    capture = await run_pipeline_capturing(
+        request.app.state.es,
+        feed_cfg,
+        gen_request,
+        feed_name=feed_name,
         request_id=request_id,
-        generated_at=generated_at,
-        expires_at=expires_at,
-        api_release_sha=api_release_sha(),
+        regenerated=regenerated,
     )
 
     # Full debug document only for debug-flagged users, in background.
     if debug_enabled:
         _spawn_background(
-            _write_feed_debug(request, db, recorder, request_id, user_did, generated_at)
+            _write_feed_debug(
+                request, db, capture.recorder, request_id, user_did, capture.snapshot.generated_at
+            )
         )
 
-    return snapshot, pipeline_result.low_score_uris
+    return capture.snapshot, capture.low_score_uris
 
 
 def _feed_request_timeout_sec() -> float:
-    """Internal deadline for the feed pipeline, read fresh per call so it can
-    be overridden per-request in tests. Set below the Bluesky AppView's 10s
-    abort on getFeedSkeleton calls (see #291) so a downstream hang (ES,
-    ranker) surfaces as a logged 504 instead of losing the race against the
-    client's own timeout with nothing recorded.
-    """
-    return float(os.environ.get("GE_FEED_REQUEST_TIMEOUT_SEC", "9"))
+    """See ``lib.pipeline.feed_request_timeout_sec``; kept as a seam for tests."""
+    return feed_request_timeout_sec()
 
 
 async def _run_pipeline_capturing_with_timeout(
@@ -1060,6 +796,42 @@ def _spawn_background(coro) -> asyncio.Task:
     return task
 
 
+async def user_exclusions(
+    db,
+    user_did: str,
+    *,
+    include_seen: bool,
+    include_discarded: bool,
+) -> list[str]:
+    """The user's recently-seen posts and posts discarded for low rank score.
+
+    Fail-soft on each source: a Firestore hiccup should degrade the feature
+    (possible repeats) rather than break feed serving, so errors are logged and
+    yield an empty list. Shared with the slate API, which applies both.
+    """
+
+    async def _seen() -> list[str]:
+        if not include_seen:
+            return []
+        try:
+            return await get_recent_seen_uris(db, user_did)
+        except Exception:
+            logger.exception("Failed to fetch seen posts for user '%s'", user_did)
+            return []
+
+    async def _discarded() -> list[str]:
+        if not include_discarded:
+            return []
+        try:
+            return await get_recent_discarded_uris(db, user_did)
+        except Exception:
+            logger.exception("Failed to fetch discarded posts for user '%s'", user_did)
+            return []
+
+    seen_uris, discarded_uris = await asyncio.gather(_seen(), _discarded())
+    return [*seen_uris, *discarded_uris]
+
+
 async def _generation_exclusions(
     db,
     user_did: str,
@@ -1071,31 +843,15 @@ async def _generation_exclusions(
 
     Combines every contextual top-post URI, the user's recently-seen posts (for feeds with
     ``exclude_seen_posts``) and posts previously discarded for low rank score
-    (for feeds with a ``min_rank_score`` floor).  Fail-soft on each source: a
-    Firestore hiccup should degrade the feature (possible repeats) rather than
-    break feed serving, so errors are logged and yield an empty list.
+    (for feeds with a ``min_rank_score`` floor).
     """
-
-    async def _seen() -> list[str]:
-        if not include_seen or not feed_cfg.exclude_seen_posts:
-            return []
-        try:
-            return await get_recent_seen_uris(db, user_did)
-        except Exception:
-            logger.exception("Failed to fetch seen posts for user '%s'", user_did)
-            return []
-
-    async def _discarded() -> list[str]:
-        if feed_cfg.min_rank_score is None:
-            return []
-        try:
-            return await get_recent_discarded_uris(db, user_did)
-        except Exception:
-            logger.exception("Failed to fetch discarded posts for user '%s'", user_did)
-            return []
-
-    seen_uris, discarded_uris = await asyncio.gather(_seen(), _discarded())
-    return list(dict.fromkeys([*sorted(_pinned_post_uris(feed_cfg)), *seen_uris, *discarded_uris]))
+    user_uris = await user_exclusions(
+        db,
+        user_did,
+        include_seen=include_seen and feed_cfg.exclude_seen_posts,
+        include_discarded=feed_cfg.min_rank_score is not None,
+    )
+    return list(dict.fromkeys([*sorted(_pinned_post_uris(feed_cfg)), *user_uris]))
 
 
 async def generate_feed_preview(
@@ -1566,40 +1322,11 @@ def _feed_name_for_metrics(feed: object) -> str:
     return canonical_feed_name(rkey) or "unknown"
 
 
-def _record_feed_render_metrics(
-    endpoint: Callable[..., Awaitable[FeedSkeletonResponse]],
-) -> Callable[..., Awaitable[FeedSkeletonResponse]]:
-    """Record one success/failure counter around a feed render request."""
-
-    @wraps(endpoint)
-    async def wrapped(*args: object, **kwargs: object) -> FeedSkeletonResponse:
-        feed_name = _feed_name_for_metrics(kwargs.get("feed"))
-        outcome = "success"
-        try:
-            return await endpoint(*args, **kwargs)
-        except HTTPException as exc:
-            outcome = str(exc.status_code)
-            raise
-        except Exception:
-            outcome = "500"
-            raise
-        finally:
-            if collector := get_metric_collector():
-                if outcome == "success":
-                    collector.record(
-                        "feed.render.success_count",
-                        1,
-                        feed_name=feed_name,
-                    )
-                else:
-                    collector.record(
-                        "feed.render.failure_count",
-                        1,
-                        feed_name=feed_name,
-                        status_code=outcome,
-                    )
-
-    return wrapped
+# Success/failure counters for every getFeedSkeleton call, labelled by the
+# feed named in the request's AT URI.
+_record_feed_render_metrics = record_render_metrics(
+    lambda kwargs: _feed_name_for_metrics(kwargs.get("feed"))
+)
 
 
 @router.get("/.well-known/did.json", response_class=JSONResponse)

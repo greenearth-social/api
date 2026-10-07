@@ -1,5 +1,5 @@
 import base64
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -265,22 +265,69 @@ class UserEmbeddingResponse(BaseModel):
     reason: Literal["no_likes", "no_embedded_history"] | None = None
 
 
-class FeedConfig(BaseModel):
+class SlateCutoffs(BaseModel):
+    """Post-ranking slate policy shared by published feeds and the slate API.
+
+    These are the knobs applied *after* candidates are scored: whether MMR
+    diversification runs, and the quality gates that trim the slate before it
+    is paginated.  ``FeedConfig`` inherits them for the feeds in ``feeds.py``;
+    ``SlateGenerateRequest`` inherits them so an API caller sets the same
+    policy per request.
+    """
+
+    diversify: bool = Field(True, description="When False, MMR reranking is skipped.")
+    max_render_share: float | None = Field(
+        None,
+        gt=0.0,
+        le=1.0,
+        description="Cap on the share of retrieved candidates that may be rendered "
+        "(e.g. 0.5 → at most 50% of the retrieved candidates are returned per slate). "
+        "None disables the cap.",
+    )
+    min_rank_score: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Combined rank-score floor in [0, 1]. Candidates scoring below it "
+        "are cut from the slate and recorded as discarded so future generation "
+        "excludes them. Only applies when rank_request_template is set. None disables.",
+    )
+    min_mmr_score: float | None = Field(
+        None,
+        description="MMR per-pick penalized-score floor. The slate is cut at the first "
+        "pick scoring below it. MMR relevance is normalized per slate, so this "
+        "threshold is slate-relative rather than an absolute quality bar. Only "
+        "applies when diversify is True. None disables.",
+    )
+
+
+class SlateConfig(SlateCutoffs):
+    """Everything the ranking pipeline needs beyond the generation request.
+
+    ``rank_request_template`` optionally holds a ranking spec.  When set,
+    candidates are ranked by the configured ``models`` (each normalized and
+    combined via weighted average) before the slate cutoffs apply.  Whether
+    Perspective API scoring participates is controlled by including a
+    ``perspective`` entry in ``models`` — there is no separate toggle.
+    Runtime fields (``candidates``, ``user_did``) are filled via ``model_copy``.
+    """
+
+    rank_request_template: RankPredictRequest | None = Field(
+        None,
+        description="When set, candidates are ranked by this model before being returned.",
+    )
+
+
+class FeedConfig(SlateConfig):
     """Configuration for a single published feed.
 
     ``gen_request_template`` holds the generator pipeline spec using the same
     shape as ``CandidateGenerateRequest``.  Session-specific fields
     (``user_did``, ``num_candidates``) are filled in at request time.
 
-    ``rank_request_template`` optionally holds a ranking spec.  When set,
-    candidates are ranked by the configured ``models`` (each normalized and
-    combined via weighted average) before URIs are returned.  Whether
-    Perspective API scoring participates is controlled by including a
-    ``perspective`` entry in ``models`` — there is no separate toggle.
-    Runtime fields (``candidates``, ``user_did``) are filled via ``model_copy``.
-
-    ``diversify`` controls whether MMR reranking is applied after candidate
-    generation and optional model ranking.  Defaults to ``True``.
+    Ranking (``rank_request_template``) and the slate policy (``diversify``,
+    ``min_rank_score``, ``min_mmr_score``, ``max_render_share``) come from
+    :class:`SlateConfig`.
     """
 
     display_name: str = Field(..., max_length=19)
@@ -297,11 +344,6 @@ class FeedConfig(BaseModel):
         description="Feed whose stored preferences this pipeline inherits, when different.",
     )
     gen_request_template: CandidateGenerateRequest
-    rank_request_template: RankPredictRequest | None = Field(
-        None,
-        description="When set, candidates are ranked by this model before being returned.",
-    )
-    diversify: bool = Field(True, description="When False, MMR reranking is skipped.")
     accepts_interactions: bool = Field(
         True,
         description="When True, the published record declares acceptsInteractions so the "
@@ -343,32 +385,158 @@ class FeedConfig(BaseModel):
         description="AT URI of the post served on its own to logged-out callers. Only "
         "read when logged_out is 'explain'; falls back to the shared logged-out UX post.",
     )
-    max_render_share: float | None = Field(
-        None,
-        gt=0.0,
-        le=1.0,
-        description="Cap on the share of retrieved candidates that may be rendered "
-        "(e.g. 0.5 → at most 50% of the retrieved candidates are returned per slate). "
-        "None disables the cap.",
-    )
-    min_rank_score: float | None = Field(
-        None,
-        ge=0.0,
-        le=1.0,
-        description="Combined rank-score floor in [0, 1]. Candidates scoring below it "
-        "are cut from the slate and recorded as discarded so future generation "
-        "excludes them. Only applies when rank_request_template is set. None disables.",
-    )
-    min_mmr_score: float | None = Field(
-        None,
-        description="MMR per-pick penalized-score floor. The slate is cut at the first "
-        "pick scoring below it. MMR relevance is normalized per slate, so this "
-        "threshold is slate-relative rather than an absolute quality bar. Only "
-        "applies when diversify is True. None disables.",
-    )
     avatar: str | None = Field(
         None,
         description="Path to avatar image relative to repo root "
         "(e.g. 'assets/icons/your-feed.png'). "
         "Used by publish_feed.py at publish time; not read at runtime.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Slate API — the whole pipeline in one call (issue #542)
+# ---------------------------------------------------------------------------
+
+EXTERNAL_GENERATOR_NAME = "external"
+
+FeedName = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9_-]*$",
+        description="Caller-chosen feed name. Identifies this feed in metrics, analytics, "
+        "the cursor session and every item's feed_context token.",
+    ),
+]
+
+
+class ExternalCandidate(BaseModel):
+    """A post the caller retrieved themselves, to be mixed into the slate.
+
+    Only the URI and an optional relevance score are taken from the caller;
+    every other post attribute (text, author, embedding, scores) is loaded
+    from our own index. A URI we don't have is dropped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    at_uri: str = Field(..., min_length=1, description="AT URI of the post")
+    score: float | None = Field(
+        default=None,
+        allow_inf_nan=False,
+        description="Caller's relevance score. Used as the post's score when the "
+        "slate is unranked, and as the `external` generator score in diagnostics.",
+    )
+
+
+# Fields that configure a fresh pipeline run. A cursor request carries none of
+# them: pages are served from the session that the first request created.
+SLATE_CONFIG_FIELDS = frozenset(
+    {
+        "generators",
+        "external_candidates",
+        "num_candidates",
+        "infill",
+        "video_only",
+        "max_age_hours",
+        "exclude_uris",
+        "rankers",
+        "politics",
+        "diversify",
+        "min_rank_score",
+        "min_mmr_score",
+        "max_render_share",
+    }
+)
+
+
+class SlateGenerateRequest(SlateCutoffs):
+    """Body for ``POST /slate/generate``.
+
+    A fresh request describes the whole pipeline: which generators to run
+    (including the caller's own ``external`` candidates), how to rank, whether
+    to diversify, and the slate cutoffs. A cursor request sends only
+    ``feed_name``, ``user_did``, ``limit`` and ``cursor``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    feed_name: FeedName
+    user_did: str = Field(..., description="AT Protocol DID of the user the slate is for")
+    limit: int = Field(30, ge=1, le=100, description="Items per page")
+    cursor: str | None = Field(
+        default=None,
+        description="Cursor from a previous response. When set, no pipeline configuration "
+        "may be sent: the page comes from the existing session.",
+    )
+
+    generators: list[GeneratorSpec] = Field(
+        default_factory=list,
+        description="Generators to run, with relative weights. Use the name `external` "
+        "for the candidates supplied in `external_candidates`.",
+    )
+    external_candidates: list[ExternalCandidate] = Field(
+        default_factory=list,
+        description="Caller-retrieved posts, mixed in through the `external` generator.",
+    )
+    num_candidates: int = Field(
+        150, ge=1, le=200, description="Total candidates to retrieve and rank for the session"
+    )
+    infill: str | None = Field(
+        None,
+        description="Generator used to fill remaining slots when the primary generators "
+        "return fewer candidates than requested.",
+    )
+    video_only: bool = Field(False, description="When true, only return posts containing video")
+    max_age_hours: MaxAgeHours = Field(168, description="Maximum candidate-post age in hours")
+    exclude_uris: list[str] = Field(
+        default_factory=list,
+        description="AT URIs to exclude (e.g. posts the caller has already shown).",
+    )
+    rankers: list[RankModelSpec] | None = Field(
+        default=None,
+        description="Rank models to run and combine. Omit to leave candidates ordered by "
+        "their generator scores.",
+    )
+    politics: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=2.0,
+        description="Multiplier applied to the combined rank score based on the post's "
+        "politics score",
+    )
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "SlateGenerateRequest":
+        if self.cursor is not None:
+            sent = sorted(self.model_fields_set & SLATE_CONFIG_FIELDS)
+            if sent:
+                raise ValueError(
+                    "a cursor request carries no pipeline configuration; remove: "
+                    + ", ".join(sent)
+                )
+            return self
+
+        if not self.generators:
+            raise ValueError("generators must list at least one generator")
+        uses_external = any(
+            spec.name == EXTERNAL_GENERATOR_NAME for spec in self.generators
+        ) or self.infill == EXTERNAL_GENERATOR_NAME
+        if uses_external and not self.external_candidates:
+            raise ValueError(
+                f"the '{EXTERNAL_GENERATOR_NAME}' generator needs external_candidates"
+            )
+        if self.external_candidates and not uses_external:
+            raise ValueError(
+                f"external_candidates were supplied but no generator is named "
+                f"'{EXTERNAL_GENERATOR_NAME}'"
+            )
+        if self.rankers is not None:
+            if not self.rankers:
+                raise ValueError("rankers must not be empty; omit it for an unranked slate")
+            if not any(model.weight > 0 for model in self.rankers):
+                raise ValueError("at least one ranker must have a positive weight")
+        if self.min_rank_score is not None and self.rankers is None:
+            raise ValueError("min_rank_score only applies when rankers are configured")
+        return self

@@ -179,3 +179,57 @@ class FirestoreFeedCache(FeedCache):
         )
         await ref.set(updated.model_dump())
         return updated
+
+
+class InMemoryFeedCache(FeedCache):
+    """Dictionary-backed feed cache for tests and local tooling.
+
+    Stores full :class:`FeedCacheDocument` objects (with ``items_meta``) so
+    callers exercising similarity/observability data on cursor pages served
+    purely from cache can set up realistic fixtures, mirroring
+    ``FirestoreFeedCache``'s document-based methods. Entries never expire.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, list[str]] = {}
+        self._docs: dict[str, FeedCacheDocument] = {}
+
+    async def store(
+        self, key: str, items: list[str], ttl_seconds: int = DEFAULT_TTL_SECONDS
+    ) -> None:
+        self._store[key] = items
+
+    async def retrieve(self, key: str) -> list[str] | None:
+        return self._store.get(key)
+
+    async def append(self, key: str, new_items: list[str]) -> list[str] | None:
+        existing = self._store.get(key)
+        if existing is None:
+            return None
+        updated = existing + new_items
+        self._store[key] = updated
+        return updated
+
+    async def store_document(self, key: str, document: FeedCacheDocument) -> None:
+        self._store[key] = document.items
+        self._docs[key] = document
+
+    async def retrieve_document(self, key: str) -> FeedCacheDocument | None:
+        return self._docs.get(key)
+
+    async def append_document(
+        self,
+        key: str,
+        new_items: list[str],
+        new_items_meta: list[PipelineItemMeta],
+    ) -> FeedCacheDocument | None:
+        existing = self._docs.get(key)
+        if existing is None:
+            return None
+        updated_items = list(dict.fromkeys([*existing.items, *new_items]))
+        meta_by_uri = {m.at_uri: m for m in existing.items_meta}
+        meta_by_uri.update({m.at_uri: m for m in new_items_meta})
+        updated_meta = [meta_by_uri[uri] for uri in updated_items if uri in meta_by_uri]
+        updated = existing.model_copy(update={"items": updated_items, "items_meta": updated_meta})
+        self._docs[key] = updated
+        return updated
