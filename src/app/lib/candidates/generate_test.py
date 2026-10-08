@@ -1145,6 +1145,8 @@ async def test_extra_generators_shadow_registry_for_specs_and_infill(monkeypatch
         ],
         user_did="did:plc:user",
         num_candidates=6,
+        video_only=False,
+        max_age_hours=168,
         infill="backfill",
     )
     result = await run_generate(
@@ -1167,6 +1169,9 @@ async def test_unknown_name_still_raises_with_extra_generators(monkeypatch):
         generators=[GeneratorSpec(name="nope", weight=1.0)],
         user_did="did:plc:user",
         num_candidates=2,
+        video_only=False,
+        max_age_hours=168,
+        infill=None,
     )
     with pytest.raises(generate_module.GeneratorNotFoundError):
         await run_generate(

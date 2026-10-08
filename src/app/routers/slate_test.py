@@ -203,7 +203,9 @@ class TestGenerate:
         # popularity got its half of the allocation.
         assert gens["popularity"].generate.await_args.kwargs["num_candidates"] == 2
         # ES was asked for every non-excluded supplied URI, in caller order.
-        assert app.state.es.search.await_args.kwargs["query"] == {
+        search_call = app.state.es.search.await_args
+        assert search_call is not None
+        assert search_call.kwargs["query"] == {
             "terms": {"at_uri": ["at://ext/a", "at://ext/missing", "at://ext/b"]}
         }
         by_name = {d["name"]: d for d in data["generator_diagnostics"]}
@@ -517,6 +519,7 @@ class TestObservability:
                 for point in metric.data.data_points
             ]
             (point,) = points
+            assert point.attributes is not None
             assert point.attributes["status_code"] == "400"
             assert point.attributes["endpoint"] == "slate_generate"
             assert point.attributes["feed_name"] == FEED_NAME
