@@ -1674,12 +1674,12 @@
         },
         "posthog": {
             "hashes": [
-                "sha256:67bc374907c3cafc1b378c4011d5e7cf6b249c240a98470cf908da2c44f76483",
-                "sha256:99436369a40b2f9e628145e997f1dcd98a5e5389da1605d4ab630d742cc1bd5d"
+                "sha256:641e0a0a6022b66b6edf784126c3e5d0d8dedb47914524cbb59115afa2f2c655",
+                "sha256:f56519fcda855954d6db83a29ed403005907809507e0d2238b6b33325e24a8f9"
             ],
             "index": "pypi",
             "markers": "python_version >= '3.10'",
-            "version": "==7.60.1"
+            "version": "==7.62.1"
         },
         "propcache": {
             "hashes": [
