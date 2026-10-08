@@ -17,8 +17,12 @@ PostHog events emitted:
   redirectClicked  — UTM click counting. Keyed on the ``redirect_service``
                      pseudo-user rather than a real DID: the click happens
                      before we know who it was.
+  slateGenerated   — one per ``POST /slate/generate`` call (the partner-facing
+                     single-call pipeline). Keyed on the user DID the slate was
+                     generated for, like feedLoaded, and carries the caller's
+                     ``feed_name`` and ``api_key_id``.
 
-Every event carries two annotations, applied by :func:`annotate_event_properties`:
+Every event carries three annotations, applied by :func:`annotate_event_properties`:
 
   surface         — which producer emitted the event. The frontend writes to the
                     same PostHog project and stamps ``greenearth_web``; this
@@ -29,6 +33,11 @@ Every event carries two annotations, applied by :func:`annotate_event_properties
                     frontend versions its own schema independently. Bump it when
                     an existing event's properties change shape in a way that
                     would break a saved insight.
+  endpoint        — the API endpoint handling the request that emitted the
+                    event (``get_feed_skeleton``, ``slate_generate``, …), so
+                    feed traffic served to Bluesky and feed traffic served
+                    through the partner API are never confused. Absent on
+                    events emitted outside a request.
 """
 
 from __future__ import annotations
@@ -38,6 +47,8 @@ import os
 from datetime import datetime
 
 from posthog import Posthog
+
+from .request_context import get_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +69,17 @@ def annotate_event_properties(properties: dict) -> dict:
     frontend's inside a shared PostHog project, and an event that could quietly
     reassign itself to another producer would corrupt every insight built on it.
     """
-    return {
+    annotated = {
         **properties,
         "surface": EVENT_SURFACE,
         "schema_version": EVENT_SCHEMA_VERSION,
     }
+    # Only stamped on a request path: an event emitted from startup or a
+    # script has no endpoint, and writing null would read as a real value.
+    endpoint = get_endpoint()
+    if endpoint is not None:
+        annotated["endpoint"] = endpoint
+    return annotated
 
 
 def user_identity_properties(username: str | None) -> dict:
@@ -132,6 +149,47 @@ def track_session(
     client.capture(
         distinct_id=user_did,
         event="feedLoaded",
+        properties=annotate_event_properties(properties),
+        timestamp=timestamp,
+    )
+
+
+def track_slate_generated(
+    client: Posthog | None,
+    *,
+    user_did: str,
+    feed_name: str,
+    api_key_id: str,
+    requested_limit: int,
+    has_cursor: bool,
+    generators: list[str],
+    rankers: list[str] | None,
+    external_candidate_count: int,
+    item_count: int,
+    timestamp: datetime,
+) -> None:
+    """Capture a slateGenerated event for one ``POST /slate/generate`` call.
+
+    Keyed on the user DID like ``feedLoaded`` so a person seen through both
+    Bluesky and a partner surface stays one PostHog person. No handle is
+    attached: resolving it would cost a directory round-trip on a latency-
+    sensitive path, and the partner knows who their user is.
+    """
+    if client is None:
+        return
+    properties: dict[str, object] = {
+        "feed_name": feed_name,
+        "api_key_id": api_key_id,
+        "requested_limit": requested_limit,
+        "has_cursor": has_cursor,
+        "generators": generators,
+        "rankers": rankers,
+        "external_candidate_count": external_candidate_count,
+        "item_count": item_count,
+    }
+    client.capture(
+        distinct_id=user_did,
+        event="slateGenerated",
         properties=annotate_event_properties(properties),
         timestamp=timestamp,
     )

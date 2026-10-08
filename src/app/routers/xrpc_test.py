@@ -20,7 +20,7 @@ from ..documents import (
 from ..feeds import FEEDS, LOGGED_OUT_POST_URI
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
-from ..lib.feed_cache import FeedCache
+from ..lib.feed_cache import InMemoryFeedCache
 from ..lib.feed_context import decode_feed_context
 from ..lib.metrics import MetricCollector, set_metric_collector
 from ..main import app
@@ -483,6 +483,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     from ..lib import inference as inference_module
     from ..lib import user_history_cache as user_history_module
     from ..lib.candidates import two_tower as candidate_two_tower_module
+    from ..lib.pipeline import run_ranking_pipeline
     from ..lib.rankers import heavy_ranker as heavy_ranker_module
     from ..lib.user_history_cache import (
         UserHistory,
@@ -492,7 +493,6 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         get_user_history_cache,
         set_user_history_cache,
     )
-    from .xrpc import _run_ranking_pipeline
 
     test_user_did = "did:plc:cache-test-user"
     expected_history = UserHistory(
@@ -668,7 +668,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     es = object()
     try:
         result = await asyncio.wait_for(
-            _run_ranking_pipeline(
+            run_ranking_pipeline(
                 feed_cfg,
                 gen_request,
                 es,
@@ -857,58 +857,6 @@ async def test_politics_explanation_survives_pipeline_cache_and_pagination(
     assert page.items_meta[0].politics_adjustment is not None
     assert page.items_meta[0].politics_adjustment.setting == politics
     assert page.items_meta[1].politics_adjustment is None
-
-
-class InMemoryFeedCache(FeedCache):
-    """Trivial in-memory feed cache for tests.
-
-    Stores full :class:`FeedCacheDocument` objects (with ``items_meta``) so
-    tests that exercise similarity/observability data on cursor pages served
-    purely from cache can set up realistic fixtures, mirroring
-    ``FirestoreFeedCache``'s document-based methods.
-    """
-
-    def __init__(self):
-        self._store: dict[str, list[str]] = {}
-        self._docs: dict[str, FeedCacheDocument] = {}
-
-    async def store(self, key: str, items: list[str], ttl_seconds: int = 600) -> None:
-        self._store[key] = items
-
-    async def retrieve(self, key: str) -> list[str] | None:
-        return self._store.get(key)
-
-    async def append(self, key: str, new_items: list[str]) -> list[str] | None:
-        existing = self._store.get(key)
-        if existing is None:
-            return None
-        updated = existing + new_items
-        self._store[key] = updated
-        return updated
-
-    async def store_document(self, key: str, document: FeedCacheDocument) -> None:
-        self._store[key] = document.items
-        self._docs[key] = document
-
-    async def retrieve_document(self, key: str) -> FeedCacheDocument | None:
-        return self._docs.get(key)
-
-    async def append_document(
-        self,
-        key: str,
-        new_items: list[str],
-        new_items_meta: list[PipelineItemMeta],
-    ) -> FeedCacheDocument | None:
-        existing = self._docs.get(key)
-        if existing is None:
-            return None
-        updated_items = list(dict.fromkeys([*existing.items, *new_items]))
-        meta_by_uri = {m.at_uri: m for m in existing.items_meta}
-        meta_by_uri.update({m.at_uri: m for m in new_items_meta})
-        updated_meta = [meta_by_uri[uri] for uri in updated_items if uri in meta_by_uri]
-        updated = existing.model_copy(update={"items": updated_items, "items_meta": updated_meta})
-        self._docs[key] = updated
-        return updated
 
 
 # ---------------------------------------------------------------------------
@@ -2708,7 +2656,7 @@ class TestRankedFeed:
 
         with (
             self._patch_generators(candidates),
-            patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch("app.lib.pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
         ):
             data = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2741,7 +2689,7 @@ class TestRankedFeed:
             self._patch_generators(candidates),
             patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
             patch(
-                "app.routers.xrpc.run_predict",
+                "app.lib.pipeline.run_predict",
                 new_callable=AsyncMock,
                 return_value=rank_result,
             ) as mock_run,
@@ -2774,7 +2722,7 @@ class TestRankedFeed:
                 return_value=[("at://p/0", [1.0, 0.0, 0.0], 0.75)],
             ) as mock_fetch,
             patch(
-                "app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result
+                "app.lib.pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result
             ) as mock_run,
         ):
             data = client.get(
@@ -2819,12 +2767,12 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.routers.xrpc.hydrate_posts",
+                "app.lib.pipeline.hydrate_posts",
                 new_callable=AsyncMock,
                 return_value=candidates,
             ),
             patch(
-                "app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result
+                "app.lib.pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result
             ) as mock_run,
         ):
             data = client.get(
@@ -2879,7 +2827,7 @@ class TestRankedFeed:
 
         with (
             self._patch_generators(candidates),
-            patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch("app.lib.pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
         ):
             data = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2897,7 +2845,7 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.routers.xrpc.run_predict",
+                "app.lib.pipeline.run_predict",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("inference down"),
             ),
@@ -2996,7 +2944,7 @@ class TestSlateCutoffs:
         discarded_mock = discarded_mock if discarded_mock is not None else AsyncMock()
         with (
             gen_patch,
-            patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch("app.lib.pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
             patch("app.routers.xrpc.record_discarded_posts", discarded_mock),
         ):
             return client.get(
@@ -3033,7 +2981,7 @@ class TestSlateCutoffs:
         with (
             gen_patch,
             patch(
-                "app.routers.xrpc.run_predict",
+                "app.lib.pipeline.run_predict",
                 new_callable=AsyncMock,
                 return_value=self._rank_result([0.8, 0.6, 0.5, 0.4]),
             ),
@@ -3143,9 +3091,9 @@ class TestSlateCutoffs:
         assert discarded.await_args.args[2] == ["at://p/0", "at://p/1", "at://p/2"]
 
     def test_fail_closed_returns_empty_feed_when_constant_flipped(self, monkeypatch):
-        from app.routers import xrpc as xrpc_mod
+        from app.lib import pipeline as pipeline_mod
 
-        monkeypatch.setattr(xrpc_mod, "EMPTY_SLATE_FAIL_OPEN", False)
+        monkeypatch.setattr(pipeline_mod, "EMPTY_SLATE_FAIL_OPEN", False)
         monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", 0.5)
         candidates = _make_candidates("p", 3, with_embedding=True)
 
@@ -3163,7 +3111,7 @@ class TestSlateCutoffs:
         rank_result = self._rank_result([0.7, 0.6])
         with (
             gen_patch,
-            patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch("app.lib.pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
             patch("app.routers.xrpc.record_discarded_posts", new_callable=AsyncMock),
             patch(
                 "app.routers.xrpc.get_recent_seen_uris",
@@ -3193,7 +3141,7 @@ class TestSlateCutoffs:
         rank_result = self._rank_result([0.5, 0.4])
         with (
             gen_patch,
-            patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch("app.lib.pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
             patch(
                 "app.routers.xrpc.get_recent_discarded_uris", new_callable=AsyncMock
             ) as discarded_fetch,
@@ -3301,7 +3249,7 @@ class TestBestOfFriendsFeed:
 
         with (
             self._patch_generators(candidates),
-            patch("app.routers.xrpc.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch("app.lib.pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
         ):
             data = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -3318,7 +3266,7 @@ class TestBestOfFriendsFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.routers.xrpc.run_predict",
+                "app.lib.pipeline.run_predict",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("inference down"),
             ),
@@ -3344,7 +3292,7 @@ class TestBestOfFriendsFeed:
 
         with (
             self._patch_generators(candidates),
-            patch("app.routers.xrpc.run_predict", side_effect=_slow_run_predict),
+            patch("app.lib.pipeline.run_predict", side_effect=_slow_run_predict),
         ):
             resp = TestClient(app, raise_server_exceptions=False).get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -5052,12 +5000,12 @@ class TestSourceWeightsOverride:
             yield
 
     @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_applies_social_radius_preset_0(self, mock_pipeline, mock_get_user):
         """social_radius=0 (Friends) → followed_users-heavy weights."""
         from ..documents import UserDocument
         from ..feeds import SOCIAL_RADIUS_PRESETS
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5077,12 +5025,12 @@ class TestSourceWeightsOverride:
         assert gen_request.max_age_hours == 12
 
     @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_applies_social_radius_preset_4(self, mock_pipeline, mock_get_user):
         """social_radius=4 (Everyone) → popularity-heavy weights."""
         from ..documents import UserDocument
         from ..feeds import SOCIAL_RADIUS_PRESETS
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5100,14 +5048,14 @@ class TestSourceWeightsOverride:
         assert gen_request.generators == SOCIAL_RADIUS_PRESETS[4]
 
     @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_applies_custom_source_weights(self, mock_pipeline, mock_get_user):
         from ..documents import (
             FeedPreferencesDocument,
             SourceWeightsDocument,
             UserDocument,
         )
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5140,7 +5088,7 @@ class TestSourceWeightsOverride:
 
     @patch("app.routers.xrpc.evaluate_feature_flags")
     @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_cold_start_ignores_social_radius(
         self,
         mock_pipeline,
@@ -5149,7 +5097,7 @@ class TestSourceWeightsOverride:
     ):
         """Cold-start keeps its fixed popularity and average-embedding mix."""
         from ..documents import UserDocument
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5171,12 +5119,12 @@ class TestSourceWeightsOverride:
         mock_feature_flags.assert_not_called()
 
     @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_default_radius_when_missing(self, mock_pipeline, mock_get_user):
         """User doc without social_radius field → defaults to 3 (balanced)."""
         from ..documents import UserDocument
         from ..feeds import DEFAULT_SOCIAL_RADIUS, SOCIAL_RADIUS_PRESETS
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5197,11 +5145,11 @@ class TestSourceWeightsOverride:
         assert gen_request.max_age_hours == 168
 
     @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_no_override_for_non_your_feed(self, mock_pipeline, mock_get_user):
         """best-of-friends is unaffected by social_radius."""
         from ..documents import UserDocument
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5221,11 +5169,11 @@ class TestSourceWeightsOverride:
         assert gen_request.generators[0].weight == 1.0
 
     @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_fallen_back_to_defaults_when_user_has_no_doc(self, mock_pipeline, mock_get_user):
         """User doc is None → no override, defaults used."""
         from ..feeds import DEFAULT_SOCIAL_RADIUS, SOCIAL_RADIUS_PRESETS
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = None
         mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
@@ -5252,7 +5200,7 @@ class TestSourceWeightsOverride:
     )
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_network_likes_presets_only_evaluate_fail_fast_flag(
         self,
         mock_pipeline,
@@ -5263,7 +5211,7 @@ class TestSourceWeightsOverride:
     ):
         from ..documents import UserDocument
         from ..feeds import SOCIAL_RADIUS_PRESETS
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5292,7 +5240,7 @@ class TestSourceWeightsOverride:
     @patch("app.routers.xrpc.evaluate_feature_flags")
     @patch("app.routers.xrpc.get_posthog_client", return_value=None)
     @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_missing_posthog_client_uses_network_likes_defaults(
         self,
         mock_pipeline,
@@ -5303,7 +5251,7 @@ class TestSourceWeightsOverride:
     ):
         from ..documents import UserDocument
         from ..feeds import SOCIAL_RADIUS_PRESETS
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5328,7 +5276,7 @@ class TestSourceWeightsOverride:
     )
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_posthog_client_preserves_explicit_custom_weights(
         self,
         mock_pipeline,
@@ -5341,7 +5289,7 @@ class TestSourceWeightsOverride:
             SourceWeightsDocument,
             UserDocument,
         )
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5423,9 +5371,9 @@ class TestPurposeOverride:
             yield
 
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None)
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_missing_user_uses_balanced_weights(self, mock_pipeline, _mock_get_user):
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_pipeline.return_value = PipelineResult(["at://dummy/1"], [])
 
@@ -5465,7 +5413,7 @@ class TestFeedScopedControls:
         ],
     )
     @patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
-    @patch("app.routers.xrpc._run_ranking_pipeline", new_callable=AsyncMock)
+    @patch("app.lib.pipeline.run_ranking_pipeline", new_callable=AsyncMock)
     def test_pipeline_uses_only_the_selected_feed_preferences(
         self,
         mock_pipeline,
@@ -5475,7 +5423,7 @@ class TestFeedScopedControls:
         expected_weights,
     ):
         from ..documents import FeedPreferencesDocument, UserDocument
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         mock_get_user.return_value = UserDocument(
             user_did="did:plc:testuser",
@@ -5557,7 +5505,7 @@ class TestGetFeedSkeletonMetrics:
         with (
             _patch_unranked_your_feed_generators(candidates),
             patch(
-                "app.routers.xrpc.run_predict",
+                "app.lib.pipeline.run_predict",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("inference down"),
             ),
@@ -5926,7 +5874,7 @@ class TestCandidateBatch:
 
     @pytest.mark.parametrize("has_posthog_client", [False, True])
     def test_initial_candidate_batch(self, has_posthog_client):
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         pipeline = AsyncMock(return_value=PipelineResult([], []))
         flags = {"fail-fast-feed": False}
@@ -5936,7 +5884,7 @@ class TestCandidateBatch:
                 return_value=MagicMock() if has_posthog_client else None,
             ),
             patch("app.routers.xrpc.evaluate_feature_flags", return_value=flags),
-            patch("app.routers.xrpc._run_ranking_pipeline", pipeline),
+            patch("app.lib.pipeline.run_ranking_pipeline", pipeline),
         ):
             response = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -5947,7 +5895,7 @@ class TestCandidateBatch:
         assert pipeline.call_args.args[1].num_candidates == 200
 
     def test_cursor_regeneration_batch(self):
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         cache_id = "candidate-batch-regeneration"
         app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
@@ -5962,7 +5910,7 @@ class TestCandidateBatch:
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
             patch("app.routers.xrpc.evaluate_feature_flags", return_value=flags),
-            patch("app.routers.xrpc._run_ranking_pipeline", pipeline),
+            patch("app.lib.pipeline.run_ranking_pipeline", pipeline),
         ):
             response = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -5977,7 +5925,7 @@ class TestCandidateBatch:
         assert pipeline.call_args.args[1].num_candidates == 200
 
     def test_candidate_batch_for_other_feeds(self):
-        from .xrpc import PipelineResult
+        from ..lib.pipeline import PipelineResult
 
         pipeline = AsyncMock(return_value=PipelineResult([], []))
         evaluate_flags = MagicMock(return_value={"fail-fast-feed": False})
@@ -5985,7 +5933,7 @@ class TestCandidateBatch:
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=posthog_client),
             patch("app.routers.xrpc.evaluate_feature_flags", evaluate_flags),
-            patch("app.routers.xrpc._run_ranking_pipeline", pipeline),
+            patch("app.lib.pipeline.run_ranking_pipeline", pipeline),
         ):
             response = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",

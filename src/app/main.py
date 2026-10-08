@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 from .routers import (
     candidates, diversify, embeddings, feed_transparency, health, llm_query_vectors, rank,
-    redirect, skylight, xrpc,
+    redirect, skylight, slate, xrpc,
 )
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
@@ -278,6 +278,18 @@ A typical integration calls `/candidates/generate`, pipes the result into
 `/rank/predict`, then optionally calls `/diversify` before presenting posts
 to a user.
 
+## Single-call slate generation
+
+`POST /slate/generate` runs the whole pipeline — the same one that serves
+our own Bluesky feeds — in one request, so an integration hosted far from
+us pays one round-trip instead of three. The request body configures every
+stage: which generators to run and how to weight them (including an
+`external` generator for candidates you retrieved yourself), which rank
+models to combine, whether to diversify, and the slate cutoffs. The
+response is one page of ranked posts with their pipeline metadata, a
+`feed_context` token per item for reporting interactions, and a cursor for
+the next page. See the endpoint's own documentation for paging semantics.
+
 ## Content search
 
 The **Skylight** endpoints (`/skylight/search` and `/skylight/similar`)
@@ -318,6 +330,16 @@ _TAGS = [
             "Rerank an ordered candidate list using Maximal Marginal Relevance "
             "(MMR) to reduce topical redundancy while preserving relevance. "
             "Typically called as the final step after ranking."
+        ),
+    },
+    {
+        "name": "slate",
+        "description": (
+            "The whole ranking pipeline in one call: candidate generation (yours "
+            "and ours, weighted), ranking, diversification and slate cutoffs, "
+            "configured per request and paginated with a cursor. For integrations "
+            "that would otherwise chain `/candidates/generate`, `/rank/predict` "
+            "and `/diversify`."
         ),
     },
     {
@@ -470,6 +492,7 @@ app.include_router(health.router)
 app.include_router(llm_query_vectors.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)
+app.include_router(slate.router)
 app.include_router(redirect.router)
 app.include_router(xrpc.router)
 
