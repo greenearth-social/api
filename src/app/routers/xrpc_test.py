@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
+from posthog.feature_flag_evaluations import FeatureFlagEvaluations
 
 from ..documents import (
     FeedCacheDocument,
@@ -39,6 +40,12 @@ from ..models import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _feature_flags(value: bool | str | None) -> MagicMock:
+    flags = MagicMock(spec=FeatureFlagEvaluations)
+    flags.get_flag.return_value = value
+    return flags
 
 
 @pytest.fixture(autouse=True)
@@ -211,8 +218,13 @@ async def test_preview_exclusions_ignore_seen_and_retain_discarded():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("has_posthog_client", [False, True])
+@pytest.mark.parametrize(
+    ("flag_value", "expected_fail_fast"), [(True, True), (False, False), (None, False)]
+)
 async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache(
     has_posthog_client: bool,
+    flag_value: bool | None,
+    expected_fail_fast: bool,
 ):
     from .xrpc import generate_feed_preview
 
@@ -266,6 +278,7 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
 
     pipeline = AsyncMock(side_effect=pipeline_result)
     exclusions = AsyncMock(return_value=["at://already-discarded"])
+    flags = _feature_flags(flag_value)
 
     with (
         patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
@@ -275,8 +288,9 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
         ),
         patch(
             "app.routers.xrpc.evaluate_feature_flags",
-            return_value={"fail-fast-feed": False},
+            return_value=flags,
         ) as evaluate_flags,
+        patch("app.routers.xrpc.set_fail_fast_for_request") as set_fail_fast,
         patch("app.routers.xrpc._generation_exclusions", exclusions),
         patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", pipeline),
         patch(
@@ -311,8 +325,11 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
     if has_posthog_client:
         assert evaluate_flags.call_args.args[1:] == ("did:plc:testuser", ["fail-fast-feed"])
         evaluate_flags.assert_called_once()
+        flags.get_flag.assert_called_once_with("fail-fast-feed")
     else:
         evaluate_flags.assert_not_called()
+        flags.get_flag.assert_not_called()
+    set_fail_fast.assert_called_once_with(expected_fail_fast if has_posthog_client else False)
     exclusions.assert_awaited_once()
     assert exclusions.await_args is not None
     assert exclusions.await_args.kwargs == {"include_seen": False}
@@ -5248,7 +5265,7 @@ class TestSourceWeightsOverride:
     )
     @patch(
         "app.routers.xrpc.evaluate_feature_flags",
-        return_value={"fail-fast-feed": False},
+        return_value=_feature_flags(False),
     )
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
@@ -5324,7 +5341,7 @@ class TestSourceWeightsOverride:
 
     @patch(
         "app.routers.xrpc.evaluate_feature_flags",
-        return_value={"fail-fast-feed": False},
+        return_value=_feature_flags(False),
     )
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
@@ -5929,7 +5946,7 @@ class TestCandidateBatch:
         from .xrpc import PipelineResult
 
         pipeline = AsyncMock(return_value=PipelineResult([], []))
-        flags = {"fail-fast-feed": False}
+        flags = _feature_flags(False)
         with (
             patch(
                 "app.routers.xrpc.get_posthog_client",
@@ -5958,7 +5975,7 @@ class TestCandidateBatch:
         )
         cursor = FeedCursor(id=cache_id, offset=1).encode()
         pipeline = AsyncMock(return_value=PipelineResult([], []))
-        flags = {"fail-fast-feed": False}
+        flags = _feature_flags(False)
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
             patch("app.routers.xrpc.evaluate_feature_flags", return_value=flags),
@@ -5980,7 +5997,7 @@ class TestCandidateBatch:
         from .xrpc import PipelineResult
 
         pipeline = AsyncMock(return_value=PipelineResult([], []))
-        evaluate_flags = MagicMock(return_value={"fail-fast-feed": False})
+        evaluate_flags = MagicMock(return_value=_feature_flags(False))
         posthog_client = MagicMock()
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=posthog_client),
@@ -6039,12 +6056,13 @@ class TestFailFastFeatureFlag:
     def test_flag_enabled_calls_set_fail_fast_true(self, limit):
         """When PostHog returns True for the user, set_fail_fast_for_request(True) is called."""
         mock_ph = MagicMock()
+        flags = _feature_flags(True)
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
             patch(
                 "app.routers.xrpc.evaluate_feature_flags",
-                return_value={"fail-fast-feed": True},
+                return_value=flags,
             ) as evaluate_flags,
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
@@ -6055,17 +6073,19 @@ class TestFailFastFeatureFlag:
 
         assert response.status_code == 200
         evaluate_flags.assert_called_once_with(mock_ph, "did:plc:testuser", ["fail-fast-feed"])
+        flags.get_flag.assert_called_once_with("fail-fast-feed")
         mock_set.assert_called_once_with(True)
 
     @pytest.mark.parametrize("feed_uri", [RANKED_FEED_URI, BEST_OF_FRIENDS_FEED_URI])
     @pytest.mark.parametrize("limit", [2, 8])
     def test_explore_previews_use_defaults_without_evaluating_flags(self, feed_uri, limit):
         """Explore prefetches skip PostHog even for users whose flag would be enabled."""
+        flags = _feature_flags(True)
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
             patch(
                 "app.routers.xrpc.evaluate_feature_flags",
-                return_value={"fail-fast-feed": True},
+                return_value=flags,
             ) as evaluate_flags,
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
@@ -6076,6 +6096,7 @@ class TestFailFastFeatureFlag:
 
         assert response.status_code == 200
         evaluate_flags.assert_not_called()
+        flags.get_flag.assert_not_called()
         mock_set.assert_called_once_with(False)
 
     @pytest.mark.parametrize("limit", [2, 8])
@@ -6096,12 +6117,13 @@ class TestFailFastFeatureFlag:
         )
         cursor = FeedCursor(id=cache_id, offset=1).encode()
         mock_ph = MagicMock()
+        flags = _feature_flags(True)
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
             patch(
                 "app.routers.xrpc.evaluate_feature_flags",
-                return_value={"fail-fast-feed": True},
+                return_value=flags,
             ) as evaluate_flags,
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
@@ -6113,17 +6135,23 @@ class TestFailFastFeatureFlag:
         assert response.status_code == 200
         assert [item["post"] for item in response.json()["feed"]] == uris[1 : 1 + limit]
         evaluate_flags.assert_called_once_with(mock_ph, "did:plc:testuser", ["fail-fast-feed"])
+        flags.get_flag.assert_called_once_with("fail-fast-feed")
         mock_set.assert_called_once_with(True)
 
-    def test_flag_disabled_calls_set_fail_fast_false(self):
-        """When PostHog returns False, set_fail_fast_for_request(False) is called."""
+    @pytest.mark.parametrize(
+        ("flag_value", "expected_fail_fast"),
+        [(False, False), (None, False), ("enabled", True), ("", False)],
+    )
+    def test_flag_value_preserves_boolean_coercion(self, flag_value, expected_fail_fast):
+        """Missing flags and multivariate values keep their previous boolean behavior."""
         mock_ph = MagicMock()
+        flags = _feature_flags(flag_value)
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
             patch(
                 "app.routers.xrpc.evaluate_feature_flags",
-                return_value={"fail-fast-feed": False},
+                return_value=flags,
             ),
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
@@ -6132,12 +6160,31 @@ class TestFailFastFeatureFlag:
                 params={"feed": RANKED_FEED_URI},
             )
 
+        flags.get_flag.assert_called_once_with("fail-fast-feed")
+        mock_set.assert_called_once_with(expected_fail_fast)
+
+    def test_failed_flag_evaluation_calls_set_fail_fast_false(self):
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.evaluate_feature_flags", return_value=None),
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        assert response.status_code == 200
         mock_set.assert_called_once_with(False)
 
     def test_none_posthog_client_calls_set_fail_fast_false(self):
         """When PostHog client is None (local dev), set_fail_fast_for_request(False) is called."""
+        flags = _feature_flags(True)
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=None),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags", return_value=flags
+            ) as evaluate_flags,
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
             client.get(
@@ -6145,6 +6192,8 @@ class TestFailFastFeatureFlag:
                 params={"feed": RANKED_FEED_URI},
             )
 
+        evaluate_flags.assert_not_called()
+        flags.get_flag.assert_not_called()
         mock_set.assert_called_once_with(False)
 
 
@@ -6238,8 +6287,14 @@ class TestLoggedOut:
 
     def test_random_feed_records_nothing_for_an_anonymous_caller(self):
         candidates = _make_candidates("did:plc:a", 5, "random_posts")
+        flags = _feature_flags(True)
         with (
             self._patch_random_generator(candidates),
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags", return_value=flags
+            ) as evaluate_flags,
+            patch("app.routers.xrpc.set_fail_fast_for_request") as set_fail_fast,
             patch("app.routers.xrpc.get_user", new_callable=AsyncMock) as get_user_mock,
             patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock) as upsert_mock,
             patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock) as snapshot_mock,
@@ -6250,6 +6305,9 @@ class TestLoggedOut:
             )
 
         assert resp.status_code == 200
+        evaluate_flags.assert_not_called()
+        flags.get_flag.assert_not_called()
+        set_fail_fast.assert_called_once_with(False)
         get_user_mock.assert_not_awaited()
         upsert_mock.assert_not_awaited()
         snapshot_mock.assert_not_awaited()

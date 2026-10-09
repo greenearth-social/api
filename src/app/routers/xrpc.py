@@ -1134,9 +1134,11 @@ async def generate_feed_preview(
             [FAIL_FAST_FLAG],
         )
         if posthog_client is not None
-        else {}
+        else None
     )
-    set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
+    set_fail_fast_for_request(
+        bool(feature_flags.get_flag(FAIL_FAST_FLAG)) if feature_flags is not None else False
+    )
 
     configured = _configured_generation(
         feed_name,
@@ -1797,7 +1799,7 @@ async def get_feed_skeleton(
     # the flag defaults instead.
     feature_flag_list = [FAIL_FAST_FLAG]
     if is_explore_preview:
-        feature_flags = {key: False for key in feature_flag_list}
+        feature_flags = None
     else:
         feature_flags = (
             await asyncio.to_thread(
@@ -1807,9 +1809,11 @@ async def get_feed_skeleton(
                 feature_flag_list,
             )
             if posthog_client is not None and not is_anonymous
-            else {}
+            else None
         )
-    set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
+    set_fail_fast_for_request(
+        bool(feature_flags.get_flag(FAIL_FAST_FLAG)) if feature_flags is not None else False
+    )
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades

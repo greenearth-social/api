@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from posthog import Posthog
+from posthog.feature_flag_evaluations import FeatureFlagEvaluations
 
 from app.lib.posthog_client import (
     EVENT_SCHEMA_VERSION,
@@ -212,11 +214,10 @@ def test_feature_flags_are_still_evaluated_on_the_did():
     # A rename must not re-roll a user's flag bucket, so flag evaluation stays
     # keyed on the DID even though the handle now rides along on every event.
     mock = MagicMock()
-    mock.get_all_flags.return_value = {FAIL_FAST_FLAG: True, SECONDARY_TEST_FLAG: True}
     evaluate_feature_flags(mock, USER_DID, [FAIL_FAST_FLAG, SECONDARY_TEST_FLAG])
-    mock.get_all_flags.assert_called_once_with(
+    mock.evaluate_flags.assert_called_once_with(
         USER_DID,
-        flag_keys_to_evaluate=[FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
+        flag_keys=[FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
     )
 
 
@@ -310,23 +311,18 @@ def test_real_posthog_client_is_disabled_in_tests():
     assert client.disabled is True
 
 
-def test_evaluate_feature_flags_none_client_returns_false_values():
+def test_evaluate_feature_flags_none_client_returns_no_snapshot():
     assert evaluate_feature_flags(
         None,
         "did:plc:abc123",
         [FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
-    ) == {
-        FAIL_FAST_FLAG: False,
-        SECONDARY_TEST_FLAG: False,
-    }
+    ) is None
 
 
-def test_evaluate_feature_flags_uses_one_sdk_request():
+def test_evaluate_feature_flags_uses_one_sdk_request_without_accessing_flags():
     mock = MagicMock()
-    mock.get_all_flags.return_value = {
-        FAIL_FAST_FLAG: False,
-        SECONDARY_TEST_FLAG: True,
-    }
+    flags = MagicMock(spec=FeatureFlagEvaluations)
+    mock.evaluate_flags.return_value = flags
 
     result = evaluate_feature_flags(
         mock,
@@ -334,27 +330,50 @@ def test_evaluate_feature_flags_uses_one_sdk_request():
         [FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
     )
 
-    assert result == {
-        FAIL_FAST_FLAG: False,
-        SECONDARY_TEST_FLAG: True,
-    }
-    mock.get_all_flags.assert_called_once_with(
+    assert result is flags
+    flags.get_flag.assert_not_called()
+    flags.is_enabled.assert_not_called()
+    mock.evaluate_flags.assert_called_once_with(
         "did:plc:abc123",
-        flag_keys_to_evaluate=[FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
+        flag_keys=[FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
     )
 
 
-def test_evaluate_feature_flags_sdk_exception_returns_false_values():
+def test_evaluate_feature_flags_sdk_exception_returns_no_snapshot():
     mock = MagicMock()
-    mock.get_all_flags.side_effect = RuntimeError("network error")
+    mock.evaluate_flags.side_effect = RuntimeError("network error")
     assert evaluate_feature_flags(
         mock,
         "did:plc:abc123",
         [FAIL_FAST_FLAG, SECONDARY_TEST_FLAG],
-    ) == {
-        FAIL_FAST_FLAG: False,
-        SECONDARY_TEST_FLAG: False,
-    }
+    ) is None
+
+
+@pytest.mark.parametrize("value", [True, False, "variant", "", None])
+def test_evaluated_flags_emit_exposure_only_when_accessed(value):
+    # Exercise the real SDK snapshot while mocking both HTTP and event capture.
+    client = Posthog("phc_test", send=False)
+    response = {"featureFlags": {SECONDARY_TEST_FLAG: True}}
+    if value is not None:
+        response["featureFlags"][FAIL_FAST_FLAG] = value
+    with (
+        patch("posthog.client.flags", return_value=response) as request,
+        patch.object(client, "capture") as capture,
+        patch.object(client, "disabled", False),
+    ):
+        flags = evaluate_feature_flags(client, USER_DID, [FAIL_FAST_FLAG, SECONDARY_TEST_FLAG])
+        assert flags is not None
+        request.assert_called_once()
+        capture.assert_not_called()
+
+        assert bool(flags.get_flag(FAIL_FAST_FLAG)) is bool(value)
+
+    capture.assert_called_once()
+    assert capture.call_args.args == ("$feature_flag_called",)
+    assert capture.call_args.kwargs["distinct_id"] == USER_DID
+    properties = capture.call_args.kwargs["properties"]
+    assert properties["$feature_flag"] == FAIL_FAST_FLAG
+    assert properties["$feature_flag_response"] == value
 
 
 def test_llm_cg_enabled_is_closed_without_posthog_client(monkeypatch):
@@ -365,20 +384,25 @@ def test_llm_cg_enabled_is_closed_without_posthog_client(monkeypatch):
 def test_llm_cg_enabled_local_override_opens_it(monkeypatch):
     monkeypatch.setenv("GE_LLM_CG_OPEN", "true")
     assert llm_cg_enabled(None, USER_DID) is True
-
-
-def test_llm_cg_enabled_follows_the_flag(monkeypatch):
-    monkeypatch.delenv("GE_LLM_CG_OPEN", raising=False)
     mock = MagicMock()
-    mock.get_all_flags.return_value = {"llm-cg": True}
     assert llm_cg_enabled(mock, USER_DID) is True
-    mock.get_all_flags.assert_called_once_with(USER_DID, flag_keys_to_evaluate=["llm-cg"])
+    mock.evaluate_flags.assert_not_called()
 
 
-def test_llm_cg_enabled_is_closed_when_flag_missing_or_failing(monkeypatch):
+@pytest.mark.parametrize("value", [True, False, "variant", "", None])
+def test_llm_cg_enabled_follows_the_flag(monkeypatch, value):
     monkeypatch.delenv("GE_LLM_CG_OPEN", raising=False)
     mock = MagicMock()
-    mock.get_all_flags.return_value = {}
-    assert llm_cg_enabled(mock, USER_DID) is False
-    mock.get_all_flags.side_effect = RuntimeError("quota")
+    flags = MagicMock(spec=FeatureFlagEvaluations)
+    flags.get_flag.return_value = value
+    mock.evaluate_flags.return_value = flags
+    assert llm_cg_enabled(mock, USER_DID) is bool(value)
+    mock.evaluate_flags.assert_called_once_with(USER_DID, flag_keys=["llm-cg"])
+    flags.get_flag.assert_called_once_with("llm-cg")
+
+
+def test_llm_cg_enabled_is_closed_when_evaluation_fails(monkeypatch):
+    monkeypatch.delenv("GE_LLM_CG_OPEN", raising=False)
+    mock = MagicMock()
+    mock.evaluate_flags.side_effect = RuntimeError("quota")
     assert llm_cg_enabled(mock, USER_DID) is False
