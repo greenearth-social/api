@@ -12,6 +12,7 @@ from .diversify import (
     _cosine_similarity,
     _pairwise_cosine_similarities,
     mmr_rerank,
+    mmr_weights,
 )
 from .embeddings import encode_float32_b64
 from .feed_debug import FeedDebugRecorder, feed_debug_scope
@@ -32,6 +33,60 @@ def _post_with_embed(uri: str, score: float, author_did: str, vec: list[float]) 
 
 def test_empty_input_returns_empty():
     assert mmr_rerank([]) == []
+
+
+@pytest.mark.parametrize(
+    ("author_setting", "topic_setting", "expected"),
+    [
+        (0.0, 0.0, (1.0, 0.0, 0.0)),
+        (0.7, 0.7, (0.3, 0.35, 0.35)),
+        (1.0, 1.0, (0.0, 0.5, 0.5)),
+        (1.0, 0.0, (0.5, 0.5, 0.0)),
+    ],
+)
+def test_mmr_weights_map_independent_ui_settings(author_setting, topic_setting, expected):
+    assert mmr_weights(author_setting, topic_setting) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(("author_setting", "topic_setting"), [(-0.1, 0.5), (0.5, 1.1)])
+def test_mmr_weights_reject_out_of_range_settings(author_setting, topic_setting):
+    with pytest.raises(ValueError):
+        mmr_weights(author_setting, topic_setting)
+
+
+def test_author_setting_changes_author_order_without_topic_penalty():
+    posts = [
+        _post("at://alice/1", 1.0, "did:plc:alice"),
+        _post("at://alice/2", 0.9, "did:plc:alice"),
+        _post("at://bob/1", 0.5, "did:plc:bob"),
+    ]
+
+    relevance_only = mmr_rerank(posts, author_penalty=0.0, topic_penalty=0.0)
+    author_diverse = mmr_rerank(posts, author_penalty=1.0, topic_penalty=0.0)
+
+    assert [post.at_uri for post, _ in relevance_only] == [
+        "at://alice/1",
+        "at://alice/2",
+        "at://bob/1",
+    ]
+    assert [post.at_uri for post, _ in author_diverse] == [
+        "at://alice/1",
+        "at://bob/1",
+        "at://alice/2",
+    ]
+
+
+def test_recorder_captures_applied_settings_and_weights():
+    posts = [_post("at://a/1", 1.0, "did:plc:a"), _post("at://b/1", 0.5, "did:plc:b")]
+    rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+    with feed_debug_scope(rec):
+        mmr_rerank(posts, author_penalty=0.2, topic_penalty=0.8)
+
+    assert rec.author_penalty_setting == 0.2
+    assert rec.topic_penalty_setting == 0.8
+    assert rec.relevance_weight == pytest.approx(0.5)
+    assert rec.author_penalty_weight == pytest.approx(0.1)
+    assert rec.topic_penalty_weight == pytest.approx(0.4)
 
 
 def test_single_candidate_unchanged():
@@ -138,6 +193,7 @@ def test_equal_scores_diversity_drives_selection():
 # _cosine_similarity unit tests
 # ---------------------------------------------------------------------------
 
+
 def test_cosine_identical_vectors():
     assert _cosine_similarity([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
 
@@ -174,6 +230,7 @@ def test_pairwise_cosine_matrix_matches_scalar_implementation():
 # ---------------------------------------------------------------------------
 # mmr_rerank with cosine similarity active
 # ---------------------------------------------------------------------------
+
 
 def test_cosine_penalizes_topically_similar_cross_author_post():
     """A post from a different author but with an identical embedding is penalized
@@ -214,6 +271,7 @@ def test_content_penalty_decays_after_intervening_selection():
 # ---------------------------------------------------------------------------
 # per-pick scores
 # ---------------------------------------------------------------------------
+
 
 def test_first_pick_score_is_weighted_normalized_relevance():
     """The first pick carries no penalties: score = (1-BETA) * norm_relevance."""
@@ -267,6 +325,7 @@ def test_cosine_similarity_value_matches_manual_calculation():
 # ---------------------------------------------------------------------------
 # Similarity score
 # ---------------------------------------------------------------------------
+
 
 class TestMmrRerankSimilarityScore:
     def test_single_candidate_short_circuits_without_diag(self):

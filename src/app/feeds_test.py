@@ -104,10 +104,9 @@ class TestFeedsRegistry:
             assert sum(weights.values()) == pytest.approx(1.0)
 
     def test_friends_social_radius_has_no_everyone_generators(self):
-        assert [
-            (generator.name, generator.weight)
-            for generator in SOCIAL_RADIUS_PRESETS[0]
-        ] == [("followed_users", 1.0)]
+        assert [(generator.name, generator.weight) for generator in SOCIAL_RADIUS_PRESETS[0]] == [
+            ("followed_users", 1.0)
+        ]
 
     def test_static_feed_defaults_include_network_likes(self):
         assert (
@@ -117,9 +116,7 @@ class TestFeedsRegistry:
 
     def test_social_radius_presets_include_network_likes_outside_friends(self):
         for radius in range(1, 5):
-            generators = {
-                generator.name for generator in SOCIAL_RADIUS_PRESETS[radius]
-            }
+            generators = {generator.name for generator in SOCIAL_RADIUS_PRESETS[radius]}
             assert "network_likes" in generators
 
     def test_no_collision_between_internal_rkeys_and_primary_rkeys(self):
@@ -149,12 +146,12 @@ class TestFeedsRegistry:
                 "perspective",
             ]
 
-    def test_ranked_feeds_have_slate_cutoffs(self):
+    def test_ranked_feeds_keep_quality_cutoffs_but_do_not_stop_on_mmr_score(self):
         for feed_name in ("your-feed", "best-of-friends"):
             cfg = FEEDS[feed_name]
             assert cfg.max_render_share is not None
             assert cfg.min_rank_score == pytest.approx(0.425)
-            assert cfg.min_mmr_score is not None
+            assert cfg.min_mmr_score is None
 
     def test_cold_start_feed_uses_empty_history_models(self):
         cfg = FEEDS["cold-start"]

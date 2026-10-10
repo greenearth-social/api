@@ -9,6 +9,8 @@ FeedControlName = Literal[
     "freshness",
     "politics",
     "purpose",
+    "author_penalty",
+    "topic_penalty",
 ]
 
 # What a feed does when the AppView calls getFeedSkeleton with no (or an
@@ -151,9 +153,9 @@ class CandidateGenerateRequest(BaseModel):
             "the user in previous pages)."
         ),
     )
-    hydrate_embeddings: bool = Field(default=False,
-
-        description="When true, refetches the 384-dim embedding arrays for the final candidates."
+    hydrate_embeddings: bool = Field(
+        default=False,
+        description="When true, refetches the 384-dim embedding arrays for the final candidates.",
     )
 
     infill: str | None = Field(
@@ -302,6 +304,18 @@ class FeedConfig(BaseModel):
         description="When set, candidates are ranked by this model before being returned.",
     )
     diversify: bool = Field(True, description="When False, MMR reranking is skipped.")
+    author_penalty_setting: float = Field(
+        0.7,
+        ge=0.0,
+        le=1.0,
+        description="Request-local author-diversity setting exposed to users as 0..1.",
+    )
+    topic_penalty_setting: float = Field(
+        0.7,
+        ge=0.0,
+        le=1.0,
+        description="Request-local topic-diversity setting exposed to users as 0..1.",
+    )
     accepts_interactions: bool = Field(
         True,
         description="When True, the published record declares acceptsInteractions so the "

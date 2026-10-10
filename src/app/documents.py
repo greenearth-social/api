@@ -41,9 +41,7 @@ class SourceWeightsDocument(BaseModel):
 
     @model_validator(mode="after")
     def weights_sum_to_one(self) -> SourceWeightsDocument:
-        total = (
-            self.following + self.network_likes + self.authors_topics + self.popular + self.llm
-        )
+        total = self.following + self.network_likes + self.authors_topics + self.popular + self.llm
         if abs(total - 1.0) > 1e-6:
             raise ValueError("source weights must sum to 1.0")
         return self
@@ -62,6 +60,8 @@ class FeedPreferencesDocument(BaseModel):
     freshness: int | None = Field(default=None, ge=0, le=5)
     politics: float | None = Field(default=None, ge=0.0, le=2.0)
     purpose: float | None = Field(default=None, ge=0.0, le=1.0)
+    author_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class UserDocument(BaseModel):
@@ -461,6 +461,11 @@ class FeedDebugDiversificationEntry(BaseModel):
         description="Combined author+content similarity to already-selected items "
         "(0=no similarity; higher=less diverse; not capped at 1)",
     )
+    author_penalty_setting: float = Field(default=0.7, ge=0.0, le=1.0)
+    topic_penalty_setting: float = Field(default=0.7, ge=0.0, le=1.0)
+    relevance_weight: float = Field(default=0.3, ge=0.0, le=1.0)
+    author_penalty_weight: float = Field(default=0.35, ge=0.0, le=0.5)
+    topic_penalty_weight: float = Field(default=0.35, ge=0.0, le=0.5)
 
 
 class FeedDebugDocument(BaseModel):
@@ -569,6 +574,11 @@ class DiversificationMeta(BaseModel):
     author_penalty: float = 0.0
     content_penalty: float = 0.0
     similarity_score: float = 0.0
+    author_penalty_setting: float = Field(default=0.7, ge=0.0, le=1.0)
+    topic_penalty_setting: float = Field(default=0.7, ge=0.0, le=1.0)
+    relevance_weight: float = Field(default=0.3, ge=0.0, le=1.0)
+    author_penalty_weight: float = Field(default=0.35, ge=0.0, le=0.5)
+    topic_penalty_weight: float = Field(default=0.35, ge=0.0, le=0.5)
 
 
 class GeneratorMeta(BaseModel):
