@@ -330,6 +330,18 @@ class TestSync:
         fetch.assert_not_called()
 
 
+class TestLogin:
+    def test_client_allows_slow_video_uploads(self):
+        """A large video blob must not trip httpx's 5-second default on a slow uplink."""
+        with patch.object(managed_posts.Client, "login") as login:
+            client = managed_posts.login("did:plc:publisher", "app-password")
+
+        login.assert_called_once_with("did:plc:publisher", "app-password")
+        timeout = client.request._client.timeout
+        assert timeout.write is not None and timeout.write >= managed_posts.UPLOAD_TIMEOUT_SECONDS
+        assert timeout.read is not None and timeout.read >= managed_posts.UPLOAD_TIMEOUT_SECONDS
+
+
 class TestResolve:
     def test_require_complete_fails_when_a_post_is_unpublished(self, manifest_path):
         with (
