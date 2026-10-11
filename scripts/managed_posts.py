@@ -24,13 +24,18 @@ import re
 import subprocess
 import sys
 
-from atproto import Client, client_utils, models
+import httpx
+from atproto import Client, Request, client_utils, models
 
 POST_COLLECTION = "app.bsky.feed.post"
 # Gates are separate records keyed by the rkey of the post they govern, so they can
 # be applied to an already-published post without changing its URI.
 THREADGATE_COLLECTION = "app.bsky.feed.threadgate"
 POSTGATE_COLLECTION = "app.bsky.feed.postgate"
+
+# Video posts upload their whole MP4 as one blob; httpx's 5-second default lets a
+# slow uplink stall a single write past the deadline.
+UPLOAD_TIMEOUT_SECONDS = 300.0
 
 LINK_RE = re.compile(r"\[(\[[^\]]+\]|[^\]]+)\]\((https?://[^)]+)\)")
 
@@ -160,7 +165,7 @@ def list_repo_posts(client: Client, repo_did: str) -> list[object]:
 
 def login(handle: str, password: str) -> Client:
     """Authenticate against Bluesky and return the client."""
-    client = Client()
+    client = Client(request=Request(timeout=httpx.Timeout(UPLOAD_TIMEOUT_SECONDS)))
     client.login(handle, password)
     return client
 
