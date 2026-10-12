@@ -263,7 +263,9 @@ def test_fit_quota_failure_is_503(mock_fit, mock_add, client, quota, metrics, fa
     response = client.post(PATH, json={"prompt": "science"})
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "Firestore unavailable"}
+    assert response.json() == {
+        "detail": "Unable to verify or reserve query-vector quota. Please try again."
+    }
     mock_fit.assert_not_awaited()
     mock_add.assert_not_awaited()
     assert metrics.record.call_args_list == [
