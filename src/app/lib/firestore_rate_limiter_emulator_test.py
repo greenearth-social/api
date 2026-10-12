@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -12,13 +12,19 @@ from google.api_core.exceptions import Aborted
 from google.auth.credentials import AnonymousCredentials
 from google.cloud.firestore import AsyncClient
 
-from . import llm_query_vector_limits as limits
+from . import firestore_rate_limiter as limits
 from .firestore import USERS_COLLECTION, user_doc_id
 
 pytestmark = pytest.mark.asyncio
 
 FIXED_NOW = datetime(2026, 10, 7, 12, tzinfo=UTC)
 USER_DIDS = tuple(f"did:plc:quota-test-{index}" for index in range(4))
+LIMITER = limits.FirestoreRateLimiter(
+    name="concurrency_test",
+    user_limit=4,
+    user_window=timedelta(hours=2),
+    global_daily_limit=200,
+)
 
 
 def _user_quota_ref(db: AsyncClient, user_did: str):
@@ -26,19 +32,17 @@ def _user_quota_ref(db: AsyncClient, user_did: str):
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
         .collection(limits.RATE_LIMITS_COLLECTION)
-        .document(limits.FIT_QUOTA_DOCUMENT)
+        .document(LIMITER.name)
     )
 
 
 def _daily_quota_ref(db: AsyncClient):
-    return db.collection(limits.GLOBAL_FIT_QUOTA_COLLECTION).document(
-        FIXED_NOW.date().isoformat()
-    )
+    return db.collection(f"{LIMITER.name}_daily").document(FIXED_NOW.date().isoformat())
 
 
 def _completed_decisions(
-    results: list[limits.FitQuotaDecision | BaseException],
-) -> list[limits.FitQuotaDecision]:
+    results: list[limits.QuotaDecision | BaseException],
+) -> list[limits.QuotaDecision]:
     decisions = []
     for result in results:
         if isinstance(result, BaseException):
@@ -61,7 +65,7 @@ async def quota_db(monkeypatch):
     # credentials. A unique demo project also isolates simultaneous test runs.
     monkeypatch.setenv("FIRESTORE_EMULATOR_HOST", emulator_host)
     db = AsyncClient(
-        project=f"demo-query-quota-{uuid4().hex[:12]}",
+        project=f"demo-rate-limit-{uuid4().hex[:12]}",
         database="(default)",
         credentials=AnonymousCredentials(),
     )
@@ -81,14 +85,11 @@ async def quota_db(monkeypatch):
 async def test_concurrent_user_reservations_do_not_exceed_cap(quota_db, remaining_slots):
     user_ref = _user_quota_ref(quota_db, USER_DIDS[0])
     daily_ref = _daily_quota_ref(quota_db)
-    await user_ref.set({"attempts": [FIXED_NOW] * (limits.USER_FIT_LIMIT - remaining_slots)})
+    await user_ref.set({"attempts": [FIXED_NOW] * (LIMITER.user_limit - remaining_slots)})
     await daily_ref.set({"count": 100})
 
     results = await asyncio.gather(
-        *(
-            limits.reserve_fit_quota(quota_db, USER_DIDS[0])
-            for _ in range(remaining_slots + 1)
-        ),
+        *(LIMITER.reserve(quota_db, USER_DIDS[0]) for _ in range(remaining_slots + 1)),
         return_exceptions=True,
     )
     decisions = _completed_decisions(results)
@@ -100,25 +101,25 @@ async def test_concurrent_user_reservations_do_not_exceed_cap(quota_db, remainin
         for decision in decisions
         if decision.exhausted_scopes
     )
-    assert (await user_ref.get()).to_dict() == {"attempts": [FIXED_NOW] * limits.USER_FIT_LIMIT}
+    assert (await user_ref.get()).to_dict() == {"attempts": [FIXED_NOW] * LIMITER.user_limit}
     assert (await daily_ref.get()).to_dict() == {"count": 100 + remaining_slots}
 
 
 @pytest.mark.parametrize("remaining_slots", [1, 2])
 async def test_concurrent_users_do_not_exceed_global_cap(quota_db, remaining_slots):
     daily_ref = _daily_quota_ref(quota_db)
-    await daily_ref.set({"count": limits.GLOBAL_DAILY_FIT_LIMIT - remaining_slots})
+    await daily_ref.set({"count": LIMITER.global_daily_limit - remaining_slots})
 
     user_dids = USER_DIDS[: remaining_slots + 1]
     results = await asyncio.gather(
-        *(limits.reserve_fit_quota(quota_db, user_did) for user_did in user_dids),
+        *(LIMITER.reserve(quota_db, user_did) for user_did in user_dids),
         return_exceptions=True,
     )
     decisions = _completed_decisions(results)
 
     assert sum(not decision.exhausted_scopes for decision in decisions) == remaining_slots
     assert sum(decision.reached_scopes == ("global",) for decision in decisions) == 1
-    assert (await daily_ref.get()).to_dict() == {"count": limits.GLOBAL_DAILY_FIT_LIMIT}
+    assert (await daily_ref.get()).to_dict() == {"count": LIMITER.global_daily_limit}
     for user_did, result in zip(user_dids, results, strict=True):
         user_snapshot = await _user_quota_ref(quota_db, user_did).get()
         if isinstance(result, BaseException):

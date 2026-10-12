@@ -14,7 +14,7 @@ updated document, so the newest fit is the one that serves.
 import asyncio
 import logging
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -22,8 +22,8 @@ from pydantic import BaseModel, Field
 
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import add_llm_query_vector, get_latest_llm_query_vector
+from ..lib.firestore_rate_limiter import FirestoreRateLimiter, QuotaScope
 from ..lib.llm_query_vector_fit import FitError, PoolTooSmallError, fit_query_vector
-from ..lib.llm_query_vector_limits import QuotaScope, reserve_fit_quota
 from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import get_posthog_client, llm_cg_enabled
 
@@ -41,6 +41,12 @@ MAX_PROMPT_CHARS = 2000
 # day could run past Cloud Run's 60 s and finish, and store, after the caller
 # already got a 504.
 FIT_TIMEOUT_S = 25.0
+FIT_RATE_LIMITER = FirestoreRateLimiter(
+    name="llm_query_vector_fit",
+    user_limit=12,
+    user_window=timedelta(hours=6),
+    global_daily_limit=1000,
+)
 
 
 async def require_llm_cg_user(user_doc_id: FirebaseUser) -> str:
@@ -154,7 +160,7 @@ async def fit_llm_query_vector(
         raise HTTPException(status_code=422, detail="prompt must not be blank")
 
     try:
-        quota = await reserve_fit_quota(db, user_did)
+        quota = await FIT_RATE_LIMITER.reserve(db, user_did)
     except Exception as exc:
         logger.exception("llm_qv_fit quota unavailable", extra={"user_did": user_did})
         raise HTTPException(status_code=503, detail="Firestore unavailable") from exc

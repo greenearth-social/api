@@ -120,13 +120,13 @@ frontend; `GE_FIRESTORE_EMULATOR_HOST` ensures requests do not reach production.
 > Add `--export-on-exit` / `--import` flags if you want persistence between
 > sessions.
 
-### Query-vector quota concurrency tests
+### Firestore rate-limiter concurrency tests
 
 With the emulator running, execute these opt-in tests from `api/`:
 
 ```bash
 FIRESTORE_QUOTA_TEST_EMULATOR_HOST=127.0.0.1:8080 \
-  pipenv run pytest src/app/lib/llm_query_vector_limits_emulator_test.py -v
+  pipenv run pytest src/app/lib/firestore_rate_limiter_emulator_test.py -v
 ```
 
 These tests require an explicit emulator address, use anonymous credentials and
@@ -135,6 +135,12 @@ Without the explicit test environment variable they are skipped, including in
 the normal test suite.
 
 ## LLM Query-Vector Fit Limits
+
+`src/app/lib/firestore_rate_limiter.py` provides a reusable `FirestoreRateLimiter`
+with a configurable rolling per-user window and global UTC calendar-day cap.
+Each limiter's name isolates its counters at
+`users/{user_doc_id}/rate_limits/{name}` and `{name}_daily/{YYYY-MM-DD}`.
+The query-vector endpoint configures it with the name `llm_query_vector_fit`.
 
 `POST /api/feeds/llm-query-vectors/fit` admits at most 12 attempts per user in a
 rolling six hours and 1,000 attempts globally per UTC calendar day. Firestore

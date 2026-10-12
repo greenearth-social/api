@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -14,14 +15,20 @@ from google.api_core.exceptions import Aborted
 from starlette.requests import Request
 
 from ..routers import llm_query_vectors as router
-from . import llm_query_vector_limits as limits
+from . import firestore_rate_limiter as limits
+from .firestore_rate_limiter import FirestoreRateLimiter, QuotaDecision
 from .llm_query_vector_fit import FitError, PoolTooSmallError
-from .llm_query_vector_limits import FitQuotaDecision, reserve_fit_quota
 
 NOW = datetime(2026, 10, 7, 12, tzinfo=UTC)
 USER_DID = "did:plc:quota-user"
-USER_PATH = "users/quota-user/rate_limits/llm_query_vector_fit"
-DAILY_PATH = "llm_query_vector_fit_daily/2026-10-07"
+LIMITER = FirestoreRateLimiter(
+    name="example_action",
+    user_limit=12,
+    user_window=timedelta(hours=6),
+    global_daily_limit=1000,
+)
+USER_PATH = "users/quota-user/rate_limits/example_action"
+DAILY_PATH = "example_action_daily/2026-10-07"
 
 
 class QuotaStore:
@@ -88,11 +95,76 @@ def clock(monkeypatch):
     return clock
 
 
+@pytest.mark.parametrize(
+    "invalid_config",
+    [
+        {"name": ""},
+        {"name": "/"},
+        {"name": "nested/action"},
+        {"user_limit": 0},
+        {"user_limit": -1},
+        {"global_daily_limit": 0},
+        {"global_daily_limit": -1},
+        {"user_window": timedelta(0)},
+        {"user_window": timedelta(seconds=-1)},
+    ],
+)
+def test_invalid_configuration_is_rejected(invalid_config):
+    with pytest.raises(ValueError):
+        replace(LIMITER, **invalid_config)
+
+
+@pytest.mark.asyncio
+async def test_configured_limits_and_window_control_admission_and_retry(store, clock):
+    limiter = replace(
+        LIMITER, user_limit=2, user_window=timedelta(minutes=15), global_daily_limit=3
+    )
+
+    assert await limiter.reserve(store.db, USER_DID) == QuotaDecision()
+    second_attempt = NOW + timedelta(minutes=1)
+    clock.now.return_value = second_attempt
+    assert await limiter.reserve(store.db, USER_DID) == QuotaDecision(reached_scopes=("user",))
+
+    expiry = NOW + timedelta(minutes=15)
+    assert await limiter.reserve(store.db, USER_DID) == QuotaDecision(
+        exhausted_scopes=("user",), retry_at=expiry
+    )
+
+    clock.now.return_value = expiry
+    assert await limiter.reserve(store.db, USER_DID) == QuotaDecision(
+        reached_scopes=("user", "global")
+    )
+    assert store.documents[USER_PATH] == {"attempts": [second_attempt, expiry]}
+    assert store.documents[DAILY_PATH] == {"count": 3}
+    assert await limiter.reserve(store.db, "did:plc:other-user") == QuotaDecision(
+        exhausted_scopes=("global",), retry_at=datetime(2026, 10, 8, tzinfo=UTC)
+    )
+
+
+@pytest.mark.asyncio
+async def test_feature_names_keep_user_and_global_counters_independent(store):
+    first = replace(LIMITER, user_limit=1, global_daily_limit=1)
+    second = replace(first, name="other_action")
+
+    assert await first.reserve(store.db, USER_DID) == QuotaDecision(
+        reached_scopes=("user", "global")
+    )
+    assert await second.reserve(store.db, USER_DID) == QuotaDecision(
+        reached_scopes=("user", "global")
+    )
+    assert store.documents == {
+        USER_PATH: {"attempts": [NOW]},
+        DAILY_PATH: {"count": 1},
+        "users/quota-user/rate_limits/other_action": {"attempts": [NOW]},
+        "other_action_daily/2026-10-07": {"count": 1},
+    }
+
+
 @pytest.mark.asyncio
 async def test_first_admission_creates_both_documents_after_reading_both(store):
-    result = await reserve_fit_quota(store.db, USER_DID)
+    result = await LIMITER.reserve(store.db, USER_DID)
 
-    assert result == FitQuotaDecision()
+    assert result == QuotaDecision()
     assert store.documents == {
         USER_PATH: {"attempts": [NOW]},
         DAILY_PATH: {"count": 1},
@@ -120,17 +192,17 @@ async def test_last_slot_is_admitted_and_next_request_rejected_without_writes(
     store.documents[USER_PATH] = {"attempts": [NOW - timedelta(hours=1)] * user_count}
     store.documents[DAILY_PATH] = {"count": daily_count}
 
-    admitted = await reserve_fit_quota(store.db, USER_DID)
+    admitted = await LIMITER.reserve(store.db, USER_DID)
 
-    assert admitted == FitQuotaDecision(reached_scopes=scopes)
+    assert admitted == QuotaDecision(reached_scopes=scopes)
     assert len(store.documents[USER_PATH]["attempts"]) == user_count + 1
     assert store.documents[DAILY_PATH]["count"] == daily_count + 1
     committed = deepcopy(store.documents)
     store.operations.clear()
 
-    rejected = await reserve_fit_quota(store.db, USER_DID)
+    rejected = await LIMITER.reserve(store.db, USER_DID)
 
-    assert rejected == FitQuotaDecision(exhausted_scopes=scopes, retry_at=retry_at)
+    assert rejected == QuotaDecision(exhausted_scopes=scopes, retry_at=retry_at)
     assert store.documents == committed
     assert store.operations == [("get", USER_PATH), ("get", DAILY_PATH)]
 
@@ -139,12 +211,12 @@ async def test_last_slot_is_admitted_and_next_request_rejected_without_writes(
 async def test_rolling_window_expires_exact_cutoff_and_discards_older_timestamps(store):
     recent = [NOW - timedelta(hours=1)] * 11
     store.documents[USER_PATH] = {
-        "attempts": [NOW - timedelta(hours=7), NOW - limits.USER_FIT_WINDOW, *recent]
+        "attempts": [NOW - timedelta(hours=7), NOW - LIMITER.user_window, *recent]
     }
 
-    result = await reserve_fit_quota(store.db, USER_DID)
+    result = await LIMITER.reserve(store.db, USER_DID)
 
-    assert result == FitQuotaDecision(reached_scopes=("user",))
+    assert result == QuotaDecision(reached_scopes=("user",))
     assert store.documents[USER_PATH]["attempts"] == [*recent, NOW]
     assert store.documents[DAILY_PATH] == {"count": 1}
 
@@ -155,14 +227,14 @@ async def test_rolling_quota_can_fill_again_when_oldest_attempt_expires(store, c
     # Ordering is not needed for the earliest retry calculation.
     store.documents[USER_PATH] = {"attempts": [NOW] * 11 + [oldest]}
 
-    rejected = await reserve_fit_quota(store.db, USER_DID)
+    rejected = await LIMITER.reserve(store.db, USER_DID)
 
-    assert rejected.retry_at == oldest + limits.USER_FIT_WINDOW
+    assert rejected.retry_at == oldest + LIMITER.user_window
     clock.now.return_value = rejected.retry_at
 
-    admitted = await reserve_fit_quota(store.db, USER_DID)
+    admitted = await LIMITER.reserve(store.db, USER_DID)
 
-    assert admitted == FitQuotaDecision(reached_scopes=("user",))
+    assert admitted == QuotaDecision(reached_scopes=("user",))
     assert store.documents[USER_PATH]["attempts"] == [NOW] * 11 + [rejected.retry_at]
 
 
@@ -172,30 +244,30 @@ async def test_both_caps_report_later_retry_time(store, clock, age_hours):
     now = NOW.replace(hour=23)
     clock.now.return_value = now
     oldest = now - timedelta(hours=age_hours)
-    store.documents[USER_PATH] = {"attempts": [oldest] * limits.USER_FIT_LIMIT}
-    store.documents[DAILY_PATH] = {"count": limits.GLOBAL_DAILY_FIT_LIMIT}
+    store.documents[USER_PATH] = {"attempts": [oldest] * LIMITER.user_limit}
+    store.documents[DAILY_PATH] = {"count": LIMITER.global_daily_limit}
 
-    result = await reserve_fit_quota(store.db, USER_DID)
+    result = await LIMITER.reserve(store.db, USER_DID)
 
-    assert result == FitQuotaDecision(
+    assert result == QuotaDecision(
         exhausted_scopes=("user", "global"),
-        retry_at=max(oldest + limits.USER_FIT_WINDOW, datetime(2026, 10, 8, tzinfo=UTC)),
+        retry_at=max(oldest + LIMITER.user_window, datetime(2026, 10, 8, tzinfo=UTC)),
     )
     store.transaction.set.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_user_quotas_are_independent_and_share_global_count(store):
-    store.documents[USER_PATH] = {"attempts": [NOW] * limits.USER_FIT_LIMIT}
+    store.documents[USER_PATH] = {"attempts": [NOW] * LIMITER.user_limit}
     store.documents[DAILY_PATH] = {"count": 12}
 
-    first_user = await reserve_fit_quota(store.db, USER_DID)
-    second_user = await reserve_fit_quota(store.db, "did:plc:other-user")
+    first_user = await LIMITER.reserve(store.db, USER_DID)
+    second_user = await LIMITER.reserve(store.db, "did:plc:other-user")
 
     assert first_user.exhausted_scopes == ("user",)
-    assert second_user == FitQuotaDecision()
-    assert store.documents[USER_PATH] == {"attempts": [NOW] * limits.USER_FIT_LIMIT}
-    assert store.documents["users/other-user/rate_limits/llm_query_vector_fit"] == {
+    assert second_user == QuotaDecision()
+    assert store.documents[USER_PATH] == {"attempts": [NOW] * LIMITER.user_limit}
+    assert store.documents["users/other-user/rate_limits/example_action"] == {
         "attempts": [NOW]
     }
     assert store.documents[DAILY_PATH] == {"count": 13}
@@ -203,12 +275,12 @@ async def test_user_quotas_are_independent_and_share_global_count(store):
 
 @pytest.mark.asyncio
 async def test_global_rejection_does_not_create_user_or_prune_expired_attempts(store):
-    store.documents[DAILY_PATH] = {"count": limits.GLOBAL_DAILY_FIT_LIMIT}
+    store.documents[DAILY_PATH] = {"count": LIMITER.global_daily_limit}
     store.documents[USER_PATH] = {"attempts": [NOW - timedelta(days=1)]}
     before = deepcopy(store.documents)
 
-    existing_user = await reserve_fit_quota(store.db, USER_DID)
-    new_user = await reserve_fit_quota(store.db, "did:plc:new-user")
+    existing_user = await LIMITER.reserve(store.db, USER_DID)
+    new_user = await LIMITER.reserve(store.db, "did:plc:new-user")
 
     assert existing_user.exhausted_scopes == new_user.exhausted_scopes == ("global",)
     assert store.documents == before
@@ -220,16 +292,16 @@ async def test_utc_midnight_resets_global_count_but_keeps_rolling_user_attempts(
     before_midnight = datetime(2026, 12, 31, 23, 59, 59, tzinfo=UTC)
     midnight = datetime(2027, 1, 1, tzinfo=UTC)
     clock.now.side_effect = [before_midnight, midnight]
-    previous_day = "llm_query_vector_fit_daily/2026-12-31"
-    next_day = "llm_query_vector_fit_daily/2027-01-01"
-    store.documents[previous_day] = {"count": limits.GLOBAL_DAILY_FIT_LIMIT - 1}
+    previous_day = "example_action_daily/2026-12-31"
+    next_day = "example_action_daily/2027-01-01"
+    store.documents[previous_day] = {"count": LIMITER.global_daily_limit - 1}
 
-    before = await reserve_fit_quota(store.db, USER_DID)
-    after = await reserve_fit_quota(store.db, USER_DID)
+    before = await LIMITER.reserve(store.db, USER_DID)
+    after = await LIMITER.reserve(store.db, USER_DID)
 
-    assert before == FitQuotaDecision(reached_scopes=("global",))
-    assert after == FitQuotaDecision()
-    assert store.documents[previous_day] == {"count": limits.GLOBAL_DAILY_FIT_LIMIT}
+    assert before == QuotaDecision(reached_scopes=("global",))
+    assert after == QuotaDecision()
+    assert store.documents[previous_day] == {"count": LIMITER.global_daily_limit}
     assert store.documents[next_day] == {"count": 1}
     assert store.documents[USER_PATH] == {"attempts": [before_midnight, midnight]}
     assert all(call.args == (UTC,) for call in clock.now.call_args_list)
@@ -240,8 +312,8 @@ async def test_transaction_retry_resamples_time_and_returns_only_committed_decis
     before_midnight = datetime(2026, 10, 7, 23, 59, 59, tzinfo=UTC)
     midnight = datetime(2026, 10, 8, tzinfo=UTC)
     clock.now.side_effect = [before_midnight, midnight]
-    store.documents[USER_PATH] = {"attempts": [midnight - limits.USER_FIT_WINDOW] * 11}
-    store.documents[DAILY_PATH] = {"count": limits.GLOBAL_DAILY_FIT_LIMIT - 1}
+    store.documents[USER_PATH] = {"attempts": [midnight - LIMITER.user_window] * 11}
+    store.documents[DAILY_PATH] = {"count": LIMITER.global_daily_limit - 1}
 
     async def commit_after_conflict():
         if store.transaction._commit.await_count == 1:
@@ -250,31 +322,31 @@ async def test_transaction_retry_resamples_time_and_returns_only_committed_decis
 
     store.transaction._commit.side_effect = commit_after_conflict
 
-    result = await reserve_fit_quota(store.db, USER_DID)
+    result = await LIMITER.reserve(store.db, USER_DID)
 
     # The aborted attempt filled both caps; the committed retry fills neither.
-    assert result == FitQuotaDecision()
+    assert result == QuotaDecision()
     assert store.documents[USER_PATH] == {"attempts": [midnight]}
-    assert store.documents[DAILY_PATH] == {"count": limits.GLOBAL_DAILY_FIT_LIMIT - 1}
-    assert store.documents["llm_query_vector_fit_daily/2026-10-08"] == {"count": 1}
+    assert store.documents[DAILY_PATH] == {"count": LIMITER.global_daily_limit - 1}
+    assert store.documents["example_action_daily/2026-10-08"] == {"count": 1}
     assert clock.now.call_count == store.transaction._commit.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_transaction_retry_can_reject_when_another_request_takes_final_slot(store):
-    store.documents[DAILY_PATH] = {"count": limits.GLOBAL_DAILY_FIT_LIMIT - 1}
+    store.documents[DAILY_PATH] = {"count": LIMITER.global_daily_limit - 1}
 
     async def commit_after_conflict():
         if store.transaction._commit.await_count == 1:
-            store.documents[DAILY_PATH] = {"count": limits.GLOBAL_DAILY_FIT_LIMIT}
+            store.documents[DAILY_PATH] = {"count": LIMITER.global_daily_limit}
             raise Aborted("another request consumed the final slot")
         await store.commit()
 
     store.transaction._commit.side_effect = commit_after_conflict
 
-    result = await reserve_fit_quota(store.db, USER_DID)
+    result = await LIMITER.reserve(store.db, USER_DID)
 
-    assert result == FitQuotaDecision(
+    assert result == QuotaDecision(
         exhausted_scopes=("global",), retry_at=datetime(2026, 10, 8, tzinfo=UTC)
     )
     assert USER_PATH not in store.documents
@@ -286,7 +358,7 @@ async def test_commit_failure_propagates_without_consuming_either_quota(store):
     store.transaction._commit.side_effect = RuntimeError("Firestore unavailable")
 
     with pytest.raises(RuntimeError, match="Firestore unavailable"):
-        await reserve_fit_quota(store.db, USER_DID)
+        await LIMITER.reserve(store.db, USER_DID)
 
     assert store.documents == {}
     store.transaction._rollback.assert_awaited_once()
@@ -297,8 +369,10 @@ async def test_commit_failure_propagates_without_consuming_either_quota(store):
 async def test_route_failures_keep_committed_quota_and_block_next_attempt(
     store, monkeypatch, failure
 ):
-    store.documents[USER_PATH] = {"attempts": [NOW - timedelta(hours=1)] * 11}
-    store.documents[DAILY_PATH] = {"count": 4}
+    fit_user_path = "users/quota-user/rate_limits/llm_query_vector_fit"
+    fit_daily_path = "llm_query_vector_fit_daily/2026-10-07"
+    store.documents[fit_user_path] = {"attempts": [NOW - timedelta(hours=1)] * 11}
+    store.documents[fit_daily_path] = {"count": 4}
     fit = AsyncMock(return_value=SimpleNamespace(query_vector=[0.1]))
     add = AsyncMock()
     collector = MagicMock()
@@ -334,8 +408,8 @@ async def test_route_failures_keep_committed_quota_and_block_next_attempt(
     if isinstance(error.value, HTTPException):
         assert error.value.status_code == expected_status[failure]
     committed = deepcopy(store.documents)
-    assert committed[USER_PATH] == {"attempts": [NOW - timedelta(hours=1)] * 11 + [NOW]}
-    assert committed[DAILY_PATH] == {"count": 5}
+    assert committed[fit_user_path] == {"attempts": [NOW - timedelta(hours=1)] * 11 + [NOW]}
+    assert committed[fit_daily_path] == {"count": 5}
     fit.assert_awaited_once()
     assert add.await_count == (1 if failure == "storage" else 0)
 
@@ -355,8 +429,10 @@ async def test_route_failures_keep_committed_quota_and_block_next_attempt(
 
 @pytest.mark.asyncio
 async def test_route_emits_each_cap_metric_once_after_transaction_retry(store, monkeypatch):
-    store.documents[USER_PATH] = {"attempts": [NOW] * 11}
-    store.documents[DAILY_PATH] = {"count": limits.GLOBAL_DAILY_FIT_LIMIT - 1}
+    fit_user_path = "users/quota-user/rate_limits/llm_query_vector_fit"
+    fit_daily_path = "llm_query_vector_fit_daily/2026-10-07"
+    store.documents[fit_user_path] = {"attempts": [NOW] * 11}
+    store.documents[fit_daily_path] = {"count": router.FIT_RATE_LIMITER.global_daily_limit - 1}
     collector = MagicMock()
     monkeypatch.setattr(router, "get_metric_collector", lambda: collector)
 
@@ -382,8 +458,8 @@ async def test_route_emits_each_cap_metric_once_after_transaction_retry(store, m
         )
 
     assert error.value.status_code == 502
-    assert store.documents[USER_PATH] == {"attempts": [NOW] * 12}
-    assert store.documents[DAILY_PATH] == {"count": limits.GLOBAL_DAILY_FIT_LIMIT}
+    assert store.documents[fit_user_path] == {"attempts": [NOW] * 12}
+    assert store.documents[fit_daily_path] == {"count": router.FIT_RATE_LIMITER.global_daily_limit}
     assert [call.kwargs for call in collector.record.call_args_list] == [
         {"scope": "user"}, {"scope": "global"}
     ]

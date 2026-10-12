@@ -12,8 +12,8 @@ from fastapi.testclient import TestClient
 
 from ..documents import LlmQueryVectorDocument
 from ..lib.firebase_auth import verify_firebase_auth
+from ..lib.firestore_rate_limiter import QuotaDecision
 from ..lib.llm_query_vector_fit import FitError, FitResult, PoolTooSmallError
-from ..lib.llm_query_vector_limits import FitQuotaDecision
 from ..main import app
 
 PATH = "/api/feeds/llm-query-vectors/fit"
@@ -23,11 +23,10 @@ CURRENT_PATH = "/api/feeds/llm-query-vectors/current"
 @pytest.fixture(autouse=True)
 def quota():
     with patch(
-        "app.routers.llm_query_vectors.reserve_fit_quota",
-        new_callable=AsyncMock,
-        return_value=FitQuotaDecision(),
-    ) as reserve:
-        yield reserve
+        "app.routers.llm_query_vectors.FIT_RATE_LIMITER", autospec=True
+    ) as limiter:
+        limiter.reserve.return_value = QuotaDecision()
+        yield limiter.reserve
 
 
 @pytest.fixture(autouse=True)
@@ -198,7 +197,7 @@ def test_current_is_403_when_flag_off(mock_latest, mock_enabled, client):
 def test_fit_rejects_full_quota(mock_fit, mock_add, client, quota, metrics, scopes):
     now = datetime(2026, 10, 7, 12, tzinfo=UTC)
     retry_at = now + timedelta(seconds=10, microseconds=1)
-    quota.return_value = FitQuotaDecision(exhausted_scopes=scopes, retry_at=retry_at)
+    quota.return_value = QuotaDecision(exhausted_scopes=scopes, retry_at=retry_at)
 
     with patch("app.routers.llm_query_vectors.datetime") as clock:
         clock.now.return_value = now
@@ -249,7 +248,7 @@ def test_fit_without_firestore_does_not_reserve(mock_fit, client, quota, monkeyp
 def test_fit_records_newly_full_caps_before_model_work(
     mock_fit, mock_add, client, quota, metrics, scopes
 ):
-    quota.return_value = FitQuotaDecision(reached_scopes=scopes)
+    quota.return_value = QuotaDecision(reached_scopes=scopes)
 
     async def fit(*_args):
         quota.assert_awaited_once()
@@ -274,7 +273,7 @@ def test_fit_records_newly_full_caps_before_model_work(
 @patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 def test_fit_storage_failure_keeps_reservation(mock_fit, mock_add, client, quota, metrics):
-    quota.return_value = FitQuotaDecision(reached_scopes=("user",))
+    quota.return_value = QuotaDecision(reached_scopes=("user",))
     mock_fit.return_value = _fit_result()
     mock_add.side_effect = RuntimeError("storage down")
 
