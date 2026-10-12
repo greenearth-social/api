@@ -104,7 +104,7 @@ class QueryVectorRateLimitDetail(BaseModel):
     message: str
     retry_at: datetime = Field(
         ...,
-        description="Earliest retry time in UTC based on current usage; capacity is not reserved",
+        description="Earliest retry time in UTC based on current usage",
     )
     retry_after_seconds: int = Field(..., ge=0, description="Seconds until retry_at, rounded up")
 
