@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from fastapi import HTTPException
@@ -17,7 +17,7 @@ from starlette.requests import Request
 from ..routers import llm_query_vectors as router
 from . import firestore_rate_limiter as limits
 from .firestore_rate_limiter import FirestoreRateLimiter, QuotaDecision
-from .llm_query_vector_fit import FitError, PoolTooSmallError
+from .llm_query_vector_fit import FitError, FitResult, PoolTooSmallError
 
 NOW = datetime(2026, 10, 7, 12, tzinfo=UTC)
 USER_DID = "did:plc:quota-user"
@@ -365,9 +365,18 @@ async def test_commit_failure_propagates_without_consuming_either_quota(store):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["pool", "model", "timeout", "cancellation", "storage"])
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        ("pool", "pool_too_small"),
+        ("model", "upstream"),
+        ("timeout", "timeout"),
+        ("cancellation", "cancelled"),
+        ("storage", "storage"),
+    ],
+)
 async def test_route_failures_keep_committed_quota_and_block_next_attempt(
-    store, monkeypatch, failure
+    store, monkeypatch, failure, reason
 ):
     fit_user_path = "users/quota-user/rate_limits/llm_query_vector_fit"
     fit_daily_path = "llm_query_vector_fit_daily/2026-10-07"
@@ -422,13 +431,18 @@ async def test_route_failures_keep_committed_quota_and_block_next_attempt(
     assert store.documents == committed
     fit.assert_awaited_once()
     assert add.await_count == (1 if failure == "storage" else 0)
-    collector.record.assert_called_once_with(
-        "llm_query_vector.fit.cap_reached_count", 1, scope="user"
-    )
+    assert collector.record.call_args_list == [
+        call("llm_query_vector.fit.attempted_count", 1),
+        call("llm_query_vector.fit.cap_reached_count", 1, scope="user"),
+        call("llm_query_vector.fit.failed_exc_count", 1, reason=reason),
+        call("llm_query_vector.fit.attempted_count", 1),
+        call("llm_query_vector.fit.failed_limited_count", 1, scope="user"),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_route_emits_each_cap_metric_once_after_transaction_retry(store, monkeypatch):
+@pytest.mark.parametrize("fit_fails", [False, True])
+async def test_route_emits_metrics_once_after_transaction_retry(store, monkeypatch, fit_fails):
     fit_user_path = "users/quota-user/rate_limits/llm_query_vector_fit"
     fit_daily_path = "llm_query_vector_fit_daily/2026-10-07"
     store.documents[fit_user_path] = {"attempts": [NOW] * 11}
@@ -437,33 +451,67 @@ async def test_route_emits_each_cap_metric_once_after_transaction_retry(store, m
     monkeypatch.setattr(router, "get_metric_collector", lambda: collector)
 
     async def commit_after_conflict():
+        # Admission and outcome metrics must not run inside the retryable callback.
+        assert collector.record.call_args_list == [
+            call("llm_query_vector.fit.attempted_count", 1)
+        ]
         if store.transaction._commit.await_count == 1:
             raise Aborted("retry the transaction")
         await store.commit()
 
-    async def failed_fit(*_args):
+    before_fit_metrics = [
+        call("llm_query_vector.fit.attempted_count", 1),
+        call("llm_query_vector.fit.cap_reached_count", 1, scope="user"),
+        call("llm_query_vector.fit.cap_reached_count", 1, scope="global"),
+    ]
+
+    async def fit_after_commit(*_args):
         assert store.transaction._commit.await_count == 2
-        assert collector.record.call_count == 2
-        raise FitError("model failed after reservation")
+        assert collector.record.call_args_list == before_fit_metrics
+        if fit_fails:
+            raise FitError("model failed after reservation")
+        return FitResult(
+            query_vector=[0.1],
+            keywords=["science"],
+            n_pool=500,
+            n_keyword_posts=80,
+            n_random_posts=120,
+            n_scored=80,
+            n_cancelled=0,
+            n_failed=0,
+            train_r2=0.45,
+            duration_s=9.8,
+            cost_usd=0.13,
+            input_tokens=1000,
+            output_tokens=200,
+        )
 
     store.transaction._commit.side_effect = commit_after_conflict
-    monkeypatch.setattr(router, "fit_query_vector", failed_fit)
+    fit = AsyncMock(side_effect=fit_after_commit)
+    add = AsyncMock(return_value=SimpleNamespace(prompt_key="stored-vector"))
+    monkeypatch.setattr(router, "fit_query_vector", fit)
+    monkeypatch.setattr(router, "add_llm_query_vector", add)
     request = Request(
         {"type": "http", "app": SimpleNamespace(state=SimpleNamespace(firestore=store.db, es=None))}
     )
 
-    with pytest.raises(HTTPException) as error:
-        await router.fit_llm_query_vector(
+    if fit_fails:
+        with pytest.raises(HTTPException) as error:
+            await router.fit_llm_query_vector(
+                router.QueryVectorFitRequest(prompt="science"), request, USER_DID
+            )
+        assert error.value.status_code == 502
+        add.assert_not_awaited()
+        outcome_metric = call("llm_query_vector.fit.failed_exc_count", 1, reason="upstream")
+    else:
+        result = await router.fit_llm_query_vector(
             router.QueryVectorFitRequest(prompt="science"), request, USER_DID
         )
+        assert result.vector_id == "stored-vector"
+        add.assert_awaited_once_with(store.db, USER_DID, [0.1], "science")
+        outcome_metric = call("llm_query_vector.fit.success_count", 1)
 
-    assert error.value.status_code == 502
+    fit.assert_awaited_once_with(None, "science")
     assert store.documents[fit_user_path] == {"attempts": [NOW] * 12}
     assert store.documents[fit_daily_path] == {"count": router.FIT_RATE_LIMITER.global_daily_limit}
-    assert [call.kwargs for call in collector.record.call_args_list] == [
-        {"scope": "user"}, {"scope": "global"}
-    ]
-    assert all(
-        call.args == ("llm_query_vector.fit.cap_reached_count", 1)
-        for call in collector.record.call_args_list
-    )
+    assert collector.record.call_args_list == [*before_fit_metrics, outcome_metric]

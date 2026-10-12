@@ -162,6 +162,22 @@ Cloud Monitoring receives `llm_query_vector.fit.cap_reached_count` with
 Both scopes are recorded when both fill together. Rejected requests do not emit
 this metric; a user can fill the rolling quota again after old attempts expire.
 
+The fit endpoint also records the following counters, all prefixed with
+`llm_query_vector.fit.`:
+
+| Metric suffix | When recorded | Additional labels |
+| --- | --- | --- |
+| `attempted_count` | Once after authentication, feature gating, and prompt validation, before checking quota; includes requests subsequently rejected. | None |
+| `failed_limited_count` | Once when quota rejects the request with HTTP 429. | `scope`: `user`, `global`, or `both` |
+| `failed_exc_count` | Once for a failure other than quota exhaustion, including cancellation. | `reason`: `quota_store`, `pool_too_small`, `timeout`, `upstream`, `storage`, or `cancelled` |
+| `success_count` | Once after the vector is stored and the response is constructed successfully. | None |
+
+Requests rejected for authentication, feature access, or invalid prompts, and
+`GET /api/feeds/llm-query-vectors/current`, do not emit these counters. Metrics
+are recorded outside the retryable quota transaction and have no user IDs or
+prompts as labels. A request rejected by both quotas records one
+`failed_limited_count` observation with `scope="both"`.
+
 ## API Key Management
 
 The API uses a Firestore-backed multi-key system. Each key is tied to an
