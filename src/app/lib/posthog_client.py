@@ -38,6 +38,7 @@ import os
 from datetime import datetime
 
 from posthog import Posthog
+from posthog.feature_flag_evaluations import FeatureFlagEvaluations
 
 logger = logging.getLogger(__name__)
 
@@ -190,21 +191,19 @@ def evaluate_feature_flags(
     client: Posthog | None,
     user_did: str,
     flag_keys: list[str],
-) -> dict[str, bool]:
-    """Evaluate the requested flags in one PostHog request, defaulting to False."""
-    values = {key: False for key in flag_keys}
+) -> FeatureFlagEvaluations | None:
+    """Evaluate flags once; callers default to False when no snapshot is available."""
     if client is None:
-        return values
+        return None
     try:
-        # The batch API does not emit $feature_flag_called exposure events.
-        evaluated = client.get_all_flags(
+        # Leave access to each use site so $feature_flag_called reflects usage.
+        return client.evaluate_flags(
             user_did,
-            flag_keys_to_evaluate=flag_keys,
-        ) or {}
-        return {key: bool(evaluated.get(key, False)) for key in flag_keys}
+            flag_keys=flag_keys,
+        )
     except Exception:
         logger.warning("PostHog feature flag evaluation failed for %s", user_did)
-        return values
+        return None
 
 
 def llm_cg_enabled(client: Posthog | None, user_did: str) -> bool:
@@ -217,4 +216,5 @@ def llm_cg_enabled(client: Posthog | None, user_did: str) -> bool:
     """
     if os.environ.get("GE_LLM_CG_OPEN", "").lower() == "true":
         return True
-    return evaluate_feature_flags(client, user_did, [LLM_CG_FLAG])[LLM_CG_FLAG]
+    flags = evaluate_feature_flags(client, user_did, [LLM_CG_FLAG])
+    return bool(flags.get_flag(LLM_CG_FLAG)) if flags is not None else False
