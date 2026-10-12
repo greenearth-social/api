@@ -25,6 +25,7 @@ USER_DID = "did:plc:exploreuser"
 FEED_URI = "at://did:plc:publisher/app.bsky.feed.generator/your-feed"
 PIN_URI = "at://ux/full-feed"
 EXPLORE_PIN_URI = "at://ux/explore"
+RETURNING_PIN_URI = "at://ux/returning"
 SURVEY_URI = "at://ux/survey"
 POST_URIS = [f"at://posts/{index}" for index in range(40)]
 
@@ -39,6 +40,7 @@ def feed_session(monkeypatch):
         update={
             "pinned_post_uri": PIN_URI,
             "explore_pinned_post_uri": EXPLORE_PIN_URI,
+            "returning_pinned_post_uri": RETURNING_PIN_URI,
             "survey_post_uri": SURVEY_URI,
         }
     )
@@ -91,7 +93,9 @@ def feed_session(monkeypatch):
         await asyncio.gather(*xrpc._background_tasks)
         return response
 
-    yield SimpleNamespace(db=db, cache=cache, user=user, snapshot=snapshot, load=load, **mocks)
+    yield SimpleNamespace(
+        db=db, cache=cache, user=user, request=request, snapshot=snapshot, load=load, **mocks
+    )
     xrpc._clear_initial_request_cache()
 
 
@@ -119,6 +123,9 @@ async def test_explore_skips_feed_state_but_keeps_personalization_and_analytics(
     state._write_feed_snapshot_background.assert_not_awaited()
     state.upsert_feed_activity.assert_not_awaited()
     state.get_feed_activity.assert_not_awaited()
+    state.get_recent_seen_uris.assert_not_awaited()
+    state.get_recent_discarded_uris.assert_not_awaited()
+    state.record_discarded_posts.assert_not_awaited()
 
     state.get_user.assert_awaited_once_with(state.db, USER_DID)
     state.upsert_user.assert_awaited_once_with(
@@ -133,11 +140,8 @@ async def test_explore_skips_feed_state_but_keeps_personalization_and_analytics(
     generation = pipeline_call.args[3]
     assert generation.num_candidates == limit * 5
     assert generation.max_age_hours == 6
-    assert {"at://seen", "at://discarded"}.issubset(generation.exclude_uris)
+    assert set(generation.exclude_uris) == {PIN_URI, EXPLORE_PIN_URI, RETURNING_PIN_URI}
     assert pipeline_call.kwargs["debug_enabled"] is True
-    state.record_discarded_posts.assert_awaited_once_with(
-        state.db, USER_DID, ["at://newly-discarded"], load_test=False
-    )
     # Interaction attribution does not depend on a cache or snapshot being stored.
     context = decode_feed_context(response.feed[0].feed_context)
     assert context is not None
@@ -171,6 +175,13 @@ async def test_full_feed_load_still_records_feed_state_and_shows_eligible_survey
     cursor = FeedCursor.decode(response.cursor)
     assert cursor.id == stored_id
     assert cursor.offset == limit - 2
+    state.get_recent_seen_uris.assert_awaited_once_with(state.db, USER_DID)
+    state.get_recent_discarded_uris.assert_awaited_once_with(state.db, USER_DID)
+    generation = state._run_pipeline_capturing_with_timeout.await_args.args[3]
+    assert {"at://seen", "at://discarded"}.issubset(generation.exclude_uris)
+    state.record_discarded_posts.assert_awaited_once_with(
+        state.db, USER_DID, ["at://newly-discarded"], load_test=False
+    )
 
 
 @pytest.mark.asyncio
@@ -215,6 +226,76 @@ async def test_small_expired_cursor_regenerates_with_normal_persistence(feed_ses
         state.db, USER_DID, "your-feed", is_initial_load=False
     )
     state.claim_accepted_feed_slate.assert_not_awaited()
+    state.get_recent_seen_uris.assert_awaited_once_with(state.db, USER_DID)
+    state.get_recent_discarded_uris.assert_awaited_once_with(state.db, USER_DID)
+    generation = state._run_pipeline_capturing_with_timeout.await_args.args[3]
+    assert {"at://seen", "at://discarded"}.issubset(generation.exclude_uris)
+    state.record_discarded_posts.assert_awaited_once_with(
+        state.db, USER_DID, ["at://newly-discarded"], load_test=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_full_feed_generation_after_explore_resumes_history_reads_and_writes(feed_session):
+    state = feed_session
+    await state.load(8)
+
+    state.get_recent_seen_uris.assert_not_awaited()
+    state.get_recent_discarded_uris.assert_not_awaited()
+    state.record_discarded_posts.assert_not_awaited()
+
+    await state.load(30)
+
+    assert state._run_pipeline_capturing_with_timeout.await_count == 2
+    preview_generation, full_generation = [
+        call.args[3] for call in state._run_pipeline_capturing_with_timeout.await_args_list
+    ]
+    assert set(preview_generation.exclude_uris) == {PIN_URI, EXPLORE_PIN_URI, RETURNING_PIN_URI}
+    assert {"at://seen", "at://discarded"}.issubset(full_generation.exclude_uris)
+    state.get_recent_seen_uris.assert_awaited_once_with(state.db, USER_DID)
+    state.get_recent_discarded_uris.assert_awaited_once_with(state.db, USER_DID)
+    state.record_discarded_posts.assert_awaited_once_with(
+        state.db, USER_DID, ["at://newly-discarded"], load_test=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_reported_explore_impression_still_records_interaction_and_seen_history(
+    feed_session, monkeypatch
+):
+    state = feed_session
+    response = await state.load(8)
+    post = response.feed[1]
+    record_interaction = AsyncMock()
+    record_seen_posts = AsyncMock()
+    record_user_post_seen = AsyncMock()
+    monkeypatch.setattr(xrpc, "record_interaction", record_interaction)
+    monkeypatch.setattr(xrpc, "record_seen_posts", record_seen_posts)
+    monkeypatch.setattr(xrpc, "record_user_post_seen", record_user_post_seen)
+    monkeypatch.setattr(xrpc, "track_interaction", MagicMock())
+
+    await xrpc.send_interactions(
+        request=state.request,
+        body=xrpc.SendInteractionsRequest(
+            interactions=[
+                xrpc.Interaction(
+                    item=post.post,
+                    event="app.bsky.feed.defs#interactionSeen",
+                    feed_context=post.feed_context,
+                )
+            ]
+        ),
+    )
+    await asyncio.gather(*xrpc._background_tasks)
+
+    record_interaction.assert_awaited_once()
+    assert record_interaction.await_args is not None
+    interaction = record_interaction.await_args.args[1]
+    assert interaction.item_uri == post.post
+    assert interaction.user_did == USER_DID
+    assert interaction.event == "interactionSeen"
+    record_seen_posts.assert_awaited_once_with(state.db, USER_DID, [post.post], load_test=False)
+    record_user_post_seen.assert_awaited_once_with(state.db, USER_DID)
 
 
 @pytest.mark.asyncio

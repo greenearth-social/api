@@ -1902,8 +1902,8 @@ async def get_feed_skeleton(
         return _make_feed_context(user_did, feed_name, request_id, load_test=is_load_test)
 
     async def generation_exclusions() -> list[str]:
-        """Post URIs to exclude, including static pins for anonymous callers."""
-        if is_anonymous:
+        """Keep static pins excluded even when skipping per-user history."""
+        if is_anonymous or is_explore_preview:
             return list(_pinned_post_uris(feed_cfg))
         return await _generation_exclusions(db, user_did, feed_cfg)
 
@@ -2325,7 +2325,13 @@ async def get_feed_skeleton(
                 regenerated=False,
                 debug_enabled=debug_enabled,
             )
-            if low_score_uris and not is_anonymous and not is_appview_one_item_check:
+            # A preview's rejected candidates should not affect future feed loads.
+            if (
+                low_score_uris
+                and not is_anonymous
+                and not is_appview_one_item_check
+                and not is_explore_preview
+            ):
                 _spawn_background(
                     _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
                 )
