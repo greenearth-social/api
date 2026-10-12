@@ -200,6 +200,7 @@ async def upsert_user(
         updated_at=now,
         last_seen_at=now,
         created_by_load_test=is_load_test,
+        request_less_items={},
     )
     await ref.set(user.model_dump())
     return user
