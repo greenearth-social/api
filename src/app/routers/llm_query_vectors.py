@@ -13,15 +13,18 @@ updated document, so the newest fit is the one that serves.
 
 import asyncio
 import logging
-from datetime import datetime
-from typing import Annotated
+import math
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import add_llm_query_vector, get_latest_llm_query_vector
+from ..lib.firestore_rate_limiter import FirestoreRateLimiter, QuotaScope
 from ..lib.llm_query_vector_fit import FitError, PoolTooSmallError, fit_query_vector
+from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import get_posthog_client, llm_cg_enabled
 
 logger = logging.getLogger(__name__)
@@ -38,6 +41,12 @@ MAX_PROMPT_CHARS = 2000
 # day could run past Cloud Run's 60 s and finish, and store, after the caller
 # already got a 504.
 FIT_TIMEOUT_S = 25.0
+FIT_RATE_LIMITER = FirestoreRateLimiter(
+    name="llm_query_vector_fit",
+    user_limit=12,
+    user_window=timedelta(hours=6),
+    global_daily_limit=1000,
+)
 
 
 async def require_llm_cg_user(user_doc_id: FirebaseUser) -> str:
@@ -95,6 +104,21 @@ class QueryVectorFitResponse(BaseModel):
     )
 
 
+class QueryVectorRateLimitDetail(BaseModel):
+    code: Literal["llm_query_vector_rate_limited"] = "llm_query_vector_rate_limited"
+    scopes: list[QuotaScope]
+    message: str
+    retry_at: datetime = Field(
+        ...,
+        description="Earliest retry time in UTC based on current usage",
+    )
+    retry_after_seconds: int = Field(..., ge=0, description="Seconds until retry_at, rounded up")
+
+
+class QueryVectorRateLimitResponse(BaseModel):
+    detail: QueryVectorRateLimitDetail
+
+
 @router.post(
     "/api/feeds/llm-query-vectors/fit",
     response_model=QueryVectorFitResponse,
@@ -102,6 +126,16 @@ class QueryVectorFitResponse(BaseModel):
         403: {"description": "The llm-cg feature flag is off for this user"},
         422: {
             "description": "Invalid request, or too few posts match the prompt to fit a vector"
+        },
+        429: {
+            "model": QueryVectorRateLimitResponse,
+            "description": "The rolling user quota or UTC daily global quota is full",
+            "headers": {
+                "Retry-After": {
+                    "description": "Seconds until the earliest retry, rounded up",
+                    "schema": {"type": "integer"},
+                }
+            },
         },
         502: {"description": "Upstream Elasticsearch or model request failed; nothing stored"},
         503: {"description": "Firestore unavailable"},
@@ -118,58 +152,128 @@ async def fit_llm_query_vector(
     Every fit stores a new document; the feed uses the user's newest one.
     The user is whoever the Firebase token belongs to, and must have the
     ``llm-cg`` flag."""
-    db = getattr(request.app.state, "firestore", None)
-    if db is None:
-        raise HTTPException(status_code=503, detail="Firestore unavailable")
     prompt = body.prompt.strip()
     if not prompt:
         raise HTTPException(status_code=422, detail="prompt must not be blank")
 
-    try:
-        async with asyncio.timeout(FIT_TIMEOUT_S):
-            result = await fit_query_vector(request.app.state.es, prompt)
-    except TimeoutError as exc:
-        logger.warning("llm_qv_fit timed out user_did=%s after %.0fs", user_did, FIT_TIMEOUT_S)
-        raise HTTPException(
-            status_code=504,
-            detail=f"fit did not finish within {FIT_TIMEOUT_S:.0f}s; nothing stored, try again",
-        ) from exc
-    except PoolTooSmallError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except FitError as exc:
-        logger.warning("llm_qv_fit failed user_did=%s error=%s", user_did, exc)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("llm_qv_fit upstream failure", extra={"user_did": user_did})
-        raise HTTPException(
-            status_code=502, detail="Elasticsearch or model request failed"
-        ) from exc
+    # Only eligible, valid requests count as attempts, including quota rejections.
+    collector = get_metric_collector()
+    if collector is not None:
+        collector.record("llm_query_vector.fit.attempted_count", 1)
 
-    stored = await add_llm_query_vector(db, user_did, result.query_vector, prompt)
-    key = stored.prompt_key
-    logger.info(
-        "llm_qv_fit stored user_did=%s vector_id=%s n_pool=%d n_keyword=%d n_random=%d "
-        "n_scored=%d n_cancelled=%d n_failed=%d train_r2=%s duration_s=%.1f cost_usd=%.3f "
-        "tokens_in=%d tokens_out=%d",
-        user_did, key, result.n_pool, result.n_keyword_posts, result.n_random_posts,
-        result.n_scored, result.n_cancelled, result.n_failed,
-        "-" if result.train_r2 is None else f"{result.train_r2:.3f}",
-        result.duration_s, result.cost_usd, result.input_tokens, result.output_tokens,
-    )
-    return QueryVectorFitResponse(
-        vector_id=key,
-        user_did=user_did,
-        keywords=result.keywords,
-        n_pool=result.n_pool,
-        n_keyword_posts=result.n_keyword_posts,
-        n_random_posts=result.n_random_posts,
-        n_scored=result.n_scored,
-        n_cancelled=result.n_cancelled,
-        n_failed=result.n_failed,
-        train_r2=result.train_r2,
-        duration_s=round(result.duration_s, 2),
-        cost_usd=round(result.cost_usd, 4),
-    )
+    # Default to failure until the response is ready. Record exactly one outcome
+    # outside the retryable quota transaction, including storage errors/cancellation.
+    outcome_metric = "llm_query_vector.fit.failed_exc_count"
+    outcome_labels = {"reason": "quota_store"}
+    try:
+        db = getattr(request.app.state, "firestore", None)
+        if db is None:
+            raise HTTPException(status_code=503, detail="Firestore unavailable")
+
+        try:
+            quota = await FIT_RATE_LIMITER.reserve(db, user_did)
+        except Exception as exc:
+            logger.exception("llm_qv_fit quota unavailable", extra={"user_did": user_did})
+            raise HTTPException(
+                status_code=503,
+                detail="Unable to verify or reserve query-vector quota. Please try again."
+            ) from exc
+
+        if quota.retry_at is not None:
+            retry_after_seconds = max(
+                0, math.ceil((quota.retry_at - datetime.now(UTC)).total_seconds())
+            )
+            if quota.exhausted_scopes == ("user",):
+                message = (
+                    "You have reached your query-vector generation limit for the past six hours."
+                )
+            elif quota.exhausted_scopes == ("global",):
+                message = "The daily query-vector generation limit has been reached."
+            else:
+                message = (
+                    "Your six-hour limit and the daily query-vector generation limit are full."
+                )
+            detail = QueryVectorRateLimitDetail(
+                scopes=list(quota.exhausted_scopes),
+                message=f"{message} Please try again later.",
+                retry_at=quota.retry_at,
+                retry_after_seconds=retry_after_seconds,
+            )
+            outcome_metric = "llm_query_vector.fit.failed_limited_count"
+            outcome_labels = {
+                "scope": "both" if len(quota.exhausted_scopes) == 2 else quota.exhausted_scopes[0]
+            }
+            raise HTTPException(
+                status_code=429,
+                detail=detail.model_dump(mode="json"),
+                headers={"Retry-After": str(retry_after_seconds)},
+            )
+
+        # At this point, this fit has already counted against the quotas. That is,
+        # the reservation is already committed. Retries of its transaction cannot
+        # duplicate metrics, and later fit failures intentionally do not refund quota.
+        if collector is not None:
+            for scope in quota.reached_scopes:
+                collector.record("llm_query_vector.fit.cap_reached_count", 1, scope=scope)
+
+        outcome_labels = {"reason": "upstream"}
+        try:
+            async with asyncio.timeout(FIT_TIMEOUT_S):
+                result = await fit_query_vector(request.app.state.es, prompt)
+        except TimeoutError as exc:
+            outcome_labels = {"reason": "timeout"}
+            logger.warning("llm_qv_fit timed out user_did=%s after %.0fs", user_did, FIT_TIMEOUT_S)
+            raise HTTPException(
+                status_code=504,
+                detail=f"fit did not finish within {FIT_TIMEOUT_S:.0f}s; nothing stored, try again",
+            ) from exc
+        except PoolTooSmallError as exc:
+            outcome_labels = {"reason": "pool_too_small"}
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except FitError as exc:
+            logger.warning("llm_qv_fit failed user_did=%s error=%s", user_did, exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("llm_qv_fit upstream failure", extra={"user_did": user_did})
+            raise HTTPException(
+                status_code=502, detail="Elasticsearch or model request failed"
+            ) from exc
+
+        outcome_labels = {"reason": "storage"}
+        stored = await add_llm_query_vector(db, user_did, result.query_vector, prompt)
+        key = stored.prompt_key
+        logger.info(
+            "llm_qv_fit stored user_did=%s vector_id=%s n_pool=%d n_keyword=%d n_random=%d "
+            "n_scored=%d n_cancelled=%d n_failed=%d train_r2=%s duration_s=%.1f cost_usd=%.3f "
+            "tokens_in=%d tokens_out=%d",
+            user_did, key, result.n_pool, result.n_keyword_posts, result.n_random_posts,
+            result.n_scored, result.n_cancelled, result.n_failed,
+            "-" if result.train_r2 is None else f"{result.train_r2:.3f}",
+            result.duration_s, result.cost_usd, result.input_tokens, result.output_tokens,
+        )
+        response = QueryVectorFitResponse(
+            vector_id=key,
+            user_did=user_did,
+            keywords=result.keywords,
+            n_pool=result.n_pool,
+            n_keyword_posts=result.n_keyword_posts,
+            n_random_posts=result.n_random_posts,
+            n_scored=result.n_scored,
+            n_cancelled=result.n_cancelled,
+            n_failed=result.n_failed,
+            train_r2=result.train_r2,
+            duration_s=round(result.duration_s, 2),
+            cost_usd=round(result.cost_usd, 4),
+        )
+        outcome_metric = "llm_query_vector.fit.success_count"
+        outcome_labels = {}
+        return response
+    except asyncio.CancelledError:
+        outcome_labels = {"reason": "cancelled"}
+        raise
+    finally:
+        if collector is not None:
+            collector.record(outcome_metric, 1, **outcome_labels)
 
 
 class CurrentPromptResponse(BaseModel):

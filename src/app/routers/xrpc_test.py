@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
+from posthog.feature_flag_evaluations import FeatureFlagEvaluations
 
 from ..documents import (
     FeedCacheDocument,
@@ -39,6 +40,12 @@ from ..models import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _feature_flags(value: bool | str | None) -> MagicMock:
+    flags = MagicMock(spec=FeatureFlagEvaluations)
+    flags.get_flag.return_value = value
+    return flags
 
 
 @pytest.fixture(autouse=True)
@@ -77,7 +84,7 @@ TEST_EMBEDDING = encode_float32_b64([1.0, 0.0, 0.0])
 
 
 class TestContextualPinnedPostSelection:
-    def test_uses_explore_page_size_and_settings_visit_without_presumed_pinned(self):
+    def test_uses_explore_preview_and_settings_visit_without_presumed_pinned(self):
         from ..routers.xrpc import _select_pinned_post_uri
 
         cfg = FEEDS["your-feed"].model_copy(
@@ -93,18 +100,16 @@ class TestContextualPinnedPostSelection:
             settings_visited_at=datetime(2026, 9, 20, tzinfo=UTC),
         )
 
-        assert _select_pinned_post_uri("your-feed", cfg, 1, new_user) == "at://first-time"
-        assert _select_pinned_post_uri("your-feed", cfg, 2, returning_user) == "at://explore"
-        assert _select_pinned_post_uri("your-feed", cfg, 8, returning_user) == "at://explore"
-        assert _select_pinned_post_uri("your-feed", cfg, 9, new_user) == "at://first-time"
-        assert _select_pinned_post_uri("your-feed", cfg, 15, returning_user) == "at://returning"
-        assert _select_pinned_post_uri("your-feed", cfg, 100, returning_user) == "at://returning"
+        assert _select_pinned_post_uri("your-feed", cfg, False, new_user) == "at://first-time"
+        assert _select_pinned_post_uri("your-feed", cfg, True, new_user) == "at://explore"
+        assert _select_pinned_post_uri("your-feed", cfg, True, returning_user) == "at://explore"
+        assert _select_pinned_post_uri("your-feed", cfg, False, returning_user) == "at://returning"
 
     def test_other_feeds_keep_their_existing_pin(self):
         from ..routers.xrpc import _select_pinned_post_uri
 
         cfg = FEEDS["random"].model_copy(update={"pinned_post_uri": "at://random"})
-        assert _select_pinned_post_uri("random", cfg, 8, None) == "at://random"
+        assert _select_pinned_post_uri("random", cfg, True, None) == "at://random"
 
 
 def _make_candidates(
@@ -213,8 +218,13 @@ async def test_preview_exclusions_ignore_seen_and_retain_discarded():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("has_posthog_client", [False, True])
+@pytest.mark.parametrize(
+    ("flag_value", "expected_fail_fast"), [(True, True), (False, False), (None, False)]
+)
 async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache(
     has_posthog_client: bool,
+    flag_value: bool | None,
+    expected_fail_fast: bool,
 ):
     from .xrpc import generate_feed_preview
 
@@ -252,6 +262,8 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
         freshness=2,
         politics=1.5,
         purpose=0.8,
+        author_penalty=0.2,
+        topic_penalty=0.9,
         source_weights=SourceWeightsDocument(
             following=0.5,
             network_likes=0.1,
@@ -268,6 +280,7 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
 
     pipeline = AsyncMock(side_effect=pipeline_result)
     exclusions = AsyncMock(return_value=["at://already-discarded"])
+    flags = _feature_flags(flag_value)
 
     with (
         patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
@@ -277,8 +290,9 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
         ),
         patch(
             "app.routers.xrpc.evaluate_feature_flags",
-            return_value={"fail-fast-feed": False},
+            return_value=flags,
         ) as evaluate_flags,
+        patch("app.routers.xrpc.set_fail_fast_for_request") as set_fail_fast,
         patch("app.routers.xrpc._generation_exclusions", exclusions),
         patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", pipeline),
         patch(
@@ -301,6 +315,8 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
     model_weights = {model.name: model.weight for model in feed_cfg.rank_request_template.models}
     assert model_weights["perspective"] == pytest.approx(0.8)
     assert feed_cfg.rank_request_template.politics == 1.5
+    assert feed_cfg.author_penalty_setting == 0.2
+    assert feed_cfg.topic_penalty_setting == 0.9
     assert gen_request.max_age_hours == 24
     assert [(generator.name, generator.weight) for generator in gen_request.generators] == [
         ("followed_users", 0.5),
@@ -313,8 +329,11 @@ async def test_generate_feed_preview_applies_draft_and_only_writes_preview_cache
     if has_posthog_client:
         assert evaluate_flags.call_args.args[1:] == ("did:plc:testuser", ["fail-fast-feed"])
         evaluate_flags.assert_called_once()
+        flags.get_flag.assert_called_once_with("fail-fast-feed")
     else:
         evaluate_flags.assert_not_called()
+        flags.get_flag.assert_not_called()
+    set_fail_fast.assert_called_once_with(expected_fail_fast if has_posthog_client else False)
     exclusions.assert_awaited_once()
     assert exclusions.await_args is not None
     assert exclusions.await_args.kwargs == {"include_seen": False}
@@ -556,12 +575,14 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         like_count=10,
         generator_name="two_tower",
     )
-    predict_user_tower = AsyncMock(return_value={
-        "outputs": [[0.1, 0.2]],
-        "model_type": "user-tower",
-        "model_uuid": "1" * 32,
-        "paired_post_model_uuid": "2" * 32,
-    })
+    predict_user_tower = AsyncMock(
+        return_value={
+            "outputs": [[0.1, 0.2]],
+            "model_type": "user-tower",
+            "model_uuid": "1" * 32,
+            "paired_post_model_uuid": "2" * 32,
+        }
+    )
     predict_heavy_ranker = AsyncMock(return_value=[0.9])
     fetch_recent_likes = AsyncMock(
         return_value=(
@@ -650,6 +671,8 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         logged_out_post_uri=None,
         controls=(),
         preference_source=None,
+        author_penalty_setting=0.7,
+        topic_penalty_setting=0.7,
         gen_request_template=gen_request,
         rank_request_template=RankPredictRequest(
             candidates=[],
@@ -3734,9 +3757,7 @@ class TestFeedDebugCapture:
                 MagicMock(), "did:plc:testuser", "r1", snapshot, limit=30
             )
 
-        collector.record.assert_any_call(
-            "feed.snapshot.truncated_count", 1, feed_name="your-feed"
-        )
+        collector.record.assert_any_call("feed.snapshot.truncated_count", 1, feed_name="your-feed")
         assert "reached item limit" in caplog.text
 
     @pytest.mark.asyncio
@@ -4977,6 +4998,247 @@ class TestSurveyPost:
 
 
 # ---------------------------------------------------------------------------
+# "How to favorite this feed" video post injection
+# ---------------------------------------------------------------------------
+
+
+class TestFavoriteVideoPostSelection:
+    VIDEO_URI = "at://did:plc:notifyauthor/app.bsky.feed.post/favoritevideo"
+
+    def _cfg(self):
+        return FEEDS["your-feed"].model_copy(update={"favorite_video_post_uri": self.VIDEO_URI})
+
+    def test_offered_to_pre_settings_users_when_the_roll_succeeds(self):
+        from ..routers.xrpc import FAVORITE_VIDEO_POST_PROBABILITY, _select_favorite_video_post_uri
+
+        new_user = UserDocument(user_did="did:plc:new")
+        with patch("app.routers.xrpc.random") as rng:
+            rng.random.return_value = FAVORITE_VIDEO_POST_PROBABILITY - 0.01
+            assert _select_favorite_video_post_uri(self._cfg(), False, new_user) == self.VIDEO_URI
+            assert _select_favorite_video_post_uri(self._cfg(), False, None) == self.VIDEO_URI
+
+    def test_skipped_when_the_roll_fails(self):
+        from ..routers.xrpc import FAVORITE_VIDEO_POST_PROBABILITY, _select_favorite_video_post_uri
+
+        new_user = UserDocument(user_did="did:plc:new")
+        with patch("app.routers.xrpc.random") as rng:
+            rng.random.return_value = FAVORITE_VIDEO_POST_PROBABILITY
+            assert _select_favorite_video_post_uri(self._cfg(), False, new_user) is None
+
+    def test_never_offered_to_explore_or_settings_visitors(self):
+        from ..routers.xrpc import _select_favorite_video_post_uri
+
+        new_user = UserDocument(user_did="did:plc:new")
+        returning_user = UserDocument(
+            user_did="did:plc:returning",
+            settings_visited_at=datetime(2026, 9, 20, tzinfo=UTC),
+        )
+        with patch("app.routers.xrpc.random") as rng:
+            rng.random.return_value = 0.0
+            assert _select_favorite_video_post_uri(self._cfg(), True, new_user) is None
+            assert _select_favorite_video_post_uri(self._cfg(), False, returning_user) is None
+
+    def test_skipped_when_the_feed_has_no_video_post(self):
+        from ..routers.xrpc import _select_favorite_video_post_uri
+
+        cfg = FEEDS["your-feed"].model_copy(update={"favorite_video_post_uri": None})
+        with patch("app.routers.xrpc.random") as rng:
+            rng.random.return_value = 0.0
+            assert _select_favorite_video_post_uri(cfg, False, None) is None
+
+    def test_registered_as_a_managed_video_post(self):
+        from .. import ux_posts
+
+        assert ux_posts.FAVORITE_YOUR_FEED in ux_posts.MANAGED_POSTS
+        assert ux_posts.FAVORITE_YOUR_FEED in ux_posts.VIDEO_POSTS
+
+
+@patch(
+    "app.routers.xrpc.verify_auth_header",
+    new_callable=AsyncMock,
+    return_value="did:plc:testuser",
+)
+@patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock)
+@patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock)
+@patch("app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock)
+@patch("app.routers.xrpc.get_feed_activity", new_callable=AsyncMock)
+@patch("app.routers.xrpc.get_user", new_callable=AsyncMock)
+class TestFavoriteVideoPost:
+    VIDEO_URI = "at://did:plc:notifyauthor/app.bsky.feed.post/favoritevideo"
+    SURVEY_URI = "at://did:plc:notifyauthor/app.bsky.feed.post/surveypost"
+    PINNED_URI = "at://did:plc:notifyauthor/app.bsky.feed.post/pinned"
+    GENERATED = [f"at://did:plc:a/{i}" for i in range(40)]
+
+    def _patched_feeds(self, *, survey: bool = False, pinned: bool = True):
+        cfg = FEEDS["your-feed"].model_copy(
+            update={
+                "favorite_video_post_uri": self.VIDEO_URI,
+                "survey_post_uri": self.SURVEY_URI if survey else None,
+                "pinned_post_uri": self.PINNED_URI if pinned else None,
+                "explore_pinned_post_uri": None,
+                "returning_pinned_post_uri": None,
+            }
+        )
+        return {"your-feed": cfg, **{k: v for k, v in FEEDS.items() if k != "your-feed"}}
+
+    def _snapshot(self):
+        from ..documents import FeedSnapshotDocument
+
+        return FeedSnapshotDocument(
+            request_id="testid",
+            items=list(self.GENERATED),
+            feed_name="your-feed",
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=1),
+        )
+
+    def _activity(self, load_count: int = 5):
+        from ..documents import FeedActivityDocument
+
+        return FeedActivityDocument(
+            feed_name="your-feed",
+            first_seen_at=datetime.now(UTC),
+            last_seen_at=datetime.now(UTC),
+            load_count=load_count,
+        )
+
+    def _load(self, feeds, *, limit: int = 30, roll: float = 0.0, position=min, cursor=None):
+        from app.routers import xrpc as xrpc_mod
+
+        params: dict[str, str | int] = {"feed": RANKED_FEED_URI, "limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        with (
+            patch.object(xrpc_mod, "FEEDS", feeds),
+            patch("app.routers.xrpc.random") as rng,
+        ):
+            rng.random.return_value = roll
+            rng.randint.side_effect = lambda lo, hi: position(lo, hi)
+            resp = client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params=params)
+        assert resp.status_code == 200
+        return resp.json()
+
+    def test_injected_directly_below_the_top_five(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds())["feed"]]
+
+        assert len(posts) == 30
+        assert posts[0] == self.PINNED_URI
+        assert posts[5] == self.VIDEO_URI
+        assert posts.count(self.VIDEO_URI) == 1
+
+    def test_random_position_can_reach_the_end_of_the_first_page(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds(), position=max)["feed"]]
+
+        assert len(posts) == 30
+        assert posts[-1] == self.VIDEO_URI
+        assert posts.count(self.VIDEO_URI) == 1
+
+    def test_not_injected_when_the_roll_fails(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        from app.routers.xrpc import FAVORITE_VIDEO_POST_PROBABILITY
+
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [
+            item["post"]
+            for item in self._load(self._patched_feeds(), roll=FAVORITE_VIDEO_POST_PROBABILITY)[
+                "feed"
+            ]
+        ]
+
+        assert self.VIDEO_URI not in posts
+        assert len(posts) == 30
+
+    def test_not_injected_after_settings_visit(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(
+            user_did="did:plc:testuser", settings_visited_at=datetime.now(UTC)
+        )
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds())["feed"]]
+
+        assert self.VIDEO_URI not in posts
+
+    def test_not_injected_into_explore_previews(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds(), limit=8)["feed"]]
+
+        assert self.VIDEO_URI not in posts
+
+    def test_survey_takes_the_slot_when_both_are_eligible(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds(survey=True))["feed"]]
+
+        assert posts[5] == self.SURVEY_URI
+        assert self.VIDEO_URI not in posts
+
+    def test_injected_when_the_survey_is_not_eligible(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity(load_count=1)
+        mock_pipeline.return_value = (self._snapshot(), [])
+
+        posts = [item["post"] for item in self._load(self._patched_feeds(survey=True))["feed"]]
+
+        assert self.SURVEY_URI not in posts
+        assert posts[5] == self.VIDEO_URI
+
+    def test_excluded_from_snapshot_and_cursor_offset(
+        self, mock_get_user, mock_get_activity, mock_pipeline, *_
+    ):
+        mock_get_user.return_value = UserDocument(user_did="did:plc:testuser")
+        mock_get_activity.return_value = self._activity()
+        mock_pipeline.return_value = (self._snapshot(), [])
+        feeds = self._patched_feeds(pinned=False)
+
+        with patch(
+            "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
+        ) as snap:
+            first = self._load(feeds, limit=10)
+
+        posts = [item["post"] for item in first["feed"]]
+        assert posts[5] == self.VIDEO_URI
+        assert len(posts) == 10
+        assert snap.await_args is not None
+        assert self.VIDEO_URI not in snap.await_args.args[3].items
+        assert FeedCursor.decode(first["cursor"]).offset == 9
+
+        second = self._load(feeds, limit=10, cursor=first["cursor"])
+        second_posts = [item["post"] for item in second["feed"]]
+        assert second_posts[0] == "at://did:plc:a/9"
+        assert self.VIDEO_URI not in second_posts
+
+
+# ---------------------------------------------------------------------------
 # Source-weight override and Social Radius migration
 # ---------------------------------------------------------------------------
 
@@ -5140,10 +5402,7 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert (
-            gen_request.generators
-            == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
-        )
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
         assert gen_request.max_age_hours == 168
 
     @patch("app.routers.xrpc.get_user")
@@ -5187,10 +5446,7 @@ class TestSourceWeightsOverride:
 
         assert resp.status_code == 200
         gen_request = mock_pipeline.call_args.args[1]
-        assert (
-            gen_request.generators
-            == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
-        )
+        assert gen_request.generators == SOCIAL_RADIUS_PRESETS[DEFAULT_SOCIAL_RADIUS]
 
     @pytest.mark.parametrize(
         "feed_uri",
@@ -5198,7 +5454,7 @@ class TestSourceWeightsOverride:
     )
     @patch(
         "app.routers.xrpc.evaluate_feature_flags",
-        return_value={"fail-fast-feed": False},
+        return_value=_feature_flags(False),
     )
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
@@ -5274,7 +5530,7 @@ class TestSourceWeightsOverride:
 
     @patch(
         "app.routers.xrpc.evaluate_feature_flags",
-        return_value={"fail-fast-feed": False},
+        return_value=_feature_flags(False),
     )
     @patch("app.routers.xrpc.get_posthog_client")
     @patch("app.routers.xrpc.get_user")
@@ -5879,7 +6135,7 @@ class TestCandidateBatch:
         from ..lib.pipeline import PipelineResult
 
         pipeline = AsyncMock(return_value=PipelineResult([], []))
-        flags = {"fail-fast-feed": False}
+        flags = _feature_flags(False)
         with (
             patch(
                 "app.routers.xrpc.get_posthog_client",
@@ -5908,7 +6164,7 @@ class TestCandidateBatch:
         )
         cursor = FeedCursor(id=cache_id, offset=1).encode()
         pipeline = AsyncMock(return_value=PipelineResult([], []))
-        flags = {"fail-fast-feed": False}
+        flags = _feature_flags(False)
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
             patch("app.routers.xrpc.evaluate_feature_flags", return_value=flags),
@@ -5930,7 +6186,7 @@ class TestCandidateBatch:
         from ..lib.pipeline import PipelineResult
 
         pipeline = AsyncMock(return_value=PipelineResult([], []))
-        evaluate_flags = MagicMock(return_value={"fail-fast-feed": False})
+        evaluate_flags = MagicMock(return_value=_feature_flags(False))
         posthog_client = MagicMock()
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=posthog_client),
@@ -5985,34 +6241,106 @@ class TestFailFastFeatureFlag:
         ):
             yield
 
-    def test_flag_enabled_calls_set_fail_fast_true(self):
+    @pytest.mark.parametrize("limit", [1, 9, 30])
+    def test_flag_enabled_calls_set_fail_fast_true(self, limit):
         """When PostHog returns True for the user, set_fail_fast_for_request(True) is called."""
         mock_ph = MagicMock()
+        flags = _feature_flags(True)
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
             patch(
                 "app.routers.xrpc.evaluate_feature_flags",
-                return_value={"fail-fast-feed": True},
-            ),
+                return_value=flags,
+            ) as evaluate_flags,
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
-            client.get(
+            response = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
-                params={"feed": RANKED_FEED_URI},
+                params={"feed": RANKED_FEED_URI, "limit": limit},
             )
 
+        assert response.status_code == 200
+        evaluate_flags.assert_called_once_with(mock_ph, "did:plc:testuser", ["fail-fast-feed"])
+        flags.get_flag.assert_called_once_with("fail-fast-feed")
         mock_set.assert_called_once_with(True)
 
-    def test_flag_disabled_calls_set_fail_fast_false(self):
-        """When PostHog returns False, set_fail_fast_for_request(False) is called."""
+    @pytest.mark.parametrize("feed_uri", [RANKED_FEED_URI, BEST_OF_FRIENDS_FEED_URI])
+    @pytest.mark.parametrize("limit", [2, 8])
+    def test_explore_previews_use_defaults_without_evaluating_flags(self, feed_uri, limit):
+        """Explore prefetches skip PostHog even for users whose flag would be enabled."""
+        flags = _feature_flags(True)
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags",
+                return_value=flags,
+            ) as evaluate_flags,
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": feed_uri, "limit": limit},
+            )
+
+        assert response.status_code == 200
+        evaluate_flags.assert_not_called()
+        flags.get_flag.assert_not_called()
+        mock_set.assert_called_once_with(False)
+
+    @pytest.mark.parametrize("limit", [2, 8])
+    def test_small_cursor_pages_still_evaluate_flags(self, limit):
+        from .xrpc import _configured_generation
+
+        # A small continuation page is scrolling, so it still uses the user's flags.
+        cache_id = "small-cursor-feature-flags"
+        uris = [f"at://cached/{index}" for index in range(10)]
+        app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
+            items=uris,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            user_did="did:plc:testuser",
+            feed_name=RANKED_FEED_RKEY,
+            preference_fingerprint=_configured_generation(
+                RANKED_FEED_RKEY, None
+            ).preference_fingerprint,
+        )
+        cursor = FeedCursor(id=cache_id, offset=1).encode()
         mock_ph = MagicMock()
+        flags = _feature_flags(True)
 
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
             patch(
                 "app.routers.xrpc.evaluate_feature_flags",
-                return_value={"fail-fast-feed": False},
+                return_value=flags,
+            ) as evaluate_flags,
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI, "limit": limit, "cursor": cursor},
+            )
+
+        assert response.status_code == 200
+        assert [item["post"] for item in response.json()["feed"]] == uris[1 : 1 + limit]
+        evaluate_flags.assert_called_once_with(mock_ph, "did:plc:testuser", ["fail-fast-feed"])
+        flags.get_flag.assert_called_once_with("fail-fast-feed")
+        mock_set.assert_called_once_with(True)
+
+    @pytest.mark.parametrize(
+        ("flag_value", "expected_fail_fast"),
+        [(False, False), (None, False), ("enabled", True), ("", False)],
+    )
+    def test_flag_value_preserves_boolean_coercion(self, flag_value, expected_fail_fast):
+        """Missing flags and multivariate values keep their previous boolean behavior."""
+        mock_ph = MagicMock()
+        flags = _feature_flags(flag_value)
+
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=mock_ph),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags",
+                return_value=flags,
             ),
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
@@ -6021,12 +6349,31 @@ class TestFailFastFeatureFlag:
                 params={"feed": RANKED_FEED_URI},
             )
 
+        flags.get_flag.assert_called_once_with("fail-fast-feed")
+        mock_set.assert_called_once_with(expected_fail_fast)
+
+    def test_failed_flag_evaluation_calls_set_fail_fast_false(self):
+        with (
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.evaluate_feature_flags", return_value=None),
+            patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": RANKED_FEED_URI},
+            )
+
+        assert response.status_code == 200
         mock_set.assert_called_once_with(False)
 
     def test_none_posthog_client_calls_set_fail_fast_false(self):
         """When PostHog client is None (local dev), set_fail_fast_for_request(False) is called."""
+        flags = _feature_flags(True)
         with (
             patch("app.routers.xrpc.get_posthog_client", return_value=None),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags", return_value=flags
+            ) as evaluate_flags,
             patch("app.routers.xrpc.set_fail_fast_for_request") as mock_set,
         ):
             client.get(
@@ -6034,6 +6381,8 @@ class TestFailFastFeatureFlag:
                 params={"feed": RANKED_FEED_URI},
             )
 
+        evaluate_flags.assert_not_called()
+        flags.get_flag.assert_not_called()
         mock_set.assert_called_once_with(False)
 
 
@@ -6127,8 +6476,14 @@ class TestLoggedOut:
 
     def test_random_feed_records_nothing_for_an_anonymous_caller(self):
         candidates = _make_candidates("did:plc:a", 5, "random_posts")
+        flags = _feature_flags(True)
         with (
             self._patch_random_generator(candidates),
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch(
+                "app.routers.xrpc.evaluate_feature_flags", return_value=flags
+            ) as evaluate_flags,
+            patch("app.routers.xrpc.set_fail_fast_for_request") as set_fail_fast,
             patch("app.routers.xrpc.get_user", new_callable=AsyncMock) as get_user_mock,
             patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock) as upsert_mock,
             patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock) as snapshot_mock,
@@ -6139,6 +6494,9 @@ class TestLoggedOut:
             )
 
         assert resp.status_code == 200
+        evaluate_flags.assert_not_called()
+        flags.get_flag.assert_not_called()
+        set_fail_fast.assert_called_once_with(False)
         get_user_mock.assert_not_awaited()
         upsert_mock.assert_not_awaited()
         snapshot_mock.assert_not_awaited()

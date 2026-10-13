@@ -27,6 +27,8 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | SourceWeightsDocument] = {
     # per-feed or legacy user values, so this does not migrate existing settings.
     "politics": 0.5,
     "purpose": 0.5,
+    "author_penalty": 0.7,
+    "topic_penalty": 0.7,
 }
 
 
@@ -82,7 +84,7 @@ def resolve_feed_preferences(
         elif user is not None:
             # Legacy flat preferences initialize every applicable feed until
             # that feed's resolved values are materialized by its first patch.
-            values[control] = getattr(user, control)
+            values[control] = getattr(user, control, CONTROL_DEFAULTS[control])
         else:
             values[control] = CONTROL_DEFAULTS[control]
 
@@ -109,7 +111,7 @@ def control_value(
 def control_value(
     user: UserDocument | None,
     feed_name: str,
-    control: Literal["politics", "purpose"],
+    control: Literal["politics", "purpose", "author_penalty", "topic_penalty"],
 ) -> float: ...
 
 

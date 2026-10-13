@@ -19,6 +19,18 @@ class DiversifyRequest(BaseModel):
             "present on each post for MMR to compute similarity."
         ),
     )
+    author_penalty: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="User-facing repeated-author penalty strength from 0 to 1.",
+    )
+    topic_penalty: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="User-facing similar-topic penalty strength from 0 to 1.",
+    )
 
 
 class DiversifyResponse(BaseModel):
@@ -44,4 +56,13 @@ async def diversify(payload: DiversifyRequest) -> DiversifyResponse:
     `minilm_l12_embedding` values for similarity to be computed; posts
     without embeddings are appended to the end of the reranked list.
     """
-    return DiversifyResponse(candidates=[c for c, _ in mmr_rerank(payload.candidates)])
+    return DiversifyResponse(
+        candidates=[
+            c
+            for c, _ in mmr_rerank(
+                payload.candidates,
+                author_penalty=payload.author_penalty,
+                topic_penalty=payload.topic_penalty,
+            )
+        ]
+    )

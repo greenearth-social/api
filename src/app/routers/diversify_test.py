@@ -25,7 +25,9 @@ def set_api_key():
 
 def test_auth_required():
     def _raise():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key"
+        )
 
     app.dependency_overrides[verify_api_key] = _raise
     try:
@@ -69,3 +71,32 @@ def test_same_author_spread():
     uris = [c["at_uri"] for c in resp.json()["candidates"]]
     assert uris[0] == "at://alice/1"
     assert uris.index("at://bob/1") < uris.index("at://alice/2")
+
+
+def test_accepts_independent_penalty_settings():
+    client = TestClient(app, headers=HEADERS)
+    candidates = [
+        {"at_uri": "at://alice/1", "score": 1.0, "author_did": "did:plc:alice"},
+        {"at_uri": "at://alice/2", "score": 0.9, "author_did": "did:plc:alice"},
+        {"at_uri": "at://bob/1", "score": 0.5, "author_did": "did:plc:bob"},
+    ]
+
+    response = client.post(
+        "/diversify",
+        json={"candidates": candidates, "author_penalty": 0.0, "topic_penalty": 0.0},
+    )
+
+    assert response.status_code == 200
+    assert [candidate["at_uri"] for candidate in response.json()["candidates"]] == [
+        "at://alice/1",
+        "at://alice/2",
+        "at://bob/1",
+    ]
+
+
+@pytest.mark.parametrize("field", ["author_penalty", "topic_penalty"])
+@pytest.mark.parametrize("value", [-0.01, 1.01])
+def test_rejects_penalty_settings_outside_ui_range(field, value):
+    client = TestClient(app, headers=HEADERS)
+    response = client.post("/diversify", json={"candidates": [], field: value})
+    assert response.status_code == 422

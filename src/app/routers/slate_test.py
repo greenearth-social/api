@@ -280,6 +280,17 @@ class TestGenerate:
         assert resp.status_code == 200, resp.text
         assert all(item["diversification"] is not None for item in resp.json()["items"])
 
+    def test_mmr_penalties_reach_the_reranker(self):
+        from ..lib.diversify import mmr_rerank
+
+        gen_patch, lookup_patch, _ = _fake_generators(popularity=_candidates("pop", [0.9, 0.8]))
+        rerank = MagicMock(side_effect=mmr_rerank)
+        with gen_patch, lookup_patch, patch("app.lib.pipeline.mmr_rerank", new=rerank):
+            resp = _post(_body(diversify=True, author_penalty=0.2, topic_penalty=1.0))
+
+        assert resp.status_code == 200, resp.text
+        assert rerank.call_args.kwargs == {"author_penalty": 0.2, "topic_penalty": 1.0}
+
     def test_failed_generator_is_reported_as_degraded(self):
         gen_patch, lookup_patch, gens = _fake_generators(
             popularity=_candidates("pop", [0.5]), random_posts=[]
@@ -345,6 +356,7 @@ class TestValidation:
             {"external_candidates": [{"at_uri": "at://x/1"}]},  # candidates without external
             {"feed_name": "Not A Slug!"},
             {"rankers": []},
+            {"author_penalty": 1.5},
             {"rankers": [{"name": "candidate_score", "weight": 0}]},
             {"min_rank_score": 0.5},  # needs rankers
             {"limit": 0},

@@ -19,6 +19,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import time
 import uuid
 from concurrent.futures import Future
@@ -105,6 +106,8 @@ ACCEPTED_SLATE_CLAIM_GRACE_SECONDS = 5
 SURVEY_POST_POSITION = 6  # 1-indexed position in the first page where the survey post appears
 SURVEY_POST_MIN_VISITS = 3  # minimum initial loads before the survey is shown
 SURVEY_POST_COOLDOWN_DAYS = 7  # days between survey showings (triggered by interactionSeen)
+FAVORITE_VIDEO_POST_PROBABILITY = 0.25  # share of eligible first-page loads that get the video
+FAVORITE_VIDEO_POST_MIN_POSITION = 6  # 1-indexed; the video always lands below the top 5
 
 
 @dataclass
@@ -502,6 +505,15 @@ def _configured_generation(
     if "politics" in controls:
         assert effective.politics is not None
         feed_cfg = _with_politics_multiplier(feed_cfg, effective.politics)
+    if "author_penalty" in controls or "topic_penalty" in controls:
+        assert effective.author_penalty is not None
+        assert effective.topic_penalty is not None
+        feed_cfg = feed_cfg.model_copy(
+            update={
+                "author_penalty_setting": effective.author_penalty,
+                "topic_penalty_setting": effective.topic_penalty,
+            }
+        )
 
     generators_override: dict[str, list[GeneratorSpec]] = {}
     if "source_weights" in controls:
@@ -730,10 +742,21 @@ def _pinned_post_uris(feed_cfg: FeedConfig) -> set[str]:
     }
 
 
+def _is_explore_preview(cursor: str | None,requested_limit: int) -> bool:
+    # Bluesky's Explore preview prefetches at most eight posts. Keep the
+    # one-item AppView reachability probe on the normal path, and do not treat
+    # larger first-page requests as Explore traffic.
+    return cursor is None and 2 <= requested_limit <= 8
+
+
+def _has_visited_settings(user_doc: UserDocument | None) -> bool:
+    return user_doc is not None and user_doc.settings_visited_at is not None
+
+
 def _select_pinned_post_uri(
     feed_name: str,
     feed_cfg: FeedConfig,
-    requested_limit: int,
+    is_explore_preview: bool,
     user_doc: UserDocument | None,
 ) -> str | None:
     """Choose the first-page top post for the Bluesky surface and user state."""
@@ -741,14 +764,30 @@ def _select_pinned_post_uri(
         return None
     if feed_name != "your-feed":
         return feed_cfg.pinned_post_uri
-    # Bluesky's Explore preview prefetches at most eight posts. Keep the
-    # one-item AppView reachability probe on the normal path, and do not treat
-    # larger first-page requests as Explore traffic.
-    if 2 <= requested_limit <= 8:
+    if is_explore_preview:
         return feed_cfg.explore_pinned_post_uri or feed_cfg.pinned_post_uri
-    if user_doc is not None and user_doc.settings_visited_at is not None:
+    if _has_visited_settings(user_doc):
         return feed_cfg.returning_pinned_post_uri or feed_cfg.pinned_post_uri
     return feed_cfg.pinned_post_uri
+
+
+def _select_favorite_video_post_uri(
+    feed_cfg: FeedConfig,
+    is_explore_preview: bool,
+    user_doc: UserDocument | None,
+) -> str | None:
+    """Roll for the "how to favorite this feed" video on a first-page load.
+
+    Only users outside Explore who have not visited Settings are eligible; they
+    get the video on ``FAVORITE_VIDEO_POST_PROBABILITY`` of their loads.
+    """
+    if feed_cfg.favorite_video_post_uri is None:
+        return None
+    if is_explore_preview or _has_visited_settings(user_doc):
+        return None
+    if random.random() >= FAVORITE_VIDEO_POST_PROBABILITY:
+        return None
+    return feed_cfg.favorite_video_post_uri
 
 
 # ---------------------------------------------------------------------------
@@ -886,9 +925,11 @@ async def generate_feed_preview(
             [FAIL_FAST_FLAG],
         )
         if posthog_client is not None
-        else {}
+        else None
     )
-    set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
+    set_fail_fast_for_request(
+        bool(feature_flags.get_flag(FAIL_FAST_FLAG)) if feature_flags is not None else False
+    )
 
     configured = _configured_generation(
         feed_name,
@@ -1513,21 +1554,28 @@ async def get_feed_skeleton(
             )
         )
 
+    is_explore_preview = _is_explore_preview(cursor, limit)
     posthog_client = get_posthog_client()
     # Flags are evaluated per user, and an anonymous caller isn't one: it would
     # be a single synthetic identity shared by every logged-out request. Take
     # the flag defaults instead.
-    feature_flags = (
-        await asyncio.to_thread(
-            evaluate_feature_flags,
-            posthog_client,
-            user_did,
-            [FAIL_FAST_FLAG],
+    feature_flag_list = [FAIL_FAST_FLAG]
+    if is_explore_preview:
+        feature_flags = None
+    else:
+        feature_flags = (
+            await asyncio.to_thread(
+                evaluate_feature_flags,
+                posthog_client,
+                user_did,
+                feature_flag_list,
+            )
+            if posthog_client is not None and not is_anonymous
+            else None
         )
-        if posthog_client is not None and not is_anonymous
-        else {}
+    set_fail_fast_for_request(
+        bool(feature_flags.get_flag(FAIL_FAST_FLAG)) if feature_flags is not None else False
     )
-    set_fail_fast_for_request(feature_flags.get(FAIL_FAST_FLAG, False))
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
@@ -1553,7 +1601,8 @@ async def get_feed_skeleton(
     preference_fingerprint = configured.preference_fingerprint
     contextual_pin_uris = _pinned_post_uris(feed_cfg)
     pinned_post_uri = (
-        _select_pinned_post_uri(feed_name, feed_cfg, limit, user_doc) if cursor is None else None
+        _select_pinned_post_uri(feed_name, feed_cfg, is_explore_preview, user_doc)
+        if cursor is None else None
     )
 
     feed_cache = _get_feed_cache(request)
@@ -2020,10 +2069,28 @@ async def get_feed_skeleton(
                     last_seen = user_doc.survey_post_last_seen_at if user_doc else None
                     show_survey = last_seen is None or last_seen < cutoff
 
-            # Pinned and survey posts are Bluesky presentation concerns and are
+            # The survey and the favorite video share one slot below the top 5, so a
+            # load shows at most one of them; the rarer, cooldown-gated survey wins.
+            # Pinned, survey, and video posts are Bluesky presentation concerns and are
             # deliberately excluded from observability snapshots and source diagnostics.
             survey_uri = feed_cfg.survey_post_uri if show_survey else None
-            n_injected = (1 if pinned_post_uri else 0) + (1 if survey_uri else 0)
+            favorite_video_uri = None
+            if (
+                not survey_uri
+                and not is_anonymous
+                and not is_probe
+                and not is_load_test
+                and not is_appview_one_item_check
+                and preferences_read_succeeded
+            ):
+                favorite_video_uri = _select_favorite_video_post_uri(
+                    feed_cfg, is_explore_preview, user_doc
+                )
+            n_injected = (
+                (1 if pinned_post_uri else 0)
+                + (1 if survey_uri else 0)
+                + (1 if favorite_video_uri else 0)
+            )
             if pinned_post_uri:
                 cache_uris = all_uris
                 generated_page = cache_uris[: max(0, limit - n_injected)]
@@ -2038,6 +2105,10 @@ async def get_feed_skeleton(
             if survey_uri:
                 insert_idx = min(SURVEY_POST_POSITION - 1, len(page))
                 page = [*page[:insert_idx], survey_uri, *page[insert_idx:]]
+            elif favorite_video_uri:
+                lowest_idx = min(FAVORITE_VIDEO_POST_MIN_POSITION - 1, len(page))
+                insert_idx = random.randint(lowest_idx, len(page))
+                page = [*page[:insert_idx], favorite_video_uri, *page[insert_idx:]]
 
             scores_by_uri = _similarity_scores_from_items_meta(generated_snapshot.items_meta)
             _record_similarity_metric(

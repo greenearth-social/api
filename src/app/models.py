@@ -9,6 +9,8 @@ FeedControlName = Literal[
     "freshness",
     "politics",
     "purpose",
+    "author_penalty",
+    "topic_penalty",
 ]
 
 # What a feed does when the AppView calls getFeedSkeleton with no (or an
@@ -151,9 +153,9 @@ class CandidateGenerateRequest(BaseModel):
             "the user in previous pages)."
         ),
     )
-    hydrate_embeddings: bool = Field(default=False,
-
-        description="When true, refetches the 384-dim embedding arrays for the final candidates."
+    hydrate_embeddings: bool = Field(
+        default=False,
+        description="When true, refetches the 384-dim embedding arrays for the final candidates.",
     )
 
     infill: str | None = Field(
@@ -265,6 +267,11 @@ class UserEmbeddingResponse(BaseModel):
     reason: Literal["no_likes", "no_embedded_history"] | None = None
 
 
+# MMR's author/topic penalty settings default to 0.7, preserving the former
+# fixed penalty split (see lib/diversify.py DEFAULT_*_PENALTY).
+DEFAULT_MMR_PENALTY = 0.7
+
+
 class SlateCutoffs(BaseModel):
     """Post-ranking slate policy shared by published feeds and the slate API.
 
@@ -315,6 +322,18 @@ class SlateConfig(SlateCutoffs):
     rank_request_template: RankPredictRequest | None = Field(
         None,
         description="When set, candidates are ranked by this model before being returned.",
+    )
+    author_penalty_setting: float = Field(
+        DEFAULT_MMR_PENALTY,
+        ge=0.0,
+        le=1.0,
+        description="Request-local author-diversity setting exposed to users as 0..1.",
+    )
+    topic_penalty_setting: float = Field(
+        DEFAULT_MMR_PENALTY,
+        ge=0.0,
+        le=1.0,
+        description="Request-local topic-diversity setting exposed to users as 0..1.",
     )
 
 
@@ -373,6 +392,12 @@ class FeedConfig(SlateConfig):
         description="AT URI of a post to inject at position 6 of the first page for users "
         "who have loaded the feed at least 3 times and have not seen it in the past 7 days. "
         "Resolved by app.ux_posts.ux_post_uri() from the deploy-generated manifest.",
+    )
+    favorite_video_post_uri: str | None = Field(
+        default=None,
+        description="AT URI of a \"how to favorite this feed\" video post injected at a random "
+        "first-page position below the top 5 on a share of loads by users who have not "
+        "visited Settings. Never shown alongside the survey post, which takes precedence.",
     )
     logged_out: LoggedOutBehavior = Field(
         "explain",
@@ -443,6 +468,8 @@ SLATE_CONFIG_FIELDS = frozenset(
         "exclude_uris",
         "rankers",
         "politics",
+        "author_penalty",
+        "topic_penalty",
         "diversify",
         "min_rank_score",
         "min_mmr_score",
@@ -505,6 +532,20 @@ class SlateGenerateRequest(SlateCutoffs):
         le=2.0,
         description="Multiplier applied to the combined rank score based on the post's "
         "politics score",
+    )
+    author_penalty: float = Field(
+        default=DEFAULT_MMR_PENALTY,
+        ge=0.0,
+        le=1.0,
+        description="Repeated-author penalty strength from 0 to 1 (as on /diversify). "
+        "Only applies when diversify is true.",
+    )
+    topic_penalty: float = Field(
+        default=DEFAULT_MMR_PENALTY,
+        ge=0.0,
+        le=1.0,
+        description="Similar-topic penalty strength from 0 to 1 (as on /diversify). "
+        "Only applies when diversify is true.",
     )
 
     @model_validator(mode="after")

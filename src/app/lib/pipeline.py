@@ -221,7 +221,11 @@ async def run_ranking_pipeline(
                 metric_attrs={"feed_name": feed_name},
                 n_candidates=len(ordered),
             ):
-                picks = mmr_rerank(ordered)
+                picks = mmr_rerank(
+                    ordered,
+                    author_penalty=slate.author_penalty_setting,
+                    topic_penalty=slate.topic_penalty_setting,
+                )
             final = [c for c, _ in picks]
             if slate.min_mmr_score is not None:
                 # Pick scores are not monotone (penalties decay with position),

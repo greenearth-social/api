@@ -153,6 +153,11 @@ def _build_items(
                             score=meta.diversification.score,
                             author_penalty=meta.diversification.author_penalty,
                             content_penalty=meta.diversification.content_penalty,
+                            author_penalty_setting=meta.diversification.author_penalty_setting,
+                            topic_penalty_setting=meta.diversification.topic_penalty_setting,
+                            relevance_weight=meta.diversification.relevance_weight,
+                            author_penalty_weight=meta.diversification.author_penalty_weight,
+                            topic_penalty_weight=meta.diversification.topic_penalty_weight,
                         )
                         if meta.diversification
                         else None,
@@ -192,6 +197,11 @@ def _build_items(
                     score=meta.diversification.score,
                     author_penalty=meta.diversification.author_penalty,
                     content_penalty=meta.diversification.content_penalty,
+                    author_penalty_setting=meta.diversification.author_penalty_setting,
+                    topic_penalty_setting=meta.diversification.topic_penalty_setting,
+                    relevance_weight=meta.diversification.relevance_weight,
+                    author_penalty_weight=meta.diversification.author_penalty_weight,
+                    topic_penalty_weight=meta.diversification.topic_penalty_weight,
                 )
                 if meta.diversification
                 else None,

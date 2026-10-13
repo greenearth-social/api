@@ -107,6 +107,19 @@ class TestContent:
         )
         assert links == ()
 
+    def test_favorite_video_post_renders_the_expected_text_with_its_video(self):
+        text, links = managed_posts.content_signature(
+            ux_posts.read_content(ux_posts.FAVORITE_YOUR_FEED)
+        )
+        assert text == (
+            "📌 Want MySky every time you open Bluesky?\n\n"
+            "Watch how to pin it and make it your default feed."
+        )
+        assert links == ()
+        assert ux_posts.video_path(ux_posts.FAVORITE_YOUR_FEED) == (
+            ux_posts.CONTENT_DIR / "favorite-your-feed.mp4"
+        )
+
     def test_every_post_is_within_the_length_limit(self):
         for name in ux_posts.MANAGED_POSTS:
             text, _ = managed_posts.content_signature(ux_posts.read_content(name))
@@ -315,6 +328,18 @@ class TestSync:
         with patch.object(manage_ux_posts, "fetch_repo_posts") as fetch:
             assert manage_ux_posts.cmd_sync(self._args()) == 1
         fetch.assert_not_called()
+
+
+class TestLogin:
+    def test_client_allows_slow_video_uploads(self):
+        """A large video blob must not trip httpx's 5-second default on a slow uplink."""
+        with patch.object(managed_posts.Client, "login") as login:
+            client = managed_posts.login("did:plc:publisher", "app-password")
+
+        login.assert_called_once_with("did:plc:publisher", "app-password")
+        timeout = client.request._client.timeout
+        assert timeout.write is not None and timeout.write >= managed_posts.UPLOAD_TIMEOUT_SECONDS
+        assert timeout.read is not None and timeout.read >= managed_posts.UPLOAD_TIMEOUT_SECONDS
 
 
 class TestResolve:

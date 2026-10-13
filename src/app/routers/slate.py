@@ -336,6 +336,8 @@ async def _generate_session(
     slate = SlateConfig(
         rank_request_template=rank_template,
         diversify=body.diversify,
+        author_penalty_setting=body.author_penalty,
+        topic_penalty_setting=body.topic_penalty,
         min_rank_score=body.min_rank_score,
         min_mmr_score=body.min_mmr_score,
         max_render_share=body.max_render_share,

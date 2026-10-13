@@ -2,7 +2,8 @@
 
 UX posts are the Bluesky posts we insert into feeds for product reasons rather than
 because they were ranked: the SETTINGS pin at the top of every public feed, the
-"you must be logged in" explainer, the user-interview survey post. Their *content*
+"you must be logged in" explainer, the user-interview survey post, the "how to
+favorite this feed" video. Their *content*
 is versioned in ``assets/ux_posts/`` and published to the notifications account by
 ``scripts/manage_ux_posts.py``; their *URIs* are resolved at deploy time into the manifest
 this module reads.
@@ -55,10 +56,12 @@ PIN_YOUR_FEED_RETURNING = "pin-your-feed-returning.md"
 PIN_BEST_OF_FRIENDS = "pin-best-of-friends.md"
 PIN_RANDOM = "pin-random.md"
 SURVEY_YOUR_FEED = "survey-your-feed.md"
+FAVORITE_YOUR_FEED = "favorite-your-feed.md"
 LOGGED_OUT = "logged-out.md"
 PLACEHOLDER = "placeholder.md"
 
 MANAGED_POSTS: tuple[str, ...] = (
+    FAVORITE_YOUR_FEED,
     LOGGED_OUT,
     PIN_BEST_OF_FRIENDS,
     PIN_RANDOM,
@@ -91,6 +94,10 @@ VIDEO_POSTS: dict[str, VideoSpec] = {
     PIN_YOUR_FEED_EXPLORE: VideoSpec(
         filename="pin-your-feed-explore.mp4",
         alt="A demonstration of how to pin the MySky feed.",
+    ),
+    FAVORITE_YOUR_FEED: VideoSpec(
+        filename="favorite-your-feed.mp4",
+        alt="A demonstration of how to pin the MySky feed and make it your default feed.",
     ),
 }
 
