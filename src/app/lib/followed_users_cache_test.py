@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +20,7 @@ from .followed_users_cache import (
     set_followed_users_cache,
 )
 from .request_cache import request_cache_scope
+from .request_context import user_cache_scope
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +573,77 @@ class TestGetFollowedDidsCached:
         from .firestore import user_doc_id
 
         assert db.store["refs"][user_doc_id(USER)].read_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cache_state", ["missing", "fresh", "stale"])
+    async def test_bypass_fetches_once_without_firestore_or_background_work(
+        self, origin, cache_state
+    ):
+        db = FakeDb()
+        if cache_state != "missing":
+            generated_at = now()
+            if cache_state == "stale":
+                generated_at -= timedelta(seconds=cache_module.ttl_seconds() + 1)
+            put(db, USER, follows=["did:plc:cached"], complete=True, generated_at=generated_at)
+        cache = make_cache(db)
+        set_followed_users_cache(cache)
+
+        with user_cache_scope(bypass=True):
+            async with request_cache_scope():
+                first, second = await asyncio.gather(
+                    get_followed_dids_cached(USER),
+                    get_followed_dids_cached(USER),
+                )
+
+        await cache.drain()
+        assert first == second == ["did:plc:a"]
+        assert origin.calls == [(USER, None)]
+        # No document access or population sweep may escape the bypass.
+        assert db.collections == []
+        assert cache._tasks == set()
+        if cache_state == "missing":
+            assert db.store["docs"] == {}
+        else:
+            assert stored(db, USER).follows == ["did:plc:cached"]
+
+    @pytest.mark.asyncio
+    async def test_bypass_does_not_disable_cache_for_concurrent_request(self, monkeypatch):
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:cached"], complete=True, generated_at=now())
+        cache = make_cache(db)
+        set_followed_users_cache(cache)
+        fetch_started = asyncio.Event()
+        release_fetch = asyncio.Event()
+
+        async def fetch_live(*_args, **_kwargs):
+            fetch_started.set()
+            await release_fetch.wait()
+            return FollowsFetch(dids=["did:plc:live"], complete=True)
+
+        origin = AsyncMock(side_effect=fetch_live)
+        monkeypatch.setattr(cache_module, "fetch_followed_user_dids", origin)
+
+        async def explore_request():
+            with user_cache_scope(bypass=True):
+                async with request_cache_scope():
+                    return await get_followed_dids_cached(USER)
+
+        async def normal_request():
+            await fetch_started.wait()
+            try:
+                async with request_cache_scope():
+                    return await get_followed_dids_cached(USER)
+            finally:
+                release_fetch.set()
+
+        explore, normal = await asyncio.wait_for(
+            asyncio.gather(explore_request(), normal_request()), timeout=1
+        )
+        await cache.drain()
+
+        assert explore == ["did:plc:live"]
+        assert normal == ["did:plc:cached"]
+        origin.assert_awaited_once_with(USER, cache_module.MAX_FOLLOWED_USERS)
 
 
 # ---------------------------------------------------------------------------

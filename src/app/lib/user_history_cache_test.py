@@ -15,6 +15,7 @@ from .embeddings import (
     encode_float32_b64,
 )
 from .request_cache import request_cache_scope
+from .request_context import user_cache_scope
 from .user_history_cache import (
     USER_HISTORY_CACHE_COLLECTION,
     USER_HISTORY_CACHE_LEASE_SEC,
@@ -466,6 +467,88 @@ async def test_cache_hit_skips_elasticsearch(monkeypatch):
     assert await fetch_user_history_features(object(), "did:plc:user1") == cached
     recent.assert_not_awaited()
     hydrate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_state", ["missing", "fresh", "stale", "pending"])
+async def test_bypass_fetches_history_once_without_firestore_or_refresh(monkeypatch, cache_state):
+    db, _collection_ref, doc_ref = _mock_firestore_client()
+    fetched_at = datetime.now(UTC)
+    if cache_state == "stale":
+        fetched_at -= timedelta(seconds=USER_HISTORY_CACHE_TTL_SEC + 1)
+    snapshot = MagicMock(exists=cache_state != "missing")
+    snapshot.to_dict.return_value = _cached_document(fetched_at=fetched_at)
+    doc_ref.get.return_value = snapshot
+    cache = FirestoreUserHistoryCache(db)
+    if cache_state == "pending":
+        cache._pending_histories["did:plc:user1"] = UserHistory(items=[])
+    set_user_history_cache(cache)
+    recent, hydrate = _install_index_hydration(monkeypatch)
+    es = object()
+
+    with user_cache_scope(bypass=True):
+        async with request_cache_scope():
+            first = await fetch_user_history_features(es, "did:plc:user1")
+            second = await fetch_user_history_features(es, "did:plc:user1")
+
+    await cache.drain()
+    assert first is second
+    assert first.items == [
+        UserHistoryItem("at://liked/reply", "time-reply", [2.0], "did:plc:reply", 20),
+        UserHistoryItem("at://liked/missing", "time-missing", None),
+        UserHistoryItem("at://liked/post", "time-post", [1.0], "did:plc:post", 10),
+    ]
+    recent.assert_awaited_once()
+    assert hydrate.await_count == 2
+    db.collection.assert_not_called()
+    db.transaction.assert_not_called()
+    assert cache._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_bypass_does_not_disable_history_cache_for_concurrent_request(monkeypatch):
+    cached = UserHistory(
+        items=[UserHistoryItem("at://liked/cached", "2026-01-01T00:00:00Z", [1.0])]
+    )
+    cache = _FakeCache(cached)
+    set_user_history_cache(cache)
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def fetch_recent(*_args, **_kwargs):
+        fetch_started.set()
+        await release_fetch.wait()
+        return [], []
+
+    recent = AsyncMock(side_effect=fetch_recent)
+    monkeypatch.setattr(user_history_module, "fetch_recent_liked_post_uris_and_times", recent)
+    es = object()
+
+    async def explore_request():
+        with user_cache_scope(bypass=True):
+            async with request_cache_scope():
+                return await fetch_user_history_features(es, "did:plc:user1")
+
+    async def normal_request():
+        await fetch_started.wait()
+        try:
+            async with request_cache_scope():
+                return await fetch_user_history_features(es, "did:plc:user1")
+        finally:
+            release_fetch.set()
+
+    explore, normal = await asyncio.wait_for(
+        asyncio.gather(explore_request(), normal_request()), timeout=1
+    )
+    await cache.drain()
+
+    assert explore == UserHistory(items=[])
+    assert normal is cached
+    recent.assert_awaited_once()
+    assert cache.retrieve_calls == 1
+    assert cache.store_calls == []
+    assert cache.claim_calls == []
+    assert cache.release_calls == []
 
 
 @pytest.mark.asyncio
