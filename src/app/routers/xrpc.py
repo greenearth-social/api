@@ -63,6 +63,7 @@ from ..lib.firestore import (
     merge_feed_snapshot,
     record_discarded_posts,
     record_interaction,
+    record_request_less_posts,
     record_seen_posts,
     record_user_post_seen,
     update_survey_post_seen,
@@ -1241,6 +1242,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
     buckets so they can be excluded from future feed generations -- but only for
     slate feeds and feeds whose config has ``exclude_seen_posts`` enabled. The raw
     interaction is always stored regardless.
+
+    Real ``requestLess`` items are also saved on the user for the anti-ranker.
     """
     # Seen URIs collected per user so we can record them with a single write
     # per user after the per-interaction loop. Keyed by (did, load_test) so a
@@ -1248,6 +1251,7 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
     # bucket instead of polluting their real exclusion data.
     seen_by_user: dict[tuple[str, bool], list[str]] = {}
     post_seen_users: set[str] = set()
+    request_less_by_user: dict[str, dict[str, datetime]] = {}
 
     # Handles for the PostHog identity properties, memoized so a batch of
     # interactions from one user costs one Firestore read rather than one per
@@ -1315,6 +1319,10 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
             feed_generated_at=datetime.fromtimestamp(payload.iat, tz=UTC),
             load_test=payload.lt,
         )
+        if event == "requestLess" and ix.item and not payload.lt:
+            # Use receipt time, not the time the feed was generated. Repeated
+            # selections of the same post in a batch keep the latest timestamp.
+            request_less_by_user.setdefault(payload.did, {})[ix.item] = doc.created_at
         try:
             await record_interaction(db, doc)
         except Exception:
@@ -1337,6 +1345,12 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
                 logger.exception(
                     "Failed to track PostHog interaction '%s' for user '%s'", event, payload.did
                 )
+
+    for did, items in request_less_by_user.items():
+        try:
+            await record_request_less_posts(db, did, items)
+        except Exception:
+            logger.exception("Failed to record requestLess posts for user '%s'", did)
 
     for (did, load_test), uris in seen_by_user.items():
         try:

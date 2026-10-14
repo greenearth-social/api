@@ -1,30 +1,40 @@
-"""Heavy ranker model.
+"""Score candidates against a user's requestLess history.
 """
 
+from __future__ import annotations
+
 import asyncio
-from datetime import datetime
 import logging
-from typing import assert_never
+from typing import TYPE_CHECKING
 
 from ...models import CandidatePost, RankedCandidate, RankPredictResult
 from ..embeddings import decode_float32_b64
 from ..elasticsearch import fetch_post_embeddings_and_metadata
 from ..feed_debug import current_recorder
-from ..firestore import get_user
 from ..inference import (
     get_inference_settings,
     predict_heavy_ranker_single_user,
 )
 from ..telemetry import timed
-from ..user_history_cache import get_user_history_cache
 from .base import Ranker, RankerResult
 from .utils import get_rank_predict_results_from_candidates_and_scores
 
+if TYPE_CHECKING:
+    from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
+
 logger = logging.getLogger(__name__)
+
+# Rankers are registered at import time; startup installs the shared Firestore client.
+_db: AsyncClient | None = None
+
+
+def set_anti_ranker_db(db: AsyncClient | None) -> None:
+    global _db
+    _db = db
 
 
 class AntiRanker(Ranker):
-    """Rank candidate posts relative to a user using an ML model."""
+    """Rank candidates by affinity to posts the user requested less of."""
 
     def __init__(self, name: str):
         self._name = name
@@ -43,68 +53,37 @@ class AntiRanker(Ranker):
         user_did: str,
         candidates: list[CandidatePost]
     ) -> RankerResult:
-        inference_base_url, inference_api_key = (
-            get_inference_settings()
-        )
+        # Defer this import to avoid the documents/ranker registry import cycle.
+        from ..firestore import get_user
+
+        user_doc = await get_user(_db, user_did) if _db is not None else None
+        request_less_items = user_doc.request_less_items if user_doc is not None else {}
+        rec = current_recorder()
+        if not request_less_items:
+            if rec is not None:
+                rec.record_user_features(self._name, [], 0)
+            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
 
         async def _get_user_features() -> tuple[list[list[float]], list[str], list[str], list[int]]:
-            rec = current_recorder()
-
             async with timed(logger, "ranker_get_user_features", user_did=user_did):
-                user_history_vectors: list[list[float]] = []
-                filtered_history_liked_at_times: list[str] = []
-                history_author_dids: list[str] = []
-                history_like_counts: list[int] = []
-                
-                ####### PUT SOMETHING HERE #######
-                user_history_cache = get_user_history_cache()
-                if user_history_cache is None:
-                    raise ValueError("Couldn't get user history cache!")
-                user_doc = await user_history_cache.get_user(user_did)
-                user_history_liked_uris_and_times = user_doc.request_less_items
-                logger.info("\n\n\n")
-                logger.info(user_history_liked_uris_and_times)
+                # Inference keeps the first N history entries, so put recent requests first.
+                history_uris = sorted(
+                    request_less_items, key=request_less_items.__getitem__, reverse=True
+                )
+                embedded_history = await fetch_post_embeddings_and_metadata(es, history_uris)
+                if rec is not None:
+                    rec.record_user_features(self._name, history_uris, len(embedded_history))
 
-                if not user_history_liked_uris_and_times:
-                    logger.info("No likes found for user %s", user_did)
-                    if rec is not None:
-                        rec.record_user_features(self._name, [], 0)
-                else:
-                    user_history_liked_uris = [
-                        uri for uri in user_history_liked_uris_and_times.keys()
-                    ]
-                    embedded_history = await fetch_post_embeddings_and_metadata(es, user_history_liked_uris)
-                    if rec is not None:
-                        rec.record_user_features(
-                            self._name, user_history_liked_uris, len(embedded_history)
-                        )
-                    if not embedded_history:
-                        logger.info(
-                            "No embeddings found for %d liked posts of user %s",
-                            len(user_history_liked_uris),
-                            user_did,
-                        )
-                    else:
-                        user_history_vectors = [
-                            item[1] for item in embedded_history if item[1] is not None
-                        ]
-                        history_author_dids = [
-                            item[2] for item in embedded_history if item[2] is not None
-                        ]
-                        history_like_counts = [
-                            item[3] for item in embedded_history if item[3] is not None
-                        ]
-                        filtered_history_liked_at_times = [
-                            user_history_liked_uris_and_times[item[0]].isoformat(timespec="seconds").replace("+00:00", "Z")
-                            for item in embedded_history
-                        ]
-                        logger.info("Found authors: %s", history_author_dids)
-
+                # The ES helper preserves URI order and skips posts without embeddings.
+                # Build every feature from the same returned rows to keep them aligned.
                 return (
-                    user_history_vectors,
-                    history_author_dids,
-                    filtered_history_liked_at_times,
-                    history_like_counts,
+                    [embedding for _, embedding, _, _ in embedded_history],
+                    [author_did for _, _, author_did, _ in embedded_history],
+                    [
+                        request_less_items[uri].isoformat(timespec="seconds").replace("+00:00", "Z")
+                        for uri, _, _, _ in embedded_history
+                    ],
+                    [like_count for _, _, _, like_count in embedded_history],
                 )
         # end _get_user_features()
 
@@ -161,6 +140,9 @@ class AntiRanker(Ranker):
         )
 
         history_embeddings, history_author_dids, history_liked_at_times, history_like_counts = user_features
+        if not history_embeddings:
+            # Empty history would score the model's general prior, not requestLess affinity.
+            return RankerResult(model=self.name, result=RankPredictResult(rankings=[]))
 
         def _return_empty_ranker_result(msg: str):
             logger.info(msg)
@@ -181,6 +163,7 @@ class AntiRanker(Ranker):
             )
         candidate_posts, candidate_post_embeddings, candidate_author_dids, candidate_like_counts = candidate_features
 
+        inference_base_url, inference_api_key = get_inference_settings()
         ranker_outputs = await predict_heavy_ranker_single_user(
             history_embeddings,
             history_author_dids,

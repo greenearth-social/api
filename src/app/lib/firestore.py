@@ -200,7 +200,6 @@ async def upsert_user(
         updated_at=now,
         last_seen_at=now,
         created_by_load_test=is_load_test,
-        request_less_items={},
     )
     await ref.set(user.model_dump())
     return user
@@ -960,6 +959,19 @@ async def record_interaction(db: AsyncClient, interaction: InteractionDocument) 
     collection so the data is easy to query and export (e.g. to Elasticsearch).
     """
     await db.collection(INTERACTIONS_COLLECTION).add(interaction.model_dump())
+
+
+async def record_request_less_posts(
+    db: AsyncClient, user_did: str, items: dict[str, datetime]
+) -> None:
+    """Merge requestLess receipt times into the user's history, keyed by post URI."""
+    if not items:
+        return
+    ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
+    # Merge nested entries so concurrent writes for different posts preserve each
+    # other. Nested keys also keep the dots in AT URIs literal, not field paths.
+    # Include the DID so a missing user document is still readable by get_user.
+    await ref.set({"user_did": user_did, "request_less_items": items}, merge=True)
 
 
 # ---------------------------------------------------------------------------
