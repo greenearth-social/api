@@ -17,7 +17,6 @@ from ..documents import (
 )
 from ..lib.feed_cache import FeedCache
 from ..lib.feed_context import decode_feed_context
-from ..lib.request_context import bypass_user_caches
 from ..main import app
 from ..models import FeedCursor
 from . import xrpc
@@ -239,24 +238,14 @@ async def test_small_expired_cursor_regenerates_with_normal_persistence(feed_ses
 @pytest.mark.asyncio
 async def test_full_feed_generation_after_explore_resumes_history_reads_and_writes(feed_session):
     state = feed_session
-    cache_modes = []
-
-    async def pipeline(*args, **kwargs):
-        cache_modes.append(bypass_user_caches())
-        return state.snapshot, ["at://newly-discarded"]
-
-    state._run_pipeline_capturing_with_timeout.side_effect = pipeline
     await state.load(8)
 
     state.get_recent_seen_uris.assert_not_awaited()
     state.get_recent_discarded_uris.assert_not_awaited()
     state.record_discarded_posts.assert_not_awaited()
-    assert bypass_user_caches() is False
 
     await state.load(30)
 
-    assert cache_modes == [True, False]
-    assert bypass_user_caches() is False
     assert state._run_pipeline_capturing_with_timeout.await_count == 2
     preview_generation, full_generation = [
         call.args[3] for call in state._run_pipeline_capturing_with_timeout.await_args_list
@@ -268,52 +257,6 @@ async def test_full_feed_generation_after_explore_resumes_history_reads_and_writ
     state.record_discarded_posts.assert_awaited_once_with(
         state.db, USER_DID, ["at://newly-discarded"], load_test=False
     )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("limit", "has_cursor", "expected_bypass"),
-    [(2, False, True), (8, False, True), (9, False, False), (30, False, False), (8, True, False)],
-)
-async def test_user_cache_policy_reaches_concurrent_pipeline_tasks(
-    feed_session, limit, has_cursor, expected_bypass
-):
-    state = feed_session
-    cache_modes = []
-
-    async def child_lookup():
-        return bypass_user_caches()
-
-    async def pipeline(*args, **kwargs):
-        # Candidate generators and rankers launch concurrent lookup tasks.
-        cache_modes.extend(await asyncio.gather(child_lookup(), child_lookup()))
-        return state.snapshot, []
-
-    state._run_pipeline_capturing_with_timeout.side_effect = pipeline
-    cursor = FeedCursor(id="expired-feed", offset=9).encode() if has_cursor else None
-
-    await state.load(limit, cursor)
-
-    assert cache_modes == [expected_bypass, expected_bypass]
-    assert bypass_user_caches() is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
-async def test_failed_explore_pipeline_restores_normal_user_cache_policy(feed_session, error_type):
-    state = feed_session
-
-    async def failing_pipeline(*args, **kwargs):
-        assert bypass_user_caches() is True
-        raise error_type("pipeline failed")
-
-    state._run_pipeline_capturing_with_timeout.side_effect = failing_pipeline
-
-    with pytest.raises(error_type, match="pipeline failed"):
-        await state.load(8)
-    await asyncio.gather(*xrpc._background_tasks)
-
-    assert bypass_user_caches() is False
 
 
 @pytest.mark.asyncio

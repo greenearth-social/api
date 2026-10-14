@@ -96,7 +96,7 @@ from ..lib.posthog_client import (
 from ..lib.rankers import run_predict
 from ..lib.release import api_release_sha
 from ..lib.request_cache import request_cache_scope
-from ..lib.request_context import set_traffic, user_cache_scope
+from ..lib.request_context import set_traffic
 from ..lib.telemetry import timed
 from ..models import (
     CandidateGenerateRequest,
@@ -2314,18 +2314,17 @@ async def get_feed_skeleton(
             # Generated up front so it can key the debug record too.
             request_id = uuid.uuid4().hex
 
-            with user_cache_scope(bypass=is_explore_preview):
-                generated_snapshot, low_score_uris = await _run_pipeline_capturing_with_timeout(
-                    request,
-                    db,
-                    feed_cfg,
-                    gen_request,
-                    feed_name=feed_name,
-                    user_did=user_did,
-                    request_id=request_id,
-                    regenerated=False,
-                    debug_enabled=debug_enabled,
-                )
+            generated_snapshot, low_score_uris = await _run_pipeline_capturing_with_timeout(
+                request,
+                db,
+                feed_cfg,
+                gen_request,
+                feed_name=feed_name,
+                user_did=user_did,
+                request_id=request_id,
+                regenerated=False,
+                debug_enabled=debug_enabled,
+            )
             # A preview's rejected candidates should not affect future feed loads.
             if (
                 low_score_uris

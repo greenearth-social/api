@@ -49,7 +49,6 @@ from .bsky import FollowedUsersLookupError, FollowsFetch, fetch_followed_user_di
 from .metrics import get_metric_collector
 from .release import api_release_sha
 from .request_cache import get_request_cache
-from .request_context import bypass_user_caches
 
 if TYPE_CHECKING:
     from ..documents import FollowedUsersCacheDocument
@@ -565,9 +564,7 @@ async def get_followed_dids_cached(user_did: str) -> list[str]:
     """
 
     async def lookup() -> list[str]:
-        # Bypass the shared cache, including background refreshes and sweeps;
-        # the request cache below still shares the live lookup across generators.
-        cache = None if bypass_user_caches() else get_followed_users_cache()
+        cache = get_followed_users_cache()
         if cache is None:
             return (await fetch_followed_user_dids(user_did, MAX_FOLLOWED_USERS)).dids
         return await cache.get_followed_dids(user_did)

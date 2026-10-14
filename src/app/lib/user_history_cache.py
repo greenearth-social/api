@@ -37,7 +37,6 @@ from .embeddings import (
 from .metrics import get_metric_collector
 from .release import api_release_sha
 from .request_cache import get_request_cache
-from .request_context import bypass_user_caches
 from .telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -632,8 +631,7 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
     """Return recent-like features through request and Firestore caches."""
 
     async def _fetch() -> UserHistory:
-        # Keep request-local reuse while avoiding shared reads and background writes.
-        cache = None if bypass_user_caches() else get_user_history_cache()
+        cache = get_user_history_cache()
         if cache is not None:
             pending = _pending_user_history(cache, user_did)
             if pending is not None:

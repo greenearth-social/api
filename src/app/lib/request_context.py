@@ -1,4 +1,4 @@
-"""Per-request identity, traffic and cache policy propagated via ContextVars.
+"""Per-request ID propagated via a ContextVar.
 
 A short, server-generated UUID is stamped on each inbound HTTP request
 by the request-ID middleware in :mod:`app.main` and stored here so that
@@ -17,7 +17,6 @@ all see the same ``rid``.
 
 from __future__ import annotations
 
-import contextlib
 from contextvars import ContextVar, Token
 
 _request_id: ContextVar[str | None] = ContextVar("ge_request_id", default=None)
@@ -38,24 +37,6 @@ _endpoint: ContextVar[str | None] = ContextVar("ge_endpoint", default=None)
 # this context at spawn time — can be split by traffic class and test traffic
 # filtered out of dashboards. Propagates through ``asyncio`` like ``rid``.
 _traffic: ContextVar[str | None] = ContextVar("ge_traffic", default=None)
-
-# Explore uses live follows/history while retaining request-local memoization.
-# This policy is task-local; the installed cache instances remain shared.
-_bypass_user_caches: ContextVar[bool] = ContextVar("ge_bypass_user_caches", default=False)
-
-
-def bypass_user_caches() -> bool:
-    return _bypass_user_caches.get()
-
-
-@contextlib.contextmanager
-def user_cache_scope(*, bypass: bool):
-    """Apply a per-user cache policy to this pipeline and its child tasks."""
-    token = _bypass_user_caches.set(bypass)
-    try:
-        yield
-    finally:
-        _bypass_user_caches.reset(token)
 
 
 def get_request_id() -> str | None:
