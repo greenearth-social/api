@@ -17,7 +17,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from .models import CandidateGenerateRequest, CandidatePost, CandidateResult, RankPredictResult
+from .lib.candidates.base import CandidateResult
+from .models import CandidateGenerateRequest, CandidatePost, RankPredictResult
 
 
 def _utcnow() -> datetime:
