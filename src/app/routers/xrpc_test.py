@@ -3507,10 +3507,133 @@ class TestSendInteractions:
             Interaction(item="at://post/3", event=less, feed_context=_make_token()),
         ]
         db = MagicMock()
-        with patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec:
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
+            patch("app.routers.xrpc.record_request_less_posts", new_callable=AsyncMock),
+        ):
             await _record_interactions(db, interactions)
 
         assert rec.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_request_less_groups_posts_by_signed_user_and_uses_receipt_time(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        less = "app.bsky.feed.defs#requestLess"
+        interactions = [
+            Interaction(item="at://post/1", event=less, feed_context=_make_token(did="did:plc:u")),
+            Interaction(item="at://post/2", event=less, feed_context=_make_token(did="did:plc:u")),
+            Interaction(item="at://post/1", event=less, feed_context=_make_token(did="did:plc:v")),
+            Interaction(
+                item="at://post/1", event="requestLess", feed_context=_make_token(did="did:plc:u")
+            ),
+        ]
+        db = MagicMock()
+        before = datetime.now(UTC)
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
+            patch("app.routers.xrpc.record_request_less_posts", new_callable=AsyncMock) as less_rec,
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+            patch("app.routers.xrpc.track_interaction"),
+        ):
+            await _record_interactions(db, interactions)
+        after = datetime.now(UTC)
+
+        docs = [call.args[1] for call in rec.await_args_list]
+        assert len(docs) == 4
+        assert all(before <= doc.created_at <= after for doc in docs)
+        assert all(doc.created_at != doc.feed_generated_at for doc in docs)
+        less_rec.assert_any_await(
+            db,
+            "did:plc:u",
+            {"at://post/1": docs[3].created_at, "at://post/2": docs[1].created_at},
+        )
+        less_rec.assert_any_await(db, "did:plc:v", {"at://post/1": docs[2].created_at})
+        assert less_rec.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "token_kind,event,item,load_test,raw_count",
+        [
+            ("forged", "requestLess", "at://post/1", False, 0),
+            ("missing", "requestLess", "at://post/1", False, 0),
+            ("valid", "interactionLike", "at://post/1", False, 1),
+            ("valid", "requestMore", "at://post/1", False, 1),
+            ("valid", None, "at://post/1", False, 1),
+            ("valid", "requestLess", None, False, 1),
+            ("valid", "requestLess", "", False, 1),
+            ("valid", "requestLess", "at://post/1", True, 1),
+        ],
+    )
+    async def test_request_less_ignores_ineligible_interactions(
+        self, token_kind, event, item, load_test, raw_count
+    ):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        tokens = {"valid": _make_token(lt=load_test), "forged": "forged.token", "missing": None}
+        ix = Interaction(
+            item=item,
+            event=f"app.bsky.feed.defs#{event}" if event else None,
+            feed_context=tokens[token_kind],
+        )
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
+            patch("app.routers.xrpc.record_request_less_posts", new_callable=AsyncMock) as less_rec,
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+            patch("app.routers.xrpc.track_interaction"),
+        ):
+            await _record_interactions(db, [ix])
+
+        less_rec.assert_not_awaited()
+        assert rec.await_count == raw_count
+
+    @pytest.mark.asyncio
+    async def test_request_less_write_failure_does_not_prevent_other_users(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        interactions = [
+            Interaction(item="at://post/1", event="requestLess", feed_context=_make_token(did=did))
+            for did in ["did:plc:u", "did:plc:v"]
+        ]
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
+            patch(
+                "app.routers.xrpc.record_request_less_posts",
+                new_callable=AsyncMock,
+                side_effect=[RuntimeError("write failed"), None],
+            ) as less_rec,
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+            patch("app.routers.xrpc.track_interaction"),
+        ):
+            await _record_interactions(db, interactions)
+
+        assert rec.await_count == 2
+        assert [call.args[1] for call in less_rec.await_args_list] == ["did:plc:u", "did:plc:v"]
+
+    @pytest.mark.asyncio
+    async def test_request_less_saved_when_raw_interaction_write_fails(self):
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        ix = Interaction(item="at://post/1", event="requestLess", feed_context=_make_token())
+        db = MagicMock()
+        with (
+            patch(
+                "app.routers.xrpc.record_interaction",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("write failed"),
+            ) as rec,
+            patch("app.routers.xrpc.record_request_less_posts", new_callable=AsyncMock) as less_rec,
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+            patch("app.routers.xrpc.track_interaction"),
+        ):
+            await _record_interactions(db, [ix])
+
+        assert rec.await_args is not None
+        less_rec.assert_awaited_once_with(
+            db, "did:plc:interactor", {"at://post/1": rec.await_args.args[1].created_at}
+        )
 
     @pytest.mark.asyncio
     async def test_seen_event_records_seen_posts(self):

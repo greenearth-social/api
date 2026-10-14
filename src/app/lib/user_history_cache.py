@@ -34,7 +34,6 @@ from .embeddings import (
     decode_float32_b64,
     encode_float32_b64,
 )
-from .firestore import UserDocument, user_doc_id
 from .metrics import get_metric_collector
 from .release import api_release_sha
 from .request_cache import get_request_cache
@@ -212,10 +211,6 @@ class UserHistoryCache(ABC):
         if self._tasks:
             await asyncio.gather(*list(self._tasks.values()), return_exceptions=True)
 
-    @abstractmethod
-    async def get_user(self, user_did: str) -> UserDocument:
-        ...
-
 
 def _user_history_cache_key(user_did: str) -> str:
     """Return a deterministic Firestore-safe document ID for a user DID."""
@@ -378,16 +373,6 @@ class FirestoreUserHistoryCache(UserHistoryCache):
         if failed:
             update["refresh_failed_at"] = datetime.now(UTC)
         await self._document(user_did).set(update, merge=True)
-
-    async def get_user(self, user_did: str):
-        """Fetch a user document by DID, or return ``None`` if not found."""
-        doc = await self._db.collection("users").document(user_doc_id(user_did)).get()
-        if not doc.exists:
-            return None
-        data = doc.to_dict()
-        if data is None:
-            return None
-        return UserDocument.model_validate(data)
 
 
 _user_history_cache: UserHistoryCache | None = None
