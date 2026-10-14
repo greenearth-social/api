@@ -8,24 +8,9 @@ composed with other generators.
 
 from abc import ABC, abstractmethod
 
-from pydantic import BaseModel, Field
-
-from ...models import CandidatePost, MaxAgeHours
-
-
-# ---------------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------------
-
-
-class CandidateResult(BaseModel):
-    """The output of a candidate generator invocation."""
-
-    generator_name: str = Field(..., description="Name of the generator that produced these candidates")
-    candidates: list[CandidatePost] = Field(default_factory=list)
-    status: str = Field(default="success")
-    reason: str | None = None
-    mode: str = Field(default="primary")
+# Preserve this import path while document schemas use the model without loading generators.
+from ...models import CandidateResult as CandidateResult
+from ...models import MaxAgeHours
 
 
 # ---------------------------------------------------------------------------
