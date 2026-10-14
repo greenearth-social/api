@@ -112,6 +112,16 @@ class CandidatePost(BaseModel):
     )
 
 
+class CandidateResult(BaseModel):
+    """The output of a candidate generator invocation."""
+
+    generator_name: str = Field(..., description="Name of the generator that produced these candidates")
+    candidates: list[CandidatePost] = Field(default_factory=list)
+    status: str = Field(default="success")
+    reason: str | None = None
+    mode: str = Field(default="primary")
+
+
 class GeneratorSpec(BaseModel):
     """Specifies a generator and the proportion of candidates it should supply."""
 
