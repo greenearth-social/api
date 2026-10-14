@@ -54,7 +54,7 @@ def no_user_history():
             "app.routers.xrpc.get_recent_discarded_uris", new_callable=AsyncMock, return_value=[]
         ),
         # Nothing on this path needs a real ES round-trip for embeddings.
-        patch("app.lib.pipeline.hydrate_posts", new=AsyncMock(side_effect=lambda es, c: c)),
+        patch("app.lib.slate_pipeline.hydrate_posts", new=AsyncMock(side_effect=lambda es, c: c)),
     ):
         yield
 
@@ -285,7 +285,7 @@ class TestGenerate:
 
         gen_patch, lookup_patch, _ = _fake_generators(popularity=_candidates("pop", [0.9, 0.8]))
         rerank = MagicMock(side_effect=mmr_rerank)
-        with gen_patch, lookup_patch, patch("app.lib.pipeline.mmr_rerank", new=rerank):
+        with gen_patch, lookup_patch, patch("app.lib.slate_pipeline.mmr_rerank", new=rerank):
             resp = _post(_body(diversify=True, author_penalty=0.2, topic_penalty=1.0))
 
         assert resp.status_code == 200, resp.text

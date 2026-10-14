@@ -72,11 +72,6 @@ from ..lib.firestore import (
 )
 from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.metrics import get_metric_collector
-from ..lib.pipeline import (
-    feed_request_timeout_sec,
-    record_render_metrics,
-    run_pipeline_capturing,
-)
 from ..lib.posthog_client import (
     FAIL_FAST_FLAG,
     evaluate_feature_flags,
@@ -85,6 +80,11 @@ from ..lib.posthog_client import (
     track_session,
 )
 from ..lib.request_context import set_traffic
+from ..lib.slate_pipeline import (
+    feed_request_timeout_sec,
+    record_render_metrics,
+    run_pipeline_capturing,
+)
 from ..lib.telemetry import timed
 from ..models import (
     CandidateGenerateRequest,
@@ -403,7 +403,7 @@ class SendInteractionsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 #
 # The pipeline itself (generate → rank → cutoffs → MMR) lives in
-# lib/pipeline.py, shared with the slate API. This router owns what wraps
+# lib/slate_pipeline.py, shared with the slate API. This router owns what wraps
 # it: preferences, pins, pagination, the feed cache and the debug document.
 
 
@@ -589,7 +589,7 @@ async def _run_pipeline_capturing(
 
 
 def _feed_request_timeout_sec() -> float:
-    """See ``lib.pipeline.feed_request_timeout_sec``; kept as a seam for tests."""
+    """See ``lib.slate_pipeline.feed_request_timeout_sec``; kept as a seam for tests."""
     return feed_request_timeout_sec()
 
 

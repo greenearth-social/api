@@ -24,10 +24,10 @@ from ..documents import FeedCacheDocument, GeneratorDiagnostic, PipelineItemMeta
 from ..lib.candidates import get_generator
 from ..lib.candidates.supplied import SuppliedCandidatesGenerator
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS
-from ..lib.pipeline import record_render_metrics, run_pipeline_capturing_with_timeout
 from ..lib.posthog_client import get_posthog_client, track_slate_generated
 from ..lib.rankers import get_ranker
 from ..lib.request_context import set_traffic
+from ..lib.slate_pipeline import record_render_metrics, run_pipeline_capturing_with_timeout
 from ..lib.telemetry import timed
 from ..models import (
     EXTERNAL_GENERATOR_NAME,
