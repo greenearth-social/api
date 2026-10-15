@@ -201,8 +201,37 @@ Key records also have a `scopes` list of named capabilities. Every key includes
 `default`, including existing records without a `scopes` field and keys with an
 empty or custom scope list. This is resolved when reading the record; existing
 keys need no rotation or backfill. Admin status does not grant additional scopes.
-The `create_api_key` helper accepts a `scopes` keyword argument. Scopes are
-currently metadata; endpoint scope enforcement and CLI options will follow.
+The `create_api_key` helper accepts a `scopes` keyword argument. CLI options for
+scopes will follow.
+
+### Requiring a scope in an endpoint
+
+Use `Depends(require_api_scope("user-config"))` from `app.security` to require a
+named scope. For example:
+
+```python
+from typing import Annotated
+
+from fastapi import Depends
+
+from app.security import require_api_scope
+
+
+@router.get("/example")
+async def example(key_id: Annotated[str, Depends(require_api_scope("user-config"))]):
+    return {"key_id": key_id}
+```
+
+The dependency returns the authenticated key ID. Missing, invalid, or revoked
+keys receive HTTP 401; valid keys missing the required scope receive HTTP 403.
+Admin keys must also have the named scope explicitly.
+
+Omitting the scope (`require_api_scope()`) requires `default`, as do the existing
+`verify_api_key` and `RequireApiKey` dependencies. `RequireAdminApiKey` continues
+to check the separate admin flag. Combining these dependencies authenticates and
+counts key usage once per request, including when a router requires default
+access and an endpoint adds a named scope. Public and Firebase-authenticated
+endpoints retain their existing authentication.
 
 ### CLI commands
 
