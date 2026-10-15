@@ -891,6 +891,77 @@ Authentication uses Firebase custom tokens (`Authorization: Bearer <token>`)
 rather than API keys.  Token `uid` must be a `did:plc:…` — the prefix is
 stripped to form the Firestore document key.
 
+### Feed Preferences API
+
+Preferences can be read and updated by the authenticated user or by a service
+with an API key explicitly granted the `user-config` scope:
+
+| Operation | Firebase-authenticated user | Service (`X-API-Key`) |
+| --- | --- | --- |
+| Read all configurable public feeds | `GET /api/feeds/preferences` | `GET /api/users/{user_did}/feeds/preferences` |
+| Update controls for one public feed | `PATCH /api/feeds/preferences/{feed_name}` | `PATCH /api/users/{user_did}/feeds/preferences/{feed_name}` |
+
+The user endpoints derive the target from the Firebase ID token. The service
+endpoints accept a full DID, such as `did:plc:abc123`, and can access any user's
+preferences. The API key's owner does not select or restrict the target user.
+The `default` scope and admin status do not grant this capability: admin keys
+also need `user-config` explicitly. Until scope support is added to the key CLI,
+issue a scoped key with `await create_api_key(db, email, scopes=["user-config"])`.
+
+```bash
+# Read the specified user's preferences.
+curl http://localhost:8000/api/users/did:plc:abc123/feeds/preferences \
+  -H "X-API-Key: <service-api-key>"
+
+# Change one control, retaining the user's other settings.
+curl -X PATCH http://localhost:8000/api/users/did:plc:abc123/feeds/preferences/random \
+  -H "X-API-Key: <service-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"freshness": 3}'
+```
+
+Both authentication paths use the same validation, persistence, and response
+models. GET returns a `feeds` object keyed by feed name, for example
+`{"feeds": {"random": {"freshness": 3}, ...}}`. It includes every public feed
+with configured controls and resolves saved values, legacy preferences, and
+defaults. Reading preferences for a user without a local user document returns
+defaults without creating that document. PATCH returns the complete resolved
+controls for the selected feed; the example above returns `{"freshness": 3}`.
+Control names use snake_case, and unconfigured controls are omitted.
+
+PATCH requires at least one non-null control supported by the selected feed.
+Control ranges and nested source-weight validation match the user endpoints;
+unspecified controls retain their resolved values. Invalid bodies or target
+DIDs return HTTP 422. Unknown feeds, non-public feeds, and feeds without controls
+return HTTP 404. Service requests with missing, invalid, or revoked API keys
+return HTTP 401; valid keys without `user-config` return HTTP 403.
+
+#### Save behavior shared by user and service requests
+
+Every successful PATCH performs the following actions, including automated
+service updates and requests whose values already match the saved preferences:
+
+- In one transaction, it resolves the selected feed's current controls, merges
+  the supplied values, and stores that feed's complete resolved preferences.
+  Other feeds' preferences and unrelated user fields are retained. It updates
+  `updated_at` and creates a minimal user document if one does not exist, so
+  saving settings does not require a prior feed load.
+- That transaction sets `created_by_load_test=False`. This protects the user
+  and their saved settings from the load-test cleanup that recursively deletes
+  flagged users. Service updates deliberately do this too, even though an
+  automated write does not demonstrate that the user personally changed settings.
+- The transaction deletes the selected feed's pending accepted-preview handoff
+  (`accepted_feed_slates/{feed_name}`). An accepted preview is a saved post
+  sequence designated for the next fresh feed load; removing it prevents older
+  settings from determining that load and coordinates with concurrent preview
+  acceptance. This does not delete all cached previews.
+- After committing, it attempts to delete the user's regular `seen_posts`
+  bucket for the current UTC day, allowing candidates to be reconsidered under
+  the saved settings. The bucket is shared across feeds, so posts seen earlier
+  that day may appear again in other feeds as well. Older daily buckets and raw
+  interaction records remain. This cleanup is best-effort: failures are logged
+  and the preference save still succeeds.
+
 ### Debugging Feeds (CLI)
 
 Turn on full pipeline capture for your account (stores full candidate/ranker data):

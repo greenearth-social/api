@@ -16,21 +16,18 @@ from google.cloud.firestore import AsyncClient
 from ..documents import FeedPreferencesDocument, FeedSnapshotDocument, PipelineItemMeta
 from ..feeds import FEEDS, canonical_feed_name
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS
-from ..lib.feed_preferences import resolve_feed_preferences
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import (
     StaleFeedPreviewError,
     accept_feed_preview,
-    delete_most_recent_seen_bucket,
     get_feed_snapshot,
     get_recent_feed_snapshots,
-    get_user,
     mark_settings_visited,
-    patch_user_feed_preferences,
 )
 from ..lib.metrics import get_metric_collector
 from ..lib.post_hydration import hydrate_posts
 from ..lib.request_context import set_traffic
+from ..lib.user_preferences import get_preferences_for_user, patch_preferences_for_user
 from ..models_feed_transparency import (
     AcceptedFeedPreviewResponse,
     AcceptFeedPreviewRequest,
@@ -301,16 +298,7 @@ async def get_preferences(
 ) -> PreferencesResponse:
     """Return configured controls and values for every public feed."""
     db: AsyncClient = request.app.state.firestore
-    user_doc = await get_user(db, f"did:plc:{user_doc_id}")
-    return PreferencesResponse(
-        feeds={
-            feed_name: FeedPreferences.model_validate(
-                resolve_feed_preferences(user_doc, feed_name).model_dump(exclude_none=True)
-            )
-            for feed_name, feed in FEEDS.items()
-            if feed.public and feed.controls
-        }
-    )
+    return await get_preferences_for_user(db, f"did:plc:{user_doc_id}")
 
 
 @router.patch(
@@ -324,49 +312,9 @@ async def patch_preferences(
     body: FeedPreferences,
     user_doc_id: FirebaseUser,
 ) -> FeedPreferences:
-    """Update only the supplied controls for one configured public feed.
-
-    Also clears today's seen-posts bucket so the user sees fresh candidates
-    after adjusting their feed controls. The delete is idempotent.
-    """
-    feed = FEEDS.get(feed_name)
-    if feed is None or not feed.public or not feed.controls:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown feed")
-
-    supplied = body.model_fields_set
-    if not supplied:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="At least one control is required",
-        )
-    if any(getattr(body, control) is None for control in supplied):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Control values cannot be null",
-        )
-    unsupported = supplied.difference(feed.controls)
-    if unsupported:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Unsupported controls for {feed_name}: {', '.join(sorted(unsupported))}",
-        )
-
+    """Update one feed's controls using the shared save behavior and side effects."""
     db: AsyncClient = request.app.state.firestore
-    user_did = f"did:plc:{user_doc_id}"
-    patch = FeedPreferencesDocument.model_validate(body.model_dump(exclude_none=True))
-    updated = await patch_user_feed_preferences(
-        db,
-        user_did,
-        feed_name,
-        patch,
-    )
-    try:
-        await delete_most_recent_seen_bucket(db, user_did)
-    except Exception:
-        # Preference persistence has already committed. Seen-history cleanup is
-        # best-effort and must not make the client roll back a successful save.
-        logger.exception("Failed to clear seen-post history for user '%s'", user_did)
-    return FeedPreferences.model_validate(updated.model_dump(exclude_none=True))
+    return await patch_preferences_for_user(db, f"did:plc:{user_doc_id}", feed_name, body)
 
 
 @router.post("/{feed_name}/preview", response_model=FeedPreviewResponse)

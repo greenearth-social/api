@@ -449,7 +449,12 @@ async def patch_user_feed_preferences(
     feed_name: str,
     patch: FeedPreferencesDocument,
 ) -> FeedPreferencesDocument:
-    """Atomically patch and materialize one feed without replacing siblings."""
+    """Atomically patch and materialize one feed without replacing siblings.
+
+    User and service saves both upsert a missing user and clear the load-test
+    deletion flag. These writes and preview invalidation also happen when the
+    supplied values already match the stored preferences.
+    """
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     accepted_ref = ref.collection(ACCEPTED_FEED_SLATES_COLLECTION).document(feed_name)
     transaction = db.transaction()
