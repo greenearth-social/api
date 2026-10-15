@@ -1,7 +1,7 @@
 """LLM query vector candidate generator.
 
 Reads the user's newest fitted query vector from Firestore and runs a kNN
-search in Elasticsearch using the MiniLM-L12 embedding field.
+search over the quality corpus using the MiniLM-L12 embedding field.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ...models import MaxAgeHours
+from ..elasticsearch import POSTS_QUALITY_KNN_INDEX
 from ..embeddings import MINILM_L12_EMBEDDING_FIELD
 from .base import CandidateGenerator, CandidateResult
 from .es_candidates import knn_search_posts
@@ -91,6 +92,7 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
             video_only=video_only,
             exclude_uris=exclude_uris,
             max_age_hours=max_age_hours,
+            index=POSTS_QUALITY_KNN_INDEX,
         )
 
         reason = None
