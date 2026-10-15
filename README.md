@@ -197,6 +197,13 @@ Keys also carry an `admin` flag, required to access `/admin/*` endpoints.
 Existing keys default to non-admin. Only issue admin keys to the greenearth
 team.
 
+Key records also have a `scopes` list of named capabilities. Every key includes
+`default`, including existing records without a `scopes` field and keys with an
+empty or custom scope list. This is resolved when reading the record; existing
+keys need no rotation or backfill. Admin status does not grant additional scopes.
+The `create_api_key` helper accepts a `scopes` keyword argument. Scopes are
+currently metadata; endpoint scope enforcement and CLI options will follow.
+
 ### CLI commands
 
 Run all commands from the `api/` directory:
