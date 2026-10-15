@@ -201,8 +201,9 @@ Key records also have a `scopes` list of named capabilities. Every key includes
 `default`, including existing records without a `scopes` field and keys with an
 empty or custom scope list. This is resolved when reading the record; existing
 keys need no rotation or backfill. Admin status does not grant additional scopes.
-The `create_api_key` helper accepts a `scopes` keyword argument. CLI options for
-scopes will follow.
+Pass `--scope <name>` when generating a key to grant a named capability; repeat
+the option to grant multiple scopes. Omitting it issues a key with only
+`default`. The `create_api_key` helper also accepts a `scopes` keyword argument.
 
 ### Requiring a scope in an endpoint
 
@@ -244,6 +245,9 @@ pipenv run python scripts/apikeys.py generate alice@example.com
 # Issue an admin key (greenearth team only)
 pipenv run python scripts/apikeys.py generate alice@greenearth.social --admin
 
+# Issue a service key that can read and update any user's feed preferences
+pipenv run python scripts/apikeys.py generate service@example.com --scope user-config
+
 # List all keys
 pipenv run python scripts/apikeys.py list
 
@@ -253,6 +257,12 @@ pipenv run python scripts/apikeys.py usage <key_id>
 # Deactivate a key
 pipenv run python scripts/apikeys.py revoke <key_id>
 ```
+
+`generate`, `list`, and `usage` display each key's effective scopes, including
+`default` for legacy keys. `--admin` and `--scope` can be combined; admin status
+remains independent of scopes. Scope names are not restricted by the CLI, but
+only names required by endpoints grant access. Currently those are `default`
+and `user-config`.
 
 ### Local development
 
@@ -878,18 +888,19 @@ enabled for the account.
 ```bash
 # List up to 100 recent feed loads for your account (within the last 24 hours)
 curl http://localhost:8000/api/feeds \
-  -H "Authorization: Bearer <firebase-custom-token>"
+  -H "Authorization: Bearer <firebase-id-token>"
 
 # Full detail for one feed load (snapshot + hydrated posts)
 curl http://localhost:8000/api/feeds/<request-id> \
-  -H "Authorization: Bearer <firebase-custom-token>"
+  -H "Authorization: Bearer <firebase-id-token>"
 ```
 
 Responses use camelCase — the frontend can consume them directly without mapping.
 
-Authentication uses Firebase custom tokens (`Authorization: Bearer <token>`)
-rather than API keys.  Token `uid` must be a `did:plc:…` — the prefix is
-stripped to form the Firestore document key.
+Authentication uses Firebase ID tokens (`Authorization: Bearer <token>`)
+rather than API keys. The frontend signs in to Firebase with a custom token,
+then obtains an ID token to send to this API. Token `uid` must be a `did:plc:…`
+— the prefix is stripped to form the Firestore document key.
 
 ### Feed Preferences API
 
@@ -905,8 +916,11 @@ The user endpoints derive the target from the Firebase ID token. The service
 endpoints accept a full DID, such as `did:plc:abc123`, and can access any user's
 preferences. The API key's owner does not select or restrict the target user.
 The `default` scope and admin status do not grant this capability: admin keys
-also need `user-config` explicitly. Until scope support is added to the key CLI,
-issue a scoped key with `await create_api_key(db, email, scopes=["user-config"])`.
+also need `user-config` explicitly. Issue a scoped key from the `api/` directory:
+
+```bash
+pipenv run python scripts/apikeys.py generate service@example.com --scope user-config
+```
 
 ```bash
 # Read the specified user's preferences.
