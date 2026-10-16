@@ -504,8 +504,8 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     from ..lib import inference as inference_module
     from ..lib import user_history_cache as user_history_module
     from ..lib.candidates import two_tower as candidate_two_tower_module
-    from ..lib.slate_pipeline import run_ranking_pipeline
     from ..lib.rankers import heavy_ranker as heavy_ranker_module
+    from ..lib.slate_pipeline import run_ranking_pipeline
     from ..lib.user_history_cache import (
         UserHistory,
         UserHistoryCache,
@@ -2681,7 +2681,11 @@ class TestRankedFeed:
 
         with (
             self._patch_generators(candidates),
-            patch("app.lib.slate_pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch(
+                "app.lib.slate_pipeline.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
+            ),
         ):
             data = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2747,7 +2751,9 @@ class TestRankedFeed:
                 return_value=[("at://p/0", [1.0, 0.0, 0.0], 0.75)],
             ) as mock_fetch,
             patch(
-                "app.lib.slate_pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result
+                "app.lib.slate_pipeline.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
             ) as mock_run,
         ):
             data = client.get(
@@ -2797,7 +2803,9 @@ class TestRankedFeed:
                 return_value=candidates,
             ),
             patch(
-                "app.lib.slate_pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result
+                "app.lib.slate_pipeline.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
             ) as mock_run,
         ):
             data = client.get(
@@ -2852,7 +2860,11 @@ class TestRankedFeed:
 
         with (
             self._patch_generators(candidates),
-            patch("app.lib.slate_pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch(
+                "app.lib.slate_pipeline.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
+            ),
         ):
             data = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
@@ -2969,7 +2981,11 @@ class TestSlateCutoffs:
         discarded_mock = discarded_mock if discarded_mock is not None else AsyncMock()
         with (
             gen_patch,
-            patch("app.lib.slate_pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch(
+                "app.lib.slate_pipeline.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
+            ),
             patch("app.routers.xrpc.record_discarded_posts", discarded_mock),
         ):
             return client.get(
@@ -3136,7 +3152,11 @@ class TestSlateCutoffs:
         rank_result = self._rank_result([0.7, 0.6])
         with (
             gen_patch,
-            patch("app.lib.slate_pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch(
+                "app.lib.slate_pipeline.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
+            ),
             patch("app.routers.xrpc.record_discarded_posts", new_callable=AsyncMock),
             patch(
                 "app.routers.xrpc.get_recent_seen_uris",
@@ -3166,7 +3186,11 @@ class TestSlateCutoffs:
         rank_result = self._rank_result([0.5, 0.4])
         with (
             gen_patch,
-            patch("app.lib.slate_pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch(
+                "app.lib.slate_pipeline.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
+            ),
             patch(
                 "app.routers.xrpc.get_recent_discarded_uris", new_callable=AsyncMock
             ) as discarded_fetch,
@@ -3274,7 +3298,11 @@ class TestBestOfFriendsFeed:
 
         with (
             self._patch_generators(candidates),
-            patch("app.lib.slate_pipeline.run_predict", new_callable=AsyncMock, return_value=rank_result),
+            patch(
+                "app.lib.slate_pipeline.run_predict",
+                new_callable=AsyncMock,
+                return_value=rank_result,
+            ),
         ):
             data = client.get(
                 "/xrpc/app.bsky.feed.getFeedSkeleton",
