@@ -173,9 +173,15 @@ class FeedCacheDocument(BaseModel):
     feed_name: str | None = None
     generated_at: datetime | None = None
     api_release_sha: str | None = None
-    mode: Literal["served", "preview", "accepted"] = Field(
+    mode: Literal["served", "preview", "accepted", "api"] = Field(
         default="served",
-        description="Whether this cache entry is served, hypothetical, or accepted for serving.",
+        description="Whether this cache entry is served, hypothetical, accepted for serving, "
+        "or a slate API session (POST /slate/generate).",
+    )
+    api_key_id: str | None = Field(
+        default=None,
+        description="key_id of the API key that created an `api` session. A cursor is only "
+        "honoured for the key that created it.",
     )
     preference_patch: FeedPreferencesDocument | None = Field(
         default=None,

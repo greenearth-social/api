@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ...models import CandidatePost
+from ..elasticsearch import POSTS_QUALITY_KNN_INDEX
 from ..embeddings import MINILM_L12_EMBEDDING_FIELD
 from .llm_query_vector import LlmQueryVectorCandidateGenerator, set_llm_query_vector_db
 
@@ -106,6 +107,7 @@ class TestLlmQueryVectorCandidateGenerator:
             video_only=True,
             exclude_uris=["at://old/1"],
             max_age_hours=48,
+            index=POSTS_QUALITY_KNN_INDEX,
         )
         assert result.generator_name == GENERATOR_NAME
         assert result.candidates == candidates
@@ -164,3 +166,4 @@ class TestLlmQueryVectorCandidateGenerator:
         assert call_args.kwargs["video_only"] is False
         assert call_args.kwargs["exclude_uris"] is None
         assert call_args.kwargs["max_age_hours"] == 168
+        assert call_args.kwargs["index"] == POSTS_QUALITY_KNN_INDEX
