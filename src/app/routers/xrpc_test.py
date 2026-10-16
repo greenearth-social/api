@@ -23,7 +23,7 @@ from ..documents import (
 from ..feeds import FEEDS, LOGGED_OUT_POST_URI
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
-from ..lib.feed_cache import InMemoryFeedCache
+from ..lib.feed_cache import FeedCache, InMemoryFeedCache
 from ..lib.feed_context import decode_feed_context
 from ..lib.metrics import MetricCollector, set_metric_collector
 from ..main import app
