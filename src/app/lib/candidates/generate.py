@@ -10,6 +10,7 @@ import asyncio
 import logging
 import math
 import os
+from collections.abc import Mapping
 
 from ...models import (
     CandidateGenerateRequest,
@@ -37,6 +38,15 @@ except ValueError:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _resolve_generator(
+    name: str, extra_generators: Mapping[str, CandidateGenerator] | None
+) -> CandidateGenerator | None:
+    """Request-scoped generators shadow the registry; unknown names are ``None``."""
+    if extra_generators is not None and name in extra_generators:
+        return extra_generators[name]
+    return get_generator(name)
 
 
 def allocate_counts(specs: list[GeneratorSpec], total: int) -> list[int]:
@@ -170,8 +180,14 @@ async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePo
 async def run_generate(
     request: CandidateGenerateRequest,
     es,
+    *,
+    extra_generators: Mapping[str, CandidateGenerator] | None = None,
 ) -> CandidateGenerateResult:
     """Execute a candidate-generation pipeline described by *request*.
+
+    ``extra_generators`` are request-scoped generators (e.g. the slate API's
+    ``external`` generator wrapping caller-supplied posts) consulted by name
+    before the global registry, for both primary specs and ``infill``.
 
     Soft-fail behavior is driven by whether a PipelineContext is installed
     (via pipeline_context_scope) on the current task:
@@ -191,7 +207,7 @@ async def run_generate(
     for spec, count in zip(request.generators, counts):
         if count <= 0:
             continue
-        gen = get_generator(spec.name)
+        gen = _resolve_generator(spec.name, extra_generators)
         if gen is None:
             raise GeneratorNotFoundError(spec.name)
         active.append((spec, count, gen))
@@ -314,7 +330,7 @@ async def run_generate(
     # ---- Infill: top up if we still need more candidates ----
     shortfall = request.num_candidates - len(deduped)
     if shortfall > 0 and request.infill is not None:
-        infill_gen = get_generator(request.infill)
+        infill_gen = _resolve_generator(request.infill, extra_generators)
         if infill_gen is None:
             raise GeneratorNotFoundError(request.infill, is_infill=True)
 
