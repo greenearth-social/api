@@ -33,15 +33,15 @@ async def knn_search_posts(
     ``index`` selects the corpus. Filter *selectivity* is what decides whether
     Lucene stays on the HNSW graph: a filter matching a small fraction of a
     segment makes it bypass the graph and exact-scan instead. ``two_tower``
-    searches ``posts_recent_quality`` by default, where corpus membership
-    already guarantees the traction bar, so it omits ``min_like_count``
-    entirely there rather than reapplying a filter that would be redundant —
-    matching every document, it costs nothing, but it also isn't doing
-    anything. Its ``posts_recent`` fallback still passes it, since it's the
-    only thing enforcing traction preference on the unfiltered corpus; that
-    filter matches ~4.6% there, which is the exact-scan problem
-    greenearth-social/ingex#442 built the quality corpus to avoid — an
-    accepted cost of the fallback, not something the fallback fixes.
+    and ``llm_query_vector`` both search ``posts_recent_quality`` by default.
+    There corpus membership already guarantees the traction bar, so
+    ``two_tower`` omits ``min_like_count`` entirely rather than reapplying a
+    filter that would be redundant — matching every document, it costs
+    nothing, but it also isn't doing anything. Its ``posts_recent`` fallback
+    still passes it, since it's the only thing enforcing traction preference
+    on the unfiltered corpus; that filter matches ~4.6% there, which is the
+    exact-scan problem greenearth-social/ingex#442 built the quality corpus to
+    avoid — an accepted cost of the fallback, not something the fallback fixes.
 
     ``max_age_hours`` bounds candidates to recently created posts. It is typed
     ``int`` rather than ``MaxAgeHours`` because callers may pass a value off the
@@ -65,14 +65,11 @@ async def knn_search_posts(
     if exclude_uris:
         must_not.append({"terms": {"at_uri": exclude_uris}})
 
-    # Temporary (2026-10-02): the LLM CG walks prod's 32M-post MiniLM graph, where a
-    # 10x-wide walk takes 5-35 s and a 3x one ~0.1 s. Revert with greenearth-social/ingex#513.
-    factor = 3 if generator_name == "llm_query_vector" else 10
     knn_clause: dict = {
         "field": search_field,
         "query_vector": query_vector,
         "k": num_candidates,
-        "num_candidates": max(100, num_candidates * factor),
+        "num_candidates": max(100, num_candidates * 10),
     }
     if filters or must_not:
         knn_clause["filter"] = {

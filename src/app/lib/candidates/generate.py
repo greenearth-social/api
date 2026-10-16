@@ -10,6 +10,7 @@ import asyncio
 import logging
 import math
 import os
+from collections.abc import Mapping
 
 from ...models import (
     CandidateGenerateRequest,
@@ -33,21 +34,19 @@ try:
 except ValueError:
     _GENERATOR_TIMEOUT_SEC = 4.0
 
-# Temporary measure (2026-10-02): a cold MiniLM kNN over posts_recent takes 3-9 s
-# on prod, so the LLM CG gets the whole 9 s feed budget instead of the shared
-# cap. Other generators are unaffected. Remove with greenearth-social/ingex#513.
-_LLM_QUERY_VECTOR_TIMEOUT_SEC = 9.0
-
-
-def _timeout_for(spec: GeneratorSpec) -> float:
-    if spec.name == "llm_query_vector":
-        return _LLM_QUERY_VECTOR_TIMEOUT_SEC
-    return _GENERATOR_TIMEOUT_SEC
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _resolve_generator(
+    name: str, extra_generators: Mapping[str, CandidateGenerator] | None
+) -> CandidateGenerator | None:
+    """Request-scoped generators shadow the registry; unknown names are ``None``."""
+    if extra_generators is not None and name in extra_generators:
+        return extra_generators[name]
+    return get_generator(name)
 
 
 def allocate_counts(specs: list[GeneratorSpec], total: int) -> list[int]:
@@ -181,8 +180,14 @@ async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePo
 async def run_generate(
     request: CandidateGenerateRequest,
     es,
+    *,
+    extra_generators: Mapping[str, CandidateGenerator] | None = None,
 ) -> CandidateGenerateResult:
     """Execute a candidate-generation pipeline described by *request*.
+
+    ``extra_generators`` are request-scoped generators (e.g. the slate API's
+    ``external`` generator wrapping caller-supplied posts) consulted by name
+    before the global registry, for both primary specs and ``infill``.
 
     Soft-fail behavior is driven by whether a PipelineContext is installed
     (via pipeline_context_scope) on the current task:
@@ -202,7 +207,7 @@ async def run_generate(
     for spec, count in zip(request.generators, counts):
         if count <= 0:
             continue
-        gen = get_generator(spec.name)
+        gen = _resolve_generator(spec.name, extra_generators)
         if gen is None:
             raise GeneratorNotFoundError(spec.name)
         active.append((spec, count, gen))
@@ -210,7 +215,6 @@ async def run_generate(
     async def _run_one(
         spec: GeneratorSpec, count: int, gen: CandidateGenerator
     ) -> list[CandidateResult]:
-        timeout_sec = _timeout_for(spec)
         try:
             async with timed(
                 logger,
@@ -229,7 +233,7 @@ async def run_generate(
                             exclude_uris=request.exclude_uris or None,
                             max_age_hours=request.max_age_hours,
                         ),
-                        timeout=timeout_sec,
+                        timeout=_GENERATOR_TIMEOUT_SEC,
                     )
                 ]
             if mc := get_metric_collector():
@@ -275,7 +279,7 @@ async def run_generate(
                 logger.warning(
                     "Candidate generator '%s' timed out after %.1fs",
                     spec.name,
-                    timeout_sec,
+                    _GENERATOR_TIMEOUT_SEC,
                 )
                 outcome = "timeout"
             else:
@@ -326,7 +330,7 @@ async def run_generate(
     # ---- Infill: top up if we still need more candidates ----
     shortfall = request.num_candidates - len(deduped)
     if shortfall > 0 and request.infill is not None:
-        infill_gen = get_generator(request.infill)
+        infill_gen = _resolve_generator(request.infill, extra_generators)
         if infill_gen is None:
             raise GeneratorNotFoundError(request.infill, is_infill=True)
 
