@@ -11,7 +11,7 @@ from ..lib.firebase_auth import verify_firebase_auth
 from ..main import app
 
 USER_DID = "did:plc:target-user"
-PREFERENCES_URL = f"/api/users/{USER_DID}/feeds/preferences"
+PREFERENCES_URL = f"/users/{USER_DID}/feeds/preferences"
 
 
 @pytest.fixture

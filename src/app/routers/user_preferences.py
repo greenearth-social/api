@@ -9,7 +9,7 @@ from ..models_feed_transparency import FeedPreferences, PreferencesResponse
 from ..security import require_api_scope
 
 router = APIRouter(
-    prefix="/api/users",
+    prefix="/users",
     tags=["user-preferences"],
     dependencies=[Depends(require_api_scope("user-config"))],
 )
