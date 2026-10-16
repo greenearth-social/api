@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from ..documents import FeedCacheDocument
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import InMemoryFeedCache
@@ -57,6 +58,37 @@ def no_user_history():
         patch("app.lib.slate_pipeline.hydrate_posts", new=AsyncMock(side_effect=lambda es, c: c)),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def staged_slates():
+    """In-memory stand-in for the Firestore staged-slate documents.
+
+    ``claim_api_slate``/``stage_api_slate`` are transactional Firestore code
+    tested in lib/firestore_test.py; here they only need to round-trip, and a
+    served claim materializes into the in-memory feed cache as the real one
+    does into the feed_cache collection.
+    """
+    staged: dict[tuple[str, str, str], tuple[str, FeedCacheDocument]] = {}
+
+    async def stage(db, user_did, *, api_key_id, feed_name, request_id, slate):
+        staged[(user_did, api_key_id, feed_name)] = (request_id, slate)
+
+    async def claim(db, user_did, *, api_key_id, feed_name, settings_fingerprint, **_):
+        entry = staged.pop((user_did, api_key_id, feed_name), None)
+        if entry is None:
+            return None, "none"
+        request_id, slate = entry
+        if slate.preference_fingerprint != settings_fingerprint:
+            return None, "settings_changed"
+        await app.state.feed_cache.store_document(request_id, slate)
+        return request_id, "served"
+
+    with (
+        patch("app.routers.slate.stage_api_slate", side_effect=stage),
+        patch("app.routers.slate.claim_api_slate", side_effect=claim) as claim_mock,
+    ):
+        yield claim_mock
 
 
 @pytest.fixture
@@ -462,8 +494,6 @@ class TestCursor:
         """A getFeedSkeleton session (mode=served) must not be readable via the API."""
         from datetime import UTC, datetime, timedelta
 
-        from ..documents import FeedCacheDocument
-
         asyncio.run(
             app.state.feed_cache.store_document(
                 "served1",
@@ -558,3 +588,195 @@ class TestObservability:
         assert props["item_count"] == 2
         assert paged["properties"]["has_cursor"] is True
         assert paged["properties"]["generators"] == []
+
+
+
+# ---------------------------------------------------------------------------
+# Accepted slates (POST /slate/accept)
+# ---------------------------------------------------------------------------
+
+
+def _accept(request_id: str, displayed: list[str], **overrides):
+    body = {
+        "feed_name": FEED_NAME,
+        "user_did": USER_DID,
+        "request_id": request_id,
+        "displayed_item_uris": displayed,
+    }
+    body.update(overrides)
+    return client.post("/slate/accept", json=body, headers={"X-API-Key": "testkey"})
+
+
+class TestAcceptedSlate:
+    def test_settings_fingerprint_ignores_candidates_and_paging_but_not_settings(self):
+        from ..models import SlateGenerateRequest
+
+        base = SlateGenerateRequest.model_validate(_body())
+        same_settings = SlateGenerateRequest.model_validate(
+            _body(
+                limit=3,
+                exclude_uris=["at://x/1"],
+                generators=[{"name": "popularity", "weight": 1.0}],
+            )
+        )
+        changed = SlateGenerateRequest.model_validate(_body(author_penalty=0.1))
+        assert base.settings_fingerprint() == same_settings.settings_fingerprint()
+        assert base.settings_fingerprint() != changed.settings_fingerprint()
+
+    def test_next_fresh_load_with_same_settings_serves_the_accepted_items(self):
+        preview = _start_session(n=5, limit=5)
+        shown = [preview["items"][0]["at_uri"], preview["items"][2]["at_uri"]]
+
+        accepted = _accept(preview["request_id"], shown)
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json() == {
+            "request_id": preview["request_id"],
+            "accepted_item_count": 2,
+        }
+
+        gen_patch, lookup_patch, gens = _fake_generators(
+            popularity=_candidates("fresh", [0.9, 0.8])
+        )
+        with gen_patch, lookup_patch:
+            resp = _post(_body(limit=1))
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["served_from"] == "accepted_slate"
+        assert data["request_id"] == preview["request_id"]
+        assert [i["at_uri"] for i in data["items"]] == shown[:1]
+        # Same metadata the preview carried.
+        assert data["items"][0]["generators"] == preview["items"][0]["generators"]
+        gens["popularity"].generate.assert_not_awaited()
+
+        page2 = _post(_cursor_body(data["cursor"], limit=5))
+        assert page2.status_code == 200, page2.text
+        assert page2.json()["served_from"] == "accepted_slate"
+        assert [i["at_uri"] for i in page2.json()["items"]] == shown[1:]
+        assert page2.json()["cursor"] is None
+
+        # Served once: the load after that generates.
+        with gen_patch, lookup_patch:
+            again = _post(_body())
+        assert again.json()["served_from"] == "generated"
+
+    def test_changed_settings_generate_instead(self, staged_slates):
+        preview = _start_session(n=3, limit=3)
+        assert _accept(preview["request_id"], [preview["items"][0]["at_uri"]]).status_code == 200
+
+        gen_patch, lookup_patch, gens = _fake_generators(popularity=_candidates("fresh", [0.5]))
+        with gen_patch, lookup_patch:
+            resp = _post(_body(diversify=True))
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["served_from"] == "generated"
+        assert [i["at_uri"] for i in resp.json()["items"]] == ["at://fresh/0"]
+        gens["popularity"].generate.assert_awaited_once()
+
+    def test_claim_failure_falls_back_to_generating(self, staged_slates):
+        staged_slates.side_effect = RuntimeError("firestore down")
+        gen_patch, lookup_patch, _ = _fake_generators(popularity=_candidates("fresh", [0.5]))
+        with gen_patch, lookup_patch:
+            resp = _post(_body())
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["served_from"] == "generated"
+
+    def test_claim_outcome_is_counted(self):
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+        preview = _start_session(n=3, limit=3)
+        _accept(preview["request_id"], [preview["items"][0]["at_uri"]])
+        reader = InMemoryMetricReader()
+        set_metric_collector(MetricCollector._from_reader(reader, service_name="t", env="test"))
+        try:
+            gen_patch, lookup_patch, _ = _fake_generators(popularity=[])
+            with gen_patch, lookup_patch:
+                _post(_body())
+            metrics_data = reader.get_metrics_data()
+            assert metrics_data is not None
+            (point,) = [
+                point
+                for rm in metrics_data.resource_metrics
+                for sm in rm.scope_metrics
+                for metric in sm.metrics
+                if metric.name == "feed.accepted_slate.claim_count"
+                for point in metric.data.data_points
+            ]
+            assert point.attributes is not None
+            assert point.attributes["outcome"] == "served"
+            assert point.attributes["feed_name"] == FEED_NAME
+            assert point.attributes["endpoint"] == "slate_generate"
+        finally:
+            set_metric_collector(None)
+
+    def test_posthog_reports_served_from(self):
+        preview = _start_session(n=3, limit=3)
+        _accept(preview["request_id"], [preview["items"][0]["at_uri"]])
+        posthog = MagicMock()
+        gen_patch, lookup_patch, _ = _fake_generators(popularity=[])
+        with gen_patch, lookup_patch, patch(
+            "app.routers.slate.get_posthog_client", return_value=posthog
+        ):
+            _post(_body())
+        assert posthog.capture.call_args.kwargs["properties"]["served_from"] == "accepted_slate"
+
+    def test_reaccepting_an_accepted_slate_replaces_the_staged_one(self):
+        preview = _start_session(n=3, limit=3)
+        uris = [i["at_uri"] for i in preview["items"]]
+        assert _accept(preview["request_id"], uris).status_code == 200
+        gen_patch, lookup_patch, _ = _fake_generators(popularity=[])
+        with gen_patch, lookup_patch:
+            served = _post(_body()).json()
+        assert served["served_from"] == "accepted_slate"
+
+        # The served accepted session can itself be accepted again (e.g. undo).
+        assert _accept(served["request_id"], uris[:2]).status_code == 200
+        with gen_patch, lookup_patch:
+            again = _post(_body()).json()
+        assert again["served_from"] == "accepted_slate"
+        assert [i["at_uri"] for i in again["items"]] == uris[:2]
+
+    @pytest.mark.parametrize(
+        "displayed",
+        [
+            ["at://pop/2", "at://pop/0"],  # out of slate order
+            ["at://pop/0", "at://pop/0"],  # repeated
+            ["at://elsewhere/1"],  # not in the slate
+        ],
+    )
+    def test_displayed_items_must_be_an_in_order_subset(self, displayed):
+        preview = _start_session(n=3, limit=3)
+        resp = _accept(preview["request_id"], displayed)
+        assert resp.status_code == 422
+
+    def test_accept_requires_a_session_for_this_key_user_and_feed(self):
+        preview = _start_session(n=3, limit=3)
+        rid = preview["request_id"]
+
+        assert _accept("no-such-session", []).status_code == 404
+        assert _accept(rid, [], user_did="did:plc:other").status_code == 404
+        assert _accept(rid, [], feed_name="other-feed").status_code == 404
+        app.dependency_overrides[verify_api_key] = lambda: "other-key"
+        try:
+            assert _accept(rid, []).status_code == 404
+        finally:
+            app.dependency_overrides[verify_api_key] = lambda: "test-key-id"
+
+    def test_bluesky_sessions_cannot_be_accepted(self):
+        from datetime import UTC, datetime, timedelta
+
+        asyncio.run(
+            app.state.feed_cache.store_document(
+                "served1",
+                FeedCacheDocument(
+                    items=["at://a/1"],
+                    expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                    user_did=USER_DID,
+                    feed_name=FEED_NAME,
+                    mode="served",
+                    preference_fingerprint="x",
+                ),
+            )
+        )
+        assert _accept("served1", ["at://a/1"]).status_code == 404

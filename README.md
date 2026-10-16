@@ -296,6 +296,17 @@ curl --fail-with-body http://localhost:8000/slate/generate \
   `user_did`, `limit` and `cursor`. The last page has `cursor: null`; a cursor
   used past that or after the ten-minute session TTL gets **410** with
   `detail.code` of `cursor_exhausted` or `cursor_expired` — start a new session.
+- A fresh request (no cursor) always runs the pipeline, with one exception:
+  an accepted slate. `POST /slate/accept` stages a slate the user was shown —
+  typically the last one they saw while editing settings in the partner's UI —
+  trimmed to `displayed_item_uris`. The next fresh request for that key, user
+  and `feed_name` whose *settings* match (the configuration minus
+  `external_candidates`, `exclude_uris`, `limit` and `cursor`) is served that
+  slate instead, once, with `served_from: "accepted_slate"`. A request with
+  different settings drops it and generates. This is the slate-API equivalent
+  of the Settings preview handoff; staged slates live beside those in
+  `users/{did}/accepted_feed_slates`, namespaced `api:{key_id}:{feed_name}`.
+  Claims are counted in `feed.accepted_slate.claim_count` by `outcome`.
 
 ## Deployment
 

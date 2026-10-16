@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import json
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -477,6 +479,12 @@ SLATE_CONFIG_FIELDS = frozenset(
     }
 )
 
+# The subset of the configuration that defines the user's *settings*: what a
+# partner's settings UI changes. An accepted slate is only served to a request
+# whose settings match the slate it was accepted from. The caller's own
+# candidates and exclusions change from load to load and are left out.
+SLATE_SETTINGS_FIELDS = SLATE_CONFIG_FIELDS - {"external_candidates", "exclude_uris"}
+
 
 class SlateGenerateRequest(SlateCutoffs):
     """Body for ``POST /slate/generate``.
@@ -581,3 +589,32 @@ class SlateGenerateRequest(SlateCutoffs):
         if self.min_rank_score is not None and self.rankers is None:
             raise ValueError("min_rank_score only applies when rankers are configured")
         return self
+
+    def settings_fingerprint(self) -> str:
+        """Deterministic hash of this request's settings (``SLATE_SETTINGS_FIELDS``).
+
+        Defaults are included, so leaving a field out and sending its default
+        value fingerprint the same.
+        """
+        payload = self.model_dump(mode="json", include=set(SLATE_SETTINGS_FIELDS))
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+
+class SlateAcceptRequest(BaseModel):
+    """Body for ``POST /slate/accept``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    feed_name: FeedName
+    user_did: str = Field(..., description="AT Protocol DID of the user the slate was for")
+    request_id: str = Field(
+        ..., min_length=1, description="request_id of the slate to accept, from its response"
+    )
+    displayed_item_uris: list[str] = Field(
+        ...,
+        max_length=200,
+        description="The slate's items the user was actually shown, in slate order. The "
+        "next fresh slate opens on exactly these.",
+    )

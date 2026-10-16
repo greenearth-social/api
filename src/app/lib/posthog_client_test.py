@@ -437,6 +437,7 @@ def test_track_slate_generated_captures_keyed_on_user_did():
         rankers=["heavy_ranker"],
         external_candidate_count=12,
         item_count=20,
+        served_from="accepted_slate",
         timestamp=NOW,
     )
     client.capture.assert_called_once_with(
@@ -451,6 +452,7 @@ def test_track_slate_generated_captures_keyed_on_user_did():
             "rankers": ["heavy_ranker"],
             "external_candidate_count": 12,
             "item_count": 20,
+            "served_from": "accepted_slate",
             **ANNOTATIONS,
         },
         timestamp=NOW,
@@ -469,5 +471,6 @@ def test_track_slate_generated_is_a_noop_without_a_client():
         rankers=None,
         external_candidate_count=0,
         item_count=0,
+        served_from="generated",
         timestamp=NOW,
     )

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 
 from google.cloud.firestore import (  # type: ignore[import-untyped]
     ArrayUnion,
@@ -705,6 +706,128 @@ async def claim_accepted_feed_slate(
         transaction.set(cache_ref, materialized.model_dump())
         transaction.set(ref, {"claimed_at": now}, merge=True)
         return accepted.request_id
+
+    return await _claim(transaction)
+
+
+# ---------------------------------------------------------------------------
+# Accepted slates for the slate API (POST /slate/accept)
+# ---------------------------------------------------------------------------
+#
+# The partner-facing equivalent of the Settings handoff above. A partner's
+# settings UI generates slates as the user edits their configuration, then
+# accepts the one the user ended on; the next fresh /slate/generate with the
+# same settings serves it instead of generating anew. Staged slates live beside
+# the Bluesky ones, under a document ID namespaced by API key. Bluesky feed
+# names never contain a colon, so the two cannot collide.
+
+SlateClaimOutcome = Literal["served", "none", "settings_changed", "consumed", "invalid"]
+
+
+def api_accepted_slate_doc_id(api_key_id: str, feed_name: str) -> str:
+    """Document ID of the staged slate for one API key's feed for one user."""
+    return f"api:{api_key_id}:{feed_name}"
+
+
+def _api_accepted_slate_ref(db: AsyncClient, user_did: str, api_key_id: str, feed_name: str):
+    return (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(ACCEPTED_FEED_SLATES_COLLECTION)
+        .document(api_accepted_slate_doc_id(api_key_id, feed_name))
+    )
+
+
+async def stage_api_slate(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    api_key_id: str,
+    feed_name: str,
+    request_id: str,
+    slate: FeedCacheDocument,
+) -> None:
+    """Stage *slate* for the next fresh slate request with matching settings.
+
+    Replaces any slate already staged for this key/user/feed: the user accepts
+    whichever configuration they finish on.
+    """
+    await _api_accepted_slate_ref(db, user_did, api_key_id, feed_name).set(
+        AcceptedFeedSlateDocument(request_id=request_id, slate=slate).model_dump(
+            exclude_none=True
+        )
+    )
+
+
+async def claim_api_slate(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    api_key_id: str,
+    feed_name: str,
+    settings_fingerprint: str,
+    claim_grace_seconds: int = 5,
+    cache_ttl_seconds: int = 600,
+) -> tuple[str | None, SlateClaimOutcome]:
+    """Claim the staged slate for one fresh slate request.
+
+    Returns ``(request_id, "served")`` when the staged slate was materialized
+    into the feed cache under ``request_id`` for paging. As with the Settings
+    handoff, parallel requests within a short grace period receive the same
+    slate, and a later request consumes the staged document.
+
+    A staged slate whose settings fingerprint differs from the request's is
+    discarded (``"settings_changed"``): the user changed their configuration
+    again without accepting, so the request generates normally.
+    """
+    ref = _api_accepted_slate_ref(db, user_did, api_key_id, feed_name)
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _claim(transaction) -> tuple[str | None, SlateClaimOutcome]:
+        snapshot = await ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return None, "none"
+        try:
+            accepted = AcceptedFeedSlateDocument.model_validate(snapshot.to_dict())
+        except Exception:
+            transaction.delete(ref)
+            return None, "invalid"
+
+        slate = accepted.slate
+        if (
+            slate is None
+            or slate.mode != "accepted"
+            or slate.api_key_id != api_key_id
+            or slate.user_did != user_did
+            or slate.feed_name != feed_name
+        ):
+            transaction.delete(ref)
+            return None, "invalid"
+        if slate.preference_fingerprint != settings_fingerprint:
+            transaction.delete(ref)
+            return None, "settings_changed"
+
+        now = datetime.now(UTC)
+        claimed_at = accepted.claimed_at
+        if claimed_at is not None:
+            if claimed_at.tzinfo is None:
+                claimed_at = claimed_at.replace(tzinfo=UTC)
+            if (now - claimed_at).total_seconds() <= claim_grace_seconds:
+                return accepted.request_id, "served"
+            transaction.delete(ref)
+            return None, "consumed"
+
+        materialized = slate.model_copy(
+            update={
+                "generated_at": now,
+                "expires_at": now + timedelta(seconds=cache_ttl_seconds),
+            }
+        )
+        cache_ref = db.collection(FEED_CACHE_COLLECTION).document(accepted.request_id)
+        transaction.set(cache_ref, materialized.model_dump())
+        transaction.set(ref, {"claimed_at": now}, merge=True)
+        return accepted.request_id, "served"
 
     return await _claim(transaction)
 

@@ -34,8 +34,10 @@ from ..lib.firestore import (
     _merge_feed_snapshots,
     _post_seen_classification_update,
     accept_feed_preview,
+    api_accepted_slate_doc_id,
     backfill_user_post_seen,
     claim_accepted_feed_slate,
+    claim_api_slate,
     delete_feed_snapshot,
     get_feed_activity,
     get_feed_debug,
@@ -56,6 +58,7 @@ from ..lib.firestore import (
     record_seen_posts,
     record_user_post_seen,
     set_user_debug_flag,
+    stage_api_slate,
     upsert_feed_activity,
     upsert_user,
     user_doc_id,
@@ -1806,3 +1809,156 @@ class TestDeleteFeedSnapshot:
             "session-1"
         )
         doc_ref.delete.assert_awaited_once()
+
+
+
+# ---------------------------------------------------------------------------
+# Slate API accepted slates
+# ---------------------------------------------------------------------------
+
+API_KEY_ID = "key12345"
+API_FEED = "partner-feed"
+
+
+def _api_staged_slate(**overrides) -> FeedCacheDocument:
+    now = datetime.now(UTC)
+    values = {
+        "items": ["at://accepted/one", "at://accepted/two"],
+        "user_did": USER_DID,
+        "feed_name": API_FEED,
+        "generated_at": now - timedelta(minutes=3),
+        "expires_at": now - timedelta(minutes=1),
+        "mode": "accepted",
+        "api_key_id": API_KEY_ID,
+        "preference_fingerprint": "fp-1",
+    }
+    values.update(overrides)
+    return FeedCacheDocument(**values)
+
+
+def _api_claim_db(*snapshots):
+    """A db whose staged-slate document returns *snapshots* on successive reads."""
+    db = MagicMock()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    users_collection = MagicMock()
+    cache_collection = MagicMock()
+    db.collection.side_effect = lambda name: (
+        users_collection if name == USERS_COLLECTION else cache_collection
+    )
+    user_ref = MagicMock()
+    users_collection.document.return_value = user_ref
+    accepted_collection = MagicMock()
+    user_ref.collection.return_value = accepted_collection
+    ref = MagicMock()
+    accepted_collection.document.return_value = ref
+    cache_ref = MagicMock()
+    cache_collection.document.return_value = cache_ref
+    ref.get = AsyncMock(side_effect=list(snapshots))
+    return db, transaction, accepted_collection, ref, cache_ref
+
+
+async def _claim(db, fingerprint="fp-1"):
+    return await claim_api_slate(
+        db,
+        USER_DID,
+        api_key_id=API_KEY_ID,
+        feed_name=API_FEED,
+        settings_fingerprint=fingerprint,
+    )
+
+
+def test_api_accepted_slate_doc_id_cannot_collide_with_bluesky_feeds():
+    doc_id = api_accepted_slate_doc_id(API_KEY_ID, "your-feed")
+    assert doc_id == "api:key12345:your-feed"
+    assert doc_id != "your-feed"
+
+
+@pytest.mark.asyncio
+async def test_stage_api_slate_writes_namespaced_document():
+    db, _, accepted_collection, ref, _ = _api_claim_db()
+    ref.set = AsyncMock()
+    slate = _api_staged_slate()
+
+    await stage_api_slate(
+        db,
+        USER_DID,
+        api_key_id=API_KEY_ID,
+        feed_name=API_FEED,
+        request_id="rid-1",
+        slate=slate,
+    )
+
+    accepted_collection.document.assert_called_once_with("api:key12345:partner-feed")
+    written = ref.set.await_args.args[0]
+    assert written["request_id"] == "rid-1"
+    assert written["slate"]["items"] == slate.items
+    assert "claimed_at" not in written
+
+
+@pytest.mark.asyncio
+async def test_claim_api_slate_serves_once_with_grace_then_consumes():
+    staged = {"request_id": "rid-1", "slate": _api_staged_slate().model_dump()}
+    db, transaction, _, ref, cache_ref = _api_claim_db(
+        _mock_doc_snapshot(True, staged),
+        _mock_doc_snapshot(True, {**staged, "claimed_at": datetime.now(UTC)}),
+        _mock_doc_snapshot(
+            True, {**staged, "claimed_at": datetime.now(UTC) - timedelta(seconds=6)}
+        ),
+    )
+    now = datetime.now(UTC)
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        assert await _claim(db) == ("rid-1", "served")
+        assert await _claim(db) == ("rid-1", "served")
+        assert await _claim(db) == (None, "consumed")
+
+    cache_write = next(c for c in transaction.set.call_args_list if c.args[0] is cache_ref)
+    materialized = cache_write.args[1]
+    assert materialized["mode"] == "accepted"
+    assert materialized["api_key_id"] == API_KEY_ID
+    assert materialized["items"] == ["at://accepted/one", "at://accepted/two"]
+    assert materialized["generated_at"] > now
+    assert materialized["expires_at"] > now + timedelta(minutes=9)
+    claim_write = next(c for c in transaction.set.call_args_list if c.args[0] is ref)
+    assert claim_write.kwargs == {"merge": True}
+    transaction.delete.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
+async def test_claim_api_slate_drops_slate_when_settings_changed():
+    staged = {"request_id": "rid-1", "slate": _api_staged_slate().model_dump()}
+    db, transaction, _, ref, _ = _api_claim_db(_mock_doc_snapshot(True, staged))
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        assert await _claim(db, fingerprint="fp-2") == (None, "settings_changed")
+
+    transaction.set.assert_not_called()
+    transaction.delete.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [{"api_key_id": "otherkey"}, {"feed_name": "other-feed"}, {"mode": "api"}],
+)
+async def test_claim_api_slate_rejects_foreign_or_unaccepted_slates(overrides):
+    staged = {"request_id": "rid-1", "slate": _api_staged_slate(**overrides).model_dump()}
+    db, transaction, _, ref, _ = _api_claim_db(_mock_doc_snapshot(True, staged))
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        assert await _claim(db) == (None, "invalid")
+
+    transaction.set.assert_not_called()
+    transaction.delete.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
+async def test_claim_api_slate_with_nothing_staged():
+    db, transaction, _, _, _ = _api_claim_db(_mock_doc_snapshot(False))
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        assert await _claim(db) == (None, "none")
+
+    transaction.set.assert_not_called()
+    transaction.delete.assert_not_called()
