@@ -180,8 +180,14 @@ class FeedCacheDocument(BaseModel):
     )
     api_key_id: str | None = Field(
         default=None,
-        description="key_id of the API key that created an `api` session. A cursor is only "
-        "honoured for the key that created it.",
+        description="key_id of the API key that created a slate API session. A cursor is "
+        "only honoured for the key that created it.",
+    )
+    served_from: Literal["generated", "last_load", "preview"] | None = Field(
+        default=None,
+        description="Slate API sessions: whether the slate was generated for this request, "
+        "is the user's last feed load re-shown as a preview, or is a preview handed to the "
+        "feed load after the user saved their settings.",
     )
     preference_patch: FeedPreferencesDocument | None = Field(
         default=None,
@@ -200,6 +206,26 @@ class FeedCacheDocument(BaseModel):
         description="True when this cache entry was created by a load-test session. The cache "
         "collection is keyed by request_id (not user), so this tag is how "
         "scripts/load_test/cleanup.py finds and removes test-created entries.",
+    )
+
+
+class StoredSlateDocument(BaseModel):
+    """A slate API slate kept beyond its paging session.
+
+    Stored at ``users/{doc}/slate_api_slates/{key_id}:{feed_name}:{kind}``, where
+    ``kind`` is ``last_load`` (the user's last feed load, re-shown when a preview
+    has the same settings) or ``preview`` (the most recent preview, handed to the
+    next feed load with the same settings).
+    """
+
+    request_id: str
+    settings_fingerprint: str
+    slate: FeedCacheDocument
+    stored_at: datetime
+    claimed_at: datetime | None = Field(
+        default=None,
+        description="Preview only: when a feed load claimed it. Parallel requests within a "
+        "short grace period share the claim; a later load consumes the preview.",
     )
 
 

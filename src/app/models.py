@@ -480,9 +480,9 @@ SLATE_CONFIG_FIELDS = frozenset(
 )
 
 # The subset of the configuration that defines the user's *settings*: what a
-# partner's settings UI changes. An accepted slate is only served to a request
-# whose settings match the slate it was accepted from. The caller's own
-# candidates and exclusions change from load to load and are left out.
+# partner's settings UI changes. A preview is matched to the last feed load, and
+# a feed load to the last preview, by these alone. The caller's own candidates
+# and exclusions change from load to load and are left out.
 SLATE_SETTINGS_FIELDS = SLATE_CONFIG_FIELDS - {"external_candidates", "exclude_uris"}
 
 
@@ -492,7 +492,8 @@ class SlateGenerateRequest(SlateCutoffs):
     A fresh request describes the whole pipeline: which generators to run
     (including the caller's own ``external`` candidates), how to rank, whether
     to diversify, and the slate cutoffs. A cursor request sends only
-    ``feed_name``, ``user_did``, ``limit`` and ``cursor``.
+    ``feed_name``, ``user_did``, ``limit`` and ``cursor`` (and may repeat
+    ``preview``, which a cursor request ignores: the session knows).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -504,6 +505,13 @@ class SlateGenerateRequest(SlateCutoffs):
         default=None,
         description="Cursor from a previous response. When set, no pipeline configuration "
         "may be sent: the page comes from the existing session.",
+    )
+    preview: bool = Field(
+        default=False,
+        description="True when the slate is for a settings preview rather than the user's "
+        "feed. A preview has no side effects on the user's history. If its settings match "
+        "the user's last feed load it shows that load; otherwise it generates, and the "
+        "user's next feed load with the same settings is served this preview.",
     )
 
     generators: list[GeneratorSpec] = Field(
@@ -601,20 +609,3 @@ class SlateGenerateRequest(SlateCutoffs):
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
-
-class SlateAcceptRequest(BaseModel):
-    """Body for ``POST /slate/accept``."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    feed_name: FeedName
-    user_did: str = Field(..., description="AT Protocol DID of the user the slate was for")
-    request_id: str = Field(
-        ..., min_length=1, description="request_id of the slate to accept, from its response"
-    )
-    displayed_item_uris: list[str] = Field(
-        ...,
-        max_length=200,
-        description="The slate's items the user was actually shown, in slate order. The "
-        "next fresh slate opens on exactly these.",
-    )

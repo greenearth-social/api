@@ -20,8 +20,9 @@ PostHog events emitted:
   slateGenerated   — one per ``POST /slate/generate`` call (the partner-facing
                      single-call pipeline). Keyed on the user DID the slate was
                      generated for, like feedLoaded, and carries the caller's
-                     ``feed_name`` and ``api_key_id``, and ``served_from``
-                     (``generated`` or ``accepted_slate``).
+                     ``feed_name`` and ``api_key_id``, whether it was a
+                     settings ``preview``, and ``served_from`` (``generated``,
+                     ``last_load`` or ``preview``).
 
 Every event carries three annotations, applied by :func:`annotate_event_properties`:
 
@@ -169,6 +170,7 @@ def track_slate_generated(
     external_candidate_count: int,
     item_count: int,
     served_from: str,
+    preview: bool,
     timestamp: datetime,
 ) -> None:
     """Capture a slateGenerated event for one ``POST /slate/generate`` call.
@@ -190,6 +192,7 @@ def track_slate_generated(
         "external_candidate_count": external_candidate_count,
         "item_count": item_count,
         "served_from": served_from,
+        "preview": preview,
     }
     client.capture(
         distinct_id=user_did,

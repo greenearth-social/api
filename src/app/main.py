@@ -290,8 +290,9 @@ response is one page of ranked posts with their pipeline metadata, a
 `feed_context` token per item for reporting interactions, and a cursor for
 the next page. See the endpoint's own documentation for paging semantics.
 
-`POST /slate/accept` supports a settings UI: accept the slate the user was
-shown, and their next fresh load with the same settings opens on it.
+Set `preview: true` from a settings UI: a preview re-shows the user's last
+feed load when the settings are unchanged, and after they save, their next
+feed load with the same settings opens on the slate they last previewed.
 
 ## Content search
 
