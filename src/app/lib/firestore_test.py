@@ -37,6 +37,7 @@ from ..lib.firestore import (
     backfill_user_post_seen,
     claim_accepted_feed_slate,
     delete_feed_snapshot,
+    delete_most_recent_seen_bucket,
     get_feed_activity,
     get_feed_debug,
     get_newer_feed_snapshot_uris,
@@ -534,6 +535,42 @@ async def test_patch_user_feed_preferences_materializes_in_transaction():
         }
     }
     assert written["created_by_load_test"] is False
+    assert transaction.set.call_args.kwargs == {"merge": True}
+    transaction.delete.assert_called_once_with(accepted_ref)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exists", [False, True], ids=["missing-user", "unchanged-preferences"])
+async def test_patch_user_feed_preferences_always_applies_save_side_effects(exists):
+    db, _, doc_ref = _mock_firestore_client()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    accepted_ref = MagicMock()
+    doc_ref.collection = MagicMock()
+    doc_ref.collection.return_value.document.return_value = accepted_ref
+    doc_ref.get.return_value = _mock_doc_snapshot(
+        exists,
+        {
+            "user_did": USER_DID,
+            "created_by_load_test": True,
+            "feed_preferences": {"random": {"freshness": 2}},
+        } if exists else None,
+    )
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        updated = await patch_user_feed_preferences(
+            db, USER_DID, "random", FeedPreferencesDocument(freshness=2)
+        )
+
+    assert updated.freshness == 2
+    doc_ref.collection.assert_called_once_with("accepted_feed_slates")
+    doc_ref.collection.return_value.document.assert_called_once_with("random")
+    transaction.set.assert_called_once()
+    written = transaction.set.call_args.args[1]
+    assert written["user_did"] == USER_DID
+    assert written["feed_preferences"] == {"random": {"freshness": 2}}
+    assert written["created_by_load_test"] is False
+    assert isinstance(written["updated_at"], datetime)
     assert transaction.set.call_args.kwargs == {"merge": True}
     transaction.delete.assert_called_once_with(accepted_ref)
 
@@ -1147,6 +1184,24 @@ class TestSettingsVisit:
 # ---------------------------------------------------------------------------
 # record_seen_posts
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_seen_bucket_targets_only_current_utc_day():
+    db, doc_ref = _mock_seen_posts_write_client()
+    now = datetime(2026, 10, 15, 1, 0, tzinfo=UTC)
+
+    with patch("app.lib.firestore.datetime") as clock:
+        clock.now.return_value = now
+        await delete_most_recent_seen_bucket(db, USER_DID)
+
+    clock.now.assert_called_once_with(UTC)
+    db.collection.assert_called_once_with("users")
+    db.collection.return_value.document.assert_called_once_with(user_doc_id(USER_DID))
+    subcollection = db.collection.return_value.document.return_value.collection
+    subcollection.assert_called_once_with("seen_posts")
+    subcollection.return_value.document.assert_called_once_with("2026-10-15")
+    doc_ref.delete.assert_awaited_once_with()
 
 
 class TestRecordSeenPosts:

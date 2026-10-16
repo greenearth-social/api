@@ -3,6 +3,8 @@
 
 Run from the api/ directory:
     pipenv run python scripts/apikeys.py generate alice@example.com
+    pipenv run python scripts/apikeys.py generate service@example.com --scope user-config
+    pipenv run python scripts/apikeys.py generate admin@example.com --admin --scope user-config
     pipenv run python scripts/apikeys.py list
     pipenv run python scripts/apikeys.py revoke a1b2c3d4
     pipenv run python scripts/apikeys.py usage a1b2c3d4
@@ -30,12 +32,13 @@ from app.lib.api_keys import create_api_key, get_api_key_doc, list_api_keys, rev
 from app.lib.firestore import init_firestore_client
 
 
-async def cmd_generate(email: str, admin: bool) -> None:
+async def cmd_generate(email: str, admin: bool, scopes: list[str] | None) -> None:
     db = init_firestore_client()
-    doc, full_key = await create_api_key(db, email, is_admin=admin)
+    doc, full_key = await create_api_key(db, email, is_admin=admin, scopes=scopes)
     print(f"Key ID : {doc.key_id}")
     print(f"Email  : {doc.email}")
     print(f"Admin  : {doc.is_admin}")
+    print(f"Scopes : {', '.join(doc.scopes)}")
     print(f"Key    : {full_key}")
     print()
     print("IMPORTANT: This is the only time the plaintext key will be shown.")
@@ -47,13 +50,16 @@ async def cmd_list() -> None:
     if not keys:
         print("No API keys found.")
         return
-    print(f"{'key_id':<10} {'email':<30} {'active':<8} {'admin':<7} {'calls/mo':<10} {'last_used_at'}")
-    print("-" * 90)
+    print(
+        f"{'key_id':<10} {'email':<30} {'active':<8} {'admin':<7} "
+        f"{'calls/mo':<10} {'last_used_at':<20} scopes"
+    )
+    print("-" * 110)
     for k in keys:
         last_used = k.last_used_at.strftime("%Y-%m-%dT%H:%M:%SZ")
         print(
             f"{k.key_id:<10} {k.email:<30} {str(k.is_active):<8} {str(k.is_admin):<7} "
-            f"{k.monthly_call_count:<10} {last_used}"
+            f"{k.monthly_call_count:<10} {last_used} {', '.join(k.scopes)}"
         )
 
 
@@ -77,6 +83,7 @@ async def cmd_usage(key_id: str) -> None:
     print(f"key_id             : {doc.key_id}")
     print(f"email              : {doc.email}")
     print(f"is_active          : {doc.is_active}")
+    print(f"scopes             : {', '.join(doc.scopes)}")
     print(f"last_used_at       : {last_used}")
     print(f"monthly_period     : {doc.monthly_period}")
     print(f"monthly_call_count : {doc.monthly_call_count}")
@@ -93,6 +100,12 @@ def main() -> None:
         action="store_true",
         help="Issue an admin key with access to /admin/* endpoints (greenearth team only)",
     )
+    gen.add_argument(
+        "--scope",
+        dest="scopes",
+        action="append",
+        help="Grant a named scope (repeatable; default is always included; independent of --admin)",
+    )
 
     sub.add_parser("list", help="List all API keys")
 
@@ -105,7 +118,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "generate":
-        asyncio.run(cmd_generate(args.email, args.admin))
+        asyncio.run(cmd_generate(args.email, args.admin, args.scopes))
     elif args.command == "list":
         asyncio.run(cmd_list())
     elif args.command == "revoke":

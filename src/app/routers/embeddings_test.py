@@ -152,7 +152,7 @@ def test_authentication_uses_existing_api_key_header(client, monkeypatch):
     assert response.status_code == 401
     cast(AsyncMock, embeddings.fetch_user_history_features).assert_not_called()
     _mock_prediction_request().assert_not_called()
-    authenticate.return_value = SimpleNamespace(key_id="valid")
+    authenticate.return_value = SimpleNamespace(key_id="valid", scopes=["default"])
     response = client.post(
         "/embeddings/user", json={"user_did": DID}, headers={"X-API-Key": "a-key"}
     )
