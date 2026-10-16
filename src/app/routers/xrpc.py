@@ -1646,6 +1646,8 @@ async def get_feed_skeleton(
                     cache_doc.user_did != user_did
                     or cache_doc.feed_name != feed_name
                     or cache_doc.mode == "preview"
+                    # Slate API sessions page only through /slate/generate.
+                    or cache_doc.api_key_id is not None
                 ):
                     logger.warning(
                         "Rejected cursor outside its originating user/feed context",

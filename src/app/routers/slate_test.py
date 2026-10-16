@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+from ..documents import FeedCacheDocument, StoredSlateDocument
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import InMemoryFeedCache
@@ -57,6 +60,53 @@ def no_user_history():
         patch("app.lib.slate_pipeline.hydrate_posts", new=AsyncMock(side_effect=lambda es, c: c)),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def stored_slates():
+    """In-memory stand-in for the Firestore last-load and preview documents.
+
+    The real helpers are transactional Firestore code tested in
+    lib/firestore_test.py. Here they only need to round-trip, and a served
+    preview claim materializes into the in-memory feed cache as the real one
+    does into the feed_cache collection.
+    """
+    store: dict[tuple[str, str, str, str], StoredSlateDocument] = {}
+
+    async def get(db, user_did, *, api_key_id, feed_name, kind):
+        return store.get((user_did, api_key_id, feed_name, kind))
+
+    async def save(db, user_did, *, api_key_id, feed_name, kind, stored):
+        store[(user_did, api_key_id, feed_name, kind)] = stored
+
+    async def delete(db, user_did, *, api_key_id, feed_name, kind):
+        store.pop((user_did, api_key_id, feed_name, kind), None)
+
+    async def claim(db, user_did, *, api_key_id, feed_name, settings_fingerprint, **_):
+        key = (user_did, api_key_id, feed_name, "preview")
+        preview = store.get(key)
+        if preview is None:
+            return None, "none"
+        if preview.settings_fingerprint != settings_fingerprint:
+            del store[key]
+            return None, "settings_changed"
+        if preview.claimed_at is not None:  # no grace window in the fake
+            del store[key]
+            return None, "consumed"
+        store[key] = preview.model_copy(update={"claimed_at": datetime.now(UTC)})
+        await app.state.feed_cache.store_document(
+            preview.request_id,
+            preview.slate.model_copy(update={"mode": "api", "served_from": "preview"}),
+        )
+        return preview.request_id, "served"
+
+    with (
+        patch("app.routers.slate.get_api_slate", side_effect=get),
+        patch("app.routers.slate.save_api_slate", side_effect=save),
+        patch("app.routers.slate.delete_api_slate", side_effect=delete),
+        patch("app.routers.slate.claim_api_preview", side_effect=claim) as claim_mock,
+    ):
+        yield SimpleNamespace(store=store, claim=claim_mock)
 
 
 @pytest.fixture
@@ -460,9 +510,7 @@ class TestCursor:
 
     def test_feed_skeleton_cursors_are_not_honoured_here(self):
         """A getFeedSkeleton session (mode=served) must not be readable via the API."""
-        from datetime import UTC, datetime, timedelta
-
-        from ..documents import FeedCacheDocument
+        from datetime import timedelta
 
         asyncio.run(
             app.state.feed_cache.store_document(
@@ -558,3 +606,218 @@ class TestObservability:
         assert props["item_count"] == 2
         assert paged["properties"]["has_cursor"] is True
         assert paged["properties"]["generators"] == []
+
+
+
+# ---------------------------------------------------------------------------
+# Settings previews
+# ---------------------------------------------------------------------------
+
+
+def _load(**overrides):
+    """A fresh feed load (no cursor, not a preview)."""
+    return _post(_body(**overrides))
+
+
+def _preview(**overrides):
+    return _post(_body(preview=True, **overrides))
+
+
+def _with_generators(**by_name):
+    """Context manager: canned generators; yields the generator mocks."""
+    gen_patch, lookup_patch, gens = _fake_generators(**by_name)
+
+    class _Ctx:
+        def __enter__(self):
+            gen_patch.__enter__()
+            lookup_patch.__enter__()
+            return gens
+
+        def __exit__(self, *exc):
+            lookup_patch.__exit__(*exc)
+            gen_patch.__exit__(*exc)
+
+    return _Ctx()
+
+
+def _uris(response) -> list[str]:
+    return [item["at_uri"] for item in response.json()["items"]]
+
+
+class TestPreview:
+    def test_settings_fingerprint_ignores_candidates_paging_and_preview(self):
+        from ..models import SlateGenerateRequest
+
+        base = SlateGenerateRequest.model_validate(_body())
+        same_settings = SlateGenerateRequest.model_validate(
+            _body(limit=3, exclude_uris=["at://x/1"], preview=True)
+        )
+        changed = SlateGenerateRequest.model_validate(_body(author_penalty=0.1))
+        assert base.settings_fingerprint() == same_settings.settings_fingerprint()
+        assert base.settings_fingerprint() != changed.settings_fingerprint()
+
+    def test_preview_with_unchanged_settings_shows_the_last_feed_load(self):
+        with _with_generators(popularity=_candidates("load", [0.9, 0.8, 0.7])):
+            load = _load()
+        assert load.json()["served_from"] == "generated"
+
+        with _with_generators(popularity=_candidates("other", [0.9])) as gens:
+            preview = _preview(limit=2)
+
+        assert preview.status_code == 200, preview.text
+        data = preview.json()
+        assert data["served_from"] == "last_load"
+        assert _uris(preview) == _uris(load)[:2]
+        assert data["request_id"] != load.json()["request_id"]
+        assert data["items"][0]["generators"] == load.json()["items"][0]["generators"]
+        gens["popularity"].generate.assert_not_awaited()
+        # Pageable like any session.
+        page2 = _post(_cursor_body(data["cursor"], limit=5))
+        assert page2.status_code == 200, page2.text
+        assert page2.json()["served_from"] == "last_load"
+        assert _uris(page2) == _uris(load)[2:]
+
+    def test_saved_preview_is_served_to_the_next_load_with_its_settings(self):
+        with _with_generators(popularity=_candidates("load", [0.9])):
+            _load()
+        with _with_generators(popularity=_candidates("pv", [0.9, 0.8, 0.7])):
+            preview = _preview(author_penalty=0.2, limit=3)
+        assert preview.json()["served_from"] == "generated"
+
+        with _with_generators(popularity=_candidates("fresh", [0.9])) as gens:
+            load = _load(author_penalty=0.2, limit=2)
+
+        assert load.status_code == 200, load.text
+        assert load.json()["served_from"] == "preview"
+        assert load.json()["request_id"] == preview.json()["request_id"]
+        assert _uris(load) == _uris(preview)[:2]
+        gens["popularity"].generate.assert_not_awaited()
+        page2 = _post(_cursor_body(load.json()["cursor"], limit=5))
+        assert page2.json()["served_from"] == "preview"
+        assert _uris(page2) == _uris(preview)[2:]
+
+        # Served once; the load after that generates.
+        with _with_generators(popularity=_candidates("fresh", [0.9])):
+            again = _load(author_penalty=0.2)
+        assert again.json()["served_from"] == "generated"
+
+    def test_only_the_most_recent_preview_is_kept(self):
+        with _with_generators(popularity=_candidates("a", [0.9])):
+            _preview(author_penalty=0.2)
+        with _with_generators(popularity=_candidates("b", [0.9])):
+            _preview(author_penalty=0.9)
+        with _with_generators(popularity=_candidates("fresh", [0.9])):
+            load = _load(author_penalty=0.2)
+        assert load.json()["served_from"] == "generated"
+        assert _uris(load) == ["at://fresh/0"]
+
+    def test_saving_different_settings_drops_the_preview(self, stored_slates):
+        with _with_generators(popularity=_candidates("pv", [0.9])):
+            _preview(author_penalty=0.2)
+        with _with_generators(popularity=_candidates("fresh", [0.9])):
+            load = _load(author_penalty=0.5)
+        assert load.json()["served_from"] == "generated"
+        assert not any(k[3] == "preview" for k in stored_slates.store)
+
+    def test_returning_to_unchanged_settings_stages_nothing(self):
+        with _with_generators(popularity=_candidates("load", [0.9])):
+            _load()
+        with _with_generators(popularity=_candidates("pv", [0.9])):
+            _preview(author_penalty=0.2)  # try something
+            back = _preview()  # back to the original settings
+        assert back.json()["served_from"] == "last_load"
+
+        # Leaving settings unchanged: the next load generates as usual.
+        with _with_generators(popularity=_candidates("fresh", [0.9])):
+            load = _load()
+        assert load.json()["served_from"] == "generated"
+        assert _uris(load) == ["at://fresh/0"]
+
+    def test_feed_loads_become_the_last_load(self, stored_slates):
+        with _with_generators(popularity=_candidates("pv", [0.9])):
+            preview = _preview(author_penalty=0.2)
+        with _with_generators(popularity=[]):
+            _load(author_penalty=0.2)  # served the preview
+        last = stored_slates.store[(USER_DID, "test-key-id", FEED_NAME, "last_load")]
+        assert last.request_id == preview.json()["request_id"]
+        assert last.slate.items == _uris(preview)
+
+    def test_preview_has_no_side_effects_on_history(self, discarded):
+        with (
+            _with_generators(popularity=_candidates("pv", [0.9, 0.1])) as gens,
+            patch(
+                "app.routers.xrpc.get_recent_seen_uris",
+                new_callable=AsyncMock,
+                return_value=["at://seen/1"],
+            ),
+            patch(
+                "app.routers.xrpc.get_recent_discarded_uris",
+                new_callable=AsyncMock,
+                return_value=["at://discarded/1"],
+            ),
+        ):
+            resp = _preview(
+                rankers=[{"name": "candidate_score", "weight": 1.0}], min_rank_score=0.5
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert _uris(resp) == ["at://pv/0"]
+        # Seen posts stay eligible; earlier low-score discards stay excluded.
+        assert gens["popularity"].generate.await_args.kwargs["exclude_uris"] == [
+            "at://discarded/1"
+        ]
+        discarded.assert_not_called()
+
+    def test_empty_preview_is_not_handed_to_the_feed(self, stored_slates):
+        with _with_generators(popularity=_candidates("pv", [0.9])):
+            _preview(author_penalty=0.2)
+        with _with_generators(popularity=[]):
+            empty = _preview(author_penalty=0.2)
+        assert empty.json()["items"] == []
+        assert not any(k[3] == "preview" for k in stored_slates.store)
+
+    def test_claim_failure_falls_back_to_generating(self, stored_slates):
+        stored_slates.claim.side_effect = RuntimeError("firestore down")
+        with _with_generators(popularity=_candidates("fresh", [0.5])):
+            resp = _load()
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["served_from"] == "generated"
+
+    def test_preview_traffic_metrics_and_analytics(self):
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+        with _with_generators(popularity=_candidates("pv", [0.9])):
+            _preview(author_penalty=0.2)
+        reader = InMemoryMetricReader()
+        set_metric_collector(MetricCollector._from_reader(reader, service_name="t", env="test"))
+        posthog = MagicMock()
+        try:
+            with (
+                _with_generators(popularity=_candidates("pv", [0.9])),
+                patch("app.routers.slate.get_posthog_client", return_value=posthog),
+            ):
+                _preview(author_penalty=0.9)
+                _load(author_penalty=0.9)
+            metrics_data = reader.get_metrics_data()
+            assert metrics_data is not None
+            points = {
+                (metric.name, point.attributes.get("traffic")): point
+                for rm in metrics_data.resource_metrics
+                for sm in rm.scope_metrics
+                for metric in sm.metrics
+                for point in metric.data.data_points
+                if point.attributes is not None
+            }
+        finally:
+            set_metric_collector(None)
+
+        assert ("feed.render.success_count", "preview") in points
+        assert ("feed.render.success_count", "real") in points
+        claim = points[("feed.slate_preview.claim_count", "real")]
+        assert claim.attributes is not None
+        assert claim.attributes["outcome"] == "served"
+        events = [c.kwargs["properties"] for c in posthog.capture.call_args_list]
+        assert [(e["preview"], e["served_from"]) for e in events] == [
+            (True, "generated"),
+            (False, "preview"),
+        ]
