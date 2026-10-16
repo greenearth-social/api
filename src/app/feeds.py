@@ -416,6 +416,7 @@ FEEDS: dict[str, FeedConfig] = {
                 RankModelSpec(name="anti_ranker", weight=1.0),
             ],
         ),
+        exclude_seen_posts=False,
     ),
 }
 
