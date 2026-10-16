@@ -191,4 +191,9 @@ class AntiRanker(Ranker):
             candidates_by_uri.values()
         )
 
-        return RankerResult(model=self.name, result=result)
+        filtered_result = RankPredictResult(rankings=[ 
+            r for r in result.rankings 
+            if r.rank_score is not None and r.rank_score >= 0.2
+        ])
+
+        return RankerResult(model=self.name, result=filtered_result)
