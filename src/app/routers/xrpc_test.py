@@ -3552,6 +3552,26 @@ class TestSendInteractions:
         classify.assert_awaited_once_with(db, "did:plc:interactor")
 
     @pytest.mark.asyncio
+    async def test_seen_recorded_for_slate_feed(self):
+        """A token for a feed outside FEEDS came from the slate API, which always
+        excludes seen posts, so seen posts are denormalized for it."""
+        from app.routers.xrpc import Interaction, _record_interactions
+
+        seen = "app.bsky.feed.defs#interactionSeen"
+        ix = Interaction(
+            item="at://post/1", event=seen, feed_context=_make_token(feed="partner-feed")
+        )
+        db = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen_rec,
+            patch("app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock),
+        ):
+            await _record_interactions(db, [ix])
+
+        seen_rec.assert_called_once_with(db, "did:plc:interactor", ["at://post/1"], load_test=False)
+
+    @pytest.mark.asyncio
     async def test_load_test_interaction_is_tagged_and_skips_analytics(self):
         """An lt=True token tags the stored doc and never reaches PostHog."""
         from app.routers.xrpc import Interaction, _record_interactions

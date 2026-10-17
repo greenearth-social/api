@@ -1234,8 +1234,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
 
     ``interactionSeen`` items are additionally appended to the user's seen-posts
     buckets so they can be excluded from future feed generations -- but only for
-    feeds whose config has ``exclude_seen_posts`` enabled. The raw interaction is
-    always stored regardless.
+    slate feeds and feeds whose config has ``exclude_seen_posts`` enabled. The raw
+    interaction is always stored regardless.
     """
     # Seen URIs collected per user so we can record them with a single write
     # per user after the per-interaction loop. Keyed by (did, load_test) so a
@@ -1277,11 +1277,12 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
         feed_cfg = FEEDS.get(payload.feed)
         if event == "interactionSeen" and ix.item and not payload.lt:
             post_seen_users.add(payload.did)
+        # A token for a feed outside FEEDS was issued by the slate API, whose
+        # generation always excludes seen posts.
         if (
             event == "interactionSeen"
             and ix.item
-            and feed_cfg is not None
-            and feed_cfg.exclude_seen_posts
+            and (feed_cfg is None or feed_cfg.exclude_seen_posts)
         ):
             seen_by_user.setdefault((payload.did, payload.lt), []).append(ix.item)
 
