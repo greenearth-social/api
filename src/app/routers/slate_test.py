@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from ..documents import ApiKeyDocument
+from ..lib.api_keys import generate_key
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import InMemoryFeedCache
@@ -558,3 +560,79 @@ class TestObservability:
         assert props["item_count"] == 2
         assert paged["properties"]["has_cursor"] is True
         assert paged["properties"]["generators"] == []
+
+
+# ---------------------------------------------------------------------------
+# Interactions
+# ---------------------------------------------------------------------------
+
+
+SEEN = "app.bsky.feed.defs#interactionSeen"
+
+
+class TestInteractions:
+    @pytest.fixture(autouse=True)
+    def api_key(self, monkeypatch):
+        """A real key checked by the real scope dependency, granted user-config."""
+        key_id, full_key, key_hash = generate_key()
+        doc = ApiKeyDocument(
+            key_id=key_id, key_hash=key_hash, email="partner@example.com", scopes=["user-config"]
+        )
+        monkeypatch.setattr("app.lib.api_keys.get_api_key_doc", AsyncMock(return_value=doc))
+        # authenticate_api_key bumps usage counters through a sync collection chain.
+        db = MagicMock()
+        db.collection.return_value.document.return_value = AsyncMock()
+        app.state.firestore = db
+        self.key_doc = doc
+        self.headers = {"X-API-Key": full_key}
+
+    def _post(self, interactions: list[dict], headers: dict | None = None):
+        return client.post(
+            "/slate/interactions",
+            json={"interactions": interactions},
+            headers=self.headers if headers is None else headers,
+        )
+
+    def test_counts_accepted_and_dropped_and_records_in_background(self):
+        with patch("app.routers.slate.decode_feed_context") as decode:
+            decode.side_effect = lambda token: object() if token == "good" else None
+            with patch("app.routers.slate._record_interactions", new_callable=AsyncMock) as rec:
+                resp = self._post([
+                    {"item": "at://p/1", "event": SEEN, "feedContext": "good"},
+                    {"item": "at://p/2", "event": SEEN, "feedContext": "forged"},
+                    {"item": "at://p/3", "event": SEEN},
+                ])
+
+        assert resp.status_code == 200
+        assert resp.json() == {"accepted": 1, "dropped": 2}
+        rec.assert_called_once()
+        assert [ix.item for ix in rec.call_args[0][1]] == ["at://p/1", "at://p/2", "at://p/3"]
+
+    def test_seen_slate_items_are_excluded_from_later_slates(self):
+        gen_patch, lookup_patch, _ = _fake_generators(popularity=_candidates("pop", [0.9, 0.5]))
+        with gen_patch, lookup_patch:
+            items = _post(_body())
+        feed_context = items.json()["items"][0]["feed_context"]
+
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.record_user_post_seen", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+            patch("app.routers.xrpc.get_posthog_client", return_value=MagicMock()),
+            patch("app.routers.xrpc.record_seen_posts", new_callable=AsyncMock) as seen,
+        ):
+            resp = self._post([{"item": "at://pop/0", "event": SEEN, "feedContext": feed_context}])
+
+        assert resp.json() == {"accepted": 1, "dropped": 0}
+        seen.assert_awaited_once_with(
+            app.state.firestore, USER_DID, ["at://pop/0"], load_test=False
+        )
+
+    def test_requires_api_key(self):
+        assert self._post([], headers={}).status_code == 401
+
+    def test_requires_user_config_scope(self):
+        self.key_doc.scopes.remove("user-config")
+        resp = self._post([])
+        assert resp.status_code == 403
+        assert resp.json() == {"detail": "API key missing required scope: user-config"}

@@ -342,6 +342,15 @@ curl --fail-with-body http://localhost:8000/slate/generate \
   `user_did`, `limit` and `cursor`. The last page has `cursor: null`; a cursor
   used past that or after the ten-minute session TTL gets **410** with
   `detail.code` of `cursor_exhausted` or `cursor_expired` — start a new session.
+- Interactions with slate items go to `POST /slate/interactions`, which takes
+  the `app.bsky.feed.sendInteractions` body and needs a key with the
+  `user-config` scope (issue #544). A partner that passes each item's
+  `feed_context` through as its skeleton's `feedContext` can forward what
+  Bluesky sends back unchanged. `interactionSeen` events exclude the post from
+  the user's later slates; reporting them is optional for callers that track
+  seen posts themselves and send `exclude_uris`. The response counts how many
+  interactions were `accepted` and how many were `dropped` for a missing or
+  invalid `feed_context`.
 
 ## Deployment
 
