@@ -290,6 +290,10 @@ response is one page of ranked posts with their pipeline metadata, a
 `feed_context` token per item for reporting interactions, and a cursor for
 the next page. See the endpoint's own documentation for paging semantics.
 
+Set `preview: true` from a settings UI: a preview re-shows the user's last
+feed load when the settings are unchanged, and after they save, their next
+feed load with the same settings opens on the slate they last previewed.
+
 ## Content search
 
 The **Skylight** endpoints (`/skylight/search` and `/skylight/similar`)
@@ -301,6 +305,12 @@ can be used on their own.
 
 Most endpoints require an `X-API-Key` header.  Use the **Authorize**
 button above to set your key.
+
+Some endpoints also require the key to be granted a named **scope**. The
+endpoints that act on behalf of a specific user, `/slate/generate` and the
+`/users/{user_did}/…` preference endpoints, require the `user-config` scope.
+Each endpoint's description says which scope it needs; a key without it gets
+HTTP 403.
 
 The AT Protocol XRPC endpoints (`/xrpc/…`) use JWT authentication issued
 by the Bluesky AppView and do not require an API key.
@@ -339,7 +349,15 @@ _TAGS = [
             "and ours, weighted), ranking, diversification and slate cutoffs, "
             "configured per request and paginated with a cursor. For integrations "
             "that would otherwise chain `/candidates/generate`, `/rank/predict` "
-            "and `/diversify`."
+            "and `/diversify`. Requires an API key with the `user-config` scope."
+        ),
+    },
+    {
+        "name": "user-preferences",
+        "description": (
+            "Read and update a specific user's feed controls on their behalf, with "
+            "the same validation and side effects as the user saving them in "
+            "Settings. Requires an API key with the `user-config` scope."
         ),
     },
     {

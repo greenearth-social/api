@@ -374,6 +374,8 @@ async def get_feed_preview(
     if (
         cache_doc is None
         or cache_doc.mode != "preview"
+        # Slate API previews belong to the partner that made them.
+        or cache_doc.api_key_id is not None
         or cache_doc.user_did != user_did
         or cache_doc.feed_name is None
         or cache_doc.generated_at is None
@@ -498,6 +500,7 @@ async def accept_preview(
     if (
         cache_doc is None
         or cache_doc.mode not in {"preview", "accepted"}
+        or cache_doc.api_key_id is not None
         or cache_doc.user_did != user_did
         or cache_doc.feed_name != feed_name
         or cache_doc.generated_at is None

@@ -18,6 +18,7 @@ from ..documents import (
     InteractionDocument,
     PipelineItemMeta,
     SourceWeightsDocument,
+    StoredSlateDocument,
 )
 from ..lib.firestore import (
     DISCARDED_POSTS_COLLECTION,
@@ -28,16 +29,20 @@ from ..lib.firestore import (
     MAX_FEED_SNAPSHOT_DOCUMENTS,
     MAX_FEED_SNAPSHOT_ITEMS,
     SEEN_POSTS_COLLECTION,
+    SLATE_API_SLATES_COLLECTION,
     USERS_COLLECTION,
     StaleFeedPreviewError,
     _accepted_preview_diagnostics,
     _merge_feed_snapshots,
     _post_seen_classification_update,
     accept_feed_preview,
+    api_slate_doc_id,
     backfill_user_post_seen,
     claim_accepted_feed_slate,
+    claim_api_preview,
     delete_feed_snapshot,
     delete_most_recent_seen_bucket,
+    get_api_slate,
     get_feed_activity,
     get_feed_debug,
     get_newer_feed_snapshot_uris,
@@ -56,6 +61,7 @@ from ..lib.firestore import (
     record_interaction,
     record_seen_posts,
     record_user_post_seen,
+    save_api_slate,
     set_user_debug_flag,
     upsert_feed_activity,
     upsert_user,
@@ -1861,3 +1867,177 @@ class TestDeleteFeedSnapshot:
             "session-1"
         )
         doc_ref.delete.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Slate API: last feed load and settings preview
+# ---------------------------------------------------------------------------
+
+API_KEY_ID = "key12345"
+API_FEED = "partner-feed"
+
+
+def _api_slate(**overrides) -> FeedCacheDocument:
+    now = datetime.now(UTC)
+    values = {
+        "items": ["at://preview/one", "at://preview/two"],
+        "user_did": USER_DID,
+        "feed_name": API_FEED,
+        "generated_at": now - timedelta(minutes=3),
+        "expires_at": now - timedelta(minutes=1),
+        "mode": "preview",
+        "api_key_id": API_KEY_ID,
+        "served_from": "generated",
+        "preference_fingerprint": "fp-1",
+    }
+    values.update(overrides)
+    return FeedCacheDocument(**values)
+
+
+def _stored(slate: FeedCacheDocument | None = None, **overrides) -> dict:
+    doc = StoredSlateDocument(
+        request_id="rid-1",
+        settings_fingerprint="fp-1",
+        slate=slate or _api_slate(),
+        stored_at=datetime.now(UTC),
+    ).model_dump()
+    doc.update(overrides)
+    return doc
+
+
+def _api_slate_db(*snapshots):
+    """A db whose stored-slate document returns *snapshots* on successive reads."""
+    db = MagicMock()
+    transaction = MagicMock()
+    db.transaction.return_value = transaction
+    users_collection = MagicMock()
+    cache_collection = MagicMock()
+    db.collection.side_effect = lambda name: (
+        users_collection if name == USERS_COLLECTION else cache_collection
+    )
+    user_ref = MagicMock()
+    users_collection.document.return_value = user_ref
+    slates_collection = MagicMock()
+    user_ref.collection.return_value = slates_collection
+    ref = MagicMock()
+    slates_collection.document.return_value = ref
+    cache_ref = MagicMock()
+    cache_collection.document.return_value = cache_ref
+    ref.get = AsyncMock(side_effect=list(snapshots))
+    ref.set = AsyncMock()
+    ref.delete = AsyncMock()
+    return db, transaction, user_ref, slates_collection, ref, cache_ref
+
+
+async def _claim(db, fingerprint="fp-1"):
+    return await claim_api_preview(
+        db,
+        USER_DID,
+        api_key_id=API_KEY_ID,
+        feed_name=API_FEED,
+        settings_fingerprint=fingerprint,
+    )
+
+
+def test_api_slate_doc_ids_are_per_key_feed_and_kind():
+    assert api_slate_doc_id(API_KEY_ID, "your-feed", "last_load") == "key12345:your-feed:last_load"
+    assert api_slate_doc_id(API_KEY_ID, "your-feed", "preview") == "key12345:your-feed:preview"
+
+
+@pytest.mark.asyncio
+async def test_save_and_get_api_slate_round_trip():
+    db, _, user_ref, slates_collection, ref, _ = _api_slate_db()
+    stored = StoredSlateDocument.model_validate(_stored())
+
+    await save_api_slate(
+        db, USER_DID, api_key_id=API_KEY_ID, feed_name=API_FEED, kind="last_load", stored=stored
+    )
+
+    user_ref.collection.assert_called_with(SLATE_API_SLATES_COLLECTION)
+    slates_collection.document.assert_called_with("key12345:partner-feed:last_load")
+    written = ref.set.await_args.args[0]
+    assert "claimed_at" not in written
+
+    ref.get = AsyncMock(return_value=_mock_doc_snapshot(True, written))
+    got = await get_api_slate(
+        db, USER_DID, api_key_id=API_KEY_ID, feed_name=API_FEED, kind="last_load"
+    )
+    assert got == stored
+
+
+@pytest.mark.asyncio
+async def test_get_api_slate_missing_or_unreadable_is_none():
+    db, *_ = _api_slate_db(_mock_doc_snapshot(False), _mock_doc_snapshot(True, {"bad": 1}))
+    for _ in range(2):
+        assert (
+            await get_api_slate(
+                db, USER_DID, api_key_id=API_KEY_ID, feed_name=API_FEED, kind="preview"
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_claim_api_preview_serves_once_with_grace_then_consumes():
+    db, transaction, _, slates_collection, ref, cache_ref = _api_slate_db(
+        _mock_doc_snapshot(True, _stored()),
+        _mock_doc_snapshot(True, _stored(claimed_at=datetime.now(UTC))),
+        _mock_doc_snapshot(True, _stored(claimed_at=datetime.now(UTC) - timedelta(seconds=6))),
+    )
+    now = datetime.now(UTC)
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        assert await _claim(db) == ("rid-1", "served")
+        assert await _claim(db) == ("rid-1", "served")
+        assert await _claim(db) == (None, "consumed")
+
+    slates_collection.document.assert_called_with("key12345:partner-feed:preview")
+    cache_write = next(c for c in transaction.set.call_args_list if c.args[0] is cache_ref)
+    materialized = cache_write.args[1]
+    assert materialized["mode"] == "api"
+    assert materialized["served_from"] == "preview"
+    assert materialized["api_key_id"] == API_KEY_ID
+    assert materialized["items"] == ["at://preview/one", "at://preview/two"]
+    assert materialized["expires_at"] > now + timedelta(minutes=9)
+    claim_write = next(c for c in transaction.set.call_args_list if c.args[0] is ref)
+    assert claim_write.kwargs == {"merge": True}
+    transaction.delete.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
+async def test_claim_api_preview_drops_preview_when_settings_differ():
+    db, transaction, _, _, ref, _ = _api_slate_db(_mock_doc_snapshot(True, _stored()))
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        assert await _claim(db, fingerprint="fp-2") == (None, "settings_changed")
+
+    transaction.set.assert_not_called()
+    transaction.delete.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [{"api_key_id": "otherkey"}, {"feed_name": "other-feed"}, {"user_did": "did:plc:other"}],
+)
+async def test_claim_api_preview_rejects_foreign_previews(overrides):
+    db, transaction, _, _, ref, _ = _api_slate_db(
+        _mock_doc_snapshot(True, _stored(_api_slate(**overrides)))
+    )
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        assert await _claim(db) == (None, "invalid")
+
+    transaction.set.assert_not_called()
+    transaction.delete.assert_called_once_with(ref)
+
+
+@pytest.mark.asyncio
+async def test_claim_api_preview_with_no_preview():
+    db, transaction, *_ = _api_slate_db(_mock_doc_snapshot(False))
+
+    with patch("app.lib.firestore.async_transactional", side_effect=lambda fn: fn):
+        assert await _claim(db) == (None, "none")
+
+    transaction.set.assert_not_called()
+    transaction.delete.assert_not_called()
