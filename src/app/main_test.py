@@ -258,5 +258,6 @@ def test_scoped_endpoints_document_their_scope():
 
     # The check only means something if it found the scoped endpoints.
     assert "POST /slate/generate" in scoped
+    assert "POST /slate/interactions" in scoped
     assert "GET /users/{user_did}/feeds/preferences" in scoped
     assert "PATCH /users/{user_did}/feeds/preferences/{feed_name}" in scoped

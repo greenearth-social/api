@@ -8,6 +8,10 @@ POST /slate/generate
     effects, the user's last feed load when the settings match it, and the
     preview is what the next feed load with those settings is served.
 
+POST /slate/interactions
+    Record interactions with served slate items, keyed by their feed_context
+    tokens (issue #544).
+
 Partners who host part of the pipeline themselves (typically candidate
 generation) previously chained ``/candidates/generate`` → ``/rank/predict`` →
 ``/diversify``, paying a network round-trip per stage. This endpoint is the
@@ -34,6 +38,7 @@ from ..documents import (
 from ..lib.candidates import get_generator
 from ..lib.candidates.supplied import SuppliedCandidatesGenerator
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS
+from ..lib.feed_context import decode_feed_context
 from ..lib.firestore import (
     claim_api_preview,
     delete_api_slate,
@@ -56,9 +61,11 @@ from ..models import (
 )
 from ..security import require_api_scope, scope_responses
 from .xrpc import (
+    SendInteractionsRequest,
     _get_feed_cache,
     _make_feed_context,
     _record_discarded,
+    _record_interactions,
     _spawn_background,
     user_exclusions,
 )
@@ -135,6 +142,15 @@ class SlateGenerateResponse(BaseModel):
         default_factory=list,
         description="Components that failed during generation. The slate was still built "
         "from whatever succeeded; empty on a clean run.",
+    )
+
+
+class SlateInteractionsResponse(BaseModel):
+    """How many of the submitted interactions will be recorded."""
+
+    accepted: int = Field(..., description="Interactions with a valid feed_context")
+    dropped: int = Field(
+        ..., description="Interactions dropped for a missing, malformed or forged feed_context"
     )
 
 
@@ -240,7 +256,7 @@ def _session_page(
 
 
 # ---------------------------------------------------------------------------
-# Endpoint
+# Endpoints
 # ---------------------------------------------------------------------------
 
 
@@ -301,7 +317,7 @@ async def slate_generate(
     `external_candidates`, `exclude_uris`, `limit`, `cursor` and `preview`.
 
     **Interactions.** Every item carries `feed_context`, the token to report
-    back with interactions for that item.
+    back with interactions for that item via `/slate/interactions`.
 
     **Authentication.** Requires an API key granted the `user-config` scope:
     the slate is generated on behalf of `user_did`, using and updating their
@@ -632,3 +648,44 @@ async def _forget_preview(body: SlateGenerateRequest, key_id: str, db) -> None:
         )
     except Exception:
         logger.exception("Failed to clear preview for feed '%s'", body.feed_name)
+
+
+@router.post(
+    "/slate/interactions",
+    response_model=SlateInteractionsResponse,
+    dependencies=[Depends(require_user_config_scope)],
+    responses=scope_responses("user-config"),
+)
+async def slate_interactions(
+    request: Request,
+    body: SendInteractionsRequest,
+) -> SlateInteractionsResponse:
+    """Record interactions with slate items on the user's behalf.
+
+    The body is the `app.bsky.feed.sendInteractions` lexicon body, so a partner
+    that passes each item's `feed_context` through as its own skeleton's
+    `feedContext` can forward what Bluesky sends back unchanged. As there, the
+    `feed_context` identifies the user, feed and request; an interaction without
+    a valid one is dropped and counted in `dropped`.
+
+    `interactionSeen` events exclude the post from the user's future slates.
+    Reporting them is optional — `exclude_uris` on `/slate/generate` does the
+    same job for callers that track seen posts themselves.
+
+    Requires an API key with the `user-config` scope, since it writes to the
+    user's history. Interactions are stored in the background after the
+    response.
+    """
+    db = getattr(request.app.state, "firestore", None)
+    if db is None:
+        logger.error("Firestore client not initialized")
+        raise HTTPException(status_code=500, detail="Firestore unavailable")
+
+    accepted = sum(
+        1 for ix in body.interactions if decode_feed_context(ix.feed_context or "") is not None
+    )
+    _spawn_background(_record_interactions(db, body.interactions))
+
+    return SlateInteractionsResponse(
+        accepted=accepted, dropped=len(body.interactions) - accepted
+    )
