@@ -20,9 +20,9 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..documents import (
@@ -54,7 +54,7 @@ from ..models import (
     SlateConfig,
     SlateGenerateRequest,
 )
-from ..security import RequireApiKey
+from ..security import require_api_scope
 from .xrpc import (
     _get_feed_cache,
     _make_feed_context,
@@ -64,6 +64,13 @@ from .xrpc import (
 )
 
 router = APIRouter(tags=["slate"])
+
+# A slate is generated on behalf of a named user: it reads their seen and
+# discarded history and writes discards and their last load and preview. That
+# is the same access as the user-preferences service endpoints, so it needs the
+# same explicitly granted scope, not the default every key has.
+require_user_config_scope = require_api_scope("user-config")
+UserConfigApiKey = Annotated[str, Depends(require_user_config_scope)]
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +249,8 @@ def _session_page(
     response_model=SlateGenerateResponse,
     responses={
         400: {"description": "Invalid cursor (malformed, or issued to another key, user or feed)"},
+        401: {"description": "Missing or invalid API key"},
+        403: {"description": "API key lacks the `user-config` scope"},
         404: {"description": "A named generator or ranker was not found"},
         410: {
             "description": "The cursor session is over: `detail.code` is `cursor_expired` "
@@ -255,7 +264,7 @@ def _session_page(
 async def slate_generate(
     request: Request,
     body: SlateGenerateRequest,
-    key_id: RequireApiKey,
+    key_id: UserConfigApiKey,
 ) -> SlateGenerateResponse:
     """Run the full ranking pipeline for a user and return the first page.
 
@@ -294,6 +303,10 @@ async def slate_generate(
 
     **Interactions.** Every item carries `feed_context`, the token to report
     back with interactions for that item.
+
+    **Authentication.** Requires an API key granted the `user-config` scope:
+    the slate is generated on behalf of `user_did`, using and updating their
+    history.
 
     `feed_name` is yours to choose. It labels this feed in our metrics and
     analytics and is bound into the cursor session and `feed_context` tokens.

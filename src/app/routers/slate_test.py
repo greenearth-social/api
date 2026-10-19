@@ -18,7 +18,7 @@ from ..lib.feed_context import decode_feed_context
 from ..lib.metrics import MetricCollector, set_metric_collector
 from ..main import app
 from ..models import CandidatePost, FeedCursor
-from ..security import verify_api_key
+from .slate import require_user_config_scope
 
 USER_DID = "did:plc:slateuser"
 FEED_NAME = "partner-feed"
@@ -28,6 +28,17 @@ TEST_EMBEDDING = encode_float32_b64([1.0, 0.0, 0.0])
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _user_config_key_override():
+    """Most tests are about the pipeline, not auth: act as a key with user-config.
+
+    TestAuth below removes this override to exercise the real scope check.
+    """
+    app.dependency_overrides[require_user_config_scope] = lambda: "test-key-id"
+    yield
+    app.dependency_overrides.pop(require_user_config_scope, None)
 
 
 @pytest.fixture(autouse=True)
@@ -421,17 +432,6 @@ class TestValidation:
             body = {k: v for k, v in body.items() if k in keep}
         assert _post(body).status_code == 422, overrides
 
-    def test_requires_api_key(self):
-        def deny():
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=401, detail="nope")
-
-        app.dependency_overrides[verify_api_key] = deny
-        try:
-            assert _post(_body()).status_code == 401
-        finally:
-            app.dependency_overrides[verify_api_key] = lambda: "test-key-id"
 
 
 # ---------------------------------------------------------------------------
@@ -502,11 +502,8 @@ class TestCursor:
         assert _post(_cursor_body(cursor, user_did="did:plc:other")).status_code == 400
         assert _post(_cursor_body(cursor, feed_name="other-feed")).status_code == 400
 
-        app.dependency_overrides[verify_api_key] = lambda: "other-key"
-        try:
-            assert _post(_cursor_body(cursor)).status_code == 400
-        finally:
-            app.dependency_overrides[verify_api_key] = lambda: "test-key-id"
+        app.dependency_overrides[require_user_config_scope] = lambda: "other-key"
+        assert _post(_cursor_body(cursor)).status_code == 400
 
     def test_feed_skeleton_cursors_are_not_honoured_here(self):
         """A getFeedSkeleton session (mode=served) must not be readable via the API."""
@@ -838,3 +835,53 @@ class TestPreview:
             (True, "generated"),
             (False, "preview"),
         ]
+
+
+# ---------------------------------------------------------------------------
+# Authentication: the real key lookup and scope check
+# ---------------------------------------------------------------------------
+
+
+class TestAuth:
+    """Through the real _authenticate and scope check, with only the key store faked."""
+
+    @pytest.fixture(autouse=True)
+    def real_auth(self, monkeypatch):
+        from ..documents import ApiKeyDocument
+        from ..lib.api_keys import generate_key
+
+        app.dependency_overrides.pop(require_user_config_scope, None)
+        key_id, raw_key, key_hash = generate_key()
+        doc = ApiKeyDocument(key_id=key_id, key_hash=key_hash, email="partner@example.com")
+        monkeypatch.setattr("app.lib.api_keys.get_api_key_doc", AsyncMock(return_value=doc))
+        # authenticate_api_key also records usage on the key document.
+        app.state.firestore = MagicMock()
+        app.state.firestore.collection.return_value.document.return_value = AsyncMock()
+        return SimpleNamespace(doc=doc, raw_key=raw_key)
+
+    def _post_with(self, raw_key: str | None):
+        headers = {"X-API-Key": raw_key} if raw_key is not None else {}
+        return client.post("/slate/generate", json=_body(), headers=headers)
+
+    def test_missing_key_is_401(self):
+        assert self._post_with(None).status_code == 401
+
+    @pytest.mark.parametrize("is_admin", [False, True])
+    @pytest.mark.parametrize("extra_scopes", [[], ["other-scope"]])
+    def test_default_scope_is_not_enough(self, real_auth, is_admin, extra_scopes):
+        real_auth.doc.is_admin = is_admin
+        real_auth.doc.scopes.extend(extra_scopes)
+
+        resp = self._post_with(real_auth.raw_key)
+
+        assert resp.status_code == 403
+        assert resp.json() == {"detail": "API key missing required scope: user-config"}
+
+    def test_user_config_scope_is_accepted(self, real_auth):
+        real_auth.doc.scopes.append("user-config")
+        gen_patch, lookup_patch, _ = _fake_generators(popularity=_candidates("pop", [0.5]))
+        with gen_patch, lookup_patch:
+            resp = self._post_with(real_auth.raw_key)
+
+        assert resp.status_code == 200, resp.text
+        assert _uris(resp) == ["at://pop/0"]

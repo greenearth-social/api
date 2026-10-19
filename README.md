@@ -309,6 +309,15 @@ exists for partners who host part of the pipeline themselves and would
 otherwise chain `/candidates/generate`, `/rank/predict` and `/diversify` across
 a long network path (issue #542).
 
+It acts on behalf of the user named in `user_did`, reading their seen and
+discarded history and recording discards, so it requires an API key granted the
+`user-config` scope, like the user-preferences service endpoints. Keys without it
+get HTTP 403; missing or invalid keys get HTTP 401. Issue one with:
+
+```bash
+pipenv run python scripts/apikeys.py generate partner@example.com --scope user-config
+```
+
 ```bash
 curl --fail-with-body http://localhost:8000/slate/generate \
   -H "X-API-Key: $GE_API_KEY" -H 'Content-Type: application/json' \
