@@ -54,7 +54,7 @@ from ..models import (
     SlateConfig,
     SlateGenerateRequest,
 )
-from ..security import require_api_scope
+from ..security import require_api_scope, scope_responses
 from .xrpc import (
     _get_feed_cache,
     _make_feed_context,
@@ -249,8 +249,6 @@ def _session_page(
     response_model=SlateGenerateResponse,
     responses={
         400: {"description": "Invalid cursor (malformed, or issued to another key, user or feed)"},
-        401: {"description": "Missing or invalid API key"},
-        403: {"description": "API key lacks the `user-config` scope"},
         404: {"description": "A named generator or ranker was not found"},
         410: {
             "description": "The cursor session is over: `detail.code` is `cursor_expired` "
@@ -258,6 +256,7 @@ def _session_page(
             "a new session by sending the request again without a cursor."
         },
         504: {"description": "Generation exceeded the server's internal deadline"},
+        **scope_responses("user-config"),
     },
 )
 @record_render_metrics(lambda kwargs: kwargs["body"].feed_name)  # type: ignore[arg-type]

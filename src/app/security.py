@@ -1,5 +1,5 @@
 from collections.abc import Awaitable, Callable
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import APIKeyHeader
@@ -40,7 +40,21 @@ def require_api_scope(scope: str = "default") -> Callable[[ApiKeyDocument], Awai
             )
         return doc.key_id
 
+    # Lets docs tooling and tests find which scope a route enforces.
+    verify_scope.required_scope = scope  # type: ignore[attr-defined]
     return verify_scope
+
+
+def scope_responses(scope: str) -> dict[int | str, dict[str, Any]]:
+    """OpenAPI ``responses`` for an endpoint that requires *scope*.
+
+    Pass to a route or router alongside ``require_api_scope(scope)`` so the
+    generated docs say which scope a caller's key needs.
+    """
+    return {
+        401: {"description": "Missing or invalid API key"},
+        403: {"description": f"API key lacks the `{scope}` scope"},
+    }
 
 
 verify_api_key = require_api_scope()

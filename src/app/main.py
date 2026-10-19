@@ -306,6 +306,12 @@ can be used on their own.
 Most endpoints require an `X-API-Key` header.  Use the **Authorize**
 button above to set your key.
 
+Some endpoints also require the key to be granted a named **scope**. The
+endpoints that act on behalf of a specific user, `/slate/generate` and the
+`/users/{user_did}/…` preference endpoints, require the `user-config` scope.
+Each endpoint's description says which scope it needs; a key without it gets
+HTTP 403.
+
 The AT Protocol XRPC endpoints (`/xrpc/…`) use JWT authentication issued
 by the Bluesky AppView and do not require an API key.
 """
@@ -343,7 +349,15 @@ _TAGS = [
             "and ours, weighted), ranking, diversification and slate cutoffs, "
             "configured per request and paginated with a cursor. For integrations "
             "that would otherwise chain `/candidates/generate`, `/rank/predict` "
-            "and `/diversify`."
+            "and `/diversify`. Requires an API key with the `user-config` scope."
+        ),
+    },
+    {
+        "name": "user-preferences",
+        "description": (
+            "Read and update a specific user's feed controls on their behalf, with "
+            "the same validation and side effects as the user saving them in "
+            "Settings. Requires an API key with the `user-config` scope."
         ),
     },
     {
