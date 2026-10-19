@@ -10,6 +10,8 @@ python-dotenv = "*"
 elasticsearch = "==9.5.1"
 aiohttp = "*"
 atproto = "*"
+# atproto 0.0.69 requires WebSockets 15.x.
+websockets = ">=15,<16"
 google-cloud-firestore = "*"
 google-cloud-storage = "*"
 opentelemetry-api = "*"
