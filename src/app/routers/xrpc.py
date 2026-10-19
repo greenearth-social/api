@@ -1041,6 +1041,7 @@ async def _record_session(
     requested_limit: int,
     is_load_test: bool = False,
     is_initial_load: bool = True,
+    record_feed_activity: bool = True,
 ) -> None:
     """Resolve the caller's handle and upsert user + feed-activity docs.
 
@@ -1061,6 +1062,9 @@ async def _record_session(
 
     ``requested_limit`` is the page size the client asked for, tracked because
     the Bluesky app requests different sizes from different surfaces.
+
+    Explore previews set ``record_feed_activity=False`` to keep identity and
+    session analytics without counting a preview as a visit to the feed.
     """
     # Handle resolution goes over the network to the PLC directory, so it fails
     # for reasons that have nothing to do with this user existing — a directory
@@ -1087,12 +1091,13 @@ async def _record_session(
     if is_load_test:
         return
 
-    try:
-        await upsert_feed_activity(db, user_did, feed_name, is_initial_load=is_initial_load)
-    except Exception:
-        logger.exception(
-            "Failed to record feed activity for user '%s', feed '%s'", user_did, feed_name
-        )
+    if record_feed_activity:
+        try:
+            await upsert_feed_activity(db, user_did, feed_name, is_initial_load=is_initial_load)
+        except Exception:
+            logger.exception(
+                "Failed to record feed activity for user '%s', feed '%s'", user_did, feed_name
+            )
 
     try:
         track_session(
@@ -1452,6 +1457,7 @@ async def get_feed_skeleton(
     # probes. Regardless of user agent, that response is not a viewed feed
     # slate and must not consume a Settings handoff or mutate user history.
     is_appview_one_item_check = cursor is None and limit == 1
+    is_explore_preview = _is_explore_preview(cursor, limit)
 
     # Cloud Scheduler probe bypass: if GE_PROBE_SECRET is set and the request
     # carries the matching X-Probe-Secret header, skip AT Protocol auth and
@@ -1551,10 +1557,10 @@ async def get_feed_skeleton(
                 requested_limit=limit,
                 is_load_test=is_load_test,
                 is_initial_load=cursor is None,
+                record_feed_activity=not is_explore_preview,
             )
         )
 
-    is_explore_preview = _is_explore_preview(cursor, limit)
     posthog_client = get_posthog_client()
     # Flags are evaluated per user, and an anonymous caller isn't one: it would
     # be a single synthetic identity shared by every logged-out request. Take
@@ -1620,7 +1626,7 @@ async def get_feed_skeleton(
 
     async def generation_exclusions() -> list[str]:
         """Post URIs to exclude, including static pins for anonymous callers."""
-        if is_anonymous:
+        if is_anonymous or is_explore_preview:
             return list(_pinned_post_uris(feed_cfg))
         return await _generation_exclusions(db, user_did, feed_cfg)
 
@@ -1925,7 +1931,9 @@ async def get_feed_skeleton(
                 and not is_anonymous
                 and not is_load_test
                 and not is_appview_one_item_check
+                and not is_explore_preview
             ):
+                # Keep the Settings handoff available for a full feed open.
                 try:
                     accepted_request_id = await claim_accepted_feed_slate(
                         db,
@@ -2040,7 +2048,13 @@ async def get_feed_skeleton(
                 regenerated=False,
                 debug_enabled=debug_enabled,
             )
-            if low_score_uris and not is_anonymous and not is_appview_one_item_check:
+            # An Explore load's rejected candidates should not affect future feed loads.
+            if (
+                low_score_uris
+                and not is_anonymous
+                and not is_appview_one_item_check
+                and not is_explore_preview
+            ):
                 _spawn_background(
                     _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
                 )
@@ -2055,6 +2069,7 @@ async def get_feed_skeleton(
                 and not is_probe
                 and not is_load_test
                 and not is_appview_one_item_check
+                and not is_explore_preview
             ):
                 try:
                     feed_activity_doc = await get_feed_activity(db, user_did, feed_name)
@@ -2115,7 +2130,12 @@ async def get_feed_skeleton(
                 page, scores_by_uri, feed_name, batch=0, exclude_uri=pinned_post_uri
             )
 
-            if not is_probe and not is_anonymous and not is_appview_one_item_check:
+            if (
+                not is_probe
+                and not is_anonymous
+                and not is_appview_one_item_check
+                and not is_explore_preview
+            ):
                 await _write_feed_snapshot_background(
                     db,
                     user_did,
@@ -2125,14 +2145,15 @@ async def get_feed_skeleton(
                     load_test=is_load_test,
                 )
 
-            # Store every non-empty batch — even a (possibly cutoff-shortened)
+            # Explore only displays a single preview, so it needs no paging state.
+            # Otherwise, store every non-empty batch — even a (possibly cutoff-shortened)
             # batch that fits in one page — so paging past it regenerates
             # instead of ending the feed. ``consumed`` (computed above) counts
             # only the generated URIs the first page actually displayed (a
             # pinned page consumes limit-1 generated URIs, not limit), or
             # later pages would skip posts.
             next_cursor = None
-            if cache_uris:
+            if cache_uris and not is_explore_preview:
                 cache_meta_by_uri = {meta.at_uri: meta for meta in generated_snapshot.items_meta}
                 cache_items_meta = [
                     cache_meta_by_uri[uri] for uri in cache_uris if uri in cache_meta_by_uri
