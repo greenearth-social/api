@@ -76,11 +76,12 @@ async def get_api_key_doc(db: AsyncClient, key_id: str) -> ApiKeyDocument | None
 
 
 async def create_api_key(
-    db: AsyncClient, email: str, is_admin: bool = False
+    db: AsyncClient, email: str, is_admin: bool = False, *, scopes: list[str] | None = None
 ) -> tuple[ApiKeyDocument, str]:
     """Issue a new API key. Returns (document, plaintext_full_key).
 
     The plaintext key is returned exactly once and never stored.
+    Every key includes the default scope in addition to any supplied scopes.
     """
     key_id, full_key, key_hash = generate_key()
     now = datetime.now(timezone.utc)
@@ -90,6 +91,7 @@ async def create_api_key(
         email=email,
         is_active=True,
         is_admin=is_admin,
+        scopes=scopes if scopes is not None else [],
         created_at=now,
         last_used_at=now,
         monthly_call_count=0,
