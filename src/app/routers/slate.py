@@ -4,6 +4,10 @@ POST /slate/generate
     Generate, rank, diversify and trim a slate for a user from a request-body
     configuration, with cursor pagination over the result.
 
+    With ``preview: true``, generate a settings preview instead: no side
+    effects, the user's last feed load when the settings match it, and the
+    preview is what the next feed load with those settings is served.
+
 Partners who host part of the pipeline themselves (typically candidate
 generation) previously chained ``/candidates/generate`` → ``/rank/predict`` →
 ``/diversify``, paying a network round-trip per stage. This endpoint is the
@@ -16,14 +20,27 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..documents import FeedCacheDocument, GeneratorDiagnostic, PipelineItemMeta
+from ..documents import (
+    FeedCacheDocument,
+    GeneratorDiagnostic,
+    PipelineItemMeta,
+    StoredSlateDocument,
+)
 from ..lib.candidates import get_generator
 from ..lib.candidates.supplied import SuppliedCandidatesGenerator
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS
+from ..lib.firestore import (
+    claim_api_preview,
+    delete_api_slate,
+    get_api_slate,
+    save_api_slate,
+)
+from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import get_posthog_client, track_slate_generated
 from ..lib.rankers import get_ranker
 from ..lib.request_context import set_traffic
@@ -52,6 +69,9 @@ logger = logging.getLogger(__name__)
 
 CURSOR_EXPIRED = "cursor_expired"
 CURSOR_EXHAUSTED = "cursor_exhausted"
+
+# How the session behind a response was created.
+ServedFrom = Literal["generated", "last_load", "preview"]
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +105,14 @@ class SlateGenerateResponse(BaseModel):
         "tokens are keyed on it."
     )
     feed_name: str
+    served_from: ServedFrom = Field(
+        default="generated",
+        description="How this slate was produced. `generated`: the pipeline ran for this "
+        "request. `last_load` (previews only): the settings match the user's last feed "
+        "load, so that load is shown. `preview` (feed loads only): the settings match the "
+        "user's most recent preview, so the feed opens on that preview. Cursor pages "
+        "report how their session started.",
+    )
     items: list[SlateItem] = Field(default_factory=list, description="Posts in slate order")
     cursor: str | None = Field(
         None,
@@ -164,6 +192,46 @@ def _gone(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=410, detail={"code": code, "message": message})
 
 
+def _owned_session(
+    cache_doc: FeedCacheDocument | None, key_id: str, user_did: str, feed_name: str
+) -> bool:
+    """Whether a stored session was created through this API for this key, user and feed."""
+    return (
+        cache_doc is not None
+        and cache_doc.mode in {"api", "preview"}
+        and cache_doc.api_key_id == key_id
+        and cache_doc.user_did == user_did
+        and cache_doc.feed_name == feed_name
+    )
+
+
+def _session_page(
+    body: SlateGenerateRequest,
+    request_id: str,
+    cache_doc: FeedCacheDocument,
+    offset: int,
+) -> SlateGenerateResponse:
+    """One page of a stored session, with a cursor while items remain."""
+    page = cache_doc.items[offset : offset + body.limit]
+    next_offset = offset + len(page)
+    next_cursor = (
+        FeedCursor(id=request_id, offset=next_offset).encode()
+        if next_offset < len(cache_doc.items)
+        else None
+    )
+    items = _page_items(
+        cache_doc.items_meta, page, _make_feed_context(body.user_did, body.feed_name, request_id)
+    )
+    return SlateGenerateResponse(
+        request_id=request_id,
+        feed_name=body.feed_name,
+        served_from=cache_doc.served_from or "generated",
+        items=items,
+        cursor=next_cursor,
+        generator_diagnostics=_page_diagnostics(cache_doc.generator_diagnostics, items),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
@@ -213,13 +281,24 @@ async def slate_generate(
     `cursor: null`; a cursor used after that, or after the session expired,
     gets **410** with `detail.code` set, which means: start a new session.
 
+    **Settings previews.** Set `preview: true` while the user edits their
+    settings. A preview changes nothing about the user's history: no
+    discards are recorded, and posts they've already seen stay eligible. If the
+    preview's settings match the user's last feed load, that load is shown
+    (`served_from: "last_load"`), so opening settings shows the feed as it is.
+    Otherwise a slate is generated and kept as the most recent preview. The
+    user's next feed load whose settings match it opens on exactly that
+    preview (`served_from: "preview"`), once; with any other settings it
+    generates as usual. "Settings" means the configuration minus
+    `external_candidates`, `exclude_uris`, `limit`, `cursor` and `preview`.
+
     **Interactions.** Every item carries `feed_context`, the token to report
     back with interactions for that item.
 
     `feed_name` is yours to choose. It labels this feed in our metrics and
     analytics and is bound into the cursor session and `feed_context` tokens.
     """
-    set_traffic("real")
+    set_traffic("preview" if body.preview else "real")
 
     db = getattr(request.app.state, "firestore", None)
     if db is None:
@@ -235,8 +314,10 @@ async def slate_generate(
     ):
         if body.cursor is not None:
             response = await _serve_cursor_page(body, key_id, feed_cache)
+        elif body.preview:
+            response = await _preview(request, body, key_id, db, feed_cache)
         else:
-            response = await _generate_session(request, body, key_id, db, feed_cache)
+            response = await _feed_load(request, body, key_id, db, feed_cache)
 
     try:
         track_slate_generated(
@@ -250,6 +331,8 @@ async def slate_generate(
             rankers=[model.name for model in body.rankers] if body.rankers is not None else None,
             external_candidate_count=len(body.external_candidates),
             item_count=len(response.items),
+            served_from=response.served_from,
+            preview=body.preview,
             timestamp=datetime.now(UTC),
         )
     except Exception:
@@ -270,12 +353,7 @@ async def _serve_cursor_page(
     cache_doc = await feed_cache.retrieve_document(parsed.id)
     if cache_doc is None:
         raise _gone(CURSOR_EXPIRED, "This slate session has expired; request a new slate")
-    if (
-        cache_doc.mode != "api"
-        or cache_doc.api_key_id != key_id
-        or cache_doc.user_did != body.user_did
-        or cache_doc.feed_name != body.feed_name
-    ):
+    if not _owned_session(cache_doc, key_id, body.user_did, body.feed_name):
         # Don't say which check failed: the cursor was minted for someone else.
         logger.warning(
             "Rejected slate cursor outside its originating key/user/feed context",
@@ -287,32 +365,138 @@ async def _serve_cursor_page(
             CURSOR_EXHAUSTED, "Every item in this slate has been served; request a new slate"
         )
 
-    page = cache_doc.items[parsed.offset : parsed.offset + body.limit]
-    next_offset = parsed.offset + len(page)
-    next_cursor = (
-        FeedCursor(id=parsed.id, offset=next_offset).encode()
-        if next_offset < len(cache_doc.items)
-        else None
-    )
-    items = _page_items(
-        cache_doc.items_meta, page, _make_feed_context(body.user_did, body.feed_name, parsed.id)
-    )
-    return SlateGenerateResponse(
-        request_id=parsed.id,
-        feed_name=body.feed_name,
-        items=items,
-        cursor=next_cursor,
-        generator_diagnostics=_page_diagnostics(cache_doc.generator_diagnostics, items),
-    )
+    return _session_page(body, parsed.id, cache_doc, parsed.offset)
 
 
-async def _generate_session(
+async def _feed_load(
     request: Request, body: SlateGenerateRequest, key_id: str, db, feed_cache
 ) -> SlateGenerateResponse:
+    """A fresh feed load: the user's last preview if its settings match, else generate."""
     _validate_component_names(body)
+    fingerprint = body.settings_fingerprint()
 
+    served = await _serve_saved_preview(body, key_id, db, feed_cache, fingerprint)
+    if served is not None:
+        response, cache_doc = served
+    else:
+        response, cache_doc = await _generate_and_store(
+            request, body, key_id, db, feed_cache, fingerprint, preview=False
+        )
+    # Remembered even when empty: a preview of unchanged settings must show the
+    # feed the user actually has, not an older non-empty load.
+    # Off the load's latency: only the next preview reads it.
+    _spawn_background(
+        _remember_last_load(body, key_id, db, response.request_id, fingerprint, cache_doc)
+    )
+    return response
+
+
+async def _preview(
+    request: Request, body: SlateGenerateRequest, key_id: str, db, feed_cache
+) -> SlateGenerateResponse:
+    """A settings preview: the last feed load if the settings match, else generate."""
+    _validate_component_names(body)
+    fingerprint = body.settings_fingerprint()
+
+    try:
+        last_load = await get_api_slate(
+            db, body.user_did, api_key_id=key_id, feed_name=body.feed_name, kind="last_load"
+        )
+    except Exception:
+        logger.exception("Failed to read last feed load for feed '%s'", body.feed_name)
+        last_load = None
+
+    if last_load is not None and last_load.settings_fingerprint == fingerprint:
+        # Unchanged settings: show the feed as the user last saw it. Nothing is
+        # kept as a preview, so if they leave settings without changing
+        # anything their next feed load generates as usual.
+        await _forget_preview(body, key_id, db)
+        request_id = uuid.uuid4().hex
+        cache_doc = last_load.slate.model_copy(
+            update={
+                "mode": "preview",
+                "served_from": "last_load",
+                "expires_at": datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS),
+            }
+        )
+        if cache_doc.items:
+            await feed_cache.store_document(request_id, cache_doc)
+        return _session_page(body, request_id, cache_doc, 0)
+
+    response, cache_doc = await _generate_and_store(
+        request, body, key_id, db, feed_cache, fingerprint, preview=True
+    )
+    if not cache_doc.items:
+        # An empty preview is not worth handing to the feed: let it generate.
+        await _forget_preview(body, key_id, db)
+    else:
+        try:
+            await _remember(
+                body, key_id, db, "preview", response.request_id, fingerprint, cache_doc
+            )
+        except Exception:
+            logger.exception("Failed to save preview for feed '%s'", body.feed_name)
+    return response
+
+
+async def _serve_saved_preview(
+    body: SlateGenerateRequest, key_id: str, db, feed_cache, fingerprint: str
+) -> tuple[SlateGenerateResponse, FeedCacheDocument] | None:
+    """Serve the user's most recent preview if its settings match this load's.
+
+    Fail-soft: a Firestore error means the load generates, as it would with no
+    preview saved.
+    """
+    request_id: str | None
+    outcome: str
+    try:
+        request_id, outcome = await claim_api_preview(
+            db,
+            body.user_did,
+            api_key_id=key_id,
+            feed_name=body.feed_name,
+            settings_fingerprint=fingerprint,
+            cache_ttl_seconds=DEFAULT_TTL_SECONDS,
+        )
+    except Exception:
+        logger.exception("Failed to claim preview for feed '%s'", body.feed_name)
+        request_id, outcome = None, "error"
+
+    cache_doc = None
+    if request_id is not None:
+        cache_doc = await feed_cache.retrieve_document(request_id)
+        if not _owned_session(cache_doc, key_id, body.user_did, body.feed_name):
+            cache_doc, outcome = None, "missing"
+
+    if outcome != "none" and (collector := get_metric_collector()):
+        collector.record(
+            "feed.slate_preview.claim_count", 1, feed_name=body.feed_name, outcome=outcome
+        )
+    if cache_doc is None or request_id is None:
+        return None
+    return _session_page(body, request_id, cache_doc, 0), cache_doc
+
+
+async def _generate_and_store(
+    request: Request,
+    body: SlateGenerateRequest,
+    key_id: str,
+    db,
+    feed_cache,
+    fingerprint: str,
+    *,
+    preview: bool,
+) -> tuple[SlateGenerateResponse, FeedCacheDocument]:
+    """Run the pipeline and store the result as a paging session.
+
+    A preview mirrors our own Settings preview: posts the user has seen stay
+    eligible (only low-score discards are excluded), and nothing is recorded.
+    Returns the response and the session document. An empty slate's document
+    is not stored for paging, but is still returned so a feed load can be
+    remembered as empty.
+    """
     excluded = await user_exclusions(
-        db, body.user_did, include_seen=True, include_discarded=True
+        db, body.user_did, include_seen=not preview, include_discarded=True
     )
     gen_request = CandidateGenerateRequest(
         generators=body.generators,
@@ -360,43 +544,79 @@ async def _generate_session(
         regenerated=False,
         extra_generators=extra_generators,
     )
-    if capture.low_score_uris:
+    if capture.low_score_uris and not preview:
         _spawn_background(_record_discarded(db, body.user_did, capture.low_score_uris))
 
     snapshot = capture.snapshot
-    all_uris = snapshot.items
-    page = all_uris[: body.limit]
-    next_cursor: str | None = None
-    if all_uris:
-        await feed_cache.store_document(
-            request_id,
-            FeedCacheDocument(
-                items=all_uris,
-                items_meta=snapshot.items_meta,
-                generator_diagnostics=snapshot.generator_diagnostics,
-                user_did=body.user_did,
-                feed_name=body.feed_name,
-                generated_at=snapshot.generated_at,
-                api_release_sha=snapshot.api_release_sha,
-                expires_at=datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS),
-                mode="api",
-                api_key_id=key_id,
-            ),
-        )
-        if len(page) < len(all_uris):
-            next_cursor = FeedCursor(id=request_id, offset=len(page)).encode()
-
-    items = _page_items(
-        snapshot.items_meta, page, _make_feed_context(body.user_did, body.feed_name, request_id)
-    )
-    return SlateGenerateResponse(
-        request_id=request_id,
+    cache_doc = FeedCacheDocument(
+        items=snapshot.items,
+        items_meta=snapshot.items_meta,
+        generator_diagnostics=snapshot.generator_diagnostics,
+        user_did=body.user_did,
         feed_name=body.feed_name,
-        items=items,
-        cursor=next_cursor,
-        generator_diagnostics=_page_diagnostics(snapshot.generator_diagnostics, items),
-        degraded=[
-            DegradationMeta(stage=event.stage.value, component=event.component)
-            for event in capture.degradations
-        ],
+        generated_at=snapshot.generated_at,
+        api_release_sha=snapshot.api_release_sha,
+        expires_at=datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS),
+        mode="preview" if preview else "api",
+        api_key_id=key_id,
+        served_from="generated",
+        preference_fingerprint=fingerprint,
     )
+    if cache_doc.items:
+        # Only a non-empty slate has pages to cursor through.
+        await feed_cache.store_document(request_id, cache_doc)
+    response = _session_page(body, request_id, cache_doc, 0)
+    response.degraded = [
+        DegradationMeta(stage=event.stage.value, component=event.component)
+        for event in capture.degradations
+    ]
+    return response, cache_doc
+
+
+async def _remember(
+    body: SlateGenerateRequest,
+    key_id: str,
+    db,
+    kind: Literal["last_load", "preview"],
+    request_id: str,
+    fingerprint: str,
+    cache_doc: FeedCacheDocument,
+) -> None:
+    """Keep a slate beyond its paging session, as the last load or the preview."""
+    await save_api_slate(
+        db,
+        body.user_did,
+        api_key_id=key_id,
+        feed_name=body.feed_name,
+        kind=kind,
+        stored=StoredSlateDocument(
+            request_id=request_id,
+            settings_fingerprint=fingerprint,
+            slate=cache_doc,
+            stored_at=datetime.now(UTC),
+        ),
+    )
+
+
+async def _remember_last_load(
+    body: SlateGenerateRequest,
+    key_id: str,
+    db,
+    request_id: str,
+    fingerprint: str,
+    cache_doc: FeedCacheDocument,
+) -> None:
+    """Background: keep this feed load for the next preview. Fail-soft."""
+    try:
+        await _remember(body, key_id, db, "last_load", request_id, fingerprint, cache_doc)
+    except Exception:
+        logger.exception("Failed to save last feed load for feed '%s'", body.feed_name)
+
+
+async def _forget_preview(body: SlateGenerateRequest, key_id: str, db) -> None:
+    try:
+        await delete_api_slate(
+            db, body.user_did, api_key_id=key_id, feed_name=body.feed_name, kind="preview"
+        )
+    except Exception:
+        logger.exception("Failed to clear preview for feed '%s'", body.feed_name)

@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import json
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -477,6 +479,12 @@ SLATE_CONFIG_FIELDS = frozenset(
     }
 )
 
+# The subset of the configuration that defines the user's *settings*: what a
+# partner's settings UI changes. A preview is matched to the last feed load, and
+# a feed load to the last preview, by these alone. The caller's own candidates
+# and exclusions change from load to load and are left out.
+SLATE_SETTINGS_FIELDS = SLATE_CONFIG_FIELDS - {"external_candidates", "exclude_uris"}
+
 
 class SlateGenerateRequest(SlateCutoffs):
     """Body for ``POST /slate/generate``.
@@ -484,7 +492,8 @@ class SlateGenerateRequest(SlateCutoffs):
     A fresh request describes the whole pipeline: which generators to run
     (including the caller's own ``external`` candidates), how to rank, whether
     to diversify, and the slate cutoffs. A cursor request sends only
-    ``feed_name``, ``user_did``, ``limit`` and ``cursor``.
+    ``feed_name``, ``user_did``, ``limit`` and ``cursor`` (and may repeat
+    ``preview``, which a cursor request ignores: the session knows).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -496,6 +505,13 @@ class SlateGenerateRequest(SlateCutoffs):
         default=None,
         description="Cursor from a previous response. When set, no pipeline configuration "
         "may be sent: the page comes from the existing session.",
+    )
+    preview: bool = Field(
+        default=False,
+        description="True when the slate is for a settings preview rather than the user's "
+        "feed. A preview has no side effects on the user's history. If its settings match "
+        "the user's last feed load it shows that load; otherwise it generates, and the "
+        "user's next feed load with the same settings is served this preview.",
     )
 
     generators: list[GeneratorSpec] = Field(
@@ -581,3 +597,15 @@ class SlateGenerateRequest(SlateCutoffs):
         if self.min_rank_score is not None and self.rankers is None:
             raise ValueError("min_rank_score only applies when rankers are configured")
         return self
+
+    def settings_fingerprint(self) -> str:
+        """Deterministic hash of this request's settings (``SLATE_SETTINGS_FIELDS``).
+
+        Defaults are included, so leaving a field out and sending its default
+        value fingerprint the same.
+        """
+        payload = self.model_dump(mode="json", include=set(SLATE_SETTINGS_FIELDS))
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+

@@ -342,6 +342,19 @@ curl --fail-with-body http://localhost:8000/slate/generate \
   `user_did`, `limit` and `cursor`. The last page has `cursor: null`; a cursor
   used past that or after the ten-minute session TTL gets **410** with
   `detail.code` of `cursor_exhausted` or `cursor_expired` — start a new session.
+- Settings previews: a partner's settings UI sends `"preview": true`. A
+  preview has no side effects on the user's history (no discards recorded,
+  seen posts stay eligible). If its settings match the user's last feed load it
+  re-shows that load (`served_from: "last_load"`); otherwise it generates and is
+  kept as the user's most recent preview. The next feed load whose settings
+  match that preview is served it, once (`served_from: "preview"`); any other
+  settings drop it and generate. "Settings" means the configuration minus
+  `external_candidates`, `exclude_uris`, `limit`, `cursor` and `preview`. This
+  is the slate-API equivalent of the Settings preview handoff. The last load
+  and the preview are kept in `users/{did}/slate_api_slates`, one document each
+  per key and feed. Preview requests carry `traffic=preview` in metrics, and
+  feed loads count preview handoffs in `feed.slate_preview.claim_count` by
+  `outcome`.
 
 ## Deployment
 

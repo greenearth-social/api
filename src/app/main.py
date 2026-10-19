@@ -290,6 +290,10 @@ response is one page of ranked posts with their pipeline metadata, a
 `feed_context` token per item for reporting interactions, and a cursor for
 the next page. See the endpoint's own documentation for paging semantics.
 
+Set `preview: true` from a settings UI: a preview re-shows the user's last
+feed load when the settings are unchanged, and after they save, their next
+feed load with the same settings opens on the slate they last previewed.
+
 ## Content search
 
 The **Skylight** endpoints (`/skylight/search` and `/skylight/similar`)

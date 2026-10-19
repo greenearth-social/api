@@ -2097,6 +2097,32 @@ class TestFeedSkeletonCursor:
         assert response.status_code == 400
         assert response.json()["detail"] == "Invalid cursor"
 
+    def test_slate_api_session_cannot_be_used_as_a_public_cursor(self):
+        """A partner session for the same user and an identically-named feed stays private."""
+        cache_id = "slate-api-session"
+        app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
+            items=["at://partner/1"],
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            user_did="did:plc:testuser",
+            feed_name=FEED_RKEY,
+            mode="accepted",
+            api_key_id="partnerkey",
+        )
+        cursor = FeedCursor(id=cache_id, offset=0).encode()
+
+        with patch(
+            "app.routers.xrpc.verify_auth_header",
+            new_callable=AsyncMock,
+            return_value="did:plc:testuser",
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "cursor": cursor},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Invalid cursor"
+
     def test_unaccepted_preview_cannot_be_used_as_a_public_cursor(self):
         cache_id = "unaccepted-preview"
         app.state.feed_cache._docs[cache_id] = FeedCacheDocument(
