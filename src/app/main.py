@@ -68,6 +68,7 @@ from .lib.request_context import (
     set_endpoint,
     set_request_id,
 )
+from .lib.rankers.anti_ranker import set_anti_ranker_db
 from .lib.user_history_cache import (
     FirestoreUserHistoryCache,
     set_user_history_cache,
@@ -184,6 +185,7 @@ async def lifespan(app: FastAPI):
     app.state.user_history_cache = FirestoreUserHistoryCache(app.state.firestore)
     set_user_history_cache(app.state.user_history_cache)
     set_llm_query_vector_db(app.state.firestore)
+    set_anti_ranker_db(app.state.firestore)
     try:
         init_firebase_auth()
     except Exception:
@@ -208,6 +210,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
         set_llm_query_vector_db(None)
+        set_anti_ranker_db(None)
         set_followed_users_cache(None)
         try:
             await app.state.followed_users_cache.drain()

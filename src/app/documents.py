@@ -157,6 +157,10 @@ class UserDocument(BaseModel):
         "scripts/load_test/cleanup.py; a later real request clears this flag "
         "(the user 'becomes ours' and their data is preserved).",
     )
+    request_less_items: dict[str, datetime] = Field(
+        default_factory=dict,
+        description="Post URIs mapped to the latest server receipt time of requestLess feedback.",
+    )
 
 
 class FeedCacheDocument(BaseModel):

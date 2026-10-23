@@ -21,6 +21,7 @@ from .predict import (
 from .candidate_score import CandidateScoreRanker
 from .perspective import PerspectiveRanker
 from .heavy_ranker import HeavyRanker
+from .anti_ranker import AntiRanker
 
 _candidate_score = CandidateScoreRanker()
 register_ranker(_candidate_score)
@@ -40,11 +41,17 @@ _heavy_ranker_empty_history = HeavyRanker(
 )
 register_ranker(_heavy_ranker_empty_history)
 
+_anti_ranker = AntiRanker(
+    name="anti_ranker",
+)
+register_ranker(_anti_ranker)
+
 
 __all__ = [
     "CandidateScoreRanker",
     "PerspectiveRanker",
     "HeavyRanker",
+    "AntiRanker",
     "Ranker",
     "RankerError",
     "RankerExecutionError",

@@ -388,6 +388,36 @@ FEEDS: dict[str, FeedConfig] = {
             ],
         ),
     ),
+    "request-less": FeedConfig(
+        display_name="Request Less",
+        description=(
+            "Regular CGs but ranked by anti-ranker based on requestLess posts."
+        ),
+        public=False,
+        internal_rkey="mb-rl",
+        internal_display_name="mb RL",
+        logged_out="deny",
+        avatar="assets/icons/mysky.png",
+        diversify=False,
+        gen_request_template=CandidateGenerateRequest.model_construct(
+            generators=[
+                GeneratorSpec(name="followed_users", weight=0.30),
+                GeneratorSpec(name="two_tower", weight=0.25),
+                GeneratorSpec(name="popularity", weight=0.25),
+                GeneratorSpec(name="network_likes", weight=0.20),
+            ],
+            infill=None,
+            num_candidates=30,
+            video_only=False,
+            exclude_uris=[],
+        ),
+        rank_request_template=RankPredictRequest.model_construct(
+            models=[
+                RankModelSpec(name="anti_ranker", weight=1.0),
+            ],
+        ),
+        exclude_seen_posts=False,
+    ),
 }
 
 

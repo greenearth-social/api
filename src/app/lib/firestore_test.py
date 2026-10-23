@@ -59,6 +59,7 @@ from ..lib.firestore import (
     prune_feed_snapshots,
     record_discarded_posts,
     record_interaction,
+    record_request_less_posts,
     record_seen_posts,
     record_user_post_seen,
     save_api_slate,
@@ -284,6 +285,7 @@ class TestGetUser:
         assert user.user_did == USER_DID
         assert user.username == USERNAME
         assert user.created_at == now
+        assert user.request_less_items == {}
         db.collection.assert_called_with(USERS_COLLECTION)
 
     @pytest.mark.asyncio
@@ -963,6 +965,41 @@ class TestUpsertFeedActivity:
 # ---------------------------------------------------------------------------
 # record_interaction
 # ---------------------------------------------------------------------------
+
+
+class TestRecordRequestLessPosts:
+    @pytest.mark.asyncio
+    async def test_merges_uri_entries_without_reading_or_replacing_user(self):
+        db, collection_ref, doc_ref = _mock_firestore_client()
+        first_uri = "at://did:plc:author/app.bsky.feed.post/first"
+        second_uri = "at://did:plc:author/app.bsky.feed.post/second"
+        first_time = datetime(2026, 10, 14, 12, tzinfo=UTC)
+        second_time = first_time + timedelta(minutes=1)
+
+        await record_request_less_posts(db, USER_DID, {first_uri: first_time})
+        await record_request_less_posts(db, USER_DID, {second_uri: second_time})
+        await record_request_less_posts(db, USER_DID, {first_uri: second_time})
+
+        db.collection.assert_called_with(USERS_COLLECTION)
+        collection_ref.document.assert_called_with(user_doc_id(USER_DID))
+        # Each write merges only its URI's timestamp, preserving other history
+        # and user settings; repeating a URI updates the same entry.
+        assert [call.args[0] for call in doc_ref.set.await_args_list] == [
+            {"user_did": USER_DID, "request_less_items": {first_uri: first_time}},
+            {"user_did": USER_DID, "request_less_items": {second_uri: second_time}},
+            {"user_did": USER_DID, "request_less_items": {first_uri: second_time}},
+        ]
+        assert all(call.kwargs == {"merge": True} for call in doc_ref.set.await_args_list)
+        doc_ref.get.assert_not_awaited()
+        doc_ref.update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_batch_does_not_clear_saved_history(self):
+        db = MagicMock()
+
+        await record_request_less_posts(db, USER_DID, {})
+
+        db.collection.assert_not_called()
 
 
 class TestRecordInteraction:

@@ -158,6 +158,7 @@ def test_lifespan_loads_prior_once_and_keeps_api_available_on_failure(
 ):
     """Optional prior loading cannot take unrelated API routes offline."""
     from pathlib import Path
+    from .lib.rankers import anti_ranker
 
     monkeypatch.setenv("GE_ELASTICSEARCH_API_KEY", "test-key")
     monkeypatch.setenv("GE_FEED_CONTEXT_SECRET", "test-secret")
@@ -204,11 +205,13 @@ def test_lifespan_loads_prior_once_and_keeps_api_available_on_failure(
     local_app.include_router(main.health.router)
     with TestClient(local_app) as client:
         assert (prior_module.get_average_user_embedding() is not None) is configured
+        assert anti_ranker._db is local_app.state.firestore
         assert client.get("/health").status_code == 200
         assert client.get("/health").status_code == 200
         load.assert_called_once_with(str(uri))
 
     assert prior_module.get_average_user_embedding() is None
+    assert anti_ranker._db is None
 
 
 def _api_routes(routes):

@@ -63,6 +63,7 @@ from ..lib.firestore import (
     merge_feed_snapshot,
     record_discarded_posts,
     record_interaction,
+    record_request_less_posts,
     record_seen_posts,
     record_user_post_seen,
     update_survey_post_seen,
@@ -666,8 +667,10 @@ BATCH_MULTIPLIER = 5  # how many pages of results to fetch for each cursor sessi
 MAX_BATCH_SIZE = 200  # maximum number of candidates per cursor session
 
 
-def _batch_size(limit: int) -> int:
+def _batch_size(limit: int, feed_name: str) -> int:
     """How many candidates to pre-generate for a new cursor session."""
+    if feed_name == 'request-less':
+        return MAX_BATCH_SIZE  # Request-less feed is a special case: always fetch the max
     return min(limit * BATCH_MULTIPLIER, MAX_BATCH_SIZE)
 
 
@@ -1241,6 +1244,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
     buckets so they can be excluded from future feed generations -- but only for
     slate feeds and feeds whose config has ``exclude_seen_posts`` enabled. The raw
     interaction is always stored regardless.
+
+    Real ``requestLess`` items are also saved on the user for the anti-ranker.
     """
     # Seen URIs collected per user so we can record them with a single write
     # per user after the per-interaction loop. Keyed by (did, load_test) so a
@@ -1248,6 +1253,7 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
     # bucket instead of polluting their real exclusion data.
     seen_by_user: dict[tuple[str, bool], list[str]] = {}
     post_seen_users: set[str] = set()
+    request_less_by_user: dict[str, dict[str, datetime]] = {}
 
     # Handles for the PostHog identity properties, memoized so a batch of
     # interactions from one user costs one Firestore read rather than one per
@@ -1315,6 +1321,11 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
             feed_generated_at=datetime.fromtimestamp(payload.iat, tz=UTC),
             load_test=payload.lt,
         )
+        if event == "requestLess" and ix.item and not payload.lt:
+            # Use receipt time, not the time the feed was generated. Repeated
+            # selections of the same post in a batch keep the latest timestamp.
+            request_less_by_user.setdefault(payload.did, {})[ix.item] = doc.created_at
+            logger.info(f"Got a requestLess interaction for user {payload.did}")
         try:
             await record_interaction(db, doc)
         except Exception:
@@ -1337,6 +1348,12 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
                 logger.exception(
                     "Failed to track PostHog interaction '%s' for user '%s'", event, payload.did
                 )
+
+    for did, items in request_less_by_user.items():
+        try:
+            await record_request_less_posts(db, did, items)
+        except Exception:
+            logger.exception("Failed to record requestLess posts for user '%s'", did)
 
     for (did, load_test), uris in seen_by_user.items():
         try:
@@ -1454,6 +1471,8 @@ async def get_feed_skeleton(
         )
 
     feed_cfg = FEEDS[feed_name]
+    # Request-less returns one short page without a cursor; keep limit for probe detection.
+    page_limit = min(limit, 5) if feed_name == "request-less" else limit
     # AppView performs one-item initial requests as freshness/reachability
     # probes. Regardless of user agent, that response is not a viewed feed
     # slate and must not consume a Settings handoff or mutate user history.
@@ -1674,7 +1693,7 @@ async def get_feed_skeleton(
                     # paging through this cursor. Start a new cache session
                     # immediately, retaining only already-delivered URIs as
                     # exclusions so the new slate cannot repeat them.
-                    batch = _batch_size(limit)
+                    batch = _batch_size(limit, feed_name)
                     delivered_uris = cached_uris[: min(parsed.offset, len(cached_uris))]
                     excluded = await generation_exclusions()
                     exclude_uris = list(dict.fromkeys([*delivered_uris, *excluded]))
@@ -1711,7 +1730,7 @@ async def get_feed_skeleton(
                     replacement_uris = [
                         uri for uri in generated_snapshot.items if uri not in contextual_pin_uris
                     ]
-                    page = replacement_uris[:limit]
+                    page = replacement_uris[:page_limit]
                     next_cursor: str | None = None
                     if replacement_uris:
                         meta_by_uri = {meta.at_uri: meta for meta in generated_snapshot.items_meta}
@@ -1776,12 +1795,12 @@ async def get_feed_skeleton(
                             page,
                             feed_context_for(replacement_request_id),
                         ),
-                        cursor=next_cursor,
+                        cursor=None if feed_name == "request-less" else next_cursor,
                     )
 
                 if parsed.offset < len(cached_uris):
                     # Serve from the existing cached batch.
-                    page = cached_uris[parsed.offset : parsed.offset + limit]
+                    page = cached_uris[parsed.offset : parsed.offset + page_limit]
                     next_offset = parsed.offset + len(page)
                     next_cursor: str | None = None
                     if page:
@@ -1816,11 +1835,11 @@ async def get_feed_skeleton(
                         )
                     return FeedSkeletonResponse(
                         feed=_skeleton_items(page, feed_context),
-                        cursor=next_cursor,
+                        cursor=None if feed_name == "request-less" else next_cursor,
                     )
 
                 # Offset is at or past the end — regenerate with exclusions.
-                batch = _batch_size(limit)
+                batch = _batch_size(limit, feed_name)
                 excluded = await generation_exclusions()
                 # Dedup while preserving order; the cached batch and the
                 # seen/discarded posts can overlap.
@@ -1867,7 +1886,7 @@ async def get_feed_skeleton(
                             new_items_meta,
                         )
                     if updated is not None:
-                        page = new_uris[:limit]
+                        page = new_uris[:page_limit]
                         next_offset = parsed.offset + len(page)
                         # A short page still gets a cursor: the next request
                         # lands at end-of-cache and regenerates again (the
@@ -1891,7 +1910,7 @@ async def get_feed_skeleton(
                             )
                         return FeedSkeletonResponse(
                             feed=_skeleton_items(page, feed_context),
-                            cursor=next_cursor,
+                            cursor=None if feed_name == "request-less" else next_cursor,
                         )
 
                 if not new_uris and not is_probe and not is_anonymous:
@@ -1964,11 +1983,11 @@ async def get_feed_skeleton(
                             uri for uri in accepted_cache.items if uri not in contextual_pin_uris
                         ]
                         if pinned_post_uri:
-                            generated_page = accepted_uris[: max(0, limit - 1)]
+                            generated_page = accepted_uris[: max(0, page_limit - 1)]
                             page = [pinned_post_uri, *generated_page]
                             consumed = len(generated_page)
                         else:
-                            generated_page = accepted_uris[:limit]
+                            generated_page = accepted_uris[:page_limit]
                             page = generated_page
                             consumed = len(generated_page)
 
@@ -2010,7 +2029,7 @@ async def get_feed_skeleton(
                                 page,
                                 feed_context_for(accepted_request_id),
                             ),
-                            cursor=next_cursor,
+                            cursor=None if feed_name == "request-less" else next_cursor,
                         )
                         if reuse_future is not None:
                             _complete_initial_request(
@@ -2023,7 +2042,7 @@ async def get_feed_skeleton(
                             )
                         return response
 
-            batch = _batch_size(limit)
+            batch = _batch_size(limit, feed_name)
             exclude_uris = await generation_exclusions()
             gen_request = feed_cfg.gen_request_template.model_copy(
                 update={
@@ -2111,12 +2130,12 @@ async def get_feed_skeleton(
             )
             if pinned_post_uri:
                 cache_uris = all_uris
-                generated_page = cache_uris[: max(0, limit - n_injected)]
+                generated_page = cache_uris[: max(0, page_limit - n_injected)]
                 page: list[str] = [pinned_post_uri, *generated_page]
                 consumed = len(generated_page)
             else:
                 cache_uris = all_uris
-                generated_page = all_uris[: max(0, limit - n_injected)]
+                generated_page = all_uris[: max(0, page_limit - n_injected)]
                 page = list(generated_page)
                 consumed = len(generated_page)
 
@@ -2182,7 +2201,7 @@ async def get_feed_skeleton(
             feed_context = feed_context_for(request_id)
             response = FeedSkeletonResponse(
                 feed=_skeleton_items(page, feed_context),
-                cursor=next_cursor,
+                cursor=None if feed_name == "request-less" else next_cursor,
             )
             if reuse_future is not None:
                 _complete_initial_request(
