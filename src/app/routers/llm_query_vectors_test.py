@@ -11,9 +11,10 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
-from ..documents import LlmQueryVectorDocument
+from ..documents import FeedPreferencesDocument, LlmQueryVectorDocument, SourceWeightsDocument
 from ..lib.firebase_auth import verify_firebase_auth
 from ..lib.firestore_rate_limiter import QuotaDecision
+from ..lib.llm_prompt_state import PromptChangedError
 from ..lib.llm_query_vector_fit import (
     FitError,
     FitResult,
@@ -32,6 +33,16 @@ def quota():
     with patch("app.routers.llm_query_vectors.FIT_RATE_LIMITER", autospec=True) as limiter:
         limiter.reserve.return_value = QuotaDecision()
         yield limiter.reserve
+
+
+@pytest.fixture(autouse=True)
+def prompt_revision():
+    with patch(
+        "app.routers.llm_query_vectors.get_llm_prompt_revision",
+        new_callable=AsyncMock,
+        return_value=0,
+    ) as revision:
+        yield revision
 
 
 @pytest.fixture(autouse=True)
@@ -70,9 +81,11 @@ def _fit_result() -> FitResult:
     )
 
 
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
-def test_fit_stores_vector_for_token_user(mock_fit, mock_add, client, quota, metrics):
+def test_fit_stores_vector_for_token_user(
+    mock_fit, mock_add, client, quota, metrics, prompt_revision
+):
     mock_fit.return_value = _fit_result()
     stored = LlmQueryVectorDocument(
         prompt_key="v1",
@@ -82,10 +95,12 @@ def test_fit_stores_vector_for_token_user(mock_fit, mock_add, client, quota, met
     )
 
     async def reserve(*_args):
+        prompt_revision.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
         metrics.record.assert_called_once_with("llm_query_vector.fit.attempted_count", 1)
         return QuotaDecision()
 
-    async def store(*_args):
+    async def store(*_args, expected_revision):
+        assert expected_revision == 0
         mock_fit.assert_awaited_once()
         metrics.record.assert_called_once_with("llm_query_vector.fit.attempted_count", 1)
         return stored
@@ -119,7 +134,7 @@ def test_fit_rejects_invalid_prompt(mock_fit, client, quota, metrics, prompt):
     metrics.record.assert_not_called()
 
 
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 def test_fit_reports_pool_too_small(mock_fit, mock_add, client, quota, metrics):
     mock_fit.side_effect = PoolTooSmallError("only 12 posts match")
@@ -138,7 +153,7 @@ def test_fit_reports_pool_too_small(mock_fit, mock_add, client, quota, metrics):
     ]
 
 
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 def test_fit_reports_prompt_refusal_and_logs_error_type(
     mock_fit, mock_add, client, quota, metrics, caplog
@@ -164,7 +179,7 @@ def test_fit_reports_prompt_refusal_and_logs_error_type(
     assert "private prompt text" not in caplog.text
 
 
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 def test_fit_is_504_and_stores_nothing_past_the_deadline(
     mock_fit, mock_add, client, monkeypatch, quota, metrics
@@ -200,7 +215,7 @@ def test_fit_requires_login(mock_fit, quota, metrics):
     metrics.record.assert_not_called()
 
 
-@patch("app.routers.llm_query_vectors.get_latest_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.get_current_llm_query_vector", new_callable=AsyncMock)
 def test_current_returns_newest_prompt_without_vector(mock_latest, client, quota, metrics):
     mock_latest.return_value = LlmQueryVectorDocument(
         prompt_key="v2",
@@ -221,7 +236,7 @@ def test_current_returns_newest_prompt_without_vector(mock_latest, client, quota
     metrics.record.assert_not_called()
 
 
-@patch("app.routers.llm_query_vectors.get_latest_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.get_current_llm_query_vector", new_callable=AsyncMock)
 def test_current_is_204_when_nothing_fitted(mock_latest, client, metrics):
     mock_latest.return_value = None
 
@@ -245,7 +260,7 @@ def test_fit_is_403_when_flag_off(mock_fit, mock_enabled, client, quota, metrics
 
 
 @patch("app.routers.llm_query_vectors.llm_cg_enabled", return_value=False)
-@patch("app.routers.llm_query_vectors.get_latest_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.get_current_llm_query_vector", new_callable=AsyncMock)
 def test_current_is_403_when_flag_off(mock_latest, mock_enabled, client, metrics):
     response = client.get(CURRENT_PATH)
     assert response.status_code == 403
@@ -254,7 +269,7 @@ def test_current_is_403_when_flag_off(mock_latest, mock_enabled, client, metrics
 
 
 @pytest.mark.parametrize("scopes", [("user",), ("global",), ("user", "global")])
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 def test_fit_rejects_full_quota(mock_fit, mock_add, client, quota, metrics, scopes):
     now = datetime(2026, 10, 7, 12, tzinfo=UTC)
@@ -286,7 +301,7 @@ def test_fit_rejects_full_quota(mock_fit, mock_add, client, quota, metrics, scop
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("Firestore down"), ValueError("retry limit")])
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 def test_fit_quota_failure_is_503(mock_fit, mock_add, client, quota, metrics, failure):
     quota.side_effect = failure
@@ -331,7 +346,7 @@ def test_fit_validates_prompt_before_firestore_availability(client, quota, metri
 
 
 @pytest.mark.parametrize("scopes", [("user",), ("global",), ("user", "global")])
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 def test_fit_records_newly_full_caps_before_model_work(
     mock_fit, mock_add, client, quota, metrics, scopes
@@ -361,7 +376,7 @@ def test_fit_records_newly_full_caps_before_model_work(
     mock_add.assert_not_awaited()
 
 
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 def test_fit_storage_failure_keeps_reservation(mock_fit, mock_add, client, quota, metrics):
     quota.return_value = QuotaDecision(reached_scopes=("user",))
@@ -386,7 +401,7 @@ def test_fit_storage_failure_keeps_reservation(mock_fit, mock_add, client, quota
         (RuntimeError("connection closed"), "Elasticsearch or model request failed"),
     ],
 )
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 def test_fit_records_upstream_failures(mock_fit, mock_add, client, quota, metrics, failure, detail):
     mock_fit.side_effect = failure
@@ -405,7 +420,7 @@ def test_fit_records_upstream_failures(mock_fit, mock_add, client, quota, metric
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["quota", "fit", "storage"])
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 async def test_fit_records_and_propagates_cancellation(
     mock_fit, mock_add, client, quota, metrics, stage
@@ -436,7 +451,7 @@ async def test_fit_records_and_propagates_cancellation(
     ]
 
 
-@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
 @patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
 def test_fit_without_metric_collector_still_succeeds(mock_fit, mock_add, client, quota, metrics):
     quota.return_value = QuotaDecision(reached_scopes=("user", "global"))
@@ -467,3 +482,83 @@ def test_fit_rate_limit_response_is_documented():
     assert responses["422"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/QueryVectorPromptErrorResponse"
     }
+
+
+@patch("app.routers.llm_query_vectors.remove_llm_prompt", new_callable=AsyncMock)
+def test_remove_returns_saved_preferences_without_model_work_or_quota(
+    mock_remove, client, quota, metrics
+):
+    mock_remove.return_value = FeedPreferencesDocument(
+        source_weights=SourceWeightsDocument(
+            following=0.3, network_likes=0.2, authors_topics=0.25, popular=0.25, llm=0
+        ),
+        freshness=3,
+    )
+    response = client.delete(CURRENT_PATH, params={"prompt_key": "v1"})
+    assert response.status_code == 200
+    assert response.json() == {
+        "source_weights": {
+            "following": 0.3,
+            "network_likes": 0.2,
+            "authors_topics": 0.25,
+            "popular": 0.25,
+            "llm": 0,
+        },
+        "freshness": 3,
+        "purpose": None,
+        "politics": None,
+        "author_penalty": None,
+        "topic_penalty": None,
+    }
+    mock_remove.assert_awaited_once_with(app.state.firestore, "did:plc:test-user", "v1")
+    quota.assert_not_awaited()
+    metrics.record.assert_not_called()
+
+
+@patch("app.routers.llm_query_vectors.remove_llm_prompt", new_callable=AsyncMock)
+@pytest.mark.parametrize(
+    "failure,status", [(PromptChangedError(), 409), (RuntimeError("storage detail"), 503)]
+)
+def test_remove_handles_conflicts_and_storage_failures(mock_remove, client, failure, status):
+    mock_remove.side_effect = failure
+    response = client.delete(CURRENT_PATH, params={"prompt_key": "v1"})
+    assert response.status_code == status
+    assert "storage detail" not in response.text
+    if status == 409:
+        assert response.json()["detail"]["code"] == "llm_query_vector_prompt_changed"
+
+
+@patch("app.routers.llm_query_vectors.remove_llm_prompt", new_callable=AsyncMock)
+def test_remove_requires_a_prompt_key(mock_remove, client):
+    assert client.delete(CURRENT_PATH).status_code == 422
+    mock_remove.assert_not_awaited()
+
+
+@patch("app.routers.llm_query_vectors.llm_cg_enabled", return_value=False)
+@patch("app.routers.llm_query_vectors.remove_llm_prompt", new_callable=AsyncMock)
+def test_remove_requires_feature_access(mock_remove, _flag, client):
+    assert client.delete(CURRENT_PATH, params={"prompt_key": "v1"}).status_code == 403
+    mock_remove.assert_not_awaited()
+
+
+@patch("app.routers.llm_query_vectors.remove_llm_prompt", new_callable=AsyncMock)
+def test_remove_requires_firestore(mock_remove, client, monkeypatch):
+    monkeypatch.setattr(app.state, "firestore", None)
+    assert client.delete(CURRENT_PATH, params={"prompt_key": "v1"}).status_code == 503
+    mock_remove.assert_not_awaited()
+
+
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
+def test_superseded_fit_returns_conflict_and_records_one_outcome(
+    mock_fit, mock_save, client, metrics
+):
+    mock_fit.return_value = _fit_result()
+    mock_save.side_effect = PromptChangedError()
+    response = client.post(PATH, json={"prompt": "science"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "llm_query_vector_prompt_changed"
+    assert metrics.record.call_args_list == [
+        call("llm_query_vector.fit.attempted_count", 1),
+        call("llm_query_vector.fit.failed_exc_count", 1, reason="prompt_changed"),
+    ]

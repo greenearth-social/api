@@ -88,6 +88,11 @@ def store():
 
 
 @pytest.fixture(autouse=True)
+def prompt_revision(monkeypatch):
+    monkeypatch.setattr(router, "get_llm_prompt_revision", AsyncMock(return_value=0))
+
+
+@pytest.fixture(autouse=True)
 def clock(monkeypatch):
     clock = MagicMock(wraps=datetime)
     clock.now.return_value = NOW
@@ -267,9 +272,7 @@ async def test_user_quotas_are_independent_and_share_global_count(store):
     assert first_user.exhausted_scopes == ("user",)
     assert second_user == QuotaDecision()
     assert store.documents[USER_PATH] == {"attempts": [NOW] * LIMITER.user_limit}
-    assert store.documents["users/other-user/rate_limits/example_action"] == {
-        "attempts": [NOW]
-    }
+    assert store.documents["users/other-user/rate_limits/example_action"] == {"attempts": [NOW]}
     assert store.documents[DAILY_PATH] == {"count": 13}
 
 
@@ -386,7 +389,7 @@ async def test_route_failures_keep_committed_quota_and_block_next_attempt(
     add = AsyncMock()
     collector = MagicMock()
     monkeypatch.setattr(router, "fit_query_vector", fit)
-    monkeypatch.setattr(router, "add_llm_query_vector", add)
+    monkeypatch.setattr(router, "save_fitted_llm_prompt", add)
     monkeypatch.setattr(router, "get_metric_collector", lambda: collector)
     request = Request(
         {"type": "http", "app": SimpleNamespace(state=SimpleNamespace(firestore=store.db, es=None))}
@@ -399,6 +402,7 @@ async def test_route_failures_keep_committed_quota_and_block_next_attempt(
     elif failure == "model":
         fit.side_effect = FitError("model failed")
     elif failure == "timeout":
+
         async def slow_fit(*_args):
             await asyncio.sleep(1)
 
@@ -452,9 +456,7 @@ async def test_route_emits_metrics_once_after_transaction_retry(store, monkeypat
 
     async def commit_after_conflict():
         # Admission and outcome metrics must not run inside the retryable callback.
-        assert collector.record.call_args_list == [
-            call("llm_query_vector.fit.attempted_count", 1)
-        ]
+        assert collector.record.call_args_list == [call("llm_query_vector.fit.attempted_count", 1)]
         if store.transaction._commit.await_count == 1:
             raise Aborted("retry the transaction")
         await store.commit()
@@ -490,7 +492,7 @@ async def test_route_emits_metrics_once_after_transaction_retry(store, monkeypat
     fit = AsyncMock(side_effect=fit_after_commit)
     add = AsyncMock(return_value=SimpleNamespace(prompt_key="stored-vector"))
     monkeypatch.setattr(router, "fit_query_vector", fit)
-    monkeypatch.setattr(router, "add_llm_query_vector", add)
+    monkeypatch.setattr(router, "save_fitted_llm_prompt", add)
     request = Request(
         {"type": "http", "app": SimpleNamespace(state=SimpleNamespace(firestore=store.db, es=None))}
     )
@@ -508,7 +510,7 @@ async def test_route_emits_metrics_once_after_transaction_retry(store, monkeypat
             router.QueryVectorFitRequest(prompt="science"), request, USER_DID
         )
         assert result.vector_id == "stored-vector"
-        add.assert_awaited_once_with(store.db, USER_DID, [0.1], "science")
+        add.assert_awaited_once_with(store.db, USER_DID, [0.1], "science", expected_revision=0)
         outcome_metric = call("llm_query_vector.fit.success_count", 1)
 
     fit.assert_awaited_once_with(None, "science")

@@ -1,14 +1,15 @@
 """Fit and read the signed-in user's MiniLM prompt vector (ingex#482, api#492).
 
 POST /api/feeds/llm-query-vectors/fit     fit a prompt and store its vector
-GET  /api/feeds/llm-query-vectors/current the newest fitted prompt, 204 if none
+GET  /api/feeds/llm-query-vectors/current the active fitted prompt, 204 if none
+DELETE /api/feeds/llm-query-vectors/current remove activation and redistribute its weight
 
 The pipeline lives in lib/llm_query_vector_fit.py; this router validates the
 request, runs it, writes the vector to Firestore (documents.LlmQueryVectorDocument,
 a new document under `users/{user}/llm_query_vectors/` per fit) and returns the
 fit's statistics so the caller can see that the job ran and how well. The
-llm_query_vector candidate generator (ingex#484) reads the user's most recently
-updated document, so the newest fit is the one that serves.
+llm_query_vector candidate generator reads the explicit active key, falling back
+to the newest document for users who have not yet used prompt activation state.
 """
 
 import asyncio
@@ -17,12 +18,18 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from ..lib.firebase_auth import FirebaseUser
-from ..lib.firestore import add_llm_query_vector, get_latest_llm_query_vector
 from ..lib.firestore_rate_limiter import FirestoreRateLimiter, QuotaScope
+from ..lib.llm_prompt_state import (
+    PromptChangedError,
+    get_current_llm_query_vector,
+    get_llm_prompt_revision,
+    remove_llm_prompt,
+    save_fitted_llm_prompt,
+)
 from ..lib.llm_query_vector_fit import (
     FitError,
     PoolTooSmallError,
@@ -32,6 +39,7 @@ from ..lib.llm_query_vector_fit import (
 from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import get_posthog_client, llm_cg_enabled
 from ..lib.request_context import get_request_id
+from ..models_feed_transparency import FeedPreferences
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +147,7 @@ class QueryVectorPromptErrorResponse(BaseModel):
     response_model=QueryVectorFitResponse,
     responses={
         403: {"description": "The llm-cg feature flag is off for this user"},
+        409: {"description": "A newer prompt change superseded this fit; nothing stored"},
         422: {
             "model": QueryVectorPromptErrorResponse,
             "description": "Invalid request, too few matching posts, or an explicit prompt refusal",
@@ -165,7 +174,7 @@ async def fit_llm_query_vector(
 ) -> QueryVectorFitResponse:
     """Expand the prompt to keywords, sample and score posts, fit a query
     vector, store it under the user. Synchronous: ~10 s and ~$0.13 per call.
-    Every fit stores a new document; the feed uses the user's newest one.
+    Each successful fit stores and activates a new vector document.
     The user is whoever the Firebase token belongs to, and must have the
     ``llm-cg`` flag."""
     prompt = body.prompt.strip()
@@ -186,6 +195,10 @@ async def fit_llm_query_vector(
         if db is None:
             raise HTTPException(status_code=503, detail="Firestore unavailable")
 
+        # Capture activation before quota/model work so a removal supersedes this fit.
+        outcome_labels = {"reason": "prompt_state"}
+        revision = await get_llm_prompt_revision(db, user_did)
+        outcome_labels = {"reason": "quota_store"}
         try:
             quota = await FIT_RATE_LIMITER.reserve(db, user_did)
         except Exception as exc:
@@ -270,7 +283,9 @@ async def fit_llm_query_vector(
             ) from exc
 
         outcome_labels = {"reason": "storage"}
-        stored = await add_llm_query_vector(db, user_did, result.query_vector, prompt)
+        stored = await save_fitted_llm_prompt(
+            db, user_did, result.query_vector, prompt, expected_revision=revision
+        )
         key = stored.prompt_key
         logger.info(
             "llm_qv_fit stored user_did=%s vector_id=%s n_pool=%d n_keyword=%d n_random=%d "
@@ -310,6 +325,12 @@ async def fit_llm_query_vector(
     except asyncio.CancelledError:
         outcome_labels = {"reason": "cancelled"}
         raise
+    except PromptChangedError as exc:
+        outcome_labels = {"reason": "prompt_changed"}
+        logger.warning(
+            "llm_qv_fit superseded error_type=PromptChangedError request_id=%s", get_request_id()
+        )
+        raise _prompt_changed() from exc
     except Exception as exc:
         cause = exc.__cause__ or exc
         status = exc.status_code if isinstance(exc, HTTPException) else 500
@@ -348,14 +369,58 @@ async def current_llm_prompt(
     request: Request,
     user_did: LlmCgUser,
 ) -> CurrentPromptResponse | Response:
-    """The prompt behind the vector the feed currently serves for this user,
-    which is the most recently updated one. The vector itself is not returned."""
+    """The active prompt behind the vector the feed currently serves for this user."""
     db = getattr(request.app.state, "firestore", None)
     if db is None:
         raise HTTPException(status_code=503, detail="Firestore unavailable")
-    stored = await get_latest_llm_query_vector(db, user_did)
+    stored = await get_current_llm_query_vector(db, user_did)
     if stored is None:
         return Response(status_code=204)
     return CurrentPromptResponse(
         prompt_key=stored.prompt_key, prompt=stored.prompt, created_at=stored.created_at
     )
+
+
+def _prompt_changed() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "llm_query_vector_prompt_changed",
+            "message": "Your prompt changed in another session. Please try again.",
+        },
+    )
+
+
+@router.delete(
+    "/api/feeds/llm-query-vectors/current",
+    response_model=FeedPreferences,
+    responses={
+        403: {"description": "The llm-cg feature flag is off for this user"},
+        409: {"description": "The active prompt differs from the requested prompt key"},
+        503: {"description": "Prompt removal could not be persisted"},
+    },
+)
+async def remove_current_llm_prompt(
+    request: Request,
+    user_did: LlmCgUser,
+    prompt_key: Annotated[str, Query(min_length=1, max_length=1500)],
+) -> FeedPreferences:
+    db = getattr(request.app.state, "firestore", None)
+    if db is None:
+        raise HTTPException(status_code=503, detail="Firestore unavailable")
+    try:
+        preferences = await remove_llm_prompt(db, user_did, prompt_key)
+    except PromptChangedError as exc:
+        logger.warning(
+            "llm_qv_remove superseded error_type=PromptChangedError request_id=%s", get_request_id()
+        )
+        raise _prompt_changed() from exc
+    except Exception as exc:
+        logger.exception(
+            "llm_qv_remove failed error_type=%s request_id=%s",
+            type(exc).__name__,
+            get_request_id(),
+        )
+        raise HTTPException(status_code=503, detail="Unable to remove prompt") from exc
+    logger.info("llm_qv_remove completed request_id=%s user_did=%s", get_request_id(), user_did)
+    return FeedPreferences.model_validate(preferences.model_dump(exclude_none=True))
