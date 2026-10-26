@@ -251,6 +251,14 @@ class ExpansionError(FitError):
     """The model did not return a usable keyword bag."""
 
 
+class PromptNotAcceptedError(FitError):
+    """Claude explicitly refused the prompt expansion request."""
+
+    def __init__(self, request_id: str | None = None):
+        super().__init__("Prompt not accepted")
+        self.request_id = request_id
+
+
 async def expand_keywords(
     client: AsyncAnthropic, prompt: str, usage: Usage | None = None
 ) -> list[str]:
@@ -266,6 +274,8 @@ async def expand_keywords(
     )
     if usage is not None:
         usage.add(resp.usage)
+    if resp.stop_reason == "refusal":
+        raise PromptNotAcceptedError(getattr(resp, "_request_id", None))
     text = next((b.text for b in resp.content if b.type == "text"), "")
     if not text:
         raise ExpansionError(f"empty expansion reply (stop_reason={resp.stop_reason!r})")

@@ -64,6 +64,13 @@ class FeedPreferencesDocument(BaseModel):
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class LlmPromptStateDocument(BaseModel):
+    """Explicit activation state; an absent state keeps legacy newest-vector behavior."""
+
+    active_prompt_key: str | None = None
+    revision: int = Field(default=0, ge=0)
+
+
 class UserDocument(BaseModel):
     """A registered feed user.
 
@@ -71,6 +78,7 @@ class UserDocument(BaseModel):
     """
 
     user_did: str = Field(..., description="AT Protocol DID of the user (also the document ID)")
+    llm_prompt_state: LlmPromptStateDocument | None = None
     username: str | None = Field(
         default=None,
         description="AT Protocol handle (e.g. foobar.bsky.app)",
