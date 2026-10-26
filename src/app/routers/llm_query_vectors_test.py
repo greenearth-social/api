@@ -14,7 +14,12 @@ from fastapi.testclient import TestClient
 from ..documents import LlmQueryVectorDocument
 from ..lib.firebase_auth import verify_firebase_auth
 from ..lib.firestore_rate_limiter import QuotaDecision
-from ..lib.llm_query_vector_fit import FitError, FitResult, PoolTooSmallError
+from ..lib.llm_query_vector_fit import (
+    FitError,
+    FitResult,
+    PoolTooSmallError,
+    PromptNotAcceptedError,
+)
 from ..main import app
 from .llm_query_vectors import QueryVectorFitRequest, fit_llm_query_vector
 
@@ -24,9 +29,7 @@ CURRENT_PATH = "/api/feeds/llm-query-vectors/current"
 
 @pytest.fixture(autouse=True)
 def quota():
-    with patch(
-        "app.routers.llm_query_vectors.FIT_RATE_LIMITER", autospec=True
-    ) as limiter:
+    with patch("app.routers.llm_query_vectors.FIT_RATE_LIMITER", autospec=True) as limiter:
         limiter.reserve.return_value = QuotaDecision()
         yield limiter.reserve
 
@@ -124,13 +127,41 @@ def test_fit_reports_pool_too_small(mock_fit, mock_add, client, quota, metrics):
     response = client.post(PATH, json={"prompt": "very niche topic"})
 
     assert response.status_code == 422
-    assert "12 posts" in response.json()["detail"]
+    assert response.json()["detail"]["code"] == "llm_query_vector_pool_too_small"
+    assert "broader topic" in response.json()["detail"]["message"]
+    assert "12 posts" not in response.text
     quota.assert_awaited_once()
     mock_add.assert_not_awaited()
     assert metrics.record.call_args_list == [
         call("llm_query_vector.fit.attempted_count", 1),
         call("llm_query_vector.fit.failed_exc_count", 1, reason="pool_too_small"),
     ]
+
+
+@patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
+def test_fit_reports_prompt_refusal_and_logs_error_type(
+    mock_fit, mock_add, client, quota, metrics, caplog
+):
+    mock_fit.side_effect = PromptNotAcceptedError("provider-request-123")
+
+    response = client.post(PATH, json={"prompt": "private prompt text"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "llm_query_vector_prompt_not_accepted",
+        "message": "Prompt not accepted. Please rephrase your request and try again.",
+    }
+    quota.assert_awaited_once()
+    mock_add.assert_not_awaited()
+    assert metrics.record.call_args_list == [
+        call("llm_query_vector.fit.attempted_count", 1),
+        call("llm_query_vector.fit.failed_exc_count", 1, reason="prompt_not_accepted"),
+    ]
+    assert "error_type=PromptNotAcceptedError" in caplog.text
+    assert "provider_request_id=provider-request-123" in caplog.text
+    assert f"request_id={response.headers['x-request-id']}" in caplog.text
+    assert "private prompt text" not in caplog.text
 
 
 @patch("app.routers.llm_query_vectors.add_llm_query_vector", new_callable=AsyncMock)
@@ -311,10 +342,7 @@ def test_fit_records_newly_full_caps_before_model_work(
         quota.assert_awaited_once()
         assert metrics.record.call_args_list == [
             call("llm_query_vector.fit.attempted_count", 1),
-            *[
-                call("llm_query_vector.fit.cap_reached_count", 1, scope=scope)
-                for scope in scopes
-            ],
+            *[call("llm_query_vector.fit.cap_reached_count", 1, scope=scope) for scope in scopes],
         ]
         # Failed work still consumed the reserved slot and reached these caps.
         raise FitError("model failed")
@@ -326,10 +354,7 @@ def test_fit_records_newly_full_caps_before_model_work(
     assert response.status_code == 502
     assert metrics.record.call_args_list == [
         call("llm_query_vector.fit.attempted_count", 1),
-        *[
-            call("llm_query_vector.fit.cap_reached_count", 1, scope=scope)
-            for scope in scopes
-        ],
+        *[call("llm_query_vector.fit.cap_reached_count", 1, scope=scope) for scope in scopes],
         call("llm_query_vector.fit.failed_exc_count", 1, reason="upstream"),
     ]
     quota.assert_awaited_once()
@@ -439,3 +464,6 @@ def test_fit_rate_limit_response_is_documented():
         "$ref": "#/components/schemas/QueryVectorRateLimitResponse"
     }
     assert responses["429"]["headers"]["Retry-After"]["schema"]["type"] == "integer"
+    assert responses["422"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/QueryVectorPromptErrorResponse"
+    }

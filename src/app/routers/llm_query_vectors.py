@@ -23,9 +23,15 @@ from pydantic import BaseModel, Field
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore import add_llm_query_vector, get_latest_llm_query_vector
 from ..lib.firestore_rate_limiter import FirestoreRateLimiter, QuotaScope
-from ..lib.llm_query_vector_fit import FitError, PoolTooSmallError, fit_query_vector
+from ..lib.llm_query_vector_fit import (
+    FitError,
+    PoolTooSmallError,
+    PromptNotAcceptedError,
+    fit_query_vector,
+)
 from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import get_posthog_client, llm_cg_enabled
+from ..lib.request_context import get_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -119,13 +125,23 @@ class QueryVectorRateLimitResponse(BaseModel):
     detail: QueryVectorRateLimitDetail
 
 
+class QueryVectorPromptErrorDetail(BaseModel):
+    code: Literal["llm_query_vector_pool_too_small", "llm_query_vector_prompt_not_accepted"]
+    message: str
+
+
+class QueryVectorPromptErrorResponse(BaseModel):
+    detail: QueryVectorPromptErrorDetail | list[dict[str, object]] | str
+
+
 @router.post(
     "/api/feeds/llm-query-vectors/fit",
     response_model=QueryVectorFitResponse,
     responses={
         403: {"description": "The llm-cg feature flag is off for this user"},
         422: {
-            "description": "Invalid request, or too few posts match the prompt to fit a vector"
+            "model": QueryVectorPromptErrorResponse,
+            "description": "Invalid request, too few matching posts, or an explicit prompt refusal",
         },
         429: {
             "model": QueryVectorRateLimitResponse,
@@ -176,7 +192,7 @@ async def fit_llm_query_vector(
             logger.exception("llm_qv_fit quota unavailable", extra={"user_did": user_did})
             raise HTTPException(
                 status_code=503,
-                detail="Unable to verify or reserve query-vector quota. Please try again."
+                detail="Unable to verify or reserve query-vector quota. Please try again.",
             ) from exc
 
         if quota.retry_at is not None:
@@ -229,7 +245,21 @@ async def fit_llm_query_vector(
             ) from exc
         except PoolTooSmallError as exc:
             outcome_labels = {"reason": "pool_too_small"}
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            detail = QueryVectorPromptErrorDetail(
+                code="llm_query_vector_pool_too_small",
+                message=(
+                    "We couldn’t find enough relevant posts for this prompt. "
+                    "Try a broader topic or different wording."
+                ),
+            )
+            raise HTTPException(status_code=422, detail=detail.model_dump()) from exc
+        except PromptNotAcceptedError as exc:
+            outcome_labels = {"reason": "prompt_not_accepted"}
+            detail = QueryVectorPromptErrorDetail(
+                code="llm_query_vector_prompt_not_accepted",
+                message="Prompt not accepted. Please rephrase your request and try again.",
+            )
+            raise HTTPException(status_code=422, detail=detail.model_dump()) from exc
         except FitError as exc:
             logger.warning("llm_qv_fit failed user_did=%s error=%s", user_did, exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -246,10 +276,19 @@ async def fit_llm_query_vector(
             "llm_qv_fit stored user_did=%s vector_id=%s n_pool=%d n_keyword=%d n_random=%d "
             "n_scored=%d n_cancelled=%d n_failed=%d train_r2=%s duration_s=%.1f cost_usd=%.3f "
             "tokens_in=%d tokens_out=%d",
-            user_did, key, result.n_pool, result.n_keyword_posts, result.n_random_posts,
-            result.n_scored, result.n_cancelled, result.n_failed,
+            user_did,
+            key,
+            result.n_pool,
+            result.n_keyword_posts,
+            result.n_random_posts,
+            result.n_scored,
+            result.n_cancelled,
+            result.n_failed,
             "-" if result.train_r2 is None else f"{result.train_r2:.3f}",
-            result.duration_s, result.cost_usd, result.input_tokens, result.output_tokens,
+            result.duration_s,
+            result.cost_usd,
+            result.input_tokens,
+            result.output_tokens,
         )
         response = QueryVectorFitResponse(
             vector_id=key,
@@ -270,6 +309,20 @@ async def fit_llm_query_vector(
         return response
     except asyncio.CancelledError:
         outcome_labels = {"reason": "cancelled"}
+        raise
+    except Exception as exc:
+        cause = exc.__cause__ or exc
+        status = exc.status_code if isinstance(exc, HTTPException) else 500
+        logger.warning(
+            "llm_qv_fit failure reason=%s error_type=%s status=%s request_id=%s "
+            "provider_request_id=%s user_did=%s",
+            "rate_limited" if status == 429 else outcome_labels.get("reason", "unknown"),
+            type(cause).__name__,
+            status,
+            get_request_id(),
+            getattr(cause, "request_id", None),
+            user_did,
+        )
         raise
     finally:
         if collector is not None:
