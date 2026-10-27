@@ -32,7 +32,7 @@ from .embeddings import (
     encode_float32_b64,
 )
 from .metrics import get_metric_collector
-from .request_cache import get_request_cache, request_cache_scope
+from .request_cache import request_cache_scope
 from .user_history_cache import (
     USER_HISTORY_CACHE_BACKGROUND_TIMEOUT_SECONDS,
     USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS,
@@ -480,16 +480,6 @@ def set_request_less_history_service(service: RequestLessHistoryService | None) 
 
 
 async def fetch_request_less_history_features(user_did: str) -> RequestLessHistory:
-    """Public reader for rankers: share a saved snapshot within the current request.
-
-    Concurrent consumers for the same user share both the Firestore read and
-    retry scheduling decision. The returned history never waits for hydration.
-    """
-    async def fetch() -> RequestLessHistory:
-        service = get_request_less_history_service()
-        return await service.retrieve(user_did) if service else RequestLessHistory([])
-
-    cache = get_request_cache()
-    if cache is None:
-        return await fetch()
-    return await cache.get_or_compute(("request_less_history", user_did), fetch)
+    """Read saved history and schedule eligible retries without awaiting hydration."""
+    service = get_request_less_history_service()
+    return await service.retrieve(user_did) if service else RequestLessHistory([])
