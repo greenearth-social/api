@@ -476,22 +476,22 @@ async def test_transactional_claims_prevent_duplicate_es_from_same_user_tasks(
 
 
 @pytest.mark.asyncio
-async def test_request_cache_shares_same_user_reads_but_isolates_users_and_scopes(monkeypatch):
-    service = MagicMock()
-    service.retrieve = AsyncMock(return_value=history_module.RequestLessHistory(items=[]))
+async def test_reader_sees_newly_saved_features_within_the_same_request(store, monkeypatch, clock):
+    service = _service(store, monkeypatch)
+    await _record(service, USER, {URI: NOW})
     history_module.set_request_less_history_service(service)
 
     async with request_cache_scope():
-        await asyncio.gather(
-            history_module.fetch_request_less_history_features(USER),
-            history_module.fetch_request_less_history_features(USER),
-            history_module.fetch_request_less_history_features("did:plc:other"),
-        )
-    async with request_cache_scope():
-        await history_module.fetch_request_less_history_features(USER)
+        before = await history_module.fetch_request_less_history_features(USER)
+        await _save_features(service)
+        store.reads.clear()
+        after = await history_module.fetch_request_less_history_features(USER)
 
-    assert service.retrieve.await_count == 3
-    assert [call.args[0] for call in service.retrieve.await_args_list].count(USER) == 2
+    assert [item.at_uri for item in before.items] == [URI]
+    assert before.items_with_embeddings == []
+    assert [item.at_uri for item in after.items_with_embeddings] == [URI]
+    assert after.items_with_embeddings[0].embedding == VECTOR
+    assert len(store.reads) == 1
 
 
 @pytest.mark.asyncio
