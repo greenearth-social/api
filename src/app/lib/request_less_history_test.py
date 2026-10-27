@@ -13,7 +13,11 @@ import pytest
 from elastic_transport import ConnectionTimeout
 
 from . import request_less_history as history_module
-from .embeddings import MINILM_L12_EMBEDDING_DIM, MINILM_L12_EMBEDDING_KEY
+from .embeddings import (
+    MINILM_L12_EMBEDDING_DIM,
+    MINILM_L12_EMBEDDING_KEY,
+    encode_float32_b64,
+)
 from .request_cache import get_request_cache, request_cache_scope
 
 NOW = datetime(2026, 10, 26, 12, tzinfo=UTC)
@@ -538,6 +542,87 @@ async def test_incompatible_documents_are_not_served_rehydrated_or_overwritten(
         await service._claim_due(USER)
 
     assert store.data() == previous
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corrupt_blob",
+    [
+        pytest.param("not base64!", id="invalid-base64"),
+        pytest.param("AQ==", id="invalid-float-byte-length"),
+        pytest.param(encode_float32_b64([1.0]), id="wrong-dimension"),
+        pytest.param(
+            encode_float32_b64([float("nan"), *([0.0] * (MINILM_L12_EMBEDDING_DIM - 1))]),
+            id="nonfinite-vector",
+        ),
+    ],
+)
+async def test_corrupt_saved_embedding_preserves_other_features_and_stored_history(
+    store, monkeypatch, clock, caplog, corrupt_blob,
+):
+    oldest_uri = "at://post/oldest"
+    service = _service(store, monkeypatch)
+    await _record(service, USER, {
+        URI: NOW + timedelta(seconds=2),
+        OTHER_URI: NOW + timedelta(seconds=1),
+        oldest_uri: NOW,
+    })
+    claims = await service._claim_due(USER)
+    await service._store_results(USER, claims, {
+        URI: FEATURES, OTHER_URI: FEATURES, oldest_uri: FEATURES,
+    })
+    stored_bad = next(item for item in store.data()["items"] if item["at_uri"] == OTHER_URI)
+    stored_bad["embedding_b64"] = corrupt_blob
+    before = deepcopy(store.data())
+    cast(MagicMock, service.schedule_hydration).reset_mock()
+
+    with caplog.at_level("WARNING", logger=history_module.__name__):
+        history = await service.retrieve(USER)
+
+    assert [item.at_uri for item in history.items] == [URI, OTHER_URI, oldest_uri]
+    assert [item.at_uri for item in history.items_with_embeddings] == [URI, oldest_uri]
+    assert all(item.embedding == VECTOR for item in history.items_with_embeddings)
+    bad = history.items[1]
+    assert bad.embedding is None
+    assert bad.received_at == NOW + timedelta(seconds=1)
+    assert bad.author_did == "did:plc:author"
+    assert bad.like_count == 7
+    assert store.data() == before
+    cast(MagicMock, service.schedule_hydration).assert_not_called()
+    warnings = [record for record in caplog.records if record.name == history_module.__name__]
+    assert len(warnings) == 1
+    assert warnings[0].levelname == "WARNING"
+    assert "embedding" in warnings[0].getMessage().lower()
+
+
+@pytest.mark.asyncio
+async def test_pending_history_still_hydrates_without_retrying_a_corrupt_saved_embedding(
+    store, monkeypatch, clock,
+):
+    seed = _service(store, monkeypatch)
+    await _record(seed, USER, {URI: NOW})
+    await _save_features(seed)
+    store.data()["items"][0]["embedding_b64"] = "not base64!"
+    corrupt_item = deepcopy(store.data()["items"][0])
+    await _record(seed, USER, {OTHER_URI: NOW + timedelta(seconds=1)})
+    fetch = AsyncMock(return_value=[(OTHER_URI, *FEATURES)])
+    monkeypatch.setattr(history_module, "fetch_post_embeddings_and_metadata", fetch)
+    service = _service(store, monkeypatch, background=True)
+
+    before = await service.retrieve(USER)
+    await service.drain()
+    after = await service.retrieve(USER)
+
+    assert [item.at_uri for item in before.items] == [OTHER_URI, URI]
+    assert before.items_with_embeddings == []
+    assert [item.at_uri for item in after.items_with_embeddings] == [OTHER_URI]
+    assert after.items_with_embeddings[0].embedding == VECTOR
+    fetch.assert_awaited_once()
+    assert fetch.await_args is not None
+    assert fetch.await_args.args[1] == [OTHER_URI]
+    assert next(item for item in store.data()["items"] if item["at_uri"] == URI) == corrupt_item
+    clock[0] += timedelta(days=90)
+    assert await service._claim_due(USER) == []
 
 
 @pytest.mark.asyncio

@@ -261,7 +261,9 @@ class RequestLessHistoryService:
 
         Hydration never changes this returned snapshot; saved results become
         available on a later read. A missing or unreadable document returns an
-        empty history without falling back to synchronous ES work.
+        empty history without falling back to synchronous ES work. An invalid
+        embedding only makes that entry's returned features unavailable; its
+        feedback and the rest of the history are still returned.
         """
         try:
             async with asyncio.timeout(USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS):
@@ -271,12 +273,21 @@ class RequestLessHistoryService:
             history = _parse_history(snapshot.to_dict(), user_did)
             items = []
             for item in history.items:
-                embedding = (
-                    decode_float32_b64(item.embedding_b64)
-                    if item.embedding_b64 is not None else None
-                )
-                if embedding is not None and not _valid_embedding(embedding):
-                    raise ValueError("Invalid saved requestLess embedding")
+                embedding = None
+                if item.embedding_b64 is not None:
+                    try:
+                        embedding = decode_float32_b64(item.embedding_b64)
+                        if not _valid_embedding(embedding):
+                            raise ValueError("Invalid saved requestLess embedding")
+                    except ValueError:
+                        logger.warning(
+                            "Ignoring invalid saved requestLess embedding for %s",
+                            item.at_uri,
+                            exc_info=True,
+                        )
+                        # Exclude only the returned embedding. Keep the stored
+                        # feedback and retry budget unchanged, without repair.
+                        embedding = None
                 items.append(RequestLessHistoryItem(
                     item.at_uri, item.received_at, embedding,
                     item.author_did, item.like_count,
