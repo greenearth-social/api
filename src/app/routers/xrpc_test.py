@@ -3419,6 +3419,51 @@ class TestShortEvent:
         assert _short_event("") == ""
 
 
+class TestDrainBackgroundTasks:
+    @pytest.mark.asyncio
+    async def test_waits_for_tasks_spawned_by_background_producers(self, monkeypatch):
+        monkeypatch.setattr(xrpc, "_background_tasks", set())
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def child():
+            started.set()
+            await release.wait()
+            raise RuntimeError("background write failed")
+
+        async def producer():
+            await asyncio.sleep(0)
+            xrpc._spawn_background(child())
+
+        xrpc._spawn_background(producer())
+        drain = asyncio.create_task(xrpc.drain_background_tasks())
+        await started.wait()
+        await asyncio.sleep(0)
+        assert not drain.done()
+        release.set()
+        await asyncio.wait_for(drain, timeout=1)
+        assert not xrpc._background_tasks
+
+    @pytest.mark.asyncio
+    async def test_cancelling_drain_cancels_unfinished_producers(self, monkeypatch):
+        monkeypatch.setattr(xrpc, "_background_tasks", set())
+        started = asyncio.Event()
+
+        async def producer():
+            started.set()
+            await asyncio.Event().wait()
+
+        producer_task = xrpc._spawn_background(producer())
+        drain = asyncio.create_task(xrpc.drain_background_tasks())
+        await started.wait()
+        await asyncio.sleep(0)
+        drain.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await drain
+        assert producer_task.cancelled()
+        assert not xrpc._background_tasks
+
+
 class TestSendInteractions:
     def test_returns_empty_object(self):
         resp = client.post("/xrpc/app.bsky.feed.sendInteractions", json={"interactions": []})
@@ -3517,6 +3562,127 @@ class TestSendInteractions:
             await _record_interactions(db, interactions)
 
         assert rec.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_request_less_groups_users_and_keeps_latest_receipt_time(self):
+        from ..documents import InteractionDocument
+
+        now = datetime(2026, 10, 26, tzinfo=UTC)
+        receipt_times = iter([
+            now + timedelta(seconds=3), now, now, now + timedelta(seconds=1),
+        ])
+        interactions = [
+            xrpc.Interaction(item=uri, event="app.bsky.feed.defs#requestLess",
+                             feed_context=_make_token(did=did))
+            for did, uri in [
+                ("did:plc:first", "at://post/1"),
+                ("did:plc:first", "at://post/2"),
+                ("did:plc:second", "at://post/3"),
+                ("did:plc:first", "at://post/1"),
+            ]
+        ]
+        service = MagicMock(record=AsyncMock())
+        with (
+            patch("app.routers.xrpc.get_request_less_history_service", return_value=service),
+            patch("app.routers.xrpc.InteractionDocument", side_effect=lambda **fields:
+                  InteractionDocument(**fields, created_at=next(receipt_times))),
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as raw,
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            await xrpc._record_interactions(MagicMock(), interactions)
+
+        assert raw.await_count == 4
+        assert service.record.await_count == 2
+        service.record.assert_any_await("did:plc:first", {
+            "at://post/1": now + timedelta(seconds=3), "at://post/2": now,
+        })
+        service.record.assert_any_await("did:plc:second", {"at://post/3": now})
+
+    @pytest.mark.asyncio
+    async def test_request_less_persists_through_real_history_service(self, monkeypatch):
+        from ..lib.request_less_history import HISTORY_COLLECTION, RequestLessHistoryService
+
+        db = MagicMock()
+        ref = db.collection.return_value.document.return_value
+        ref.get = AsyncMock(return_value=MagicMock(exists=False))
+        transaction = MagicMock()
+        service = RequestLessHistoryService(db, object())
+
+        async def run_transaction(body):
+            return await body(transaction)
+
+        monkeypatch.setattr(service, "_run_transaction", run_transaction)
+        schedule = MagicMock()
+        monkeypatch.setattr(service, "schedule_hydration", schedule)
+        interaction = xrpc.Interaction(
+            item="at://post/less",
+            event="requestLess",
+            feed_context=_make_token(did="did:plc:feedback-user"),
+        )
+        with (
+            patch("app.routers.xrpc.get_request_less_history_service", return_value=service),
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as raw,
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            await xrpc._record_interactions(db, [interaction])
+
+        db.collection.assert_called_once_with(HISTORY_COLLECTION)
+        transaction.set.assert_called_once()
+        stored = transaction.set.call_args.args[1]
+        assert stored["user_did"] == "did:plc:feedback-user"
+        assert len(stored["items"]) == 1
+        assert stored["items"][0]["at_uri"] == "at://post/less"
+        assert raw.await_args is not None
+        assert stored["items"][0]["received_at"] == raw.await_args.args[1].created_at
+        assert stored["items"][0]["attempt_count"] == 0
+        schedule.assert_called_once_with("did:plc:feedback-user")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", [
+        "missing_item", "empty_item", "load_test", "forged_token", "missing_token", "like",
+    ])
+    async def test_request_less_ignores_ineligible_interactions(self, case):
+        item = None if case == "missing_item" else "" if case == "empty_item" else "at://post/1"
+        token = _make_token(lt=case == "load_test")
+        if case == "forged_token":
+            token = "forged.token"
+        elif case == "missing_token":
+            token = None
+        interaction = xrpc.Interaction(
+            item=item,
+            event="interactionLike" if case == "like" else "requestLess",
+            feed_context=token,
+        )
+        service = MagicMock(record=AsyncMock())
+        with (
+            patch("app.routers.xrpc.get_request_less_history_service", return_value=service),
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            await xrpc._record_interactions(MagicMock(), [interaction])
+
+        service.record.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_request_less_survives_raw_failure_and_continues_after_history_failure(self):
+        service = MagicMock(record=AsyncMock(side_effect=[RuntimeError("write failed"), None]))
+        interactions = [
+            xrpc.Interaction(item="at://post/1", event="requestLess",
+                             feed_context=_make_token(did=did))
+            for did in ("did:plc:first", "did:plc:second")
+        ]
+        with (
+            patch("app.routers.xrpc.get_request_less_history_service", return_value=service),
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock,
+                  side_effect=RuntimeError("raw write failed")) as raw,
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            await xrpc._record_interactions(MagicMock(), interactions)
+
+        assert raw.await_count == 2
+        assert [call.args[0] for call in service.record.await_args_list] == [
+            "did:plc:first", "did:plc:second",
+        ]
 
     @pytest.mark.asyncio
     async def test_seen_event_records_seen_posts(self):
