@@ -1,9 +1,8 @@
 """Shared ranking pipeline.
 
 Given a `RankPredictRequest`, runs each configured rank model in parallel,
-normalizes each model's raw scores into [0, 1] using its theoretical
-`score_bounds`, and combines them into a single ordering via a weighted
-average using each model's configured relative weight.
+combines the scores supplied by each ranker into a single ordering via a
+weighted average, and substitutes each model's median for missing scores.
 """
 
 import asyncio
@@ -33,27 +32,6 @@ class RankModelNotFoundError(Exception):
     def __init__(self, name: str):
         self.name = name
         super().__init__(f"Rank model not found: {name}")
-
-
-def _normalize(
-    raw: float | None,
-    bounds: tuple[float, float],
-    fallback_normalized_score: float,
-) -> float:
-    """Linearly map *raw* from *bounds* into [0, 1], clamping the result.
-
-    Missing scores (``None`` — e.g. a ranker couldn't score a candidate)
-    normalize to ``fallback_normalized_score``. Degenerate bounds
-    (``hi <= lo``) also normalize to ``fallback_normalized_score`` to avoid
-    division by zero.
-    """
-    if raw is None:
-        return fallback_normalized_score
-    lo, hi = bounds
-    if hi <= lo:
-        return fallback_normalized_score
-    normalized = (raw - lo) / (hi - lo)
-    return max(0.0, min(1.0, normalized))
 
 
 async def _run_one(
@@ -95,11 +73,11 @@ async def run_predict(
 ) -> RankPredictResult:
     """Rank the supplied candidates by combining the requested rank models.
 
-    Each model runs in parallel; its raw `rank_score`s are normalized into
-    [0, 1] using its `score_bounds`, then combined into a single score per
-    candidate via a weighted average (weights normalized to sum to 1, so the
-    combined score also stays within [0, 1]). The final ordering is by
-    combined score, descending, with ties broken by original candidate order.
+    Each model runs in parallel and supplies scores ready for combination.
+    Scores are combined directly via a weighted average, with weights
+    normalized to sum to 1; scores are neither rescaled nor clamped here.
+    The final ordering is by combined score, descending, with ties broken by
+    original candidate order.
     If a candidate at_uri has no valid scores from any model, it is dropped.
     If it has a score from at least one model but not the others, the median
     (per-model results) is filled in for those missing scores.
@@ -146,29 +124,28 @@ async def run_predict(
             raise result
 
         # all the valid uris with their scores from this ranker model
-        raw_by_uri = {
+        scores_by_uri = {
             r.at_uri: r.rank_score
             for r in result.result.rankings
             if r.at_uri is not None and r.rank_score is not None
         }
-        if raw_by_uri:
-            bounds = ranker.score_bounds
-            raw_median = statistics.median(raw_by_uri.values())
-            medians_by_model[name] = _normalize(raw_median, bounds, 0.5)
+        if scores_by_uri:
+            medians_by_model[name] = statistics.median(scores_by_uri.values())
             models_with_valid_results.append((name, weight, ranker))
-        for uri, score in raw_by_uri.items():
+        for uri, score in scores_by_uri.items():
             if uri not in results_by_candidate:
                 results_by_candidate[uri] = {name: score}
             else:
                 results_by_candidate[uri][name] = score
 
-    # loop through again to normalize scores and drop candidates with no valid scores in any model
+    # Fill missing contributions only after checking candidate eligibility.
+    # A median must not make an otherwise unscored candidate eligible.
     candidate_uris_and_politics_scores = [
         (c.at_uri, c.politics_score) for c in request.candidates if c.at_uri
     ]
     valid_uris_and_politics_scores = []
     active_model_names = {name for name, weight, _ranker in models_with_valid_results if weight > 0}
-    normalized_by_model: dict[str, dict[str, float]] = {}  # {model_name: {uri: normalized_score}}
+    scores_by_model: dict[str, dict[str, float]] = {}  # {model_name: {uri: score}}
     dropped_candidate_count = 0
     for uri, politics_score in candidate_uris_and_politics_scores:
         # Zero-weight models are recorded for transparency, but only an active
@@ -177,16 +154,12 @@ async def run_predict(
             dropped_candidate_count += 1
             continue
         valid_uris_and_politics_scores.append((uri, politics_score))
-        for model_name, _, ranker in models_with_valid_results:
-            bounds = ranker.score_bounds
-            score = None
-            if model_name in results_by_candidate[uri]:
-                score = results_by_candidate[uri][model_name]
-            normalized_score = _normalize(score, bounds, medians_by_model[model_name])
-            if model_name not in normalized_by_model:
-                normalized_by_model[model_name] = {uri: normalized_score}
+        for model_name, _, _ranker in models_with_valid_results:
+            score = results_by_candidate[uri].get(model_name, medians_by_model[model_name])
+            if model_name not in scores_by_model:
+                scores_by_model[model_name] = {uri: score}
             else:
-                normalized_by_model[model_name][uri] = normalized_score
+                scores_by_model[model_name][uri] = score
 
     metric_collector = get_metric_collector()
     if metric_collector and dropped_candidate_count > 0:
@@ -200,14 +173,14 @@ async def run_predict(
             rec.record_model_scores(
                 model_name,
                 weight,
-                normalized_by_model.get(model_name, {}),
+                scores_by_model.get(model_name, {}),
             )
 
     total_weight = sum(weight for _name, weight, _ranker in models_with_valid_results)
 
     def _combined(at_uri: str) -> float:
         return sum(
-            (weight / total_weight) * normalized_by_model[name].get(at_uri, 0.0)
+            (weight / total_weight) * scores_by_model[name].get(at_uri, 0.0)
             for name, weight, _ in models_with_valid_results
         )
 

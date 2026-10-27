@@ -316,7 +316,7 @@ class TestGenerate:
         # min_rank_score cuts three; max_render_share caps at floor(0.5 * 6) = 3.
         assert uris == ["at://pop/0", "at://pop/1", "at://pop/2"]
         assert [item["rank"] for item in data["items"]] == [1, 2, 3]
-        assert data["items"][0]["rank_score"] == pytest.approx(0.9)
+        assert data["items"][0]["rank_score"] == pytest.approx(1.0)
         assert [m["name"] for m in data["items"][0]["model_scores"]] == ["candidate_score"]
         discarded.assert_called_once()
         assert discarded.call_args.args[1:] == (USER_DID, ["at://pop/3", "at://pop/4", "at://pop/5"])

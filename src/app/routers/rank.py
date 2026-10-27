@@ -62,11 +62,12 @@ async def rank_predict(
 ) -> RankPredictResult:
     """Score and order candidate posts by combining one or more rank models.
 
-    Each model in `models` is run in parallel; its raw scores are normalized
-    into [0, 1] using the model's theoretical score bounds, then combined
-    into a single score per candidate via a weighted average using each
-    model's relative `weight`.  The response lists candidates in descending
-    combined-score order with 1-based `rank` positions.  Pass the output of
+    Each model in `models` runs in parallel and supplies per-candidate blend
+    contributions. Missing scores use that model's median; contributions are
+    combined directly using relative weights normalized to sum to one, then
+    adjusted by the politics multiplier. Scores may be negative or exceed one.
+    The response lists candidates in descending combined-score order with
+    1-based `rank` positions. Pass the output of
     `/candidates/generate` directly as the request body.
     """
     try:

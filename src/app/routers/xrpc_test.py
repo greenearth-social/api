@@ -772,7 +772,7 @@ async def test_politics_explanation_survives_pipeline_cache_and_pagination(
     generator.generate.return_value = CandidateResult(
         generator_name="two_tower", candidates=candidates
     )
-    ranker = MagicMock(score_bounds=(0.0, 1.0))
+    ranker = MagicMock()
     ranker.predict = AsyncMock(
         return_value=RankerResult(
             model="heavy_ranker",
