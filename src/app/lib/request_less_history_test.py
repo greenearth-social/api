@@ -128,8 +128,8 @@ async def _record(service, user_did, uri_times):
 async def _save_features(service, uri=URI):
     claims = await service._claim_due(USER)
     assert [claim.at_uri for claim in claims] == [uri]
-    saved = await service._store_results(USER, claims, {uri: FEATURES})
-    assert saved.saved == {uri}
+    result = await service._store_results(USER, claims, {uri: FEATURES})
+    assert result.hydrated_uris == {uri}
 
 
 @pytest.mark.asyncio
@@ -272,7 +272,7 @@ async def test_hydration_completion_preserves_feedback_arriving_in_flight(
     later = NOW + timedelta(minutes=1)
     await _record(service, USER, {URI: later, OTHER_URI: later})
 
-    assert (await service._store_results(USER, claims, {URI: FEATURES})).saved == {URI}
+    assert (await service._store_results(USER, claims, {URI: FEATURES})).hydrated_uris == {URI}
     history = await service.retrieve(USER)
 
     assert {item.at_uri for item in history.items} == {URI, OTHER_URI}
@@ -289,8 +289,8 @@ async def test_stale_attempt_completion_cannot_overwrite_newer_attempt(store, mo
     clock[0] += timedelta(seconds=900)
     second = await service._claim_due(USER)
 
-    assert (await service._store_results(USER, first, {URI: FEATURES})).saved == set()
-    assert (await service._store_results(USER, second, {URI: FEATURES})).saved == {URI}
+    assert (await service._store_results(USER, first, {URI: FEATURES})).hydrated_uris == set()
+    assert (await service._store_results(USER, second, {URI: FEATURES})).hydrated_uris == {URI}
 
 
 @pytest.mark.asyncio
@@ -307,7 +307,7 @@ async def test_completion_does_not_resurrect_pruned_history(store, monkeypatch, 
         },
     )
 
-    assert (await service._store_results(USER, claims, {URI: FEATURES})).saved == set()
+    assert (await service._store_results(USER, claims, {URI: FEATURES})).hydrated_uris == set()
     assert URI not in [item.at_uri for item in (await service.retrieve(USER)).items]
 
 
@@ -331,9 +331,9 @@ async def test_old_attempt_cannot_match_a_pruned_then_recreated_uri(store, monke
     assert new_claim.next_attempt_at == old_claims[0].next_attempt_at
     assert new_claim.attempt_id != old_claims[0].attempt_id
     old_result = await service._store_results(USER, old_claims, {URI: FEATURES})
-    assert old_result.saved == set()
-    assert old_result.current == set()
-    assert (await service._store_results(USER, [new_claim], {URI: FEATURES})).saved == {URI}
+    assert old_result.hydrated_uris == set()
+    assert old_result.applicable_uris == set()
+    assert (await service._store_results(USER, [new_claim], {URI: FEATURES})).hydrated_uris == {URI}
 
 
 @pytest.mark.asyncio

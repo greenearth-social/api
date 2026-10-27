@@ -2,6 +2,10 @@
 
 Feedback and retry budgets live together so concurrent API instances can claim
 attempts safely. Readers return the saved snapshot; ES work never delays them.
+
+Recording feedback and reading history can both schedule hydration for that
+user. Each worker claims eligible posts, fetches their features in one ES batch,
+and merges the results into the latest saved history.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import math
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, TypeVar
+from typing import Any
 from uuid import uuid4
 
 from elastic_transport import ConnectionTimeout
@@ -41,7 +45,6 @@ SCHEMA_VERSION = 1
 MAX_HYDRATION_ATTEMPTS = 3
 HYDRATION_RETRY_SECONDS = 15 * 60
 HYDRATION_TIMEOUT_SECONDS = 5.0
-_T = TypeVar("_T")
 _Features = tuple[list[float], str, int]
 
 
@@ -51,6 +54,12 @@ def _now() -> datetime:
 
 @dataclass(frozen=True)
 class RequestLessHistoryItem:
+    """One feedback entry exposed to callers, with optional hydrated features.
+
+    ``received_at`` is the latest server receipt time for this URI. An absent
+    embedding means features are unavailable; retry bookkeeping stays internal.
+    """
+
     at_uri: str
     received_at: datetime
     embedding: list[float] | None
@@ -60,7 +69,11 @@ class RequestLessHistoryItem:
 
 @dataclass(frozen=True)
 class RequestLessHistory:
-    """Newest feedback first, including posts whose features are unavailable."""
+    """Saved history returned to callers, ordered by newest feedback first.
+
+    ``items`` includes every retained entry. ``items_with_embeddings`` exposes
+    the subset whose features are ready for use by a ranker.
+    """
 
     items: list[RequestLessHistoryItem]
 
@@ -70,6 +83,15 @@ class RequestLessHistory:
 
 
 class _StoredItem(BaseModel):
+    """Firestore representation of one URI, its features, and its retry budget.
+
+    Features use a compact base64-encoded float32 embedding. A stored embedding
+    makes the entry ready; otherwise it is pending until all attempts are used.
+    Claims consume attempts before ES work and set the earliest next retry time.
+    That time controls eligibility only; another feedback or read trigger must
+    start the retry. There is no timer that wakes up when the cooldown expires.
+    """
+
     at_uri: str = Field(min_length=1)
     received_at: AwareDatetime
     embedding_b64: str | None = None
@@ -88,6 +110,13 @@ class _StoredItem(BaseModel):
 
 
 class _StoredHistory(BaseModel):
+    """One user's Firestore document, containing their latest distinct URIs.
+
+    Recording prunes all entries to USER_HISTORY_LIMIT, including pending and
+    exhausted entries. Version fields identify the schema and embedding model;
+    successful features remain stored until the entry is evicted.
+    """
+
     schema_version: int = SCHEMA_VERSION
     user_did: str
     embedding_key: str = MINILM_L12_EMBEDDING_KEY
@@ -96,6 +125,12 @@ class _StoredHistory(BaseModel):
 
 @dataclass(frozen=True)
 class _HydrationClaim:
+    """Identity of a committed attempt passed from Firestore to a worker.
+
+    Results may only update an entry that still matches this claim. Its unique
+    ID distinguishes both later attempts and feedback evicted then added again.
+    """
+
     at_uri: str
     attempt_count: int
     next_attempt_at: datetime
@@ -112,8 +147,23 @@ class _HydrationClaim:
 
 @dataclass(frozen=True)
 class _HydrationResult:
-    saved: set[str]
-    current: set[str]
+    """Report from merging a batch's results into the latest history.
+
+    ``hydrated_uris`` contains posts whose features were successfully fetched
+    and saved to Firestore. Fetching features alone does not put a post here.
+
+    ``applicable_uris`` contains posts whose feedback was still in history and
+    still matched this attempt when results were merged. It includes both
+    successful and failed attempts, but excludes feedback that was evicted or
+    attempts that were replaced by newer ones. ``hydrated_uris`` is a subset.
+
+    For example: A's features were saved, B had no features in ES, and C was
+    evicted during the query. Then hydrated_uris = {A}, applicable_uris = {A, B}.
+    Metrics count A as a success and B as a failure, and ignore C's result.
+    """
+
+    hydrated_uris: set[str]
+    applicable_uris: set[str]
 
 
 def _parse_history(data: dict[str, Any] | None, user_did: str) -> _StoredHistory:
@@ -144,6 +194,14 @@ def _metric(name: str, **labels: str) -> None:
 
 
 class RequestLessHistoryService:
+    """Own per-user persistence, hydration attempts, and background tasks.
+
+    ``record`` saves feedback; ``retrieve`` returns the saved snapshot. Both can
+    schedule hydration, while Firestore transactions coordinate concurrent work
+    across API instances. The application drains this service before closing
+    the shared database and ES clients.
+    """
+
     def __init__(self, db: AsyncClient, hydration_es: Any) -> None:
         self._db = db
         self._es = hydration_es
@@ -151,10 +209,16 @@ class RequestLessHistoryService:
         self._closing = False
 
     def _document(self, user_did: str):
+        """Use the like-history cache's hashed-DID document key convention."""
         key = hashlib.sha256(user_did.encode()).hexdigest()
         return self._db.collection(HISTORY_COLLECTION).document(key)
 
-    async def _run_transaction(self, body: Callable[..., Awaitable[_T]]) -> _T:
+    async def _run_transaction[T](self, body: Callable[..., Awaitable[T]]) -> T:
+        """Run a retryable Firestore callback with a bounded total duration.
+
+        Firestore may replay ``body`` on conflicts, so callbacks only read and
+        update documents. ES calls, task scheduling, and metrics happen outside.
+        """
         async with asyncio.timeout(USER_HISTORY_CACHE_BACKGROUND_TIMEOUT_SECONDS):
             return await async_transactional(body)(self._db.transaction())
 
@@ -179,6 +243,8 @@ class RequestLessHistoryService:
                     item.received_at = max(item.received_at, received_at)
                 else:
                     by_uri[uri] = _StoredItem(at_uri=uri, received_at=received_at)
+            # Merge and prune together so retention uses the latest combined
+            # history even when feedback arrives concurrently.
             history.items = sorted(
                 by_uri.values(), key=lambda item: (item.received_at, item.at_uri),
                 reverse=True,
@@ -186,10 +252,17 @@ class RequestLessHistoryService:
             transaction.set(ref, history.model_dump())
 
         await self._run_transaction(merge)
+        # Only committed feedback is eligible for hydration. This also picks up
+        # older entries for the same user whose retry cooldown has elapsed.
         self.schedule_hydration(user_did)
 
     async def retrieve(self, user_did: str) -> RequestLessHistory:
-        """Return saved features and schedule eligible work without awaiting it."""
+        """Return saved features and schedule eligible work without awaiting it.
+
+        Hydration never changes this returned snapshot; saved results become
+        available on a later read. A missing or unreadable document returns an
+        empty history without falling back to synchronous ES work.
+        """
         try:
             async with asyncio.timeout(USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS):
                 snapshot = await self._document(user_did).get()
@@ -208,6 +281,8 @@ class RequestLessHistoryService:
                     item.at_uri, item.received_at, embedding,
                     item.author_did, item.like_count,
                 ))
+            # This snapshot check only avoids unnecessary tasks. The worker must
+            # recheck eligibility in a transaction before consuming an attempt.
             if any(item.eligible(_now()) for item in history.items):
                 self.schedule_hydration(user_did)
             return RequestLessHistory(items)
@@ -216,6 +291,12 @@ class RequestLessHistoryService:
             return RequestLessHistory([])
 
     async def _claim_due(self, user_did: str) -> list[_HydrationClaim]:
+        """Reserve eligible attempts atomically before any ES work starts.
+
+        Concurrent workers see the committed cooldown and cannot claim those
+        entries again immediately. A crash or failed result write still consumes
+        the reserved attempt; unsuccessful entries have no age-based deadline.
+        """
         ref = self._document(user_did)
 
         async def claim(transaction):
@@ -246,35 +327,44 @@ class RequestLessHistoryService:
         self, user_did: str, claims: list[_HydrationClaim],
         features_by_uri: dict[str, _Features],
     ) -> _HydrationResult:
+        """Merge valid features only into entries still owned by these claims.
+
+        Reloading the document preserves feedback received while ES was running.
+        Even a batch with no valid features checks which attempts still apply
+        so its failure metrics exclude evicted or superseded entries.
+        """
         ref = self._document(user_did)
         by_uri = {claim.at_uri: claim for claim in claims}
 
         async def merge(transaction):
             snapshot = await ref.get(transaction=transaction)
             if not snapshot.exists:
-                return _HydrationResult(set(), set())
+                return _HydrationResult(hydrated_uris=set(), applicable_uris=set())
             history = _parse_history(snapshot.to_dict(), user_did)
-            current: set[str] = set()
-            saved: set[str] = set()
+            applicable_uris: set[str] = set()
+            hydrated_uris: set[str] = set()
             for item in history.items:
                 claim = by_uri.get(item.at_uri)
                 if claim is None or not claim.matches(item):
                     continue
-                current.add(item.at_uri)
+                applicable_uris.add(item.at_uri)
                 if item.at_uri in features_by_uri:
                     embedding, author_did, like_count = features_by_uri[item.at_uri]
                     item.embedding_b64 = encode_float32_b64(embedding)
                     item.author_did = author_did
                     item.like_count = like_count
                     item.next_attempt_at = None
-                    saved.add(item.at_uri)
-            if saved:
+                    hydrated_uris.add(item.at_uri)
+            if hydrated_uris:
                 transaction.set(ref, history.model_dump())
-            return _HydrationResult(saved, current)
+            return _HydrationResult(
+                hydrated_uris=hydrated_uris, applicable_uris=applicable_uris
+            )
 
         return await self._run_transaction(merge)
 
     async def _hydrate(self, user_did: str) -> None:
+        """Claim one user's due posts, hydrate one batch, and report each outcome."""
         claims: list[_HydrationClaim] = []
         outcomes: dict[str, str] = {}
         try:
@@ -292,6 +382,8 @@ class RequestLessHistoryService:
                         self._es, [claim.at_uri for claim in claims], index="posts,replies"
                     )
                 by_uri = {uri: (embedding, author, likes) for uri, embedding, author, likes in rows}
+                # Classify each post separately so missing or malformed rows do
+                # not prevent valid features from the same batch being saved.
                 for claim in claims:
                     row = by_uri.get(claim.at_uri)
                     if row is None:
@@ -326,9 +418,9 @@ class RequestLessHistoryService:
                 logger.warning("Failed to save requestLess hydration results", exc_info=True)
             else:
                 outcomes = {
-                    uri: reason for uri, reason in outcomes.items() if uri in result.current
+                    uri: reason for uri, reason in outcomes.items() if uri in result.applicable_uris
                 }
-                outcomes.update({uri: "success" for uri in result.saved})
+                outcomes.update({uri: "success" for uri in result.hydrated_uris})
         except asyncio.CancelledError:
             for claim in claims:
                 outcomes.setdefault(claim.at_uri, "cancelled")
@@ -351,6 +443,11 @@ class RequestLessHistoryService:
                         logger.info("requestLess hydration attempt budget exhausted")
 
     def schedule_hydration(self, user_did: str) -> None:
+        """Track a task for this trigger; transactional claims prevent duplicate work.
+
+        Separate tasks let new feedback be picked up while an earlier batch is
+        still running. The task set lets shutdown wait for all outstanding work.
+        """
         if self._closing:
             return
         task = asyncio.create_task(self._hydrate(user_did))
@@ -369,6 +466,7 @@ class RequestLessHistoryService:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
 
 
+# Installed by the application lifespan so callers share clients and task ownership.
 _service: RequestLessHistoryService | None = None
 
 
@@ -382,7 +480,11 @@ def set_request_less_history_service(service: RequestLessHistoryService | None) 
 
 
 async def fetch_request_less_history_features(user_did: str) -> RequestLessHistory:
-    """Share one saved snapshot and retry decision among request consumers."""
+    """Public reader for rankers: share a saved snapshot within the current request.
+
+    Concurrent consumers for the same user share both the Firestore read and
+    retry scheduling decision. The returned history never waits for hydration.
+    """
     async def fetch() -> RequestLessHistory:
         service = get_request_less_history_service()
         return await service.retrieve(user_did) if service else RequestLessHistory([])
