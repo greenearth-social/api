@@ -45,7 +45,7 @@ SCHEMA_VERSION = 1
 MAX_HYDRATION_ATTEMPTS = 3
 HYDRATION_RETRY_SECONDS = 15 * 60
 HYDRATION_TIMEOUT_SECONDS = 5.0
-_Features = tuple[list[float], str, int]
+_HydrationFeatures = tuple[list[float], str, int]
 
 
 def _now() -> datetime:
@@ -325,7 +325,7 @@ class RequestLessHistoryService:
 
     async def _store_results(
         self, user_did: str, claims: list[_HydrationClaim],
-        features_by_uri: dict[str, _Features],
+        features_by_uri: dict[str, _HydrationFeatures],
     ) -> _HydrationResult:
         """Merge valid features only into entries still owned by these claims.
 
@@ -373,7 +373,7 @@ class RequestLessHistoryService:
                 _metric("attempt_count", attempt=str(claim.attempt_count))
             if not claims:
                 return
-            features: dict[str, _Features] = {}
+            features: dict[str, _HydrationFeatures] = {}
             try:
                 # Child tasks inherit request caches. Every consumed attempt
                 # must perform its own search, while retaining metric context.
