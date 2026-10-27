@@ -292,8 +292,8 @@ class RequestLessHistoryService:
                     item.at_uri, item.received_at, embedding,
                     item.author_did, item.like_count,
                 ))
-            # This snapshot check only avoids unnecessary tasks. The worker must
-            # recheck eligibility in a transaction before consuming an attempt.
+            # If any posts need hydration, schedule a background task. The
+            # schedule_hydration() function will handle concurrent calls and avoid duplicate work.
             if any(item.eligible(_now()) for item in history.items):
                 self.schedule_hydration(user_did)
             return RequestLessHistory(items)
