@@ -453,17 +453,18 @@ class FeedDebugScoreEntry(BaseModel):
 class FeedDebugModelScoreEntry(BaseModel):
     """One rank model's contribution to the combined ranking.
 
-    Captures the model's normalized (to [0, 1]) per-candidate scores and its
-    configured relative weight — i.e. the inputs to the weighted-average
-    combination — so the pre-politics combined score can be explained. The
-    final politics-adjusted score is captured in ``ranking``.
+    Captures the model's per-candidate blend contributions and configured
+    relative weight so the pre-politics combined score can be explained.
+    Contributions may be negative or exceed one; missing scores use the
+    model's median. The final politics-adjusted score is captured in ``ranking``.
     """
 
     model_name: str = Field(..., description="Name of the rank model, e.g. 'heavy_ranker'")
     weight: float = Field(..., description="Configured relative weight for this model")
     scores: list[FeedDebugScoreEntry] = Field(
         default_factory=list,
-        description="Per-candidate scores after normalization to [0, 1]",
+        description="Per-candidate blend contributions, with missing scores filled "
+        "from the model's median",
     )
 
 
@@ -482,7 +483,7 @@ class FeedDebugPoliticsAdjustment(BaseModel):
         le=2.0,
         description="Per-post multiplier derived from the user setting and topic score",
     )
-    score_before: float = Field(description="Combined normalized score before politics adjustment")
+    score_before: float = Field(description="Combined score before politics adjustment")
     score_after: float = Field(description="Combined score after politics adjustment")
 
 
@@ -570,7 +571,7 @@ class FeedDebugDocument(BaseModel):
     )
     model_scores: list[FeedDebugModelScoreEntry] = Field(
         default_factory=list,
-        description="Per-model normalized ([0, 1]) scores and configured weight, "
+        description="Per-model blend contributions and configured weight, "
         "in the order rank models ran (empty when no ranking ran)",
     )
     politics_setting: float | None = Field(
@@ -655,7 +656,7 @@ class GeneratorDiagnostic(BaseModel):
 
 
 class ModelScoreMeta(BaseModel):
-    """One rank model's normalized score for a single item."""
+    """One rank model's blend contribution for an item; may be negative or exceed one."""
 
     name: str
     weight: float

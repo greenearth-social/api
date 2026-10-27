@@ -438,8 +438,7 @@ def _item_panel(
     journey.append("  →  final ", style="dim")
     journey.append(f"#{pos}", style="bold green")
 
-    # --- per-model normalized score breakdown (only when multiple rank
-    # models combined to produce the model score above) ---
+    # --- per-model contributions to the combined model score above ---
     model_breakdown = model_scores_by_uri.get(uri)
     breakdown_line = None
     if model_breakdown:
@@ -580,9 +579,9 @@ def _render_show(doc: FeedDebugDocument) -> None:
     console.print(f"[dim]journey: retrieved by generator (gen score) → {legend}[/dim]")
     if doc.model_scores:
         console.print(
-            "[dim]model scores = each rank model's per-candidate score normalized to "
-            "[0, 1], with its configured weight — the inputs to the combined "
-            "score before the politics adjustment[/dim]"
+            "[dim]model scores = each ranker's blend contribution with its configured "
+            "weight; weights are normalized for the combined score before politics "
+            "adjustment. Contributions may be negative or exceed one.[/dim]"
         )
     if politics_by_uri:
         console.print(

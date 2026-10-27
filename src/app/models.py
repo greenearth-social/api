@@ -199,9 +199,9 @@ class RankPredictRequest(BaseModel):
         ...,
         min_length=1,
         description=(
-            "Rank models to run and combine. Each model's scores are normalized "
-            "to [0, 1] using its theoretical bounds, then combined via a "
-            "weighted average using the configured relative weights."
+            "Rank models to run and combine. Each model supplies blend contributions, "
+            "which are combined directly using weights normalized to sum to one. "
+            "Contributions may be negative or exceed one."
         ),
     )
     user_did: str = Field(
@@ -297,7 +297,8 @@ class SlateCutoffs(BaseModel):
         None,
         ge=0.0,
         le=1.0,
-        description="Combined rank-score floor in [0, 1]. Candidates scoring below it "
+        description="Optional rank-score cutoff, configurable from 0 to 1. "
+        "Candidates scoring below it "
         "are cut from the slate and recorded as discarded so future generation "
         "excludes them. Only applies when rank_request_template is set. None disables.",
     )
@@ -314,8 +315,8 @@ class SlateConfig(SlateCutoffs):
     """Everything the ranking pipeline needs beyond the generation request.
 
     ``rank_request_template`` optionally holds a ranking spec.  When set,
-    candidates are ranked by the configured ``models`` (each normalized and
-    combined via weighted average) before the slate cutoffs apply.  Whether
+    the configured ``models`` supply contributions that are combined via
+    weighted average before the slate cutoffs apply.  Whether
     Perspective API scoring participates is controlled by including a
     ``perspective`` entry in ``models`` — there is no separate toggle.
     Runtime fields (``candidates``, ``user_did``) are filled via ``model_copy``.
