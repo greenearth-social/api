@@ -5,11 +5,20 @@ Each ranker has a unique name and an async `predict` method that returns a
 looked up by name from the API layer or composed with other internal logic.
 """
 
+import os
 from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, Field
 
 from ...models import RankPredictResult, CandidatePost
+
+# Shared by the pipeline's ranker deadline and optional work inside rankers.
+try:
+    RANK_MODEL_TIMEOUT_SEC: float = float(
+        os.environ.get("GE_RANK_MODEL_TIMEOUT_SEC", "2.5")
+    )
+except ValueError:
+    RANK_MODEL_TIMEOUT_SEC = 2.5
 
 
 class RankerResult(BaseModel):
@@ -36,7 +45,8 @@ class Ranker(ABC):
     """Named rankers supply scores on their intended scale for combination.
 
     The shared pipeline blends these scores directly without rescaling or
-    clamping them. Each ranker owns any conversion its scores require.
+    clamping individual contributions, then floors the combined score at zero.
+    Each ranker owns any conversion its scores require.
     """
 
     @property

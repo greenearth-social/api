@@ -3,27 +3,48 @@
 
 import asyncio
 import logging
+import math
 from typing import assert_never
 
+import httpx
+
 from ...models import CandidatePost, RankedCandidate, RankPredictResult
-from ..embeddings import decode_float32_b64
 from ..elasticsearch import fetch_post_embeddings_and_metadata
+from ..embeddings import decode_float32_b64
 from ..feed_debug import current_recorder
 from ..inference import (
     HistoryMode,
+    InferenceResponseFormatError,
     get_inference_settings,
     predict_heavy_ranker_single_user,
 )
+from ..metrics import get_metric_collector
+from ..posthog_client import get_posthog_client, request_less_heavy_ranker_enabled
+from ..request_context import get_traffic
+from ..request_less_history import fetch_request_less_history_features
 from ..telemetry import timed
 from ..user_history_cache import fetch_user_history_features
-from .base import Ranker, RankerResult
+from .base import RANK_MODEL_TIMEOUT_SEC, Ranker, RankerResult
 from .utils import get_rank_predict_results_from_candidates_and_scores
 
 logger = logging.getLogger(__name__)
 
+# Affinity to requestLess history is a penalty, not a calibrated rejection
+# probability. Zero disables the entire optional path, including flag lookup.
+REQUEST_LESS_COEFFICIENT = 0.75
+
+
+def _request_less_metric(name: str, value: float, **labels: str) -> None:
+    collector = get_metric_collector()
+    if collector is not None:
+        try:
+            collector.record(f"rank.request_less.{name}", value, **labels)
+        except Exception:
+            logger.warning("Failed to record requestLess ranking metric", exc_info=True)
+
 
 class HeavyRanker(Ranker):
-    """Rank candidate posts relative to a user using an ML model."""
+    """Score affinity to liked posts, optionally subtracting requestLess affinity."""
 
     def __init__(self, name: str, history_mode: HistoryMode):
         self._name = name
@@ -39,6 +60,10 @@ class HeavyRanker(Ranker):
         user_did: str,
         candidates: list[CandidatePost]
     ) -> RankerResult:
+        loop = asyncio.get_running_loop()
+        # Reserve the end of the pipeline's ranker budget for positive scoring
+        # and cleanup, even if flag evaluation or negative inference stalls.
+        request_less_deadline = loop.time() + 0.8 * RANK_MODEL_TIMEOUT_SEC
         inference_base_url, inference_api_key = (
             get_inference_settings()
         )
@@ -149,13 +174,6 @@ class HeavyRanker(Ranker):
 
         candidates_by_uri = {candidate.at_uri: candidate for candidate in candidates if candidate.at_uri is not None}
 
-        user_features, candidate_features = await asyncio.gather(
-            _get_user_features(),
-            _get_candidate_features(),
-        )
-
-        history_embeddings, history_author_dids, history_liked_at_times, history_like_counts = user_features
-
         def _return_empty_ranker_result(msg: str):
             logger.info(msg)
             rankings = [
@@ -169,37 +187,147 @@ class HeavyRanker(Ranker):
             ]
             return RankerResult(model=self.name, result=RankPredictResult(rankings=rankings))
 
-        if candidate_features is None:
-            return _return_empty_ranker_result(
-                f"No valid features found for any of {len(candidates_by_uri)} candidate posts of user {user_did}"
+        # Both inference calls share this exact candidate batch and ordering.
+        # Start the positive prerequisites before any optional flag/history work.
+        user_task = asyncio.create_task(_get_user_features())
+        candidate_task = asyncio.create_task(_get_candidate_features())
+        request_less_outcome = "disabled"
+
+        async def _get_request_less_scores() -> list[float] | None:
+            nonlocal request_less_outcome
+            started = loop.time()
+            try:
+                async with asyncio.timeout_at(request_less_deadline):
+                    # PostHog is synchronous. If we stop awaiting the thread,
+                    # its eventual result cannot start history or inference work.
+                    enabled = await asyncio.to_thread(
+                        request_less_heavy_ranker_enabled, get_posthog_client(), user_did
+                    )
+                    if not enabled:
+                        request_less_outcome = "flag_off"
+                        return None
+
+                    history = await fetch_request_less_history_features(user_did)
+                    embedded_history = history.items_with_embeddings
+                    if not embedded_history:
+                        request_less_outcome = "missing_features"
+                        return None
+                    logger.info(
+                        "Scoring requestLess affinity with %d hydrated history entries",
+                        len(embedded_history),
+                    )
+                    # The optional deadline must not cancel candidate preparation:
+                    # positive inference still needs it after this path times out.
+                    candidate_features = await asyncio.shield(candidate_task)
+                    if candidate_features is None:
+                        request_less_outcome = "missing_features"
+                        return None
+                    candidate_posts, candidate_embeddings, candidate_authors, candidate_likes = candidate_features
+                    outputs = await predict_heavy_ranker_single_user(
+                        [item.embedding for item in embedded_history if item.embedding is not None],
+                        [item.author_did for item in embedded_history],
+                        [item.received_at.isoformat() for item in embedded_history],
+                        [item.like_count for item in embedded_history],
+                        candidate_embeddings,
+                        candidate_authors,
+                        candidate_likes,
+                        base_url=inference_base_url,
+                        api_key=inference_api_key,
+                    )
+                    # Treat a malformed batch as unavailable rather than mixing
+                    # adjusted and unadjusted scores within the same ranking.
+                    if (
+                        not isinstance(outputs, list)
+                        or len(outputs) != len(candidate_posts)
+                        or any(
+                            type(score) not in (int, float)
+                            or not math.isfinite(score)
+                            or not 0.0 <= score <= 1.0
+                            for score in outputs
+                        )
+                    ):
+                        raise InferenceResponseFormatError("Invalid requestLess inference scores")
+                    return outputs
+            except InferenceResponseFormatError:
+                request_less_outcome = "invalid_output"
+                logger.warning("Ignoring invalid requestLess inference output", exc_info=True)
+                return None
+            except (TimeoutError, httpx.TimeoutException):
+                request_less_outcome = "timeout"
+                logger.warning("RequestLess scoring timed out; using positive scores")
+                return None
+            except Exception:
+                request_less_outcome = "error"
+                logger.warning("RequestLess scoring failed; using positive scores", exc_info=True)
+                return None
+            finally:
+                _request_less_metric("duration_ms", (loop.time() - started) * 1000)
+
+        request_less_task = None
+        if (
+            REQUEST_LESS_COEFFICIENT != 0
+            and self.history_mode == "actual"
+            and get_traffic() != "logged_out"
+        ):
+            # Only mark an adjustment applied after positive scoring succeeds
+            # and the adjusted scores are included in the returned result.
+            request_less_outcome = "cancelled"
+            request_less_task = asyncio.create_task(_get_request_less_scores())
+
+        try:
+            user_features, candidate_features = await asyncio.gather(user_task, candidate_task)
+            history_embeddings, history_author_dids, history_liked_at_times, history_like_counts = user_features
+
+            if candidate_features is None:
+                return _return_empty_ranker_result(
+                    f"No valid features found for any of {len(candidates_by_uri)} candidate posts of user {user_did}"
+                )
+            candidate_posts, candidate_post_embeddings, candidate_author_dids, candidate_like_counts = candidate_features
+
+            ranker_outputs = await predict_heavy_ranker_single_user(
+                history_embeddings,
+                history_author_dids,
+                history_liked_at_times,
+                history_like_counts,
+                candidate_post_embeddings,
+                candidate_author_dids,
+                candidate_like_counts,
+                base_url=inference_base_url,
+                api_key=inference_api_key
             )
-        candidate_posts, candidate_post_embeddings, candidate_author_dids, candidate_like_counts = candidate_features
 
-        ranker_outputs = await predict_heavy_ranker_single_user(
-            history_embeddings,
-            history_author_dids,
-            history_liked_at_times,
-            history_like_counts,
-            candidate_post_embeddings,
-            candidate_author_dids,
-            candidate_like_counts,
-            base_url=inference_base_url,
-            api_key=inference_api_key
-        )
+            if not ranker_outputs:
+                return _return_empty_ranker_result(
+                    f"No ranker outputs for any of {len(candidates_by_uri)} candidate posts of user {user_did}"
+                )
+            if len(ranker_outputs) != len(candidate_posts):
+                return _return_empty_ranker_result(
+                    f"Heavy ranker returned {len(ranker_outputs)} results but {len(candidate_posts)} were requested."
+                )
 
-        if not ranker_outputs:
-            return _return_empty_ranker_result(
-                f"No ranker outputs for any of {len(candidates_by_uri)} candidate posts of user {user_did}"
+            negative_outputs = await request_less_task if request_less_task is not None else None
+            if negative_outputs is not None:
+                ranker_outputs = [
+                    positive - REQUEST_LESS_COEFFICIENT * negative
+                    for positive, negative in zip(ranker_outputs, negative_outputs, strict=True)
+                ]
+
+            result = get_rank_predict_results_from_candidates_and_scores(
+                candidate_posts,
+                ranker_outputs,
+                candidates_by_uri.values()
             )
-        if len(ranker_outputs) != len(candidate_posts):
-            return _return_empty_ranker_result(
-                f"Heavy ranker returned {len(ranker_outputs)} results but {len(candidate_posts)} were requested."
-            )
-
-        result = get_rank_predict_results_from_candidates_and_scores(
-            candidate_posts,
-            ranker_outputs,
-            candidates_by_uri.values()
-        )
-
-        return RankerResult(model=self.name, result=result)
+            if negative_outputs is not None:
+                request_less_outcome = "applied"
+            return RankerResult(model=self.name, result=result)
+        finally:
+            # Drain only tasks owned by this invocation. Hydration scheduled by
+            # the history reader belongs to the service and continues separately.
+            tasks = [user_task, candidate_task]
+            if request_less_task is not None:
+                tasks.append(request_less_task)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            _request_less_metric("outcome_count", 1, outcome=request_less_outcome)
