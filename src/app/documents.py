@@ -456,7 +456,8 @@ class FeedDebugModelScoreEntry(BaseModel):
     Captures the model's per-candidate blend contributions and configured
     relative weight so the pre-politics combined score can be explained.
     Contributions may be negative or exceed one; missing scores use the
-    model's median. The final politics-adjusted score is captured in ``ranking``.
+    model's median. Their weighted average is floored at zero before politics.
+    The final politics-adjusted score is captured in ``ranking``.
     """
 
     model_name: str = Field(..., description="Name of the rank model, e.g. 'heavy_ranker'")
@@ -483,7 +484,7 @@ class FeedDebugPoliticsAdjustment(BaseModel):
         le=2.0,
         description="Per-post multiplier derived from the user setting and topic score",
     )
-    score_before: float = Field(description="Combined score before politics adjustment")
+    score_before: float = Field(description="Combined score after its zero floor, before politics adjustment")
     score_after: float = Field(description="Combined score after politics adjustment")
 
 

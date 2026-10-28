@@ -3,28 +3,27 @@
 Given a `RankPredictRequest`, runs each configured rank model in parallel,
 combines the scores supplied by each ranker into a single ordering via a
 weighted average, and substitutes each model's median for missing scores.
+The combined score is floored at zero before the politics adjustment.
 """
 
 import asyncio
 import logging
-import os
 import statistics
 
 from ...models import RankedCandidate, RankPredictRequest, RankPredictResult
 from ..feed_debug import current_recorder
 from ..telemetry import timed
-from .base import Ranker, RankerError, RankerExecutionError, RankerResult, get_ranker
+from .base import (
+    RANK_MODEL_TIMEOUT_SEC,
+    Ranker,
+    RankerError,
+    RankerExecutionError,
+    RankerResult,
+    get_ranker,
+)
 from ..metrics import get_metric_collector
 
 logger = logging.getLogger(__name__)
-
-try:
-    _RANK_MODEL_TIMEOUT_SEC: float = float(
-        os.environ.get("GE_RANK_MODEL_TIMEOUT_SEC", "2.5")
-    )
-except ValueError:
-    _RANK_MODEL_TIMEOUT_SEC = 2.5
-
 
 class RankModelNotFoundError(Exception):
     """Raised when a requested rank model does not exist."""
@@ -51,7 +50,7 @@ async def _run_one(
         ):
             return await asyncio.wait_for(
                 ranker.predict(es, user_did, request.candidates),
-                timeout=_RANK_MODEL_TIMEOUT_SEC,
+                timeout=RANK_MODEL_TIMEOUT_SEC,
             )
     except RankerError:
         raise
@@ -59,7 +58,7 @@ async def _run_one(
         raise
     except TimeoutError:
         logger.warning(
-            "Ranker '%s' timed out after %.1fs", name, _RANK_MODEL_TIMEOUT_SEC
+            "Ranker '%s' timed out after %.1fs", name, RANK_MODEL_TIMEOUT_SEC
         )
         raise
     except Exception as exc:
@@ -75,7 +74,8 @@ async def run_predict(
 
     Each model runs in parallel and supplies scores ready for combination.
     Scores are combined directly via a weighted average, with weights
-    normalized to sum to 1; scores are neither rescaled nor clamped here.
+    normalized to sum to 1. Individual contributions and their medians retain
+    their signs; only the combined score is floored at zero, before politics.
     The final ordering is by combined score, descending, with ties broken by
     original candidate order.
     If a candidate at_uri has no valid scores from any model, it is dropped.
@@ -185,7 +185,10 @@ async def run_predict(
         )
 
     candidates_with_scores_initial_order = [
-        (initial_idx, uri, _combined(uri), politics_score)
+        # Preserve negative contributions until after blending. Flooring here
+        # also prevents the politics multiplier from reversing its effect on
+        # a negative combined score.
+        (initial_idx, uri, max(0.0, _combined(uri)), politics_score)
         for initial_idx, (uri, politics_score) in enumerate(valid_uris_and_politics_scores)
     ]
 

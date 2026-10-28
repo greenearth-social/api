@@ -64,8 +64,9 @@ async def rank_predict(
 
     Each model in `models` runs in parallel and supplies per-candidate blend
     contributions. Missing scores use that model's median; contributions are
-    combined directly using relative weights normalized to sum to one, then
-    adjusted by the politics multiplier. Scores may be negative or exceed one.
+    combined directly using relative weights normalized to sum to one. Model
+    contributions may be negative or exceed one; the combined score is floored
+    at zero before the politics multiplier is applied.
     The response lists candidates in descending combined-score order with
     1-based `rank` positions. Pass the output of
     `/candidates/generate` directly as the request body.

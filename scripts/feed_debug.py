@@ -580,7 +580,7 @@ def _render_show(doc: FeedDebugDocument) -> None:
     if doc.model_scores:
         console.print(
             "[dim]model scores = each ranker's blend contribution with its configured "
-            "weight; weights are normalized for the combined score before politics "
+            "weight; the weighted average is floored at zero before politics "
             "adjustment. Contributions may be negative or exceed one.[/dim]"
         )
     if politics_by_uri:
