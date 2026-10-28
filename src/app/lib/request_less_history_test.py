@@ -369,7 +369,7 @@ async def test_background_hydration_batches_posts_and_replies_and_retains_missin
     hydrate.assert_awaited_once()
     assert hydrate.await_args is not None
     assert set(hydrate.await_args.args[1]) == {URI, OTHER_URI}
-    assert hydrate.await_args.kwargs["index"] == "posts,replies"
+    assert hydrate.await_args.kwargs["index"] == "posts"
     assert [item.at_uri for item in history.items] == [OTHER_URI, URI]
     assert [item.at_uri for item in history.items_with_embeddings] == [OTHER_URI]
     clock[0] += timedelta(seconds=900)
