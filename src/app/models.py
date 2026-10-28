@@ -201,7 +201,7 @@ class RankPredictRequest(BaseModel):
         description=(
             "Rank models to run and combine. Each model supplies blend contributions, "
             "which are combined directly using weights normalized to sum to one. "
-            "Contributions may be negative or exceed one."
+            "The combined score is floored at zero before the politics multiplier is applied."
         ),
     )
     user_did: str = Field(

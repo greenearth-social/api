@@ -59,6 +59,7 @@ _posthog_client: Posthog | None = None
 
 FAIL_FAST_FLAG = "fail-fast-feed"
 LLM_CG_FLAG = "llm-cg"
+REQUEST_LESS_HEAVY_RANKER_FLAG = "request-less-heavy-ranker"
 
 EVENT_SURFACE = "greenearth_api"
 EVENT_SCHEMA_VERSION = 1
@@ -282,3 +283,13 @@ def llm_cg_enabled(client: Posthog | None, user_did: str) -> bool:
         return True
     flags = evaluate_feature_flags(client, user_did, [LLM_CG_FLAG])
     return bool(flags.get_flag(LLM_CG_FLAG)) if flags is not None else False
+
+
+def request_less_heavy_ranker_enabled(client: Posthog | None, user_did: str) -> bool:
+    """Enable requestLess ranking only for an explicitly enabled boolean flag."""
+    try:
+        flags = evaluate_feature_flags(client, user_did, [REQUEST_LESS_HEAVY_RANKER_FLAG])
+        return flags is not None and flags.get_flag(REQUEST_LESS_HEAVY_RANKER_FLAG) is True
+    except Exception:
+        logger.warning("PostHog requestLess heavy-ranker flag access failed for %s", user_did)
+        return False

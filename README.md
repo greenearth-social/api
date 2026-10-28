@@ -1543,6 +1543,43 @@ code-level constants and intentionally cannot vary by deployment environment;
 changing them requires a code change and a new API deployment. See
 `src/app/lib/user_history_cache.py`.
 
+## RequestLess History in the Heavy Ranker
+
+The `request-less-heavy-ranker` PostHog flag enables an optional second inference
+pass in `heavy_ranker`. It uses hydrated requestLess history as the history input
+to the same model, with the same candidate features. The returned heavy score is
+`positive_score - 0.75 * request_less_score`; this is a similarity penalty, not a
+separately trained rejection probability. The coefficient lives in code.
+`heavy_ranker_empty_history` remains unchanged.
+
+Keep the boolean flag disabled initially and enable it for a small cohort by
+user DID. A missing flag or failed flag lookup leaves the positive ranking path
+unchanged. Disabling the flag stops requestLess reads and the second inference
+pass; setting `REQUEST_LESS_COEFFICIENT` in `rankers/heavy_ranker.py` to zero also
+skips flag evaluation. Logged-out, probe, and load-test traffic skip this path.
+Feedback recording and ingestion-triggered hydration remain enabled regardless
+of the ranking flag. Flag changes affect newly generated rankings, not cached
+feed responses.
+
+The history read uses saved features and schedules eligible hydration retries
+without waiting for them. Empty or unhydrated history skips the optional pass.
+The optional work has 80% of `GE_RANK_MODEL_TIMEOUT_SEC` (2 seconds with the
+default 2.5-second ranker timeout), measured from the start of prediction.
+Failures or missed deadlines leave the positive scores intact.
+
+`rank.request_less.outcome_count` records one outcome per heavy-ranker call:
+`disabled`, `flag_off`, `no_features`, `applied`, `timeout`, `error`,
+`invalid_output`, or `cancelled`. `rank.request_less.duration_ms` measures the
+optional path when it starts. Both use the existing metric collector and
+inherited endpoint/traffic labels; inference and hydration metrics remain in
+place.
+
+Signed heavy scores combine with other rankers using the existing weights and
+median fallback. Only the final weighted score is floored at zero, before the
+politics multiplier. Per-model debug scores retain their signed values. The
+zero floor intentionally makes all negative combined scores tie; it is not a
+post-rejection rule. Existing slate cutoffs and empty-slate fallback still apply.
+
 ## Popularity Candidate Cache
 
 Popularity candidates are identical for every user, so the API keeps one shared

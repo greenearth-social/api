@@ -108,7 +108,8 @@ class FeedDebugRecorder:
 
         Missing scores have been filled from the model's median. Contributions
         may be negative or exceed one; weights are normalized when blending.
-        Pre- and post-politics combined scores are captured separately.
+        The combined score is floored at zero before politics; its pre- and
+        post-politics values are captured separately.
         """
         self.model_scores.append((model_name, weight, dict(scores)))
 

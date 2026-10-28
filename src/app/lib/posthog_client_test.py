@@ -11,11 +11,13 @@ from app.lib.posthog_client import (
     EVENT_SCHEMA_VERSION,
     EVENT_SURFACE,
     FAIL_FAST_FLAG,
+    REQUEST_LESS_HEAVY_RANKER_FLAG,
     annotate_event_properties,
     evaluate_feature_flags,
     get_posthog_client,
     init_posthog_client,
     llm_cg_enabled,
+    request_less_heavy_ranker_enabled,
     set_posthog_client,
     track_interaction,
     track_redirect,
@@ -407,6 +409,47 @@ def test_llm_cg_enabled_is_closed_when_evaluation_fails(monkeypatch):
     mock = MagicMock()
     mock.evaluate_flags.side_effect = RuntimeError("quota")
     assert llm_cg_enabled(mock, USER_DID) is False
+
+
+@pytest.mark.parametrize("value", [True, False, "true", "variant", "", 1, 0, None])
+def test_request_less_heavy_ranker_requires_boolean_true(value):
+    client = MagicMock()
+    flags = MagicMock(spec=FeatureFlagEvaluations)
+    flags.get_flag.return_value = value
+    client.evaluate_flags.return_value = flags
+
+    assert request_less_heavy_ranker_enabled(client, USER_DID) is (value is True)
+
+    client.evaluate_flags.assert_called_once_with(
+        USER_DID, flag_keys=[REQUEST_LESS_HEAVY_RANKER_FLAG]
+    )
+    flags.get_flag.assert_called_once_with("request-less-heavy-ranker")
+
+
+def test_request_less_heavy_ranker_is_disabled_without_posthog(monkeypatch):
+    monkeypatch.setenv("GE_LLM_CG_OPEN", "true")
+
+    assert request_less_heavy_ranker_enabled(None, USER_DID) is False
+
+
+def test_request_less_heavy_ranker_is_disabled_without_flag_snapshot():
+    client = MagicMock()
+    client.evaluate_flags.return_value = None
+
+    assert request_less_heavy_ranker_enabled(client, USER_DID) is False
+
+
+@pytest.mark.parametrize("failure_source", ["evaluation", "access"])
+def test_request_less_heavy_ranker_is_disabled_when_flag_lookup_fails(failure_source):
+    client = MagicMock()
+    flags = MagicMock(spec=FeatureFlagEvaluations)
+    client.evaluate_flags.return_value = flags
+    if failure_source == "evaluation":
+        client.evaluate_flags.side_effect = RuntimeError("PostHog unavailable")
+    else:
+        flags.get_flag.side_effect = RuntimeError("Cannot access flag")
+
+    assert request_less_heavy_ranker_enabled(client, USER_DID) is False
 
 
 def test_annotate_stamps_endpoint_only_on_a_request_path():
