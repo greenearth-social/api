@@ -80,6 +80,7 @@ from ..lib.posthog_client import (
     track_session,
 )
 from ..lib.request_context import set_traffic
+from ..lib.request_less_history import get_request_less_history_service
 from ..lib.slate_pipeline import (
     feed_request_timeout_sec,
     record_render_metrics,
@@ -835,6 +836,12 @@ def _spawn_background(coro) -> asyncio.Task:
     return task
 
 
+async def drain_background_tasks() -> None:
+    """Finish background producers before their shared clients and services close."""
+    while _background_tasks:
+        await asyncio.gather(*list(_background_tasks), return_exceptions=True)
+
+
 async def user_exclusions(
     db,
     user_did: str,
@@ -1241,6 +1248,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
     buckets so they can be excluded from future feed generations -- but only for
     slate feeds and feeds whose config has ``exclude_seen_posts`` enabled. The raw
     interaction is always stored regardless.
+
+    Real ``requestLess`` items also update the user's hydrated feedback history.
     """
     # Seen URIs collected per user so we can record them with a single write
     # per user after the per-interaction loop. Keyed by (did, load_test) so a
@@ -1248,6 +1257,7 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
     # bucket instead of polluting their real exclusion data.
     seen_by_user: dict[tuple[str, bool], list[str]] = {}
     post_seen_users: set[str] = set()
+    request_less_by_user: dict[str, dict[str, datetime]] = {}
 
     # Handles for the PostHog identity properties, memoized so a batch of
     # interactions from one user costs one Firestore read rather than one per
@@ -1315,6 +1325,10 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
             feed_generated_at=datetime.fromtimestamp(payload.iat, tz=UTC),
             load_test=payload.lt,
         )
+        if event == "requestLess" and ix.item and not payload.lt:
+            # Feedback recency comes from receipt time, not feed generation time.
+            items = request_less_by_user.setdefault(payload.did, {})
+            items[ix.item] = max(items.get(ix.item, doc.created_at), doc.created_at)
         try:
             await record_interaction(db, doc)
         except Exception:
@@ -1337,6 +1351,14 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
                 logger.exception(
                     "Failed to track PostHog interaction '%s' for user '%s'", event, payload.did
                 )
+
+    history_service = get_request_less_history_service()
+    if history_service is not None:
+        for did, items in request_less_by_user.items():
+            try:
+                await history_service.record(did, items)
+            except Exception:
+                logger.exception("Failed to record requestLess history for user '%s'", did)
 
     for (did, load_test), uris in seen_by_user.items():
         try:

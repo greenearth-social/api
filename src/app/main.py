@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import uuid
@@ -67,6 +68,11 @@ from .lib.request_context import (
     reset_request_id,
     set_endpoint,
     set_request_id,
+)
+from .lib.request_less_history import (
+    HYDRATION_TIMEOUT_SECONDS,
+    RequestLessHistoryService,
+    set_request_less_history_service,
 )
 from .lib.user_history_cache import (
     FirestoreUserHistoryCache,
@@ -183,6 +189,19 @@ async def lifespan(app: FastAPI):
     set_followed_users_cache(app.state.followed_users_cache)
     app.state.user_history_cache = FirestoreUserHistoryCache(app.state.firestore)
     set_user_history_cache(app.state.user_history_cache)
+    # Retry accounting belongs to the request less  history service, so override
+    # the automatic ES retry behavior
+    app.state.request_less_history = RequestLessHistoryService(
+        app.state.firestore,
+        SlowQueryLoggingES(
+            es.options(
+                max_retries=0,
+                retry_on_timeout=False,
+                request_timeout=HYDRATION_TIMEOUT_SECONDS,
+            )
+        ),
+    )
+    set_request_less_history_service(app.state.request_less_history)
     set_llm_query_vector_db(app.state.firestore)
     try:
         init_firebase_auth()
@@ -197,6 +216,19 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Finish scheduled request less hydration tasks before
+        # stopping the history service. Bound unrelated background writes too.
+        try:
+            async with asyncio.timeout(10.0):
+                await xrpc.drain_background_tasks()
+        except TimeoutError:
+            logger.warning("Timed out draining request background tasks")
+        try:
+            await app.state.request_less_history.drain()
+        except Exception:
+            logger.warning("Failed to drain requestLess history hydration", exc_info=True)
+        finally:
+            set_request_less_history_service(None)
         # Do not carry a prior into a later lifespan in the same process (tests
         # can start the app repeatedly with different artifact configurations).
         set_average_user_embedding(None)

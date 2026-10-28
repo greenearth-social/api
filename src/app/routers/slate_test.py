@@ -935,6 +935,29 @@ class TestInteractions:
         rec.assert_called_once()
         assert [ix.item for ix in rec.call_args[0][1]] == ["at://p/1", "at://p/2", "at://p/3"]
 
+    def test_request_less_uses_shared_history_recorder(self):
+        from ..lib.feed_context import FeedContextPayload, encode_feed_context
+
+        token = encode_feed_context(FeedContextPayload(
+            did=USER_DID, feed=FEED_NAME, rid="feedback-request", iat=1730000000,
+        ))
+        service = MagicMock(record=AsyncMock())
+        with (
+            patch("app.routers.xrpc.get_request_less_history_service", return_value=service),
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as raw,
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            resp = self._post([{
+                "item": "at://post/less", "event": "requestLess", "feedContext": token,
+            }])
+
+        assert resp.json() == {"accepted": 1, "dropped": 0}
+        raw.assert_awaited_once()
+        assert raw.await_args is not None
+        service.record.assert_awaited_once_with(
+            USER_DID, {"at://post/less": raw.await_args.args[1].created_at}
+        )
+
     def test_seen_slate_items_are_excluded_from_later_slates(self):
         gen_patch, lookup_patch, _ = _fake_generators(popularity=_candidates("pop", [0.9, 0.5]))
         with gen_patch, lookup_patch:
