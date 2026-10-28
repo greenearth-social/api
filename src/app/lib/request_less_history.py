@@ -390,7 +390,7 @@ class RequestLessHistoryService:
                 # must perform its own search, while retaining metric context.
                 async with request_cache_scope(), asyncio.timeout(HYDRATION_TIMEOUT_SECONDS):
                     rows = await fetch_post_embeddings_and_metadata(
-                        self._es, [claim.at_uri for claim in claims], index="posts,replies"
+                        self._es, [claim.at_uri for claim in claims], index="posts"
                     )
                 by_uri = {uri: (embedding, author, likes) for uri, embedding, author, likes in rows}
                 # Classify each post separately so missing or malformed rows do
