@@ -1,11 +1,8 @@
-"""Lightweight API-key schemas, re-exported by app.documents.
-
-Kept separate so key administration does not initialize feed generators.
-"""
+"""Lightweight API-key schema, re-exported by app.documents for compatibility."""
 
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def _utcnow() -> datetime:
@@ -26,6 +23,10 @@ class ApiKeyDocument(BaseModel):
     is_admin: bool = Field(
         default=False, description="Whether this key may access /admin/* endpoints"
     )
+    scopes: list[str] = Field(
+        default_factory=lambda: ["default"],
+        description="Named capabilities granted to this key; always includes default",
+    )
     created_at: datetime = Field(default_factory=_utcnow, description="When the key was created")
     last_used_at: datetime = Field(
         default_factory=_utcnow, description="Last time this key was used for an API request"
@@ -36,3 +37,11 @@ class ApiKeyDocument(BaseModel):
     monthly_period: str = Field(
         default="", description="YYYY-MM of the current call counters; resets each month"
     )
+
+    @field_validator("scopes")
+    @classmethod
+    def include_default_scope(cls, scopes: list[str]) -> list[str]:
+        # Explicit scope lists get the same baseline access as legacy keys.
+        if "default" not in scopes:
+            return ["default", *scopes]
+        return scopes

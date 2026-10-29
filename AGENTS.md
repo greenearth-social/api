@@ -6,7 +6,7 @@
 - Project is `greenearth-471522`; stage database is `greenearth-stage`; production database is `greenearth-prod`. `API_KEYS_COLLECTION = "api_keys"` is already fixed; never invent a collection-selection flag.
 - No separate human-approval step is required for an authorized operation. Verify the command's reported database matches the requested environment.
 - Never bypass the CLI with ad hoc Firestore write scripts or alter environment settings to evade validation. Resolve stale configuration first.
-- One active key per normalized email/database. Use `rotate KEY_ID` to replace it; never generate additional keys for the same owner. Rotation preserves privileges and immediately invalidates the old key.
+- One active key per normalized email/database. Use `rotate KEY_ID` to replace it; never generate additional keys for the same owner. Rotation preserves admin status and all scopes and immediately invalidates the old key.
 - Plaintext keys are displayed once. Do not commit, persist in logs, attach to issues, or include in test fixtures. On verification failure, a key may already have been created: inspect metadata before retrying. Lost plaintext requires explicit rotation.
 - Duplicate cleanup defaults to dry-run. Use `deduplicate --apply` only within authorized cleanup scope; it revokes redundant keys and preserves their records. Ambiguous usage or privileges requires `--keep KEY_ID`.
 - `(default)` is not used by deployed APIs. Only `--legacy-default` explicitly permits inspection/revocation/cleanup there; never issue keys there or copy its records to prod automatically.

@@ -56,3 +56,6 @@ Files: README.md, AGENTS.md, docs/internal/api-key-issuance.md (tracked in API r
 - Post-cleanup verification: prod has 8 active keys, stage has 8, default has 0; all active owners unique and owner indexes consistent. Vardon's existing production key still returns HTTP 200.
 - Final validation: full suite with local key emulator enabled: 2328 passed, 4 skipped (unrelated opt-in emulator tests), 159 existing warnings. Full pyright: 0 errors/warnings. Ruff on changed Python files and git diff --check pass.
 - Code is kept on the requested local branch; no deployment, merge, or push is part of this task.
+
+- PR preparation: merged current main and resolved overlapping API-key scope changes. Preserved scope defaults/validation, repeatable --scope, scoped CLI output, and scope-specific regressions; added emulator coverage for scope-preserving rotation and explicit retention on conflicting scopes. No further cloud mutations occurred.
+- Validation after main integration: 2561 passed, 4 skipped; full pyright reports 0 errors/warnings; Ruff on affected files and diff-versus-main whitespace checks pass.

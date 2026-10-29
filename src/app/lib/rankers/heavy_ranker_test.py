@@ -18,10 +18,6 @@ def _time(hour: int) -> str:
     return datetime(2026, 1, 1, hour, tzinfo=UTC).isoformat()
 
 
-def test_score_bounds_match_inference_service_output_range():
-    assert HeavyRanker(name="heavy_ranker", history_mode="actual").score_bounds == (0.0, 1.0)
-
-
 def test_empty_history_variant_is_registered_with_empty_history_mode():
     ranker = get_ranker("heavy_ranker_empty_history")
 

@@ -165,14 +165,14 @@ async def test_verification_failure_reports_created_key_without_retry(monkeypatc
 
     from app.lib import api_keys
 
-    doc = Mock(key_id="test0001", email="alice@example.com", is_admin=False)
+    doc = Mock(key_id="test0001", email="alice@example.com", is_admin=False, scopes=["default"])
     create = AsyncMock(return_value=(doc, "gea_test-secret"))
     db = Mock()
     monkeypatch.setattr(firestore, "AsyncClient", Mock(return_value=db))
     monkeypatch.setattr(api_keys, "create_api_key", create)
     monkeypatch.setattr(apikeys, "verify_key", AsyncMock(return_value=False))
     result = await apikeys.execute(
-        argparse.Namespace(command="generate", email="alice@example.com", admin=False),
+        argparse.Namespace(command="generate", email="alice@example.com", admin=False, scopes=None),
         apikeys.Destination("prod", "greenearth-prod", "https://api.greenearth.social"),
     )
     output = capsys.readouterr()
@@ -256,3 +256,26 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     assert result.returncode == 1
     assert "pipenv sync --dev" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_cleanup_requires_explicit_retention_for_different_scopes():
+    from datetime import UTC, datetime, timedelta
+
+    from app.api_key_documents import ApiKeyDocument
+    from app.lib.api_keys import choose_retained_key
+
+    now = datetime.now(UTC)
+    records = [
+        ApiKeyDocument(
+            key_id=k,
+            key_hash="hash",
+            email="alice@example.com",
+            scopes=scopes,
+            created_at=now - timedelta(days=2),
+            last_used_at=now,
+            monthly_call_count=1,
+        )
+        for k, scopes in [("plain001", []), ("scoped01", ["user-config"])]
+    ]
+    with pytest.raises(ValueError, match="different privileges"):
+        choose_retained_key(records)

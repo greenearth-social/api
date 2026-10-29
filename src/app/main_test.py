@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI, Request
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from . import main
@@ -208,3 +209,55 @@ def test_lifespan_loads_prior_once_and_keeps_api_available_on_failure(
         load.assert_called_once_with(str(uri))
 
     assert prior_module.get_average_user_embedding() is None
+
+
+def _api_routes(routes):
+    """Every APIRoute, including those inside included routers.
+
+    FastAPI keeps an included router as a wrapper route rather than flattening
+    it into ``app.routes``; walk it the same way ``main._match_route`` does.
+    """
+    for route in routes:
+        if isinstance(route, APIRoute):
+            yield route
+            continue
+        sub = getattr(route, "routes", None)
+        if sub is None:
+            sub = getattr(getattr(route, "original_router", None), "routes", None)
+        if sub is not None:
+            yield from _api_routes(sub)
+
+
+def _required_scopes(dependant) -> set[str]:
+    """Named scopes enforced anywhere in a route's dependency tree."""
+    scopes: set[str] = set()
+    for dependency in dependant.dependencies:
+        scope = getattr(dependency.call, "required_scope", None)
+        if scope is not None:
+            scopes.add(scope)
+        scopes |= _required_scopes(dependency)
+    return scopes
+
+
+def test_scoped_endpoints_document_their_scope():
+    """Every endpoint that requires a non-default scope says so in its docs.
+
+    A partner reading /docs must be able to tell which scope their key needs,
+    so both the endpoint description and its documented 403 name the scope.
+    """
+    spec = app.openapi()
+    scoped = []
+    for route in _api_routes(app.routes):
+        for scope in _required_scopes(route.dependant) - {"default"}:
+            for method in route.methods or ():
+                op = spec["paths"][route.path_format][method.lower()]
+                scoped.append(f"{method} {route.path_format}")
+                assert f"`{scope}`" in op.get("description", ""), (method, route.path)
+                assert scope in op["responses"]["403"]["description"], (method, route.path)
+                assert "401" in op["responses"], (method, route.path)
+
+    # The check only means something if it found the scoped endpoints.
+    assert "POST /slate/generate" in scoped
+    assert "POST /slate/interactions" in scoped
+    assert "GET /users/{user_did}/feeds/preferences" in scoped
+    assert "PATCH /users/{user_did}/feeds/preferences/{feed_name}" in scoped

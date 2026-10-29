@@ -126,3 +126,13 @@ async def test_bad_keep_id_or_ambiguous_owner_leaves_every_record_unchanged(db):
     with pytest.raises(ValueError):
         await keys.reconcile_api_keys(db, apply=True, keep_ids=["missing1"])
     assert all(d.is_active for d in await keys.list_api_keys(db))
+
+
+async def test_scoped_rotation_preserves_all_capabilities(db):
+    original, old_key = await keys.create_api_key(
+        db, "scoped@example.com", is_admin=True, scopes=["user-config", "reports"]
+    )
+    replacement, new_key = await keys.rotate_api_key(db, original.key_id)
+    assert replacement.scopes == ["default", "user-config", "reports"]
+    assert await keys.authenticate_api_key(db, old_key) is None
+    assert (await keys.authenticate_api_key(db, new_key)).scopes == replacement.scopes

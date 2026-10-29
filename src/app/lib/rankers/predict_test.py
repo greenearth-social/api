@@ -15,6 +15,7 @@ from ...models import (
 from ..feed_debug import FeedDebugRecorder, feed_debug_scope
 from . import predict as predict_module
 from .base import RankerExecutionError, RankerResult
+from .candidate_score import CandidateScoreRanker
 
 
 class StubRanker:
@@ -23,23 +24,17 @@ class StubRanker:
     def __init__(
         self,
         name: str,
-        bounds: tuple[float, float],
         scores: dict[str, float],
         *,
         include_missing: bool = True,
     ):
         self._name = name
-        self._bounds = bounds
         self._scores = scores
         self._include_missing = include_missing
 
     @property
     def name(self) -> str:
         return self._name
-
-    @property
-    def score_bounds(self) -> tuple[float, float]:
-        return self._bounds
 
     async def predict(self, es, user_did, candidates):
         rankings = [
@@ -60,10 +55,6 @@ class ExplodingRanker:
     def name(self) -> str:
         return "exploding"
 
-    @property
-    def score_bounds(self) -> tuple[float, float]:
-        return (0.0, 1.0)
-
     async def predict(self, es, user_did, candidates):
         raise RuntimeError("downstream boom")
 
@@ -77,10 +68,6 @@ class HangingRanker:
     @property
     def name(self) -> str:
         return self._name
-
-    @property
-    def score_bounds(self) -> tuple[float, float]:
-        return (0.0, 1.0)
 
     async def predict(self, es, user_did, candidates):
         await asyncio.sleep(9999)
@@ -103,10 +90,6 @@ class TimingOutRanker:
     @property
     def name(self) -> str:
         return self._name
-
-    @property
-    def score_bounds(self) -> tuple[float, float]:
-        return (0.0, 1.0)
 
     async def predict(self, es, user_did, candidates):
         raise TimeoutError("simulated timeout")
@@ -156,20 +139,16 @@ def test_run_predict_raises_for_unknown_model(monkeypatch):
         )
 
 
-def test_run_predict_normalizes_and_combines_with_weights(monkeypatch):
-    """Each model's raw scores are linearly mapped from its `score_bounds` into
-    [0, 1], then combined via a weighted average (weights normalized to sum
-    to 1)."""
+def test_run_predict_combines_supplied_scores_without_rescaling_or_clipping(monkeypatch):
+    """Only weights are normalized; signed and above-one scores pass through."""
     candidates = [
         CandidatePost(at_uri="at://post/a", score=0.5),
         CandidatePost(at_uri="at://post/b", score=0.5),
     ]
 
-    # Model "x": bounds [0, 1] -> raw 1.0 normalizes to 1.0, raw 0.0 to 0.0
-    # Model "y": bounds [-10, 10] -> raw 0.0 normalizes to 0.5 for both
     rankers = {
-        "x": StubRanker("x", (0.0, 1.0), {"at://post/a": 1.0, "at://post/b": 0.0}),
-        "y": StubRanker("y", (-10.0, 10.0), {"at://post/a": 0.0, "at://post/b": 0.0}),
+        "x": StubRanker("x", {"at://post/a": 2.0, "at://post/b": -1.0}),
+        "y": StubRanker("y", {"at://post/a": 0.5, "at://post/b": 0.5}),
     }
     monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
 
@@ -186,11 +165,88 @@ def test_run_predict_normalizes_and_combines_with_weights(monkeypatch):
         )
     )
 
-    # combined(a) = (3/4)*1.0 + (1/4)*0.5 = 0.875
-    # combined(b) = (3/4)*0.0 + (1/4)*0.5 = 0.125
+    # combined(a) = (3/4)*2.0 + (1/4)*0.5 = 1.625
+    # combined(b) = (3/4)*-1.0 + (1/4)*0.5 = -0.625
     assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
-        ("at://post/a", 1, pytest.approx(0.875)),
-        ("at://post/b", 2, pytest.approx(0.125)),
+        ("at://post/a", 1, pytest.approx(1.625)),
+        ("at://post/b", 2, pytest.approx(-0.625)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("purpose", "expected"),
+    [
+        (0.0, [("a", 0.8), ("b", 0.2)]),
+        (0.5, [("a", 0.55), ("c", 0.5), ("b", 0.45)]),
+        (1.0, [("b", 0.7), ("c", 0.5), ("a", 0.3)]),
+    ],
+)
+def test_run_predict_preserves_unit_range_heavy_and_perspective_blend(
+    monkeypatch, purpose, expected
+):
+    """Production model scores keep their scale, weights, and median fallback."""
+    candidates = [CandidatePost(at_uri=f"at://post/{suffix}") for suffix in "abc"]
+    rankers = {
+        "heavy_ranker": StubRanker("heavy_ranker", {"at://post/a": 0.8, "at://post/b": 0.2}),
+        "perspective": StubRanker(
+            "perspective", {"at://post/a": 0.3, "at://post/b": 0.7, "at://post/c": 0.5}
+        ),
+    }
+    monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
+
+    result = asyncio.run(
+        predict_module.run_predict(
+            _request(
+                models=[
+                    RankModelSpec(name="heavy_ranker", weight=1.0 - purpose),
+                    RankModelSpec(name="perspective", weight=purpose),
+                ],
+                candidates=candidates,
+            ),
+            es=object(),
+        )
+    )
+
+    assert [(r.at_uri, r.rank_score) for r in result.rankings] == [
+        (f"at://post/{suffix}", pytest.approx(score)) for suffix, score in expected
+    ]
+
+
+def test_run_predict_uses_median_of_candidate_score_normalized_outputs(monkeypatch):
+    candidates = [
+        CandidatePost(at_uri="at://post/a", score=10.0),
+        CandidatePost(at_uri="at://post/b", score=30.0),
+        CandidatePost(at_uri="at://post/c", score=90.0),
+        CandidatePost(at_uri="at://post/missing", score=None),
+    ]
+    rankers = {
+        "candidate_score": CandidateScoreRanker(),
+        "other": StubRanker(
+            "other", {candidate.at_uri: 0.6 for candidate in candidates if candidate.at_uri}
+        ),
+    }
+    monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
+
+    result = asyncio.run(
+        predict_module.run_predict(
+            _request(
+                models=[
+                    RankModelSpec(name="candidate_score", weight=1.0),
+                    RankModelSpec(name="other", weight=1.0),
+                ],
+                candidates=candidates,
+            ),
+            es=object(),
+        )
+    )
+
+    # The candidate-score outputs are 0, .25, and 1. Their median (.25)
+    # fills the missing contribution, since the other model scored that URI.
+    assert [(r.at_uri, r.rank_score) for r in result.rankings] == [
+        ("at://post/c", pytest.approx(0.8)),
+        ("at://post/b", pytest.approx(0.425)),
+        ("at://post/missing", pytest.approx(0.425)),
+        ("at://post/a", pytest.approx(0.3)),
     ]
 
 
@@ -200,10 +256,9 @@ def test_run_predict_keeps_zero_weight_model_transparency_only(monkeypatch):
         CandidatePost(at_uri="at://post/inactive-only"),
     ]
     rankers = {
-        "active": StubRanker("active", (0.0, 1.0), {"at://post/active": 0.8}),
+        "active": StubRanker("active", {"at://post/active": 0.8}),
         "inactive": StubRanker(
             "inactive",
-            (0.0, 1.0),
             {"at://post/active": 0.1, "at://post/inactive-only": 1.0},
         ),
     }
@@ -238,7 +293,7 @@ def test_run_predict_keeps_zero_weight_model_transparency_only(monkeypatch):
 
 
 def test_run_predict_ignores_failure_from_zero_weight_model(monkeypatch):
-    active = StubRanker("active", (0.0, 1.0), {"at://post/1": 0.8})
+    active = StubRanker("active", {"at://post/1": 0.8})
     rankers = {"active": active, "inactive": ExplodingRanker()}
     monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
 
@@ -299,7 +354,6 @@ def test_run_predict_applies_politics_multiplier_after_combining_models(
     ]
     ranker = StubRanker(
         "x",
-        (0.0, 1.0),
         {
             "at://post/non-political": 0.4,
             "at://post/political": 0.3,
@@ -331,7 +385,7 @@ def test_run_predict_drops_candidates_with_no_valid_scores(monkeypatch):
         CandidatePost(at_uri="at://post/b", score=0.5),
     ]
     rankers = {
-        "x": StubRanker("x", (0.0, 1.0), {"at://post/a": 1.0}),
+        "x": StubRanker("x", {"at://post/a": 1.0}),
     }
     monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
 
@@ -347,7 +401,13 @@ def test_run_predict_drops_candidates_with_no_valid_scores(monkeypatch):
     ]
 
 
-def test_run_predict_uses_ranker_median_for_explicit_missing_score(monkeypatch):
+@pytest.mark.parametrize(
+    ("score_a", "score_c", "expected"),
+    [(10.0, 0.0, [7.5, 3.75, 0.0]), (-2.0, -6.0, [-1.5, -3.0, -4.5])],
+)
+def test_run_predict_uses_ranker_median_for_explicit_missing_score(
+    monkeypatch, score_a, score_c, expected
+):
     """A valid candidate missing one ranker's score gets that ranker's median score."""
     candidates = [
         CandidatePost(at_uri="at://post/a", score=0.5),
@@ -355,10 +415,9 @@ def test_run_predict_uses_ranker_median_for_explicit_missing_score(monkeypatch):
         CandidatePost(at_uri="at://post/c", score=0.5),
     ]
     rankers = {
-        "x": StubRanker("x", (0.0, 10.0), {"at://post/a": 10.0, "at://post/c": 0.0}),
+        "x": StubRanker("x", {"at://post/a": score_a, "at://post/c": score_c}),
         "y": StubRanker(
             "y",
-            (-1.0, 1.0),
             {"at://post/a": 0.0, "at://post/b": 0.0, "at://post/c": 0.0},
         ),
     }
@@ -378,13 +437,19 @@ def test_run_predict_uses_ranker_median_for_explicit_missing_score(monkeypatch):
     )
 
     assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
-        ("at://post/a", 1, pytest.approx(0.875)),
-        ("at://post/b", 2, pytest.approx(0.5)),
-        ("at://post/c", 3, pytest.approx(0.125)),
+        ("at://post/a", 1, pytest.approx(expected[0])),
+        ("at://post/b", 2, pytest.approx(expected[1])),
+        ("at://post/c", 3, pytest.approx(expected[2])),
     ]
 
 
-def test_run_predict_uses_ranker_median_for_omitted_score(monkeypatch):
+@pytest.mark.parametrize(
+    ("score_a", "score_c", "expected"),
+    [(10.0, 0.0, [7.5, 3.75, 0.0]), (-2.0, -6.0, [-1.5, -3.0, -4.5])],
+)
+def test_run_predict_uses_ranker_median_for_omitted_score(
+    monkeypatch, score_a, score_c, expected
+):
     """Median fallback also applies when a ranker omits a still-valid candidate."""
     candidates = [
         CandidatePost(at_uri="at://post/a", score=0.5),
@@ -394,13 +459,11 @@ def test_run_predict_uses_ranker_median_for_omitted_score(monkeypatch):
     rankers = {
         "x": StubRanker(
             "x",
-            (0.0, 10.0),
-            {"at://post/a": 10.0, "at://post/c": 0.0},
+            {"at://post/a": score_a, "at://post/c": score_c},
             include_missing=False,
         ),
         "y": StubRanker(
             "y",
-            (-1.0, 1.0),
             {"at://post/a": 0.0, "at://post/b": 0.0, "at://post/c": 0.0},
         ),
     }
@@ -420,9 +483,9 @@ def test_run_predict_uses_ranker_median_for_omitted_score(monkeypatch):
     )
 
     assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
-        ("at://post/a", 1, pytest.approx(0.875)),
-        ("at://post/b", 2, pytest.approx(0.5)),
-        ("at://post/c", 3, pytest.approx(0.125)),
+        ("at://post/a", 1, pytest.approx(expected[0])),
+        ("at://post/b", 2, pytest.approx(expected[1])),
+        ("at://post/c", 3, pytest.approx(expected[2])),
     ]
 
 
@@ -433,8 +496,8 @@ def test_run_predict_ignores_ranker_with_no_valid_scores(monkeypatch):
         CandidatePost(at_uri="at://post/b", score=0.5),
     ]
     rankers = {
-        "x": StubRanker("x", (0.0, 1.0), {"at://post/a": 1.0, "at://post/b": 0.0}),
-        "empty": StubRanker("empty", (0.0, 1.0), {}),
+        "x": StubRanker("x", {"at://post/a": 1.0, "at://post/b": 0.0}),
+        "empty": StubRanker("empty", {}),
     }
     monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
 
@@ -466,7 +529,7 @@ def test_run_predict_excludes_timed_out_ranker_without_losing_fast_ranker(monkey
         CandidatePost(at_uri="at://post/b", score=0.5),
     ]
     rankers = {
-        "x": StubRanker("x", (0.0, 1.0), {"at://post/a": 1.0, "at://post/b": 0.0}),
+        "x": StubRanker("x", {"at://post/a": 1.0, "at://post/b": 0.0}),
         "slow": TimingOutRanker("slow"),
     }
     monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
@@ -516,8 +579,8 @@ def test_run_predict_records_empty_model_scores_for_empty_ranker(monkeypatch):
         CandidatePost(at_uri="at://post/b", score=0.5),
     ]
     rankers = {
-        "x": StubRanker("x", (0.0, 1.0), {"at://post/a": 1.0, "at://post/b": 0.0}),
-        "empty": StubRanker("empty", (0.0, 1.0), {}),
+        "x": StubRanker("x", {"at://post/a": 1.0, "at://post/b": 0.0}),
+        "empty": StubRanker("empty", {}),
     }
     monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
 
@@ -548,7 +611,7 @@ def test_run_predict_returns_empty_when_no_ranker_has_valid_scores(monkeypatch):
         CandidatePost(at_uri="at://post/b", score=0.5),
     ]
     rankers = {
-        "empty": StubRanker("empty", (0.0, 1.0), {}),
+        "empty": StubRanker("empty", {}),
     }
     monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
 
@@ -568,7 +631,7 @@ def test_run_predict_treats_zero_scores_as_valid(monkeypatch):
         CandidatePost(at_uri="at://post/b", score=0.5),
     ]
     rankers = {
-        "x": StubRanker("x", (-1.0, 1.0), {"at://post/a": 0.0}),
+        "x": StubRanker("x", {"at://post/a": 0.0}),
     }
     monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
 
@@ -580,13 +643,13 @@ def test_run_predict_treats_zero_scores_as_valid(monkeypatch):
     )
 
     assert [(r.at_uri, r.rank, r.rank_score) for r in result.rankings] == [
-        ("at://post/a", 1, pytest.approx(0.5)),
+        ("at://post/a", 1, pytest.approx(0.0)),
     ]
 
 
-def test_run_predict_records_normalized_model_scores_and_weight(monkeypatch):
+def test_run_predict_records_supplied_model_scores_and_weight(monkeypatch):
     """`record_model_scores` is invoked once per configured model with its
-    weight and *normalized* (not raw) per-uri scores — and the final combined
+    weight and supplied per-uri scores — and the final combined
     score is not separately recorded there (it's captured via `record_ranking`
     by the caller)."""
     candidates = [
@@ -594,8 +657,8 @@ def test_run_predict_records_normalized_model_scores_and_weight(monkeypatch):
         CandidatePost(at_uri="at://post/b", score=0.5),
     ]
     rankers = {
-        "x": StubRanker("x", (0.0, 1.0), {"at://post/a": 1.0, "at://post/b": 0.0}),
-        "y": StubRanker("y", (-1.0, 1.0), {"at://post/a": 0.5, "at://post/b": -0.5}),
+        "x": StubRanker("x", {"at://post/a": 2.0, "at://post/b": 0.0}),
+        "y": StubRanker("y", {"at://post/a": 0.5, "at://post/b": -0.5}),
     }
     monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
 
@@ -615,8 +678,8 @@ def test_run_predict_records_normalized_model_scores_and_weight(monkeypatch):
         )
 
     assert rec.model_scores == [
-        ("x", 2.0, {"at://post/a": pytest.approx(1.0), "at://post/b": pytest.approx(0.0)}),
-        ("y", 1.0, {"at://post/a": pytest.approx(0.75), "at://post/b": pytest.approx(0.25)}),
+        ("x", 2.0, {"at://post/a": pytest.approx(2.0), "at://post/b": pytest.approx(0.0)}),
+        ("y", 1.0, {"at://post/a": pytest.approx(0.5), "at://post/b": pytest.approx(-0.5)}),
     ]
 
 
@@ -628,7 +691,6 @@ def test_run_predict_records_politics_score_adjustments(monkeypatch):
     ]
     ranker = StubRanker(
         "x",
-        (0.0, 1.0),
         {
             "at://post/missing": 0.4,
             "at://post/partial": 0.3,
@@ -668,7 +730,7 @@ def test_run_predict_preserves_duplicate_candidate_count(monkeypatch):
         CandidatePost(at_uri="at://post/b", score=0.4),
     ]
     rankers = {
-        "x": StubRanker("x", (0.0, 1.0), {"at://post/a": 0.5, "at://post/b": 0.5}),
+        "x": StubRanker("x", {"at://post/a": 0.5, "at://post/b": 0.5}),
     }
     monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
 

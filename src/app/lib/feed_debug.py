@@ -60,7 +60,7 @@ class FeedDebugRecorder:
         self.final_candidates: list["CandidatePost"] = []
         self.user_features: list[tuple[str, list[str], int]] = []
         self.ranking: "RankPredictResult | None" = None
-        # (model_name, weight, {at_uri: normalized_score}) per configured rank
+        # (model_name, weight, {at_uri: score}) per configured rank
         # model, in the order they were run; populated only when ranking runs.
         self.model_scores: list[tuple[str, float, dict[str, float]]] = []
         self.politics_setting: float | None = None
@@ -104,11 +104,11 @@ class FeedDebugRecorder:
         self.ranking = ranking
 
     def record_model_scores(self, model_name: str, weight: float, scores: dict[str, float]) -> None:
-        """Record one rank model's normalized per-candidate scores and weight.
+        """Record one rank model's per-candidate blend contributions and weight.
 
-        Captures the score *after* normalization to [0, 1] (the form the
-        scores are in when combined), not the model's raw output. The exact
-        pre- and post-politics combined scores are captured separately.
+        Missing scores have been filled from the model's median. Contributions
+        may be negative or exceed one; weights are normalized when blending.
+        Pre- and post-politics combined scores are captured separately.
         """
         self.model_scores.append((model_name, weight, dict(scores)))
 

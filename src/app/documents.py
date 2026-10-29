@@ -65,6 +65,13 @@ class FeedPreferencesDocument(BaseModel):
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class LlmPromptStateDocument(BaseModel):
+    """Explicit activation state; an absent state keeps legacy newest-vector behavior."""
+
+    active_prompt_key: str | None = None
+    revision: int = Field(default=0, ge=0)
+
+
 class UserDocument(BaseModel):
     """A registered feed user.
 
@@ -72,6 +79,7 @@ class UserDocument(BaseModel):
     """
 
     user_did: str = Field(..., description="AT Protocol DID of the user (also the document ID)")
+    llm_prompt_state: LlmPromptStateDocument | None = None
     username: str | None = Field(
         default=None,
         description="AT Protocol handle (e.g. foobar.bsky.app)",
@@ -174,9 +182,21 @@ class FeedCacheDocument(BaseModel):
     feed_name: str | None = None
     generated_at: datetime | None = None
     api_release_sha: str | None = None
-    mode: Literal["served", "preview", "accepted"] = Field(
+    mode: Literal["served", "preview", "accepted", "api"] = Field(
         default="served",
-        description="Whether this cache entry is served, hypothetical, or accepted for serving.",
+        description="Whether this cache entry is served, hypothetical, accepted for serving, "
+        "or a slate API session (POST /slate/generate).",
+    )
+    api_key_id: str | None = Field(
+        default=None,
+        description="key_id of the API key that created a slate API session. A cursor is "
+        "only honoured for the key that created it.",
+    )
+    served_from: Literal["generated", "last_load", "preview"] | None = Field(
+        default=None,
+        description="Slate API sessions: whether the slate was generated for this request, "
+        "is the user's last feed load re-shown as a preview, or is a preview handed to the "
+        "feed load after the user saved their settings.",
     )
     preference_patch: FeedPreferencesDocument | None = Field(
         default=None,
@@ -195,6 +215,26 @@ class FeedCacheDocument(BaseModel):
         description="True when this cache entry was created by a load-test session. The cache "
         "collection is keyed by request_id (not user), so this tag is how "
         "scripts/load_test/cleanup.py finds and removes test-created entries.",
+    )
+
+
+class StoredSlateDocument(BaseModel):
+    """A slate API slate kept beyond its paging session.
+
+    Stored at ``users/{doc}/slate_api_slates/{key_id}:{feed_name}:{kind}``, where
+    ``kind`` is ``last_load`` (the user's last feed load, re-shown when a preview
+    has the same settings) or ``preview`` (the most recent preview, handed to the
+    next feed load with the same settings).
+    """
+
+    request_id: str
+    settings_fingerprint: str
+    slate: FeedCacheDocument
+    stored_at: datetime
+    claimed_at: datetime | None = Field(
+        default=None,
+        description="Preview only: when a feed load claimed it. Parallel requests within a "
+        "short grace period share the claim; a later load consumes the preview.",
     )
 
 
@@ -376,17 +416,18 @@ class FeedDebugScoreEntry(BaseModel):
 class FeedDebugModelScoreEntry(BaseModel):
     """One rank model's contribution to the combined ranking.
 
-    Captures the model's normalized (to [0, 1]) per-candidate scores and its
-    configured relative weight — i.e. the inputs to the weighted-average
-    combination — so the pre-politics combined score can be explained. The
-    final politics-adjusted score is captured in ``ranking``.
+    Captures the model's per-candidate blend contributions and configured
+    relative weight so the pre-politics combined score can be explained.
+    Contributions may be negative or exceed one; missing scores use the
+    model's median. The final politics-adjusted score is captured in ``ranking``.
     """
 
     model_name: str = Field(..., description="Name of the rank model, e.g. 'heavy_ranker'")
     weight: float = Field(..., description="Configured relative weight for this model")
     scores: list[FeedDebugScoreEntry] = Field(
         default_factory=list,
-        description="Per-candidate scores after normalization to [0, 1]",
+        description="Per-candidate blend contributions, with missing scores filled "
+        "from the model's median",
     )
 
 
@@ -405,7 +446,7 @@ class FeedDebugPoliticsAdjustment(BaseModel):
         le=2.0,
         description="Per-post multiplier derived from the user setting and topic score",
     )
-    score_before: float = Field(description="Combined normalized score before politics adjustment")
+    score_before: float = Field(description="Combined score before politics adjustment")
     score_after: float = Field(description="Combined score after politics adjustment")
 
 
@@ -493,7 +534,7 @@ class FeedDebugDocument(BaseModel):
     )
     model_scores: list[FeedDebugModelScoreEntry] = Field(
         default_factory=list,
-        description="Per-model normalized ([0, 1]) scores and configured weight, "
+        description="Per-model blend contributions and configured weight, "
         "in the order rank models ran (empty when no ranking ran)",
     )
     politics_setting: float | None = Field(
@@ -578,7 +619,7 @@ class GeneratorDiagnostic(BaseModel):
 
 
 class ModelScoreMeta(BaseModel):
-    """One rank model's normalized score for a single item."""
+    """One rank model's blend contribution for an item; may be negative or exceed one."""
 
     name: str
     weight: float

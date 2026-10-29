@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 from .routers import (
     candidates, diversify, embeddings, feed_transparency, health, llm_query_vectors, rank,
-    redirect, skylight, xrpc,
+    redirect, skylight, slate, user_preferences, xrpc,
 )
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
@@ -278,6 +278,22 @@ A typical integration calls `/candidates/generate`, pipes the result into
 `/rank/predict`, then optionally calls `/diversify` before presenting posts
 to a user.
 
+## Single-call slate generation
+
+`POST /slate/generate` runs the whole pipeline — the same one that serves
+our own Bluesky feeds — in one request, so an integration hosted far from
+us pays one round-trip instead of three. The request body configures every
+stage: which generators to run and how to weight them (including an
+`external` generator for candidates you retrieved yourself), which rank
+models to combine, whether to diversify, and the slate cutoffs. The
+response is one page of ranked posts with their pipeline metadata, a
+`feed_context` token per item for reporting interactions, and a cursor for
+the next page. See the endpoint's own documentation for paging semantics.
+
+Set `preview: true` from a settings UI: a preview re-shows the user's last
+feed load when the settings are unchanged, and after they save, their next
+feed load with the same settings opens on the slate they last previewed.
+
 ## Content search
 
 The **Skylight** endpoints (`/skylight/search` and `/skylight/similar`)
@@ -289,6 +305,13 @@ can be used on their own.
 
 Most endpoints require an `X-API-Key` header.  Use the **Authorize**
 button above to set your key.
+
+Some endpoints also require the key to be granted a named **scope**. The
+endpoints that act on behalf of a specific user, `/slate/generate`,
+`/slate/interactions` and the `/users/{user_did}/…` preference endpoints,
+require the `user-config` scope.
+Each endpoint's description says which scope it needs; a key without it gets
+HTTP 403.
 
 The AT Protocol XRPC endpoints (`/xrpc/…`) use JWT authentication issued
 by the Bluesky AppView and do not require an API key.
@@ -318,6 +341,25 @@ _TAGS = [
             "Rerank an ordered candidate list using Maximal Marginal Relevance "
             "(MMR) to reduce topical redundancy while preserving relevance. "
             "Typically called as the final step after ranking."
+        ),
+    },
+    {
+        "name": "slate",
+        "description": (
+            "The whole ranking pipeline in one call: candidate generation (yours "
+            "and ours, weighted), ranking, diversification and slate cutoffs, "
+            "configured per request and paginated with a cursor. For integrations "
+            "that would otherwise chain `/candidates/generate`, `/rank/predict` "
+            "and `/diversify`. `/slate/interactions` reports what the user did with "
+            "the posts served. Requires an API key with the `user-config` scope."
+        ),
+    },
+    {
+        "name": "user-preferences",
+        "description": (
+            "Read and update a specific user's feed controls on their behalf, with "
+            "the same validation and side effects as the user saving them in "
+            "Settings. Requires an API key with the `user-config` scope."
         ),
     },
     {
@@ -470,7 +512,9 @@ app.include_router(health.router)
 app.include_router(llm_query_vectors.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)
+app.include_router(slate.router)
 app.include_router(redirect.router)
+app.include_router(user_preferences.router)
 app.include_router(xrpc.router)
 
 

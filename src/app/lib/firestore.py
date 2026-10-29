@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 
 from google.cloud.firestore import (  # type: ignore[import-untyped]
     ArrayUnion,
@@ -31,6 +32,7 @@ from ..documents import (
     InteractionDocument,
     LlmQueryVectorDocument,
     RedirectDocument,
+    StoredSlateDocument,
     UserDocument,
 )
 from .feed_cache import FEED_CACHE_COLLECTION
@@ -449,7 +451,12 @@ async def patch_user_feed_preferences(
     feed_name: str,
     patch: FeedPreferencesDocument,
 ) -> FeedPreferencesDocument:
-    """Atomically patch and materialize one feed without replacing siblings."""
+    """Atomically patch and materialize one feed without replacing siblings.
+
+    User and service saves both upsert a missing user and clear the load-test
+    deletion flag. These writes and preview invalidation also happen when the
+    supplied values already match the stored preferences.
+    """
     ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     accepted_ref = ref.collection(ACCEPTED_FEED_SLATES_COLLECTION).document(feed_name)
     transaction = db.transaction()
@@ -550,6 +557,7 @@ async def accept_feed_preview(
         requested_patch = preference_patch.model_dump(exclude_none=True)
         if (
             cache_doc.mode not in {"preview", "accepted"}
+            or cache_doc.api_key_id is not None
             or cache_doc.user_did != user_did
             or cache_doc.feed_name != feed_name
             or cache_expires_at <= now
@@ -705,6 +713,160 @@ async def claim_accepted_feed_slate(
         transaction.set(cache_ref, materialized.model_dump())
         transaction.set(ref, {"claimed_at": now}, merge=True)
         return accepted.request_id
+
+    return await _claim(transaction)
+
+
+# ---------------------------------------------------------------------------
+# Slate API: last feed load and settings preview
+# ---------------------------------------------------------------------------
+#
+# The partner-facing equivalent of the Settings preview handoff. A partner's
+# settings UI calls /slate/generate with preview=true as the user edits their
+# configuration. A preview whose settings match the user's last feed load
+# re-shows that load; otherwise it generates, and the result is kept as the
+# most recent preview. The next feed load whose settings match the preview is
+# served it, so the feed opens on what the user last previewed.
+#
+# The two slates are separate documents (each the size of a feed-cache entry)
+# so the write on every feed load never rewrites the preview.
+
+SLATE_API_SLATES_COLLECTION = "slate_api_slates"
+
+StoredSlateKind = Literal["last_load", "preview"]
+PreviewClaimOutcome = Literal["served", "none", "settings_changed", "consumed", "invalid"]
+
+
+def api_slate_doc_id(api_key_id: str, feed_name: str, kind: StoredSlateKind) -> str:
+    """Document ID of one stored slate for one API key's feed for one user."""
+    return f"{api_key_id}:{feed_name}:{kind}"
+
+
+def _api_slate_ref(
+    db: AsyncClient, user_did: str, api_key_id: str, feed_name: str, kind: StoredSlateKind
+):
+    return (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(SLATE_API_SLATES_COLLECTION)
+        .document(api_slate_doc_id(api_key_id, feed_name, kind))
+    )
+
+
+async def get_api_slate(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    api_key_id: str,
+    feed_name: str,
+    kind: StoredSlateKind,
+) -> StoredSlateDocument | None:
+    """The stored slate of *kind*, or ``None`` when there is none (or it is unreadable)."""
+    snapshot = await _api_slate_ref(db, user_did, api_key_id, feed_name, kind).get()
+    if not snapshot.exists:
+        return None
+    try:
+        return StoredSlateDocument.model_validate(snapshot.to_dict())
+    except Exception:
+        logger.warning("Invalid stored %s slate for feed '%s'", kind, feed_name)
+        return None
+
+
+async def save_api_slate(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    api_key_id: str,
+    feed_name: str,
+    kind: StoredSlateKind,
+    stored: StoredSlateDocument,
+) -> None:
+    """Replace the stored slate of *kind*."""
+    await _api_slate_ref(db, user_did, api_key_id, feed_name, kind).set(
+        stored.model_dump(exclude_none=True)
+    )
+
+
+async def delete_api_slate(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    api_key_id: str,
+    feed_name: str,
+    kind: StoredSlateKind,
+) -> None:
+    await _api_slate_ref(db, user_did, api_key_id, feed_name, kind).delete()
+
+
+async def claim_api_preview(
+    db: AsyncClient,
+    user_did: str,
+    *,
+    api_key_id: str,
+    feed_name: str,
+    settings_fingerprint: str,
+    claim_grace_seconds: int = 5,
+    cache_ttl_seconds: int = 600,
+) -> tuple[str | None, PreviewClaimOutcome]:
+    """Claim the most recent preview for one feed load.
+
+    Returns ``(request_id, "served")`` when the preview was materialized into
+    the feed cache under ``request_id`` for paging. As with the Settings
+    handoff, parallel requests within a short grace period receive the same
+    slate, and a later request consumes the preview.
+
+    A preview with different settings is discarded (``"settings_changed"``):
+    the user saved something other than what they last previewed, so the load
+    generates normally.
+    """
+    ref = _api_slate_ref(db, user_did, api_key_id, feed_name, "preview")
+    transaction = db.transaction()
+
+    @async_transactional
+    async def _claim(transaction) -> tuple[str | None, PreviewClaimOutcome]:
+        snapshot = await ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return None, "none"
+        try:
+            preview = StoredSlateDocument.model_validate(snapshot.to_dict())
+        except Exception:
+            transaction.delete(ref)
+            return None, "invalid"
+
+        slate = preview.slate
+        if (
+            slate.api_key_id != api_key_id
+            or slate.user_did != user_did
+            or slate.feed_name != feed_name
+        ):
+            transaction.delete(ref)
+            return None, "invalid"
+        if preview.settings_fingerprint != settings_fingerprint:
+            transaction.delete(ref)
+            return None, "settings_changed"
+
+        now = datetime.now(UTC)
+        claimed_at = preview.claimed_at
+        if claimed_at is not None:
+            if claimed_at.tzinfo is None:
+                claimed_at = claimed_at.replace(tzinfo=UTC)
+            if (now - claimed_at).total_seconds() <= claim_grace_seconds:
+                return preview.request_id, "served"
+            transaction.delete(ref)
+            return None, "consumed"
+
+        materialized = slate.model_copy(
+            update={
+                "mode": "api",
+                "served_from": "preview",
+                "generated_at": now,
+                "expires_at": now + timedelta(seconds=cache_ttl_seconds),
+            }
+        )
+        cache_ref = db.collection(FEED_CACHE_COLLECTION).document(preview.request_id)
+        transaction.set(cache_ref, materialized.model_dump())
+        transaction.set(ref, {"claimed_at": now}, merge=True)
+        return preview.request_id, "served"
 
     return await _claim(transaction)
 

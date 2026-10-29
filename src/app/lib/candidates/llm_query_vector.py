@@ -1,7 +1,7 @@
 """LLM query vector candidate generator.
 
-Reads the user's newest fitted query vector from Firestore and runs a kNN
-search in Elasticsearch using the MiniLM-L12 embedding field.
+Reads the user's active fitted query vector from Firestore and runs a kNN
+search over the quality corpus using the MiniLM-L12 embedding field.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ...models import MaxAgeHours
+from ..elasticsearch import POSTS_QUALITY_KNN_INDEX
 from ..embeddings import MINILM_L12_EMBEDDING_FIELD
 from .base import CandidateGenerator, CandidateResult
 from .es_candidates import knn_search_posts
@@ -39,7 +40,7 @@ def get_llm_query_vector_db() -> AsyncClient | None:
 class LlmQueryVectorCandidateGenerator(CandidateGenerator):
     """Candidate generator driven by a user's LLM-generated query vector.
 
-    Reads the most recently updated query vector from Firestore and searches
+    Reads the active query vector from Firestore and searches
     Elasticsearch using the MiniLM-L12 embedding field.  If no vector is
     found the generator returns an empty result so the pipeline can fall
     back to other sources.
@@ -70,10 +71,10 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
 
         # Imported here (not at module top) to avoid an import cycle:
         # documents -> candidates.base -> candidates -> llm_query_vector
-        # -> lib.firestore -> documents.  Same pattern as popularity_cache.
-        from ..firestore import get_latest_llm_query_vector
+        # -> lib.llm_prompt_state -> lib.firestore -> documents.
+        from ..llm_prompt_state import get_current_llm_query_vector
 
-        latest = await get_latest_llm_query_vector(db, user_did)
+        latest = await get_current_llm_query_vector(db, user_did)
         if latest is None:
             return CandidateResult(
                 generator_name=self.name,
@@ -91,6 +92,7 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
             video_only=video_only,
             exclude_uris=exclude_uris,
             max_age_hours=max_age_hours,
+            index=POSTS_QUALITY_KNN_INDEX,
         )
 
         reason = None

@@ -1,7 +1,7 @@
 """Score-based fallback ranker.
 
-Ranks candidates using their existing `score` field. This is a temporary
-fallback until inference-service-backed ranking is wired in.
+Ranks candidates using their existing `score` field, scaled to [0, 1]
+within each invocation for blending with other rankers.
 """
 
 from ...models import RankedCandidate, CandidatePost, RankPredictResult
@@ -15,16 +15,15 @@ class CandidateScoreRanker(Ranker):
     def name(self) -> str:
         return "candidate_score"
 
-    @property
-    def score_bounds(self) -> tuple[float, float]:
-        return (0.0, 1.0)
-
     async def predict(
         self, 
         es,
         user_did: str,
         candidates: list[CandidatePost]
     ) -> RankerResult:
+        scores = [candidate.score for candidate in candidates if candidate.score is not None]
+        min_score = min(scores, default=0.0)
+        max_score = max(scores, default=0.0)
         ranked_candidates = sorted(
             enumerate(candidates),
             key=lambda item: (
@@ -38,11 +37,19 @@ class CandidateScoreRanker(Ranker):
         for rank_idx, (_, candidate) in enumerate(ranked_candidates, start=1):
             assert candidate.at_uri is not None
             ranked_at_uris.append(candidate.at_uri)
+            rank_score = None
+            if candidate.score is not None:
+                # A constant batch has no relative preference, so use the midpoint.
+                rank_score = (
+                    (candidate.score - min_score) / (max_score - min_score)
+                    if max_score != min_score
+                    else 0.5
+                )
             rankings.append(
                 RankedCandidate(
                     at_uri=candidate.at_uri,
                     rank=rank_idx,
-                    rank_score=candidate.score,
+                    rank_score=rank_score,
                 )
             )
 

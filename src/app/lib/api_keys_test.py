@@ -159,6 +159,40 @@ class TestGetApiKeyDoc:
         assert result.is_admin is False
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_admin", [False, True])
+    async def test_existing_key_without_scopes_gets_only_default(self, is_admin):
+        data = _make_doc_data()
+        data["is_admin"] = is_admin
+        db, doc_ref = _mock_firestore(data, exists=True)
+
+        result = await get_api_key_doc(db, "a1b2c3d4")
+
+        assert result is not None
+        assert result.scopes == ["default"]
+        assert result.is_admin is is_admin
+        doc_ref.set.assert_not_awaited()
+        doc_ref.update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("scopes", "expected"),
+        [
+            ([], ["default"]),
+            (["user-config"], ["default", "user-config"]),
+            (["default", "user-config"], ["default", "user-config"]),
+        ],
+    )
+    async def test_returns_stored_scopes_with_default(self, scopes, expected):
+        data = _make_doc_data()
+        data["scopes"] = scopes
+        db, _ = _mock_firestore(data, exists=True)
+
+        result = await get_api_key_doc(db, "a1b2c3d4")
+
+        assert result is not None
+        assert result.scopes == expected
+
+    @pytest.mark.asyncio
     async def test_returns_none_when_not_found(self):
         db, _ = _mock_firestore(exists=False)
 
@@ -182,9 +216,11 @@ class TestCreateApiKey:
         assert isinstance(doc, ApiKeyDocument)
         assert doc.email == "alice@example.com"
         assert doc.is_active is True
+        assert doc.scopes == ["default"]
         assert full_key.startswith("gea_")
         assert len(full_key) == FULL_KEY_LEN
         db.transaction.return_value.create.assert_called_once()
+        assert db.transaction.return_value.create.call_args[0][1]["scopes"] == ["default"]
 
     @pytest.mark.asyncio
     async def test_defaults_to_non_admin(self):
@@ -201,8 +237,23 @@ class TestCreateApiKey:
         doc, _ = await create_api_key(db, "alice@greenearth.social", is_admin=True)
 
         assert doc.is_admin is True
+        assert doc.scopes == ["default"]
         written = db.transaction.return_value.create.call_args[0][1]
         assert written["is_admin"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_admin", [False, True])
+    async def test_can_issue_key_with_scopes(self, is_admin):
+        db, doc_ref = _mock_firestore(exists=False)
+        scopes = ["user-config", "another-capability"]
+
+        doc, _ = await create_api_key(db, "alice@example.com", is_admin=is_admin, scopes=scopes)
+
+        expected = ["default", "user-config", "another-capability"]
+        assert doc.scopes == expected
+        assert doc.is_admin is is_admin
+        assert db.transaction.return_value.create.call_args[0][1]["scopes"] == expected
+        assert scopes == ["user-config", "another-capability"]
 
     @pytest.mark.asyncio
     async def test_written_data_contains_hash_not_plaintext(self):
@@ -266,17 +317,22 @@ class TestAuthenticateApiKey:
         assert await authenticate_api_key(db, tampered_key) is None
 
     @pytest.mark.asyncio
-    async def test_returns_document_for_valid_key(self):
+    @pytest.mark.parametrize("scopes", [None, [], ["user-config"]])
+    async def test_returns_document_for_valid_key(self, scopes):
         key_id, full_key, key_hash = generate_key()
         data = _make_doc_data(key_id=key_id, is_active=True, monthly_period="2026-05")
         data["key_hash"] = key_hash
+        if scopes is not None:
+            data["scopes"] = scopes
         db, doc_ref = _mock_firestore(data, exists=True)
 
         result = await authenticate_api_key(db, full_key)
 
         assert result is not None
         assert result.key_id == key_id
+        assert result.scopes == ["default", *(scopes or [])]
         doc_ref.update.assert_called_once()
+        assert "scopes" not in doc_ref.update.call_args[0][0]
 
     @pytest.mark.asyncio
     async def test_increments_call_count_same_month(self):
@@ -315,6 +371,7 @@ class TestListApiKeys:
     async def test_returns_all_documents(self):
         db = MagicMock()
         docs_data = [_make_doc_data("key00001"), _make_doc_data("key00002")]
+        docs_data[1]["scopes"] = ["user-config"]
 
         async def mock_stream(**kwargs):
             for data in docs_data:
@@ -330,6 +387,8 @@ class TestListApiKeys:
         assert len(result) == 2
         assert result[0].key_id == "key00001"
         assert result[1].key_id == "key00002"
+        assert result[0].scopes == ["default"]
+        assert result[1].scopes == ["default", "user-config"]
 
     @pytest.mark.asyncio
     async def test_returns_empty_list_when_no_keys(self):

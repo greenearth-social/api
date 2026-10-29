@@ -33,22 +33,16 @@ class RankerExecutionError(Exception):
 
 
 class Ranker(ABC):
-    """Abstract base class for named rankers."""
+    """Named rankers supply scores on their intended scale for combination.
+
+    The shared pipeline blends these scores directly without rescaling or
+    clamping them. Each ranker owns any conversion its scores require.
+    """
 
     @property
     @abstractmethod
     def name(self) -> str:
         """Unique name identifying this ranker."""
-        ...
-
-    @property
-    @abstractmethod
-    def score_bounds(self) -> tuple[float, float]:
-        """Theoretical (min, max) bounds of this ranker's raw `rank_score` values.
-
-        Used to linearly normalize raw scores into [0, 1] before combining
-        multiple rankers' outputs into a single weighted score.
-        """
         ...
 
     @abstractmethod

@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     gen = sub.add_parser("generate", help="Issue a key only if the owner has no active key")
     gen.add_argument("email")
     gen.add_argument("--admin", action="store_true", help="Green Earth team only")
+    gen.add_argument(
+        "--scope",
+        dest="scopes",
+        action="append",
+        help="Grant a named scope (repeatable; default is always included)",
+    )
     rotate = sub.add_parser(
         "rotate", help="Atomically replace an active key; old key stops working"
     )
@@ -119,12 +125,15 @@ async def execute(args: argparse.Namespace, destination: Destination) -> int:
     try:
         if args.command in {"generate", "rotate"}:
             if args.command == "generate":
-                doc, full_key = await api_keys.create_api_key(db, args.email, is_admin=args.admin)
+                doc, full_key = await api_keys.create_api_key(
+                    db, args.email, is_admin=args.admin, scopes=args.scopes
+                )
             else:
                 doc, full_key = await api_keys.rotate_api_key(db, args.key_id)
             print(f"Key ID      : {doc.key_id}")
             print(f"Email       : {doc.email}")
             print(f"Admin       : {doc.is_admin}")
+            print(f"Scopes      : {', '.join(doc.scopes)}")
             print(f"Key         : {full_key}", flush=True)
             print("Save securely: plaintext is displayed once and never stored.", flush=True)
             if not await verify_key(destination.api_url, full_key):
@@ -140,7 +149,9 @@ async def execute(args: argparse.Namespace, destination: Destination) -> int:
                 print(
                     f"{doc.key_id} {doc.email} active={doc.is_active} admin={doc.is_admin} "
                     f"calls={doc.monthly_call_count} period={doc.monthly_period} "
-                    f"created={doc.created_at.isoformat()} last_used={doc.last_used_at.isoformat()}"
+                    f"created={doc.created_at.isoformat()} "
+                    f"last_used={doc.last_used_at.isoformat()} "
+                    f"scopes={', '.join(doc.scopes)}"
                 )
         elif args.command == "usage":
             doc = await api_keys.get_api_key_doc(db, args.key_id)
@@ -158,7 +169,8 @@ async def execute(args: argparse.Namespace, destination: Destination) -> int:
                     f"{doc.key_id} {doc.email} active={doc.is_active} admin={doc.is_admin} "
                     f"created={doc.created_at.isoformat()} "
                     f"last_used={doc.last_used_at.isoformat()} "
-                    f"calls={doc.monthly_call_count} period={doc.monthly_period}"
+                    f"calls={doc.monthly_call_count} period={doc.monthly_period} "
+                    f"scopes={', '.join(doc.scopes)}"
                 )
             decisions = await api_keys.reconcile_api_keys(db, apply=args.apply, keep_ids=args.keep)
             print(

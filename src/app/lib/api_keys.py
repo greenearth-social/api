@@ -76,7 +76,7 @@ def _write_owner(transaction, ref, email, key_id):
     transaction.set(ref, {"email": email, "active_key_id": key_id, "updated_at": datetime.now(UTC)})
 
 
-def _new_key(email, is_admin):
+def _new_key(email, is_admin, scopes=None):
     key_id, full_key, key_hash = generate_key()
     now = datetime.now(UTC)
     return ApiKeyDocument(
@@ -84,6 +84,7 @@ def _new_key(email, is_admin):
         key_hash=key_hash,
         email=email,
         is_admin=is_admin,
+        scopes=scopes if scopes is not None else [],
         created_at=now,
         last_used_at=now,
         monthly_period=now.strftime("%Y-%m"),
@@ -113,7 +114,7 @@ def choose_retained_key(records: list[ApiKeyDocument], keep_ids=()) -> ApiKeyDoc
     detail = (
         f"{email}: ambiguous active keys {[doc.key_id for doc in records]}; specify --keep KEY_ID"
     )
-    if len({doc.is_admin for doc in records}) > 1:
+    if len({(doc.is_admin, frozenset(doc.scopes)) for doc in records}) > 1:
         raise ValueError(detail + " (different privileges)")
     if any(not {"created_at", "last_used_at"} <= doc.model_fields_set for doc in records):
         raise ValueError(detail + " (missing timestamp history)")
@@ -175,11 +176,11 @@ async def get_api_key_doc(db: AsyncClient, key_id: str) -> ApiKeyDocument | None
 
 
 async def create_api_key(
-    db: AsyncClient, email: str, is_admin: bool = False
+    db: AsyncClient, email: str, is_admin: bool = False, *, scopes: list[str] | None = None
 ) -> tuple[ApiKeyDocument, str]:
     """Create one active key per normalized owner, including legacy unindexed keys."""
     email = normalize_email(email)
-    doc, full_key = _new_key(email, is_admin)
+    doc, full_key = _new_key(email, is_admin, scopes)
     owner = _owner_ref(db, email)
 
     @async_transactional
@@ -208,7 +209,7 @@ async def rotate_api_key(db: AsyncClient, key_id: str) -> tuple[ApiKeyDocument, 
         raise ValueError(f"Key {key_id} not found")
     email = normalize_email(old.email)
     owner = _owner_ref(db, email)
-    replacement, full_key = _new_key(email, old.is_admin)
+    replacement, full_key = _new_key(email, old.is_admin, old.scopes)
 
     @async_transactional
     async def rotate(transaction):
@@ -217,7 +218,7 @@ async def rotate_api_key(db: AsyncClient, key_id: str) -> tuple[ApiKeyDocument, 
         if len(active) != 1 or active[0].key_id != key_id:
             raise ValueError(f"Key {key_id} is not the sole active key; inspect/deduplicate first")
         # Revalidate privileges inside the transaction; don't rotate a stale snapshot.
-        if active[0].is_admin != replacement.is_admin:
+        if active[0].is_admin != replacement.is_admin or active[0].scopes != replacement.scopes:
             raise ValueError("Key privileges changed; inspect before retrying rotation")
         transaction.update(
             db.collection(API_KEYS_COLLECTION).document(key_id), {"is_active": False}

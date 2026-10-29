@@ -20,6 +20,7 @@ from app.lib.posthog_client import (
     track_interaction,
     track_redirect,
     track_session,
+    track_slate_generated,
     user_identity_properties,
 )
 
@@ -406,3 +407,73 @@ def test_llm_cg_enabled_is_closed_when_evaluation_fails(monkeypatch):
     mock = MagicMock()
     mock.evaluate_flags.side_effect = RuntimeError("quota")
     assert llm_cg_enabled(mock, USER_DID) is False
+
+
+def test_annotate_stamps_endpoint_only_on_a_request_path():
+    from app.lib.request_context import reset_endpoint, set_endpoint
+
+    token = set_endpoint("slate_generate")
+    try:
+        assert annotate_event_properties({"feed_name": "partner"}) == {
+            "feed_name": "partner",
+            "endpoint": "slate_generate",
+            **ANNOTATIONS,
+        }
+    finally:
+        reset_endpoint(token)
+    assert "endpoint" not in annotate_event_properties({"feed_name": "partner"})
+
+
+def test_track_slate_generated_captures_keyed_on_user_did():
+    client = MagicMock()
+    track_slate_generated(
+        client,
+        user_did=USER_DID,
+        feed_name="partner-feed",
+        api_key_id="abcd1234",
+        requested_limit=20,
+        has_cursor=False,
+        generators=["external", "popularity"],
+        rankers=["heavy_ranker"],
+        external_candidate_count=12,
+        item_count=20,
+        served_from="preview",
+        preview=False,
+        timestamp=NOW,
+    )
+    client.capture.assert_called_once_with(
+        distinct_id=USER_DID,
+        event="slateGenerated",
+        properties={
+            "feed_name": "partner-feed",
+            "api_key_id": "abcd1234",
+            "requested_limit": 20,
+            "has_cursor": False,
+            "generators": ["external", "popularity"],
+            "rankers": ["heavy_ranker"],
+            "external_candidate_count": 12,
+            "item_count": 20,
+            "served_from": "preview",
+            "preview": False,
+            **ANNOTATIONS,
+        },
+        timestamp=NOW,
+    )
+
+
+def test_track_slate_generated_is_a_noop_without_a_client():
+    track_slate_generated(
+        None,
+        user_did=USER_DID,
+        feed_name="partner-feed",
+        api_key_id="abcd1234",
+        requested_limit=20,
+        has_cursor=True,
+        generators=[],
+        rankers=None,
+        external_candidate_count=0,
+        item_count=0,
+        served_from="generated",
+        preview=True,
+        timestamp=NOW,
+    )

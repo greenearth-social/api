@@ -658,6 +658,53 @@ def test_get_feed_preview_hides_wrong_owner(client):
     assert response.status_code == 404
 
 
+def test_get_feed_preview_hides_slate_api_previews(client):
+    """A partner's preview for the same user is not readable through our Settings API."""
+    cache = MagicMock()
+    cache.retrieve_document = AsyncMock(
+        return_value=FeedCacheDocument(
+            items=["at://partner/1"],
+            user_did="did:plc:test-user",
+            feed_name="your-feed",
+            generated_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            mode="preview",
+            api_key_id="partnerkey",
+        )
+    )
+    app.state.feed_cache = cache
+
+    response = client.get("/api/feeds/previews/partner-preview")
+
+    assert response.status_code == 404
+
+
+@patch("app.routers.feed_transparency.accept_feed_preview", new_callable=AsyncMock)
+def test_accept_preview_rejects_slate_api_previews(mock_accept, client):
+    app.state.feed_cache = MagicMock(
+        retrieve_document=AsyncMock(
+            return_value=FeedCacheDocument(
+                items=["at://partner/1"],
+                user_did="did:plc:test-user",
+                feed_name="your-feed",
+                generated_at=datetime.now(UTC),
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                mode="preview",
+                api_key_id="partnerkey",
+                preference_patch=FeedPreferencesDocument(freshness=2),
+            )
+        )
+    )
+
+    response = client.post(
+        "/api/feeds/your-feed/previews/partner-preview/accept",
+        json={"preferences": {"freshness": 2}, "displayed_item_uris": ["at://partner/1"]},
+    )
+
+    assert response.status_code == 404
+    mock_accept.assert_not_awaited()
+
+
 def test_get_feed_preview_hides_served_cache_entries(client):
     cache = MagicMock()
     cache.retrieve_document = AsyncMock(
@@ -879,12 +926,12 @@ def test_saved_preview_acceptance_mysky_and_waist_share_one_organic_slate(client
 
     with (
         patch(
-            "app.routers.feed_transparency.patch_user_feed_preferences",
+            "app.lib.user_preferences.patch_user_feed_preferences",
             new_callable=AsyncMock,
             return_value=preferences,
         ),
         patch(
-            "app.routers.feed_transparency.delete_most_recent_seen_bucket",
+            "app.lib.user_preferences.delete_most_recent_seen_bucket",
             new_callable=AsyncMock,
         ),
         patch(
@@ -1272,7 +1319,7 @@ def test_get_feed_detail_multiple_items(mock_get_snapshot, mock_hydrate, client)
 # ---------------------------------------------------------------------------
 
 
-@patch("app.routers.feed_transparency.get_user")
+@patch("app.lib.user_preferences.get_user")
 def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
     from ..documents import UserDocument
 
@@ -1311,7 +1358,7 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
     }
 
 
-@patch("app.routers.feed_transparency.get_user")
+@patch("app.lib.user_preferences.get_user")
 def test_get_preferences_returns_stored_value(mock_get_user, client):
     from ..documents import UserDocument
 
@@ -1352,8 +1399,8 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
     }
 
 
-@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.delete_most_recent_seen_bucket")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 def test_patch_preferences_updates_only_selected_feed(mock_patch_prefs, mock_delete_seen, client):
     from ..documents import FeedPreferencesDocument
 
@@ -1373,8 +1420,8 @@ def test_patch_preferences_updates_only_selected_feed(mock_patch_prefs, mock_del
     mock_delete_seen.assert_awaited_once()
 
 
-@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.delete_most_recent_seen_bucket")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 @pytest.mark.parametrize("politics", [0.0, 2.0])
 def test_patch_preferences_updates_politics_for_your_feed(
     mock_patch_prefs, mock_delete_seen, politics, client
@@ -1394,8 +1441,8 @@ def test_patch_preferences_updates_politics_for_your_feed(
     mock_delete_seen.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
 
 
-@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.delete_most_recent_seen_bucket")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 @pytest.mark.parametrize("feed_name", ["your-feed", "best-of-friends"])
 @pytest.mark.parametrize("field", ["author_penalty", "topic_penalty"])
 @pytest.mark.parametrize("value", [0.0, 1.0])
@@ -1417,8 +1464,8 @@ def test_patch_preferences_accepts_penalty_boundaries(
     mock_delete_seen.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
 
 
-@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.delete_most_recent_seen_bucket")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 @pytest.mark.parametrize("feed_name", ["your-feed", "best-of-friends"])
 @pytest.mark.parametrize("purpose", [0.0, 1.0])
 def test_patch_preferences_accepts_pure_purpose(
@@ -1439,7 +1486,7 @@ def test_patch_preferences_accepts_pure_purpose(
     mock_delete_seen.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
 
 
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 @pytest.mark.parametrize("politics", [-0.01, 2.01])
 def test_patch_preferences_rejects_out_of_range_politics(mock_patch_prefs, politics, client):
     response = client.patch(
@@ -1451,7 +1498,7 @@ def test_patch_preferences_rejects_out_of_range_politics(mock_patch_prefs, polit
     mock_patch_prefs.assert_not_awaited()
 
 
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 @pytest.mark.parametrize("purpose", [-0.01, 1.01])
 def test_patch_preferences_rejects_out_of_range_purpose(mock_patch_prefs, purpose, client):
     response = client.patch(
@@ -1463,8 +1510,8 @@ def test_patch_preferences_rejects_out_of_range_purpose(mock_patch_prefs, purpos
     mock_patch_prefs.assert_not_awaited()
 
 
-@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.delete_most_recent_seen_bucket")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 def test_patch_preferences_succeeds_when_seen_cleanup_fails(
     mock_patch_prefs, mock_delete_seen, client
 ):
@@ -1481,7 +1528,7 @@ def test_patch_preferences_succeeds_when_seen_cleanup_fails(
     mock_delete_seen.assert_awaited_once()
 
 
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 def test_patch_preferences_rejects_out_of_range(mock_patch_prefs, client):
     response = client.patch(
         "/api/feeds/preferences/random",
@@ -1513,8 +1560,8 @@ def test_patch_preferences_rejects_out_of_range(mock_patch_prefs, client):
         },
     ],
 )
-@patch("app.routers.feed_transparency.delete_most_recent_seen_bucket")
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.delete_most_recent_seen_bucket")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 def test_patch_preferences_accepts_atomic_source_weights(
     mock_patch_prefs, mock_delete_seen, weight_values, client
 ):
@@ -1542,7 +1589,7 @@ def test_patch_preferences_accepts_atomic_source_weights(
         {"following": 0.0, "authors_topics": 1.1, "popular": -0.1},
     ],
 )
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 def test_patch_preferences_rejects_invalid_source_weights(mock_patch_prefs, weights, client):
     response = client.patch(
         "/api/feeds/preferences/your-feed",
@@ -1552,7 +1599,7 @@ def test_patch_preferences_rejects_invalid_source_weights(mock_patch_prefs, weig
     mock_patch_prefs.assert_not_awaited()
 
 
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 def test_patch_preferences_rejects_unsupported_control(mock_patch_prefs, client):
     response = client.patch(
         "/api/feeds/preferences/random",
@@ -1563,7 +1610,7 @@ def test_patch_preferences_rejects_unsupported_control(mock_patch_prefs, client)
 
 
 @pytest.mark.parametrize("body", [{}, {"freshness": None}, {"socialRadius": 3}])
-@patch("app.routers.feed_transparency.patch_user_feed_preferences")
+@patch("app.lib.user_preferences.patch_user_feed_preferences")
 def test_patch_preferences_rejects_invalid_body(mock_patch_prefs, body, client):
     response = client.patch(
         "/api/feeds/preferences/your-feed",

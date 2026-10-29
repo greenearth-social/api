@@ -162,15 +162,15 @@ class TestBuildDocument:
 
     def test_includes_model_scores(self):
         rec = self._recorder()
-        rec.record_model_scores("heavy_ranker", 1.0, {"at://p/1": 0.8, "at://p/2": 0.2})
+        rec.record_model_scores("heavy_ranker", 1.0, {"at://p/1": 1.8, "at://p/2": -0.2})
         rec.record_model_scores("perspective", 2.0, {"at://p/1": 0.25, "at://p/2": 0.1})
         doc = self._build(rec)
 
         assert [e.model_name for e in doc.model_scores] == ["heavy_ranker", "perspective"]
         assert doc.model_scores[0].weight == 1.0
         assert {s.at_uri: s.score for s in doc.model_scores[0].scores} == {
-            "at://p/1": 0.8,
-            "at://p/2": 0.2,
+            "at://p/1": 1.8,
+            "at://p/2": -0.2,
         }
         assert doc.model_scores[1].weight == 2.0
         assert {s.at_uri: s.score for s in doc.model_scores[1].scores} == {
@@ -447,7 +447,8 @@ class TestBuildPipelineMetadata:
         assert snapshot.generator_diagnostics[0].status == "empty"
         assert snapshot.generator_diagnostics[0].reason == expected_reason
 
-    def test_per_uri_rank_and_model_scores(self):
+    @pytest.mark.parametrize("top_score", [0.92, -0.2, 1.5])
+    def test_per_uri_rank_and_model_scores(self, top_score):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
         rec.set_generate_request(
             CandidateGenerateRequest(
@@ -462,12 +463,14 @@ class TestBuildPipelineMetadata:
         rec.record_ranking(
             RankPredictResult(
                 rankings=[
-                    RankedCandidate(at_uri="at://a", rank=1, rank_score=0.92),
-                    RankedCandidate(at_uri="at://b", rank=2, rank_score=0.88),
+                    RankedCandidate(at_uri="at://a", rank=1, rank_score=top_score),
+                    RankedCandidate(at_uri="at://b", rank=2, rank_score=top_score - 0.04),
                 ]
             )
         )
-        rec.record_model_scores("heavy_ranker", 1.0, {"at://a": 0.92, "at://b": 0.88})
+        rec.record_model_scores(
+            "heavy_ranker", 1.0, {"at://a": top_score, "at://b": top_score - 0.04}
+        )
         rec.ranker_model = "heavy_ranker"
         rec.final_order = ["at://a", "at://b"]
         rec.order_after_rank = ["at://a", "at://b"]
@@ -478,11 +481,11 @@ class TestBuildPipelineMetadata:
         assert snap.ranker_model == "heavy_ranker"
         item = snap.items_meta[0]
         assert item.rank == 1
-        assert item.rank_score == 0.92
+        assert item.rank_score == top_score
         assert len(item.model_scores) == 1
         assert item.model_scores[0].name == "heavy_ranker"
         assert item.model_scores[0].weight == 1.0
-        assert item.model_scores[0].score == 0.92
+        assert item.model_scores[0].score == top_score
         assert item.politics_adjustment is None
 
     @pytest.mark.parametrize("setting", [0.0, 1.0, 2.0])

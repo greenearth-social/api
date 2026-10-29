@@ -24,7 +24,9 @@ pipenv run python scripts/apikeys.py --environment prod revoke KEY_ID
 ```
 
 Use `stage` for stage keys. Normal developer keys are non-admin; `generate --admin`
-is for the Green Earth team only. Rotation preserves admin status.
+is for the Green Earth team only. Use repeatable `generate --scope NAME` to grant named capabilities. Every key
+always includes `default`; admin status does not imply additional scopes. Rotation
+preserves admin status and all effective scopes.
 
 Check the printed project/database/API URL. Save and deliver the one-time plaintext
 through an appropriate private channel. Use `X-API-Key` to authenticate requests.
@@ -51,7 +53,7 @@ report and apply. Review the apply output.
 
 Creation initializes `last_used_at`; equality to `created_at` with a zero counter
 is not evidence of use. Tied usage, never-used duplicates, or different admin
-privileges need explicit `--keep KEY_ID`; repeat for different owners. Do not use
+privileges (admin status or scopes) need explicit `--keep KEY_ID`; repeat for different owners. Do not use
 creation time alone to replace a genuinely used key. Records remain for audit.
 
 The legacy `(default)` database is separate and not used by deployed APIs:
