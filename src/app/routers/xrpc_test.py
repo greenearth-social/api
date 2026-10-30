@@ -3879,23 +3879,51 @@ class TestFeedDebugCapture:
         )
 
     @pytest.mark.asyncio
-    async def test_posts_fulfilled_ratio_metric_emitted(self):
+    @pytest.mark.parametrize(
+        ("requested_count", "returned_count", "injected_post_count", "expected_ratio"),
+        [
+            (30, 3, 0, 0.1),
+            (30, 29, 1, 1.0),
+            (30, 28, 2, 1.0),
+            (30, 14, 2, 0.5),
+            (30, 0, 1, 0.0),
+            (1, 0, 1, 1.0),
+        ],
+    )
+    async def test_posts_fulfilled_ratio_metric_emitted(
+        self, requested_count, returned_count, injected_post_count, expected_ratio
+    ):
         from ..routers.xrpc import _write_feed_snapshot_background
 
-        snapshot = MagicMock(items=["at://a", "at://b", "at://c"], feed_name="your-feed")
+        snapshot = MagicMock(
+            items=[f"at://post/{index}" for index in range(returned_count)],
+            feed_name="your-feed",
+        )
         collector = MagicMock()
         with (
             patch(
                 "app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock, return_value=False
-            ),
+            ) as merge,
             patch("app.routers.xrpc.get_metric_collector", return_value=collector),
         ):
             await _write_feed_snapshot_background(
-                MagicMock(), "did:plc:testuser", "r1", snapshot, limit=30
+                MagicMock(),
+                "did:plc:testuser",
+                "r1",
+                snapshot,
+                limit=requested_count,
+                injected_post_count=injected_post_count,
             )
 
+        merge.assert_awaited_once()
         collector.record.assert_any_call(
-            "feed.snapshot.posts_fulfilled_ratio", 0.1, feed_name="your-feed"
+            "feed.snapshot.posts_fulfilled_ratio", expected_ratio, feed_name="your-feed"
+        )
+        collector.record.assert_any_call(
+            "feed.snapshot.posts_requested_count", requested_count, feed_name="your-feed"
+        )
+        collector.record.assert_any_call(
+            "feed.snapshot.posts_returned_count", returned_count, feed_name="your-feed"
         )
 
     @pytest.mark.asyncio
@@ -5200,12 +5228,17 @@ class TestFavoriteVideoPost:
         mock_get_activity.return_value = self._activity()
         mock_pipeline.return_value = (self._snapshot(), [])
 
-        posts = [item["post"] for item in self._load(self._patched_feeds())["feed"]]
+        with patch(
+            "app.routers.xrpc._write_feed_snapshot_background", new_callable=AsyncMock
+        ) as write_snapshot:
+            posts = [item["post"] for item in self._load(self._patched_feeds())["feed"]]
 
         assert len(posts) == 30
         assert posts[0] == self.PINNED_URI
         assert posts[5] == self.VIDEO_URI
         assert posts.count(self.VIDEO_URI) == 1
+        write_snapshot.assert_awaited_once()
+        assert write_snapshot.await_args.kwargs["injected_post_count"] == 2
 
     def test_random_position_can_reach_the_end_of_the_first_page(
         self, mock_get_user, mock_get_activity, mock_pipeline, *_
@@ -6769,6 +6802,7 @@ async def test_full_feed_load_still_records_feed_state_and_shows_eligible_survey
     )
     state.get_feed_activity.assert_awaited_once_with(state.db, USER_DID, "your-feed")
     state._write_feed_snapshot_background.assert_awaited_once()
+    assert state._write_feed_snapshot_background.await_args.kwargs["injected_post_count"] == 2
     served_snapshot = state._write_feed_snapshot_background.await_args.args[3]
     assert served_snapshot.items == POST_URIS[: limit - 2]
     state.cache.store_document.assert_awaited_once()
@@ -6928,5 +6962,6 @@ async def test_explore_preserves_accepted_settings_slate_for_next_full_feed_load
     state.claim_accepted_feed_slate.assert_awaited_once()
     state.cache.retrieve_document.assert_awaited_once_with(accepted_id)
     state._write_feed_snapshot_background.assert_awaited_once()
+    assert state._write_feed_snapshot_background.await_args.kwargs["injected_post_count"] == 1
     state.upsert_feed_activity.assert_awaited_once()
     state._run_pipeline_capturing_with_timeout.assert_awaited_once()

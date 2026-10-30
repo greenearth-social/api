@@ -1143,6 +1143,7 @@ async def _write_feed_snapshot_background(
     snapshot,
     *,
     limit: int,
+    injected_post_count: int = 0,
     load_test: bool = False,
 ) -> None:
     """Create or extend the lightweight feed snapshot in a background task.
@@ -1167,9 +1168,12 @@ async def _write_feed_snapshot_background(
             collector.record(
                 "feed.snapshot.posts_requested_count", limit, feed_name=snapshot.feed_name
             )
+            # Injected posts occupy response slots but are excluded from snapshots.
+            generated_posts_requested = limit - injected_post_count
+            # A page filled entirely by injected posts has no generated slots to fulfill.
             collector.record(
                 "feed.snapshot.posts_fulfilled_ratio",
-                posts_returned / limit,
+                posts_returned / generated_posts_requested if generated_posts_requested else 1.0,
                 feed_name=snapshot.feed_name,
             )
         truncated = await merge_feed_snapshot(
@@ -1998,6 +2002,7 @@ async def get_feed_skeleton(
                             accepted_request_id,
                             _snapshot_page(accepted_snapshot, generated_page),
                             limit=limit,
+                            injected_post_count=1 if pinned_post_uri else 0,
                             load_test=False,
                         )
                         next_cursor = (
@@ -2145,6 +2150,7 @@ async def get_feed_skeleton(
                     request_id,
                     _snapshot_page(generated_snapshot, generated_page),
                     limit=limit,
+                    injected_post_count=n_injected,
                     load_test=is_load_test,
                 )
 
