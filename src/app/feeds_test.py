@@ -150,7 +150,7 @@ class TestFeedsRegistry:
         for feed_name in ("your-feed", "best-of-friends"):
             cfg = FEEDS[feed_name]
             assert cfg.max_render_share is not None
-            assert cfg.min_rank_score == pytest.approx(0.425)
+            assert cfg.min_rank_score == pytest.approx(0.15)
             assert cfg.min_mmr_score is None
 
     def test_cold_start_feed_uses_empty_history_models(self):
@@ -167,7 +167,7 @@ class TestFeedsRegistry:
         ]
         assert cfg.diversify is True
         assert cfg.max_render_share == pytest.approx(0.5)
-        assert cfg.min_rank_score == pytest.approx(0.425)
+        assert cfg.min_rank_score == pytest.approx(0.15)
         assert cfg.min_mmr_score == pytest.approx(-0.05)
 
     def test_public_feeds_show_something_when_logged_out(self):
@@ -222,7 +222,7 @@ class TestFeedsRegistry:
             == FEEDS["your-feed"].gen_request_template.generators
         )
         assert cfg.max_render_share == pytest.approx(0.5)
-        assert cfg.min_rank_score == pytest.approx(0.425)
+        assert cfg.min_rank_score == pytest.approx(0.15)
         assert cfg.min_mmr_score == pytest.approx(-0.05)
 
 
