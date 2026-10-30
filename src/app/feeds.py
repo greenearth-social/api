@@ -29,7 +29,7 @@ DEFAULT_SOCIAL_RADIUS: int = 3
 # ranking or cutoffs cannot make the two UI choices drift apart.
 FOLLOWED_USERS_ONLY_GENERATORS = [GeneratorSpec(name="followed_users", weight=1.0)]
 PERSONALIZED_MAX_RENDER_SHARE = 0.5
-PERSONALIZED_MIN_RANK_SCORE = 0.425
+PERSONALIZED_MIN_RANK_SCORE = 0.15
 PERSONALIZED_MIN_MMR_SCORE = -0.05
 PERSONALIZED_RANK_REQUEST_TEMPLATE = RankPredictRequest.model_construct(
     models=[
@@ -167,11 +167,6 @@ FEEDS: dict[str, FeedConfig] = {
         favorite_video_post_uri=ux_post_uri(ux_posts.FAVORITE_YOUR_FEED),
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
-        # min_rank_score=0.425 maps the old -0.15 floor into the current [0, 1]
-        # combined rank-score range. That value was calibrated from stage
-        # feed_debug records for this feed (242 ranked candidates across 4 real
-        # loads), where it sat at ~p12-13 and trimmed only the clear tail,
-        # leaving max_render_share as the dominant lever on render volume.
         # See "cutoff-preview" below for the live preview of this feed's pipeline
         # with the same thresholds.
         max_render_share=PERSONALIZED_MAX_RENDER_SHARE,
@@ -236,21 +231,11 @@ FEEDS: dict[str, FeedConfig] = {
                 RankModelSpec(name="perspective", weight=1.0),
             ],
         ),
-        # Values below are calibrated from real combined rank_score and MMR
-        # pick_score distributions pulled from stage feed_debug records (242
-        # ranked candidates across 4 real "your-feed" loads from 2 debug-enabled
-        # stage users, 2026-07-14 to 2026-07-21). Those records used the old
-        # [-1, 1] combined rank-score range, so the rank-score numbers below
-        # are mapped into the current [0, 1] range.
-        #
-        # Empirically the old combined score skewed below the old midpoint
-        # (old p10=-0.21, p25=-0.07, p50=+0.07; current p10=0.395,
-        # p25=0.465, p50=0.535). A floor at the current midpoint (0.5) would
-        # cut roughly half of all candidates by itself, before MMR or the share
-        # cap get a say. min_rank_score=0.425 is the old -0.15 floor mapped via
-        # (score + 1) / 2; it sits at ~p12-13, trimming only the clearly-bad
-        # tail and leaving max_render_share as the dominant lever on render
-        # volume, matching the issue's 10-50% band.
+        # As of 2026-10-30, using a ranker trained with BCE loss and with the
+        # inference-service outputting sigmoid(logits), empirically a min_rank_score
+        # of 0.15 matches the old cutoff of 0.425 in that it sits at about the
+        # 12-13th percentile of combined rank scores, just before applying the
+        # cutoff. So it trims about the bottom 15%, only the clearly bad posts.
         #
         # MMR pick_score is a post-diversification penalized score, not a rank
         # score, so it can still be negative. The old observed p10=+0.01 and
@@ -258,7 +243,7 @@ FEEDS: dict[str, FeedConfig] = {
         # almost all real picks; keep it as the starting point until fresh
         # post-migration debug records are available.
         max_render_share=0.5,
-        min_rank_score=0.425,
+        min_rank_score=0.15,
         min_mmr_score=-0.05,
     ),
     ### (Private) Pure Candidate Generator Feeds, mostly for testing and debugging ###
@@ -364,7 +349,7 @@ FEEDS: dict[str, FeedConfig] = {
         logged_out="deny",
         avatar="assets/icons/mysky.png",
         max_render_share=0.5,
-        min_rank_score=0.425,
+        min_rank_score=0.15,
         min_mmr_score=-0.05,
         gen_request_template=CandidateGenerateRequest.model_construct(
             # Simulate cold start regardless of the requesting DID: the empty
