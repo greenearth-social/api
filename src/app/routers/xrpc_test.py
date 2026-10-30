@@ -5238,6 +5238,7 @@ class TestFavoriteVideoPost:
         assert posts[5] == self.VIDEO_URI
         assert posts.count(self.VIDEO_URI) == 1
         write_snapshot.assert_awaited_once()
+        assert write_snapshot.await_args is not None
         assert write_snapshot.await_args.kwargs["injected_post_count"] == 2
 
     def test_random_position_can_reach_the_end_of_the_first_page(
