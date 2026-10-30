@@ -167,11 +167,6 @@ FEEDS: dict[str, FeedConfig] = {
         favorite_video_post_uri=ux_post_uri(ux_posts.FAVORITE_YOUR_FEED),
         # Slate-cutoff starting points — tune further from the feed.slate.kept_share
         # and feed.slate.cutoff_count metrics once live (see issue #248).
-        # min_rank_score=0.425 maps the old -0.15 floor into the current [0, 1]
-        # combined rank-score range. That value was calibrated from stage
-        # feed_debug records for this feed (242 ranked candidates across 4 real
-        # loads), where it sat at ~p12-13 and trimmed only the clear tail,
-        # leaving max_render_share as the dominant lever on render volume.
         # See "cutoff-preview" below for the live preview of this feed's pipeline
         # with the same thresholds.
         max_render_share=PERSONALIZED_MAX_RENDER_SHARE,
