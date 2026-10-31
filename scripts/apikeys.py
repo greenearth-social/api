@@ -80,7 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list", help="List key metadata (never plaintext or hashes)")
     for command in ("usage", "revoke"):
         sub.add_parser(command).add_argument("key_id")
-    cleanup = sub.add_parser("deduplicate", help="Report latest-used keep/revoke decisions")
+    cleanup = sub.add_parser(
+        "deduplicate", help="Find duplicate active API keys and preview cleanup"
+    )
     cleanup.add_argument(
         "--apply", action="store_true", help="Revoke duplicates and seed owner index"
     )
