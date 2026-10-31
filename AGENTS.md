@@ -1,19 +1,64 @@
-# Green Earth API agent instructions
+# Green Earth API
 
-## API-key administration
+Python 3.13 FastAPI service for Bluesky feed recommendations. Use Pipenv.
 
-- Use `pipenv run python scripts/apikeys.py --environment stage|prod COMMAND` from this repository. Always select the environment explicitly; if the request does not identify it, ask which environment is intended.
-- Project is `greenearth-471522`; stage database is `greenearth-stage`; production database is `greenearth-prod`. `API_KEYS_COLLECTION = "api_keys"` is already fixed; never invent a collection-selection flag.
-- No separate human-approval step is required for an authorized operation. Verify the command's reported database matches the requested environment.
-- Never bypass the CLI with ad hoc Firestore write scripts or alter environment settings to evade validation. Resolve stale configuration first.
-- One active key per normalized email/database. Use `rotate KEY_ID` to replace it; never generate additional keys for the same owner. Rotation preserves admin status and all scopes and immediately invalidates the old key.
-- Plaintext keys are displayed once. Do not commit, persist in logs, attach to issues, or include in test fixtures. On verification failure, a key may already have been created: inspect metadata before retrying. Lost plaintext requires explicit rotation.
-- Duplicate cleanup defaults to dry-run. Use `deduplicate --apply` only within authorized cleanup scope; it revokes redundant keys and preserves their records. Ambiguous usage or privileges requires `--keep KEY_ID`.
-- `(default)` is not used by deployed APIs. Only `--legacy-default` explicitly permits inspection/revocation/cleanup there; never issue keys there or copy its records to prod automatically.
-- Read `docs/internal/api-key-issuance.md` and the README API Key Management section for exact commands and setup.
+## Where to work
 
-## Code and verification
+- `src/app/routers/`: HTTP endpoints and request handling.
+- `src/app/lib/`: reusable service logic and persistence helpers.
+- Tests usually live beside the code they exercise, with names ending in `_test.py`.
+- `scripts/`: development and operational tools. Check a script's effects before running it.
 
-- API-key schemas live in lightweight `src/app/api_key_documents.py` and are re-exported from `app.documents` for compatibility. Do not make CLI key administration initialize feed generators, ML models, or the whole application.
-- Keep administrative owner updates and key writes in the same Firestore transaction. All administration paths must share the normalized owner lock.
-- Run offline CLI/key/auth tests plus local emulator transaction tests for changes to issuance, rotation, or deduplication. Automated tests must never use live cloud credentials or projects.
+Before starting the server, read the README's configuration requirements and
+`.env.example`. A local server can still connect to live services.
+
+## Verification
+
+After dependency changes or switching to a branch with a different lockfile,
+run `pipenv sync --dev` to synchronize the environment.
+
+For behavior changes, add regression coverage and run the relevant tests while
+working. Before opening or updating a code PR, run the checks defined in
+`.github/workflows/python-ci.yml`:
+
+```bash
+pipenv run python -m pip check
+pipenv run pyright
+pipenv run pytest
+```
+
+Run Ruff on changed Python files using the configuration in `pyproject.toml`.
+For documentation-only edits, verify referenced paths and commands; a code test
+run is unnecessary unless the edit changes executable examples or configuration.
+
+Use mocks or a local emulator for automated tests. Ensure test subprocesses do
+not inherit live cloud credentials.
+
+Report which checks ran and their results. Identify any checks that could not
+run and explain why; do not claim that unexecuted checks passed.
+
+## Operational boundaries
+
+A request to change code does not itself authorize deployment, credential
+administration, or live data changes. Those operations require an explicit
+request covering the operation and target environment. Ask only for missing
+information; existing authorization does not require repeated confirmation.
+
+Use the documented operational tools. Resolve configuration conflicts rather
+than bypassing their validation with ad hoc write scripts.
+
+Keep credentials out of commits, persistent logs, issues, and test fixtures.
+An ignored `.env` file can still be read by a process; `.gitignore` does not
+restrict access to credentials.
+
+## Specialized guidance
+
+Before changing or using API-key administration, read
+`docs/internal/api-key-issuance.md` and the README's API Key Management section.
+Keep issuance procedures and environment mappings in those documents rather
+than duplicating them here.
+
+## Pull requests
+
+Explain the problem, resulting behavior, validation, and any live operational
+changes already performed. Exclude temporary session notes and execution ledgers.
