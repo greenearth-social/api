@@ -1,16 +1,26 @@
 """Tests for api_keys module."""
+
 from __future__ import annotations
 
 import hmac
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ..documents import ApiKeyDocument
 from ..lib.api_keys import (
+    API_KEYS_COLLECTION,
     FULL_KEY_LEN,
     KEY_PREFIX,
     _hash_key,
+    authenticate_api_key,
+    create_api_key,
     generate_key,
+    get_api_key_doc,
+    list_api_keys,
     parse_key_id,
+    revoke_api_key,
 )
 
 
@@ -69,20 +79,6 @@ class TestParseKeyId:
         assert parse_key_id("") is None
 
 
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
-
-from ..documents import ApiKeyDocument
-from ..lib.api_keys import (
-    API_KEYS_COLLECTION,
-    authenticate_api_key,
-    create_api_key,
-    get_api_key_doc,
-    list_api_keys,
-    revoke_api_key,
-)
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -94,7 +90,7 @@ def _make_doc_data(
     monthly_period: str = "2026-05",
     monthly_call_count: int = 0,
 ) -> dict:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     _, _, key_hash = generate_key()
     return {
         "key_id": key_id,
@@ -112,10 +108,23 @@ def _mock_firestore(doc_data: dict | None = None, exists: bool = True):
     db = MagicMock()
     doc_ref = AsyncMock()
     snap = MagicMock()
+    snap.id = (doc_data or {}).get("key_id")
     snap.exists = exists
     snap.to_dict.return_value = doc_data
     doc_ref.get.return_value = snap
     db.collection.return_value.document.return_value = doc_ref
+
+    async def stream(**kwargs):
+        if exists and doc_data:
+            yield snap
+
+    db.collection.return_value.stream.side_effect = stream
+    transaction = db.transaction.return_value
+    transaction._read_only = False
+    transaction._max_attempts = 5
+    transaction._begin = AsyncMock()
+    transaction._commit = AsyncMock()
+    transaction._rollback = AsyncMock()
     return db, doc_ref
 
 
@@ -210,8 +219,8 @@ class TestCreateApiKey:
         assert doc.scopes == ["default"]
         assert full_key.startswith("gea_")
         assert len(full_key) == FULL_KEY_LEN
-        doc_ref.set.assert_called_once()
-        assert doc_ref.set.call_args[0][0]["scopes"] == ["default"]
+        db.transaction.return_value.create.assert_called_once()
+        assert db.transaction.return_value.create.call_args[0][1]["scopes"] == ["default"]
 
     @pytest.mark.asyncio
     async def test_defaults_to_non_admin(self):
@@ -229,7 +238,7 @@ class TestCreateApiKey:
 
         assert doc.is_admin is True
         assert doc.scopes == ["default"]
-        written = doc_ref.set.call_args[0][0]
+        written = db.transaction.return_value.create.call_args[0][1]
         assert written["is_admin"] is True
 
     @pytest.mark.asyncio
@@ -238,14 +247,12 @@ class TestCreateApiKey:
         db, doc_ref = _mock_firestore(exists=False)
         scopes = ["user-config", "another-capability"]
 
-        doc, _ = await create_api_key(
-            db, "alice@example.com", is_admin=is_admin, scopes=scopes
-        )
+        doc, _ = await create_api_key(db, "alice@example.com", is_admin=is_admin, scopes=scopes)
 
         expected = ["default", "user-config", "another-capability"]
         assert doc.scopes == expected
         assert doc.is_admin is is_admin
-        assert doc_ref.set.call_args[0][0]["scopes"] == expected
+        assert db.transaction.return_value.create.call_args[0][1]["scopes"] == expected
         assert scopes == ["user-config", "another-capability"]
 
     @pytest.mark.asyncio
@@ -254,7 +261,7 @@ class TestCreateApiKey:
 
         doc, full_key = await create_api_key(db, "alice@example.com")
 
-        written = doc_ref.set.call_args[0][0]
+        written = db.transaction.return_value.create.call_args[0][1]
         assert "key_hash" in written
         assert full_key not in str(written)
 
@@ -264,7 +271,7 @@ class TestCreateApiKey:
 
         doc, _ = await create_api_key(db, "alice@example.com")
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         assert doc.monthly_period == now.strftime("%Y-%m")
 
 
@@ -330,7 +337,7 @@ class TestAuthenticateApiKey:
     @pytest.mark.asyncio
     async def test_increments_call_count_same_month(self):
         key_id, full_key, key_hash = generate_key()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         data = _make_doc_data(key_id=key_id, monthly_period=now.strftime("%Y-%m"))
         data["key_hash"] = key_hash
         db, doc_ref = _mock_firestore(data, exists=True)
@@ -366,10 +373,11 @@ class TestListApiKeys:
         docs_data = [_make_doc_data("key00001"), _make_doc_data("key00002")]
         docs_data[1]["scopes"] = ["user-config"]
 
-        async def mock_stream():
+        async def mock_stream(**kwargs):
             for data in docs_data:
                 snap = MagicMock()
                 snap.to_dict.return_value = data
+                snap.id = data["key_id"]
                 yield snap
 
         db.collection.return_value.stream.return_value = mock_stream()
@@ -386,7 +394,7 @@ class TestListApiKeys:
     async def test_returns_empty_list_when_no_keys(self):
         db = MagicMock()
 
-        async def mock_stream():
+        async def mock_stream(**kwargs):
             return
             yield
 
@@ -411,7 +419,7 @@ class TestRevokeApiKey:
         result = await revoke_api_key(db, "a1b2c3d4")
 
         assert result is True
-        doc_ref.update.assert_called_once_with({"is_active": False})
+        db.transaction.return_value.update.assert_called_once_with(doc_ref, {"is_active": False})
 
     @pytest.mark.asyncio
     async def test_returns_false_when_not_found(self):

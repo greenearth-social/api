@@ -180,22 +180,27 @@ prompts as labels. A request rejected by both quotas records one
 
 ## API Key Management
 
-The API uses a Firestore-backed multi-key system. Each key is tied to an
-owner email and tracks monthly call count. Keys are issued manually using
-the `scripts/apikeys.py` CLI.
+Keys live in the fixed Firestore collection `api_keys` under project
+`greenearth-471522`. **Every command must select a database** using
+`--environment stage` (`greenearth-stage`) or `--environment prod`
+(`greenearth-prod`). The collection name is already hardcoded; there is no
+collection-selection parameter and no interactive approval step.
 
-### Key format
+### Setup
 
+Use Python 3.13 and install the locked API dependencies:
+
+```bash
+cd api
+pipenv sync --dev
+gcloud auth application-default login
 ```
-gea_<8-char key_id><48-char secret>
-```
 
-The plaintext key is shown **once** at generation and never stored.
-Authenticate requests by passing the key in the `X-API-Key` header.
-
-Keys also carry an `admin` flag, required to access `/admin/*` endpoints.
-Existing keys default to non-admin. Only issue admin keys to the greenearth
-team.
+`--help` works without credentials or application/ML dependencies. The CLI
+loads `api/.env` before validating the destination, refuses conflicting
+project/database variables, and refuses either Firestore emulator variable.
+Unset stale settings rather than working around these checks. The shared
+application client's defaults are unchanged.
 
 Key records also have a `scopes` list of named capabilities. Every key includes
 `default`, including existing records without a `scopes` field and keys with an
@@ -234,64 +239,75 @@ counts key usage once per request, including when a router requires default
 access and an endpoint adds a named scope. Public and Firebase-authenticated
 endpoints retain their existing authentication.
 
-### CLI commands
+### Commands
 
-Run all commands from the `api/` directory:
-
-```bash
-# Issue a new key
-pipenv run python scripts/apikeys.py generate alice@example.com
-
-# Issue an admin key (greenearth team only)
-pipenv run python scripts/apikeys.py generate alice@greenearth.social --admin
-
-# Issue a service key that can read and update any user's feed preferences
-pipenv run python scripts/apikeys.py generate service@example.com --scope user-config
-
-# List all keys
-pipenv run python scripts/apikeys.py list
-
-# Show usage stats for a key
-pipenv run python scripts/apikeys.py usage <key_id>
-
-# Deactivate a key
-pipenv run python scripts/apikeys.py revoke <key_id>
-```
-
-`generate`, `list`, and `usage` display each key's effective scopes, including
-`default` for legacy keys. `--admin` and `--scope` can be combined; admin status
-remains independent of scopes. Scope names are not restricted by the CLI, but
-only names required by endpoints grant access. Currently those are `default`
-and `user-config`.
-
-### Local development
-
-Point the CLI at the Firestore emulator so you don't touch the real database:
+Run from `api/`; place `--environment` before the subcommand:
 
 ```bash
-GE_FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 pipenv run python scripts/apikeys.py generate test@example.com
+pipenv run python scripts/apikeys.py --environment prod generate developer@example.com
+# Optional named capabilities (repeat --scope for additional scopes)
+pipenv run python scripts/apikeys.py --environment prod generate service@example.com --scope user-config
+pipenv run python scripts/apikeys.py --environment prod list
+pipenv run python scripts/apikeys.py --environment prod usage KEY_ID
+pipenv run python scripts/apikeys.py --environment prod rotate KEY_ID
+pipenv run python scripts/apikeys.py --environment prod revoke KEY_ID
 ```
 
-### Deployment order
+Use `--environment stage` for staging. Add `--admin` to `generate` only for
+Green Earth team keys. Rotation preserves the previous key's admin status and all effective scopes.
 
-**Generate keys before deploying.** The service reads keys from Firestore at
-request time. If no keys exist when the service starts, every request returns
-401.
+There is **one active key per normalized email per database**. Emails are
+trimmed and lowercased; provider-specific aliases are not merged. Generate
+refuses existing active owners (including legacy records); use explicit
+`rotate KEY_ID` instead. Rotation immediately invalidates the old key and
+atomically activates its replacement. Concurrent operations use a deterministic
+`api_key_owners` record and Firestore transactions. Administrative operations
+scan the small key collection to catch legacy case/whitespace differences;
+they are not designed as a high-volume public issuance API.
+
+Keys have format `gea_<8-char key_id><48-char secret>` and are sent in the
+`X-API-Key` header. Only a SHA-256 hash is stored. Plaintext is displayed once;
+keep it in a secure credential store. It cannot be retrieved by `list` or `usage`.
+
+The CLI prints the project, database, fixed collection, API URL, and key ID,
+and verifies new keys against the selected API. **A verification failure can
+occur after creation succeeded.** Do not run generate again: inspect the
+reported key ID and destination. If plaintext was lost or the outcome is
+uncertain, inspect metadata and explicitly rotate the existing active key.
+Only one active replacement is permitted; rotation is not silently retried
+as a new operation after an uncertain result.
+
+### Duplicate cleanup and legacy database
 
 ```bash
-# 1. Generate a key in the target environment's Firestore
-GE_FIRESTORE_PROJECT=greenearth-471522 GE_FIRESTORE_DATABASE=greenearth-stage \
-  pipenv run python scripts/apikeys.py generate alice@example.com
-
-# 2. Deploy
-./scripts/deploy.sh --environment stage
-
-# 3. Verify
-curl https://<service-url>/ -H "X-API-Key: gea_..."
+# Read-only report with latest-used keep/revoke decisions
+pipenv run python scripts/apikeys.py --environment prod deduplicate
+# Recompute in a transaction, revoke duplicates, and populate the owner index
+pipenv run python scripts/apikeys.py --environment prod deduplicate --apply
+# Select a retained key explicitly when usage/privileges are ambiguous
+pipenv run python scripts/apikeys.py --environment prod deduplicate --keep KEY_ID --apply
 ```
 
-Repeat with `GE_FIRESTORE_DATABASE=greenearth-prod` and
-`--environment prod` for production.
+Cleanup retains the most recently successfully used active key per owner.
+`last_used_at` is initialized at creation, so a fresh unused key must not
+outrank a used key. Monthly counters are not lifetime counters. Unused or tied
+keys and different admin status or scopes require an explicit `--keep KEY_ID`;
+repeat `--keep` for different ambiguous owners. Apply recomputes the current
+choices, so a report is not a frozen plan. Revoked records remain for audit;
+no key hashes are changed and no plaintext is generated. A single bounded
+transaction prevents partial cleanup when any owner remains ambiguous.
+
+The unused `(default)` database is available **only** through explicit
+`--legacy-default` for `list`, `usage`, `revoke`, or `deduplicate`. It cannot
+issue or rotate keys and records are never automatically copied into prod:
+
+```bash
+pipenv run python scripts/apikeys.py --legacy-default list
+pipenv run python scripts/apikeys.py --legacy-default deduplicate --keep KEY_ID --apply
+```
+
+Use the official CLI for administration; do not bypass destination/uniqueness
+checks with ad hoc Firestore scripts. See [the issuance runbook](docs/internal/api-key-issuance.md).
 
 ## API Documentation
 
@@ -315,7 +331,7 @@ discarded history and recording discards, so it requires an API key granted the
 get HTTP 403; missing or invalid keys get HTTP 401. Issue one with:
 
 ```bash
-pipenv run python scripts/apikeys.py generate partner@example.com --scope user-config
+pipenv run python scripts/apikeys.py --environment prod generate partner@example.com --scope user-config
 ```
 
 ```bash
@@ -993,7 +1009,7 @@ The `default` scope and admin status do not grant this capability: admin keys
 also need `user-config` explicitly. Issue a scoped key from the `api/` directory:
 
 ```bash
-pipenv run python scripts/apikeys.py generate service@example.com --scope user-config
+pipenv run python scripts/apikeys.py --environment prod generate service@example.com --scope user-config
 ```
 
 ```bash

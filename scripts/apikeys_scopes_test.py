@@ -1,0 +1,186 @@
+"""Tests for API key CLI scope arguments, persistence, and display."""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import apikeys
+import pytest
+
+
+@pytest.fixture
+def firestore_mock(monkeypatch):
+    db = MagicMock()
+    doc_ref = AsyncMock()
+    db.collection.return_value.document.return_value = doc_ref
+    snapshot = MagicMock()
+    snapshot.exists = False
+    doc_ref.get.return_value = snapshot
+
+    async def empty_stream(**kwargs):
+        if False:
+            yield
+
+    db.collection.return_value.stream.side_effect = empty_stream
+    transaction = db.transaction.return_value
+    transaction._read_only = False
+    transaction._max_attempts = 5
+    transaction._begin = AsyncMock()
+    transaction._commit = AsyncMock()
+    transaction._rollback = AsyncMock()
+    monkeypatch.setenv("GE_FIRESTORE_PROJECT", "greenearth-471522")
+    monkeypatch.setenv("GE_FIRESTORE_DATABASE", "greenearth-prod")
+    for name in ["FIRESTORE_EMULATOR_HOST", "GE_FIRESTORE_EMULATOR_HOST"]:
+        monkeypatch.delenv(name, raising=False)
+    with patch("google.cloud.firestore.AsyncClient", return_value=db) as mock_init:
+        with patch("apikeys.verify_key", new=AsyncMock(return_value=True)):
+            yield db, doc_ref, mock_init
+
+
+def _key_data(key_id="a1b2c3d4", **fields):
+    now = datetime(2026, 10, 15, 12, 30, tzinfo=UTC)
+    return {
+        "key_id": key_id,
+        "key_hash": "a" * 64,
+        "email": "service@example.com",
+        "is_active": True,
+        "is_admin": False,
+        "created_at": now,
+        "last_used_at": now,
+        "monthly_period": "2026-10",
+        "monthly_call_count": 12,
+        **fields,
+    }
+
+
+@pytest.mark.parametrize("admin", [False, True])
+@pytest.mark.parametrize(
+    ("scopes", "expected_scopes"),
+    [
+        ([], ["default"]),
+        (["user-config"], ["default", "user-config"]),
+        (["user-config", "reports"], ["default", "user-config", "reports"]),
+        (["default", "user-config"], ["default", "user-config"]),
+        (["Custom-Scope"], ["default", "Custom-Scope"]),
+    ],
+)
+def test_generate_persists_and_displays_scopes(
+    admin, scopes, expected_scopes, firestore_mock, monkeypatch, capsys
+):
+    db, doc_ref, _ = firestore_mock
+    argv = ["apikeys.py", "--environment", "prod", "generate", "service@example.com"]
+    if admin:
+        argv.append("--admin")
+    for scope in scopes:
+        argv.extend(["--scope", scope])
+    monkeypatch.setattr("sys.argv", argv)
+
+    apikeys.main()
+
+    db.transaction.return_value.create.assert_called_once()
+    stored = db.transaction.return_value.create.call_args.args[1]
+    assert stored["email"] == "service@example.com"
+    assert stored["is_admin"] is admin
+    assert stored["scopes"] == expected_scopes
+    db.collection.assert_any_call("api_keys")
+    output = capsys.readouterr().out
+    assert f"Key ID      : {stored['key_id']}" in output
+    assert "Email       : service@example.com" in output
+    assert f"Admin       : {admin}" in output
+    assert f"Scopes      : {', '.join(expected_scopes)}" in output
+    key_line = next(line for line in output.splitlines() if line.startswith("Key         : "))
+    full_key = key_line.removeprefix("Key         : ")
+    assert full_key.startswith(f"gea_{stored['key_id']}")
+    assert hashlib.sha256(full_key.encode()).hexdigest() == stored["key_hash"]
+    assert full_key not in str(stored)
+    assert stored["key_hash"] not in output
+    assert "plaintext is displayed once and never stored." in output
+
+
+def test_generate_requires_a_value_for_scope(firestore_mock, monkeypatch, capsys):
+    _, _, mock_init = firestore_mock
+    monkeypatch.setattr(
+        "sys.argv",
+        ["apikeys.py", "--environment", "prod", "generate", "service@example.com", "--scope"],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        apikeys.main()
+
+    assert exc.value.code == 2
+    assert "--scope: expected one argument" in capsys.readouterr().err
+    mock_init.assert_not_called()
+
+
+def test_list_displays_effective_scopes_for_legacy_and_new_keys(
+    firestore_mock, monkeypatch, capsys
+):
+    db, _, _ = firestore_mock
+    records = [
+        _key_data("legacy01", is_admin=True),
+        _key_data("default1", scopes=["default"]),
+        _key_data("scoped01", scopes=["user-config", "reports"]),
+    ]
+
+    async def stream(**kwargs):
+        for record in records:
+            snapshot = MagicMock()
+            snapshot.id = record["key_id"]
+            snapshot.to_dict.return_value = record
+            yield snapshot
+
+    db.collection.return_value.stream.side_effect = stream
+    monkeypatch.setattr("sys.argv", ["apikeys.py", "--environment", "prod", "list"])
+
+    apikeys.main()
+
+    output = capsys.readouterr().out
+    lines = output.splitlines()
+    assert "Collection  : api_keys (fixed)" in output
+    for key_id, expected_scopes in [
+        ("legacy01", "default"),
+        ("default1", "default"),
+        ("scoped01", "default, user-config, reports"),
+    ]:
+        line = next(line for line in lines if line.startswith(key_id))
+        assert line.endswith("scopes=" + expected_scopes)
+        assert "service@example.com" in line
+        assert "2026-10-15T12:30:00+00:00" in line
+    assert "gea_" not in output
+    assert records[0]["key_hash"] not in output
+
+
+@pytest.mark.parametrize("is_admin", [False, True])
+@pytest.mark.parametrize(
+    ("fields", "expected_scopes"),
+    [
+        ({}, "default"),
+        ({"scopes": ["default"]}, "default"),
+        ({"scopes": ["user-config", "reports"]}, "default, user-config, reports"),
+    ],
+)
+def test_usage_displays_effective_scopes(
+    is_admin, fields, expected_scopes, firestore_mock, monkeypatch, capsys
+):
+    _, doc_ref, _ = firestore_mock
+    record = _key_data(is_admin=is_admin, **fields)
+    snapshot = MagicMock()
+    snapshot.exists = True
+    snapshot.to_dict.return_value = record
+    doc_ref.get.return_value = snapshot
+    monkeypatch.setattr(
+        "sys.argv", ["apikeys.py", "--environment", "prod", "usage", record["key_id"]]
+    )
+
+    apikeys.main()
+
+    output = capsys.readouterr().out
+    assert record["key_id"] in output
+    assert repr(expected_scopes.split(", ")) in output
+    assert "'monthly_call_count': 12" in output
+    assert "gea_" not in output
+    assert record["key_hash"] not in output
+    doc_ref.set.assert_not_awaited()
+    doc_ref.update.assert_not_awaited()
