@@ -515,6 +515,12 @@ def _configured_generation(
             }
         )
 
+    if "normalize_rank_by_generator" in controls:
+        assert effective.normalize_rank_by_generator is not None
+        feed_cfg = feed_cfg.model_copy(
+            update={"normalize_rank_by_generator": effective.normalize_rank_by_generator}
+        )
+
     generators_override: dict[str, list[GeneratorSpec]] = {}
     if "source_weights" in controls:
         source_weights = effective.source_weights

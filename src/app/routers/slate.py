@@ -553,6 +553,7 @@ async def _generate_and_store(
         min_rank_score=body.min_rank_score,
         min_mmr_score=body.min_mmr_score,
         max_render_share=body.max_render_share,
+        normalize_rank_by_generator=body.normalize_rank_by_generator,
     )
     extra_generators = (
         {EXTERNAL_GENERATOR_NAME: SuppliedCandidatesGenerator(body.external_candidates)}

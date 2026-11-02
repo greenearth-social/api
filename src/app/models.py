@@ -13,6 +13,7 @@ FeedControlName = Literal[
     "purpose",
     "author_penalty",
     "topic_penalty",
+    "normalize_rank_by_generator",
 ]
 
 # What a feed does when the AppView calls getFeedSkeleton with no (or an
@@ -308,6 +309,12 @@ class SlateCutoffs(BaseModel):
         "pick scoring below it. MMR relevance is normalized per slate, so this "
         "threshold is slate-relative rather than an absolute quality bar. Only "
         "applies when diversify is True. None disables.",
+    )
+    normalize_rank_by_generator: bool = Field(
+        default=False,
+        description="After the min_rank_score cut, rescale each generator's rank scores to "
+        "0..1 before MMR so no generator is crowded out (issue #572). Only applies when "
+        "rank_request_template is set.",
     )
 
 

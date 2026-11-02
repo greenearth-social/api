@@ -62,6 +62,7 @@ class FeedPreferencesDocument(BaseModel):
     purpose: float | None = Field(default=None, ge=0.0, le=1.0)
     author_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    normalize_rank_by_generator: bool | None = None
 
 
 class LlmPromptStateDocument(BaseModel):
@@ -521,6 +522,15 @@ class FeedDebugDiversificationEntry(BaseModel):
     topic_penalty_weight: float = Field(default=0.35, ge=0.0, le=0.5)
 
 
+class FeedDebugRankNormalization(BaseModel):
+    """A candidate's rank score before and after per-generator rescaling (#572)."""
+
+    at_uri: str
+    generator_name: str
+    score_before: float
+    score_after: float
+
+
 class FeedDebugDocument(BaseModel):
     """Captured debugging information for a single feed load.
 
@@ -583,6 +593,10 @@ class FeedDebugDocument(BaseModel):
     politics_adjustments: list[FeedDebugPoliticsAdjustment] = Field(
         default_factory=list,
         description="Per-candidate politics score adjustment captured during ranking",
+    )
+    rank_normalization: list[FeedDebugRankNormalization] = Field(
+        default_factory=list,
+        description="Per-generator rank-score rescaling; empty when the slate flag was off",
     )
     order_after_rank: list[str] = Field(
         default_factory=list, description="AT URIs in order after ranking, before diversification"
@@ -679,6 +693,10 @@ class PipelineItemMeta(BaseModel):
     at_uri: str
     rank: int | None = None
     rank_score: float | None = None
+    normalized_rank_score: float | None = Field(
+        default=None,
+        description="rank_score rescaled within its generator; set only when the slate flag was on",
+    )
     after_rank_position: int | None = None
     generators: list[GeneratorMeta] = Field(default_factory=list)
     model_scores: list[ModelScoreMeta] = Field(default_factory=list)
