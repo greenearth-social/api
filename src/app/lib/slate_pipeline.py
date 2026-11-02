@@ -66,8 +66,7 @@ class PipelineResult(NamedTuple):
     low_score_uris: list[str]
 
 
-# Generator key for candidates that carry no generator_name (e.g. the slate
-# API's caller-supplied posts); they are normalized as one group of their own.
+# Group for candidates without a generator_name (e.g. slate API caller-supplied posts).
 UNKNOWN_GENERATOR = "unknown"
 
 
@@ -180,9 +179,7 @@ async def run_ranking_pipeline(
         candidates = await hydrate_posts(es, candidates)
 
         low_score_uris: list[str] = []
-        # True once model rank scores are on the candidates (not the fail-open
-        # generator-score ordering), which is what per-generator normalization
-        # is defined over.
+        # True once model rank scores are on the candidates, not the fail-open ordering.
         ranked = False
         if slate.rank_request_template is not None:
             candidates = [c for c in candidates if c.minilm_l12_embedding]
@@ -246,8 +243,6 @@ async def run_ranking_pipeline(
             record_cutoff(feed_name, "rank_score", low_score_uris)
 
         if ranked and slate.normalize_rank_by_generator and ordered:
-            # The absolute floor above has already judged quality; from here on
-            # each generator is graded on its own curve so none is crowded out.
             raw_by_uri = {c.at_uri: c.score or 0.0 for c in ordered if c.at_uri}
             ordered = normalize_scores_by_generator(ordered)
             if rec is not None:

@@ -29,7 +29,6 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | bool | SourceWeightsDocume
     "purpose": 0.5,
     "author_penalty": 0.7,
     "topic_penalty": 0.7,
-    # Off by default: an opt-in experiment (issue #572) surfaced to cohort users.
     "normalize_rank_by_generator": False,
 }
 

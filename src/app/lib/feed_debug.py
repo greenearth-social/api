@@ -67,8 +67,7 @@ class FeedDebugRecorder:
         # (at_uri, topic_score, score_multiplier, score_before, score_after)
         # per ranked candidate, in request order.
         self.politics_adjustments: list[tuple[str, float | None, float, float, float]] = []
-        # (at_uri, generator_name, score_before, score_after) in post-normalization
-        # order; populated only when the slate normalizes rank scores per generator.
+        # (at_uri, generator_name, score_before, score_after); only with the slate flag on.
         self.rank_normalization: list[tuple[str, str, float, float]] = []
         self.order_after_rank: list[str] = []
         self.final_order: list[str] = []
@@ -125,8 +124,7 @@ class FeedDebugRecorder:
         self.politics_adjustments = list(adjustments)
 
     def record_rank_normalization(self, entries: list[tuple[str, str, float, float]]) -> None:
-        """Record each candidate's per-generator rescaling as
-        (at_uri, generator_name, score_before, score_after); see issue #572."""
+        """Entries are (at_uri, generator_name, score_before, score_after)."""
         self.rank_normalization = list(entries)
 
     def record_order_after_rank(self, uris: list[str]) -> None:
@@ -486,7 +484,7 @@ class FeedDebugRecorder:
         # Per-URI position after ranking.
         after_rank_pos = {uri: i for i, uri in enumerate(self.order_after_rank, start=1)}
 
-        # Per-URI normalized rank score (only when the slate normalized per generator).
+        # Per-URI normalized rank score.
         normalized_by_uri = {
             at_uri: score_after
             for at_uri, _generator, _before, score_after in self.rank_normalization

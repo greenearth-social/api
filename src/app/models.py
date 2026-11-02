@@ -312,12 +312,9 @@ class SlateCutoffs(BaseModel):
     )
     normalize_rank_by_generator: bool = Field(
         default=False,
-        description="When True, after the min_rank_score cut each candidate generator's "
-        "combined rank scores are rescaled linearly so that generator's worst survivor "
-        "scores 0 and its best scores 1, before MMR and the share cap. This stops a "
-        "generator whose posts the heavy ranker has never seen liked (e.g. the LLM "
-        "prompt source) from being crowded out of the slate. Only applies when "
-        "rank_request_template is set. See issue #572.",
+        description="After the min_rank_score cut, rescale each generator's rank scores to "
+        "0..1 before MMR so no generator is crowded out (issue #572). Only applies when "
+        "rank_request_template is set.",
     )
 
 

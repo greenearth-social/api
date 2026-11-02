@@ -523,12 +523,7 @@ class FeedDebugDiversificationEntry(BaseModel):
 
 
 class FeedDebugRankNormalization(BaseModel):
-    """One candidate's per-generator rank-score normalization (issue #572).
-
-    Recorded only when the slate's ``normalize_rank_by_generator`` flag was on:
-    ``score_before`` is the combined (politics-adjusted) rank score and
-    ``score_after`` its position within ``generator_name``'s [min, max] range.
-    """
+    """A candidate's rank score before and after per-generator rescaling (#572)."""
 
     at_uri: str
     generator_name: str
@@ -601,8 +596,7 @@ class FeedDebugDocument(BaseModel):
     )
     rank_normalization: list[FeedDebugRankNormalization] = Field(
         default_factory=list,
-        description="Per-candidate rank-score rescaling within each generator; empty when "
-        "the slate's normalize_rank_by_generator flag was off",
+        description="Per-generator rank-score rescaling; empty when the slate flag was off",
     )
     order_after_rank: list[str] = Field(
         default_factory=list, description="AT URIs in order after ranking, before diversification"
@@ -701,8 +695,7 @@ class PipelineItemMeta(BaseModel):
     rank_score: float | None = None
     normalized_rank_score: float | None = Field(
         default=None,
-        description="rank_score rescaled within its generator's [min, max]; only set when "
-        "the slate's normalize_rank_by_generator flag was on",
+        description="rank_score rescaled within its generator; set only when the slate flag was on",
     )
     after_rank_position: int | None = None
     generators: list[GeneratorMeta] = Field(default_factory=list)

@@ -436,8 +436,6 @@ def _item_panel(
         journey.append(f" (score {_fmt_score(rank_score)})", style="dim")
         normalized = (normalized_by_uri or {}).get(uri)
         if normalized is not None and ar is not None:
-            # Per-generator rescaling (issue #572): position entering MMR and
-            # the score within this generator's own [min, max].
             journey.append("  →  within ", style="dim")
             journey.append(normalized.generator_name, style="cyan")
             journey.append(f" #{ar + 1}", style="yellow")
