@@ -509,6 +509,7 @@ def test_remove_returns_saved_preferences_without_model_work_or_quota(
         "politics": None,
         "author_penalty": None,
         "topic_penalty": None,
+        "normalize_rank_by_generator": None,
     }
     mock_remove.assert_awaited_once_with(app.state.firestore, "did:plc:test-user", "v1")
     quota.assert_not_awaited()

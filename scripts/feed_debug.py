@@ -397,6 +397,7 @@ def _item_panel(
     generators_by_uri: dict,
     rank_by_uri: dict,
     after_rank_pos: dict,
+    normalized_by_uri: dict,
     model_scores_by_uri: dict,
     politics_by_uri: dict,
     div_by_uri: dict,
@@ -432,6 +433,14 @@ def _item_panel(
         journey.append("  →  ranked ", style="dim")
         journey.append(f"#{rank}", style="yellow")
         journey.append(f" (score {_fmt_score(rank_score)})", style="dim")
+        normalized = normalized_by_uri.get(uri)
+        if normalized is not None and ar is not None:
+            # Per-generator rescaling (issue #572): position entering MMR and
+            # the score within this generator's own [min, max].
+            journey.append("  →  within ", style="dim")
+            journey.append(normalized.generator_name, style="cyan")
+            journey.append(f" #{ar + 1}", style="yellow")
+            journey.append(f" (score {_fmt_score(normalized.score_after)})", style="dim")
     elif ar is not None:
         journey.append("  →  by score ", style="dim")
         journey.append(f"#{ar}", style="white")
@@ -553,6 +562,9 @@ def _render_show(doc: FeedDebugDocument) -> None:
         adjustment.at_uri: adjustment for adjustment in getattr(doc, "politics_adjustments", [])
     }
     after_rank_pos = {uri: i for i, uri in enumerate(doc.order_after_rank)}
+    normalized_by_uri = {
+        entry.at_uri: entry for entry in getattr(doc, "rank_normalization", [])
+    }
     final_pos = {uri: i for i, uri in enumerate(doc.final_order)}
     div_by_uri = {e.at_uri: e for e in doc.diversification}
 
@@ -601,6 +613,7 @@ def _render_show(doc: FeedDebugDocument) -> None:
                 generators_by_uri,
                 rank_by_uri,
                 after_rank_pos,
+                normalized_by_uri,
                 model_scores_by_uri,
                 politics_by_uri,
                 div_by_uri,

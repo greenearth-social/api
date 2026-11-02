@@ -159,6 +159,7 @@ FEEDS: dict[str, FeedConfig] = {
             "politics",
             "author_penalty",
             "topic_penalty",
+            "normalize_rank_by_generator",
         ),
         pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED),
         explore_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_EXPLORE),

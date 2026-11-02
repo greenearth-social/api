@@ -89,9 +89,49 @@ class TestBuildDocument:
                 ("at://p/2", None, 1.0, 0.5, 0.5),
             ],
         )
+        rec.record_rank_normalization(
+            [("at://p/1", "popularity", 0.9, 1.0), ("at://p/2", "popularity", 0.5, 0.0)]
+        )
         rec.record_order_after_rank(["at://p/1", "at://p/2"])
         rec.record_final_order(["at://p/2", "at://p/1"])
         return rec
+
+    def test_records_rank_normalization(self):
+        doc = self._build(self._recorder())
+        assert [entry.model_dump() for entry in doc.rank_normalization] == [
+            {
+                "at_uri": "at://p/1",
+                "generator_name": "popularity",
+                "score_before": 0.9,
+                "score_after": 1.0,
+            },
+            {
+                "at_uri": "at://p/2",
+                "generator_name": "popularity",
+                "score_before": 0.5,
+                "score_after": 0.0,
+            },
+        ]
+
+    def test_snapshot_carries_normalized_rank_score(self):
+        rec = self._recorder()
+        now = datetime.now(timezone.utc)
+        snapshot = rec.build_pipeline_metadata(
+            request_id="req123", generated_at=now, expires_at=now + timedelta(days=1)
+        )
+        by_uri = {item.at_uri: item for item in snapshot.items_meta}
+        assert by_uri["at://p/1"].rank_score == 0.9
+        assert by_uri["at://p/1"].normalized_rank_score == 1.0
+        assert by_uri["at://p/2"].normalized_rank_score == 0.0
+
+    def test_snapshot_omits_normalized_score_when_flag_off(self):
+        rec = self._recorder()
+        rec.rank_normalization = []
+        now = datetime.now(timezone.utc)
+        snapshot = rec.build_pipeline_metadata(
+            request_id="req123", generated_at=now, expires_at=now + timedelta(days=1)
+        )
+        assert all(item.normalized_rank_score is None for item in snapshot.items_meta)
 
     def _build(self, rec: FeedDebugRecorder, **kwargs):
         now = datetime.now(timezone.utc)

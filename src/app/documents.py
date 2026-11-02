@@ -62,6 +62,7 @@ class FeedPreferencesDocument(BaseModel):
     purpose: float | None = Field(default=None, ge=0.0, le=1.0)
     author_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    normalize_rank_by_generator: bool | None = None
 
 
 class LlmPromptStateDocument(BaseModel):
@@ -521,6 +522,20 @@ class FeedDebugDiversificationEntry(BaseModel):
     topic_penalty_weight: float = Field(default=0.35, ge=0.0, le=0.5)
 
 
+class FeedDebugRankNormalization(BaseModel):
+    """One candidate's per-generator rank-score normalization (issue #572).
+
+    Recorded only when the slate's ``normalize_rank_by_generator`` flag was on:
+    ``score_before`` is the combined (politics-adjusted) rank score and
+    ``score_after`` its position within ``generator_name``'s [min, max] range.
+    """
+
+    at_uri: str
+    generator_name: str
+    score_before: float
+    score_after: float
+
+
 class FeedDebugDocument(BaseModel):
     """Captured debugging information for a single feed load.
 
@@ -583,6 +598,11 @@ class FeedDebugDocument(BaseModel):
     politics_adjustments: list[FeedDebugPoliticsAdjustment] = Field(
         default_factory=list,
         description="Per-candidate politics score adjustment captured during ranking",
+    )
+    rank_normalization: list[FeedDebugRankNormalization] = Field(
+        default_factory=list,
+        description="Per-candidate rank-score rescaling within each generator; empty when "
+        "the slate's normalize_rank_by_generator flag was off",
     )
     order_after_rank: list[str] = Field(
         default_factory=list, description="AT URIs in order after ranking, before diversification"
@@ -679,6 +699,11 @@ class PipelineItemMeta(BaseModel):
     at_uri: str
     rank: int | None = None
     rank_score: float | None = None
+    normalized_rank_score: float | None = Field(
+        default=None,
+        description="rank_score rescaled within its generator's [min, max]; only set when "
+        "the slate's normalize_rank_by_generator flag was on",
+    )
     after_rank_position: int | None = None
     generators: list[GeneratorMeta] = Field(default_factory=list)
     model_scores: list[ModelScoreMeta] = Field(default_factory=list)

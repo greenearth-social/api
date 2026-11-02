@@ -67,6 +67,9 @@ class FeedDebugRecorder:
         # (at_uri, topic_score, score_multiplier, score_before, score_after)
         # per ranked candidate, in request order.
         self.politics_adjustments: list[tuple[str, float | None, float, float, float]] = []
+        # (at_uri, generator_name, score_before, score_after) in post-normalization
+        # order; populated only when the slate normalizes rank scores per generator.
+        self.rank_normalization: list[tuple[str, str, float, float]] = []
         self.order_after_rank: list[str] = []
         self.final_order: list[str] = []
         # (at_uri, relevance, score, author_penalty, content_penalty,
@@ -121,6 +124,11 @@ class FeedDebugRecorder:
         self.politics_setting = setting
         self.politics_adjustments = list(adjustments)
 
+    def record_rank_normalization(self, entries: list[tuple[str, str, float, float]]) -> None:
+        """Record each candidate's per-generator rescaling as
+        (at_uri, generator_name, score_before, score_after); see issue #572."""
+        self.rank_normalization = list(entries)
+
     def record_order_after_rank(self, uris: list[str]) -> None:
         self.order_after_rank = list(uris)
 
@@ -174,6 +182,7 @@ class FeedDebugRecorder:
             FeedDebugDocument,
             FeedDebugModelScoreEntry,
             FeedDebugPoliticsAdjustment,
+            FeedDebugRankNormalization,
             FeedDebugScoreEntry,
             FeedDebugUserFeatures,
         )
@@ -241,6 +250,15 @@ class FeedDebugRecorder:
                 score_after,
             ) in self.politics_adjustments
         ]
+        rank_normalization = [
+            FeedDebugRankNormalization(
+                at_uri=at_uri,
+                generator_name=generator_name,
+                score_before=score_before,
+                score_after=score_after,
+            )
+            for at_uri, generator_name, score_before, score_after in self.rank_normalization
+        ]
         diversification = [
             FeedDebugDiversificationEntry(
                 at_uri=at_uri,
@@ -281,6 +299,7 @@ class FeedDebugRecorder:
             model_scores=model_scores,
             politics_setting=self.politics_setting,
             politics_adjustments=politics_adjustments,
+            rank_normalization=rank_normalization,
             order_after_rank=self.order_after_rank,
             final_order=self.final_order,
             diversification=diversification,
@@ -467,6 +486,12 @@ class FeedDebugRecorder:
         # Per-URI position after ranking.
         after_rank_pos = {uri: i for i, uri in enumerate(self.order_after_rank, start=1)}
 
+        # Per-URI normalized rank score (only when the slate normalized per generator).
+        normalized_by_uri = {
+            at_uri: score_after
+            for at_uri, _generator, _before, score_after in self.rank_normalization
+        }
+
         # Per-URI diversification.
         div_by_uri: dict[str, DiversificationMeta] = {}
         for (
@@ -498,6 +523,7 @@ class FeedDebugRecorder:
                     at_uri=at_uri,
                     rank=rank,
                     rank_score=rank_score,
+                    normalized_rank_score=normalized_by_uri.get(at_uri),
                     after_rank_position=after_rank_pos.get(at_uri, pos + 1),
                     generators=gens_by_uri.get(at_uri, []),
                     model_scores=model_scores_by_uri.get(at_uri, []),

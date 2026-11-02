@@ -19,7 +19,7 @@ DEFAULT_SOURCE_WEIGHTS = SourceWeightsDocument(
     popular=0.25,
 )
 
-CONTROL_DEFAULTS: dict[FeedControlName, int | float | SourceWeightsDocument] = {
+CONTROL_DEFAULTS: dict[FeedControlName, int | float | bool | SourceWeightsDocument] = {
     "source_weights": DEFAULT_SOURCE_WEIGHTS,
     "social_radius": 3,
     "freshness": 5,
@@ -29,6 +29,8 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | SourceWeightsDocument] = {
     "purpose": 0.5,
     "author_penalty": 0.7,
     "topic_penalty": 0.7,
+    # Off by default: an opt-in experiment (issue #572) surfaced to cohort users.
+    "normalize_rank_by_generator": False,
 }
 
 
@@ -65,7 +67,7 @@ def resolve_feed_preferences(
     """Resolve stored values, legacy fallbacks, and defaults for one feed."""
     source = preference_source(feed_name)
     stored = user.feed_preferences.get(source) if user is not None else None
-    values: dict[str, int | float | SourceWeightsDocument] = {}
+    values: dict[str, int | float | bool | SourceWeightsDocument] = {}
 
     for control in configured_controls(feed_name):
         if control == "source_weights":
@@ -115,11 +117,19 @@ def control_value(
 ) -> float: ...
 
 
+@overload
+def control_value(
+    user: UserDocument | None,
+    feed_name: str,
+    control: Literal["normalize_rank_by_generator"],
+) -> bool: ...
+
+
 def control_value(
     user: UserDocument | None,
     feed_name: str,
     control: FeedControlName,
-) -> int | float | SourceWeightsDocument:
+) -> int | float | bool | SourceWeightsDocument:
     """Resolve one value, returning its default when the feed does not expose it."""
     if control not in configured_controls(feed_name):
         return CONTROL_DEFAULTS[control]
