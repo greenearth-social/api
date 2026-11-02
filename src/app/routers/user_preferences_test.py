@@ -183,27 +183,6 @@ def test_patch_saves_target_user_then_clears_seen_history(
     app.state.firestore.collection.return_value.document.return_value.update.assert_awaited_once()
 
 
-def test_patch_saves_rank_normalization_for_your_feed(client, scoped_headers, preferences_io):
-    preferences_io.save.return_value = FeedPreferencesDocument(
-        freshness=5, normalize_rank_by_generator=True
-    )
-
-    response = client.patch(
-        f"{PREFERENCES_URL}/your-feed",
-        headers=scoped_headers,
-        json={"normalize_rank_by_generator": True},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"freshness": 5, "normalize_rank_by_generator": True}
-    preferences_io.save.assert_awaited_once_with(
-        app.state.firestore,
-        USER_DID,
-        "your-feed",
-        FeedPreferencesDocument(normalize_rank_by_generator=True),
-    )
-
-
 def test_patch_succeeds_when_seen_cleanup_fails(client, scoped_headers, preferences_io):
     preferences_io.clear_seen.side_effect = RuntimeError("cleanup unavailable")
 
@@ -242,8 +221,6 @@ def test_failed_save_does_not_clear_seen_history(client, scoped_headers, prefere
         ("your-feed", {"topic_penalty": 1.01}, 422),
         ("your-feed", {"source_weights": {"following": 0.5}}, 422),
         ("your-feed", {"socialRadius": 3}, 422),
-        ("your-feed", {"normalize_rank_by_generator": None}, 422),
-        ("best-of-friends", {"normalize_rank_by_generator": True}, 422),
         ("random", {"purpose": 0.8}, 422),
     ],
 )

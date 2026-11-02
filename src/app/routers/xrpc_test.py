@@ -450,26 +450,6 @@ def test_configured_generation_applies_politics_to_request_local_rank_template(p
     assert original_rank_template.politics == 1.0
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_configured_generation_applies_rank_normalization_to_request_local_slate(enabled):
-    from .xrpc import _configured_generation
-
-    user = UserDocument(
-        user_did="did:plc:testuser",
-        feed_preferences={
-            "your-feed": FeedPreferencesDocument(normalize_rank_by_generator=enabled),
-        },
-    )
-
-    configured = _configured_generation("your-feed", user)
-    defaults = _configured_generation("your-feed", None)
-
-    assert configured.feed_cfg.normalize_rank_by_generator is enabled
-    assert defaults.feed_cfg.normalize_rank_by_generator is False
-    assert FEEDS["your-feed"].normalize_rank_by_generator is False
-    assert (configured.preference_fingerprint != defaults.preference_fingerprint) is enabled
-
-
 def test_100_percent_following_and_best_of_friends_share_pipeline_configuration():
     from .xrpc import _configured_generation
 

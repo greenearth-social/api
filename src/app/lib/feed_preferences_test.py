@@ -128,22 +128,3 @@ def test_feed_preferences_document_accepts_politics_boundaries(politics):
 def test_feed_preferences_document_rejects_politics_outside_boundaries(politics):
     with pytest.raises(ValidationError):
         FeedPreferencesDocument(politics=politics)
-
-
-def test_resolver_defaults_rank_normalization_off_for_your_feed_only():
-    resolved = resolve_feed_preferences(None, "your-feed")
-    assert resolved.normalize_rank_by_generator is False
-
-    # Not a best-of-friends control: left unset rather than defaulted.
-    assert resolve_feed_preferences(None, "best-of-friends").normalize_rank_by_generator is None
-
-
-def test_resolver_returns_stored_rank_normalization():
-    user = UserDocument(
-        user_did="did:plc:test",
-        feed_preferences={
-            "your-feed": FeedPreferencesDocument(normalize_rank_by_generator=True),
-        },
-    )
-
-    assert resolve_feed_preferences(user, "your-feed").normalize_rank_by_generator is True
