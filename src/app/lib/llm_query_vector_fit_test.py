@@ -699,3 +699,58 @@ def test_score_call_cost_bound_is_the_worst_case_of_one_call():
     # trips on a misconfiguration.
     assert fit.N_KEYWORD_POSTS * fit._SCORE_CALL_COST_BOUND_USD < fit.MAX_COST_USD
     assert math.ceil(fit.MIN_SCORED_FRACTION * fit.N_KEYWORD_POSTS) == 64
+
+
+@pytest.mark.asyncio
+async def test_filter_fit_rewrites_the_wish_and_judges_aboutness(small_sample):
+    """A filter prompt (#566) is a wish; the fit must see only the kind of post."""
+    pool = [
+        (f"at://k/{i}", f"airplane spotting {i}" if i % 2 else f"airport delays {i}")
+        for i in range(8)
+    ]
+    randoms = [(f"at://r/{i}", f"unrelated chatter {i}") for i in range(12)]
+    es = FakeES(pool, randoms)
+    bag = [f"kw{i}" for i in range(fit.N_KEYWORDS)]
+
+    def handler(kw):
+        if kw["system"] == fit.FILTER_SUBJECT_SYSTEM:
+            assert "I don't want to see airplanes" in kw["messages"][0]["content"]
+            return _reply(json.dumps({"subject": "posts about airplanes"}))
+        if "output_config" in kw:  # the expansion call sees the subject, not the wish
+            assert "posts about airplanes" in kw["messages"][0]["content"]
+            assert "don't want" not in kw["messages"][0]["content"]
+            return _reply(json.dumps({"keywords": bag}))
+        assert kw["system"] == fit.FILTER_SCORING_SYSTEM
+        assert "The kind of post:\nposts about airplanes" in kw["messages"][0]["content"]
+        return _score_reply(9 if "spotting" in _post_text(kw) else 3)
+
+    client = FakeAnthropic(handler)
+    with (
+        patch.object(fit, "_get_anthropic_client", return_value=client),
+        patch.object(
+            fit, "fetch_post_embeddings_and_politics_scores", AsyncMock(side_effect=_hydrate_all)
+        ),
+    ):
+        result = await fit_query_vector(es, "I don't want to see airplanes", role="filter")
+
+    assert result.subject == "posts about airplanes"
+    assert len(result.query_vector) == _DIM
+    # Subject, expansion, four scoring calls.
+    assert len(client.started) == 6
+
+
+@pytest.mark.asyncio
+async def test_cg_fit_never_rewrites(small_sample):
+    pool = [(f"at://k/{i}", f"solar panels story {i}") for i in range(8)]
+    es = FakeES(pool, [(f"at://r/{i}", f"chatter {i}") for i in range(12)])
+    client = _pipeline_client()
+    with (
+        patch.object(fit, "_get_anthropic_client", return_value=client),
+        patch.object(
+            fit, "fetch_post_embeddings_and_politics_scores", AsyncMock(side_effect=_hydrate_all)
+        ),
+    ):
+        result = await fit_query_vector(es, "hopeful solar news")
+    assert result.subject is None
+    assert all(c["system"] != fit.FILTER_SUBJECT_SYSTEM for c in client.started)
+    assert all(c["system"] != fit.FILTER_SCORING_SYSTEM for c in client.started)

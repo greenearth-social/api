@@ -161,6 +161,7 @@ class FeedPreferences(BaseModel):
     author_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     normalize_rank_by_generator: bool | None = None
+    llm_filter: float | None = Field(default=None, ge=0.5, le=2.0)
 
 
 class AcceptFeedPreviewRequest(BaseModel):

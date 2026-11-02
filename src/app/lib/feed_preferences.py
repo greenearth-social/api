@@ -30,6 +30,8 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | bool | SourceWeightsDocume
     "author_penalty": 0.7,
     "topic_penalty": 0.7,
     "normalize_rank_by_generator": False,
+    # "Min" by default (#566) so a freshly fitted filter prompt shows an effect at once.
+    "llm_filter": 0.5,
 }
 
 
@@ -112,7 +114,7 @@ def control_value(
 def control_value(
     user: UserDocument | None,
     feed_name: str,
-    control: Literal["politics", "purpose", "author_penalty", "topic_penalty"],
+    control: Literal["politics", "purpose", "author_penalty", "topic_penalty", "llm_filter"],
 ) -> float: ...
 
 

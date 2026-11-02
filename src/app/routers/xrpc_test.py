@@ -6966,3 +6966,33 @@ async def test_explore_preserves_accepted_settings_slate_for_next_full_feed_load
     assert state._write_feed_snapshot_background.await_args.kwargs["injected_post_count"] == 1
     state.upsert_feed_activity.assert_awaited_once()
     state._run_pipeline_capturing_with_timeout.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (None, 1.0),
+        ({"active_prompt_key": None, "revision": 2}, 1.0),
+        ({"active_prompt_key": "filter-1", "revision": 2}, 0.75),
+    ],
+    ids=["no-state", "removed", "active"],
+)
+def test_llm_filter_reaches_the_rank_template_only_with_an_active_filter_prompt(state, expected):
+    from .xrpc import _configured_generation
+
+    user = UserDocument(
+        user_did="did:plc:testuser",
+        llm_filter_prompt_state=state,
+        feed_preferences={"your-feed": FeedPreferencesDocument(llm_filter=0.75)},
+    )
+
+    configured = _configured_generation("your-feed", user)
+
+    assert configured.effective_preferences.llm_filter == 0.75
+    assert configured.feed_cfg.rank_request_template is not None
+    assert configured.feed_cfg.rank_request_template.llm_filter == expected
+    # The shared template is never mutated.
+    assert FEEDS["your-feed"].rank_request_template is not None
+    assert FEEDS["your-feed"].rank_request_template.llm_filter == 1.0
+    assert _configured_generation("your-feed", None).effective_preferences.llm_filter == 0.5
+    assert "llm_filter" not in FEEDS["best-of-friends"].controls

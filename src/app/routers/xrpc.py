@@ -453,6 +453,29 @@ def _with_politics_multiplier(feed_cfg: FeedConfig, politics: float) -> FeedConf
     )
 
 
+def _with_llm_filter_multiplier(
+    feed_cfg: FeedConfig, llm_filter: float, user_doc: UserDocument | None
+) -> FeedConfig:
+    """Return a request-local feed config with the user's LLM filter multiplier.
+
+    Applied to the combined rank score like politics. Without an active filter
+    prompt the template stays neutral (1.0), so the ranker never goes to
+    Firestore for a vector that is not there: most users have none.
+    """
+    rank_template = feed_cfg.rank_request_template
+    if rank_template is None:
+        return feed_cfg
+    state = user_doc.llm_filter_prompt_state if user_doc is not None else None
+    if state is None or state.active_prompt_key is None:
+        return feed_cfg
+
+    return feed_cfg.model_copy(
+        update={
+            "rank_request_template": rank_template.model_copy(update={"llm_filter": llm_filter})
+        }
+    )
+
+
 def _source_generators(
     weights: SourceWeightsDocument,
 ) -> list[GeneratorSpec]:
@@ -514,6 +537,10 @@ def _configured_generation(
                 "topic_penalty_setting": effective.topic_penalty,
             }
         )
+
+    if "llm_filter" in controls:
+        assert effective.llm_filter is not None
+        feed_cfg = _with_llm_filter_multiplier(feed_cfg, effective.llm_filter, user_doc)
 
     if "normalize_rank_by_generator" in controls:
         assert effective.normalize_rank_by_generator is not None

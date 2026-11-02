@@ -30,10 +30,14 @@ import re
 import ssl
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import certifi  # transitive via requests/httpx; adding it to Pipfile relocks 20 packages
 import numpy as np
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
+
+if TYPE_CHECKING:
+    from ..documents import LlmPromptRole
 
 from .elasticsearch import (
     POSTS_KNN_INDEX,
@@ -580,6 +584,62 @@ async def hydrate_embeddings(es, posts: list[Post]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 3b. Filter prompts (#566): rewrite the wish into a neutral description        #
+# --------------------------------------------------------------------------- #
+# A filter prompt arrives as a wish ("I don't want to see airplanes", "less
+# airplanes"). The slider carries the sign, so the fit must not: the prompt is
+# rewritten into a description of the kind of post, and the expansion and the
+# judge both see only that. The description is stored and shown on the card.
+
+FILTER_SUBJECT_SYSTEM = (
+    "Someone is describing a kind of social media post so that a feed can show "
+    "them more or less of it. Rewrite what they wrote as a short, neutral "
+    "description of that kind of post, as a noun phrase starting with "
+    '"posts about" or "posts that". Drop every expression of wanting: '
+    "\"I don't want\", \"less\", \"more\", \"stop showing me\", \"please\" and the like "
+    "are not part of the description. Keep every detail that narrows the kind. "
+    "Return only the JSON object requested."
+)
+_SUBJECT_SCHEMA = {
+    "type": "object",
+    "properties": {"subject": {"type": "string"}},
+    "required": ["subject"],
+    "additionalProperties": False,
+}
+_SUBJECT_MAX_TOKENS = 200
+
+
+async def describe_filter_subject(
+    client: AsyncAnthropic, prompt: str, usage: Usage | None = None
+) -> str:
+    """One call: the user's filter prompt -> a neutral description of the kind of post."""
+    resp = await client.messages.create(
+        model=EXPANSION_MODEL,
+        max_tokens=_SUBJECT_MAX_TOKENS,
+        system=FILTER_SUBJECT_SYSTEM,
+        output_config={"format": {"type": "json_schema", "schema": _SUBJECT_SCHEMA}},
+        messages=[
+            {
+                "role": "user",
+                "content": f'They wrote:\n\n    "{prompt}"\n\nReturn JSON: {{"subject": "..."}}',
+            }
+        ],
+    )
+    if usage is not None:
+        usage.add(resp.usage)
+    if resp.stop_reason == "refusal":
+        raise PromptNotAcceptedError(getattr(resp, "_request_id", None))
+    text = next((b.text for b in resp.content if b.type == "text"), "")
+    try:
+        subject = json.loads(text)["subject"].strip()
+    except (ValueError, KeyError, AttributeError, TypeError) as exc:
+        raise ExpansionError(f"unusable subject reply: {text[:80]!r}") from exc
+    if not subject:
+        raise ExpansionError("empty subject reply")
+    return subject
+
+
+# --------------------------------------------------------------------------- #
 # 4. Score: Sonnet rates each keyword post 1-10 against the prompt              #
 #    All calls are fired at once (each is its own HTTP request; there is no    #
 #    batch), then the step waits SCORE_DEADLINE_S and fits on what has         #
@@ -654,6 +714,28 @@ SCORING_TEMPLATE = (
     "and nothing else."
 )
 
+# The filter judge (#566) rates aboutness only. Whether the person wants more or
+# less of it is the slider's business, and serve-worthiness is not the question.
+FILTER_SCORING_SYSTEM = (
+    "Someone has described a kind of social media post. For each post, rate how "
+    "much it is that kind of post.\n\n"
+    f"{MIN_SCORE} = not that kind at all. {MAX_SCORE} = squarely that kind. "
+    "Use the middle of the scale for posts that touch the kind in passing or "
+    "only partly. Judge what the post is about, not whether it is good, and not "
+    "whether anyone would want it.\n\n"
+    f"Empty, truncated or unintelligible posts score {MIN_SCORE}. Judge content, "
+    "not language. Never decline to rate."
+)
+
+FILTER_SCORING_TEMPLATE = (
+    "The kind of post:\n{prompt}\n\n"
+    "Candidate post:\n{text}\n\n"
+    f"How much is this post that kind of post? Score {MIN_SCORE}-{MAX_SCORE}. "
+    "Reply with ONLY a JSON object of the form "
+    '{{"explanation": "<one or two sentences>", "score": <integer>}} '
+    "and nothing else."
+)
+
 _SCORE_RE = re.compile(r'"score"\s*:\s*(\d+)')
 
 
@@ -679,7 +761,9 @@ def parse_score(raw: str) -> int | None:
     return None
 
 
-async def _score_one(client: AsyncAnthropic, prompt: str, text: str, usage: Usage) -> int | None:
+async def _score_one(
+    client: AsyncAnthropic, prompt: str, text: str, usage: Usage, role: LlmPromptRole = "cg"
+) -> int | None:
     """One post's score, or None if the reply had no usable score.
 
     A `refusal` stop is a verdict, not an error: a post the model will not
@@ -688,11 +772,16 @@ async def _score_one(client: AsyncAnthropic, prompt: str, text: str, usage: Usag
     Transport and rate-limit errors are retried by the SDK client; anything
     that still raises propagates to score_posts, which counts it as unscored.
     """
+    system, template = (
+        (FILTER_SCORING_SYSTEM, FILTER_SCORING_TEMPLATE)
+        if role == "filter"
+        else (SCORING_SYSTEM, SCORING_TEMPLATE)
+    )
     resp = await client.messages.create(
         model=SCORING_MODEL,
         max_tokens=_SCORE_MAX_TOKENS,
-        system=SCORING_SYSTEM,
-        messages=[{"role": "user", "content": SCORING_TEMPLATE.format(prompt=prompt, text=text)}],
+        system=system,
+        messages=[{"role": "user", "content": template.format(prompt=prompt, text=text)}],
     )
     usage.add(resp.usage)
     if resp.stop_reason == "refusal":
@@ -710,7 +799,11 @@ class ScoreOutcome:
 
 
 async def score_posts(
-    client: AsyncAnthropic, prompt: str, posts: list[Post], usage: Usage
+    client: AsyncAnthropic,
+    prompt: str,
+    posts: list[Post],
+    usage: Usage,
+    role: LlmPromptRole = "cg",
 ) -> ScoreOutcome:
     """Score `posts` concurrently with the deadline-and-floor rule above."""
     n = len(posts)
@@ -722,7 +815,7 @@ async def score_posts(
 
     async def one(post: Post) -> int | None:
         async with semaphore:
-            return await _score_one(client, prompt, post.content, scoring_usage)
+            return await _score_one(client, prompt, post.content, scoring_usage, role)
 
     def n_scored_in(done: set[asyncio.Task[int | None]]) -> int:
         return sum(
@@ -854,6 +947,8 @@ class PoolTooSmallError(FitError):
 @dataclass
 class FitResult:
     query_vector: list[float]
+    # unit_embedding @ query_vector + intercept predicts the 1-10 verdict.
+    intercept: float
     keywords: list[str]
     n_pool: int
     n_keyword_posts: int
@@ -866,9 +961,11 @@ class FitResult:
     cost_usd: float
     input_tokens: int
     output_tokens: int
+    # Filter fits only: the neutral description the vector was actually fitted to.
+    subject: str | None = None
 
 
-async def fit_query_vector(es, prompt: str) -> FitResult:
+async def fit_query_vector(es, prompt: str, role: LlmPromptRole = "cg") -> FitResult:
     """Run the whole pipeline for `prompt`. Raises PoolTooSmallError,
     ExpansionError or ScoringError for the pipeline's own failures; client
     errors from Elasticsearch or Anthropic propagate as they are."""
@@ -876,7 +973,8 @@ async def fit_query_vector(es, prompt: str) -> FitResult:
     client = _get_anthropic_client()
     usage = Usage()
 
-    keywords = await expand_keywords(client, prompt, usage)
+    subject = await describe_filter_subject(client, prompt, usage) if role == "filter" else None
+    keywords = await expand_keywords(client, subject or prompt, usage)
 
     pool, sim = await fetch_pool(es, keywords)
     if len(pool) < MIN_KEYWORD_POSTS:
@@ -902,7 +1000,7 @@ async def fit_query_vector(es, prompt: str) -> FitResult:
             f"scoring {len(keyword_posts)} posts could cost ${worst_case:.2f}, "
             f"over the ${MAX_COST_USD:.2f} cap; nothing sent"
         )
-    outcome = await score_posts(client, prompt, keyword_posts, usage)
+    outcome = await score_posts(client, subject or prompt, keyword_posts, usage, role)
     cost = cost_usd(usage)
     if cost > MAX_COST_USD:
         # The calls are already billed, so failing here would only throw the
@@ -917,10 +1015,11 @@ async def fit_query_vector(es, prompt: str) -> FitResult:
     scores = [s for _, s in labelled]
     embeddings += [p.embedding for p in random_posts]
     scores += [MIN_SCORE] * len(random_posts)
-    q, _intercept, train_r2 = fit_ridge(np.asarray(embeddings), np.asarray(scores), RIDGE_ALPHA)
+    q, intercept, train_r2 = fit_ridge(np.asarray(embeddings), np.asarray(scores), RIDGE_ALPHA)
 
     return FitResult(
         query_vector=q.tolist(),
+        intercept=intercept,
         keywords=keywords,
         n_pool=len(pool),
         n_keyword_posts=len(keyword_posts),
@@ -933,4 +1032,5 @@ async def fit_query_vector(es, prompt: str) -> FitResult:
         cost_usd=cost,
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
+        subject=subject,
     )

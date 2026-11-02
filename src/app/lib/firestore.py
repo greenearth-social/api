@@ -1562,18 +1562,21 @@ async def get_all_llm_query_vectors(
 async def get_latest_llm_query_vector(
     db: AsyncClient, user_did: str
 ) -> LlmQueryVectorDocument | None:
-    """Return the most recently updated LLM query vector for a user, or None."""
+    """Return the user's newest cg query vector, or None: the legacy selection for
+    users without activation state. Filter vectors (#566) are skipped."""
     query = (
         db.collection(USERS_COLLECTION)
         .document(user_doc_id(user_did))
         .collection(LLM_QUERY_VECTORS_SUBCOLLECTION)
         .order_by("updated_at", direction=Query.DESCENDING)
-        .limit(1)
     )
     async for doc in query.stream():
         data = doc.to_dict()
-        if data is not None:
-            return LlmQueryVectorDocument.model_validate(data)
+        if data is None:
+            continue
+        record = LlmQueryVectorDocument.model_validate(data)
+        if record.role == "cg":
+            return record
     return None
 
 
