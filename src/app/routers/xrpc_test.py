@@ -6966,3 +6966,30 @@ async def test_explore_preserves_accepted_settings_slate_for_next_full_feed_load
     assert state._write_feed_snapshot_background.await_args.kwargs["injected_post_count"] == 1
     state.upsert_feed_activity.assert_awaited_once()
     state._run_pipeline_capturing_with_timeout.assert_awaited_once()
+
+
+def test_get_feed_skeleton_triggers_freshness_recording_for_probes(monkeypatch):
+    record_mock = AsyncMock()
+    monkeypatch.setattr("app.routers.xrpc.record_megastream_freshness", record_mock)
+    monkeypatch.setenv("GE_PROBE_SECRET", "test-secret")
+
+    app.state.es = AsyncMock()
+
+    with patch("app.routers.xrpc._run_pipeline_capturing_with_timeout") as mock_pipeline:
+        mock_pipeline.return_value = (
+            FeedSnapshotDocument(
+                request_id="test",
+                items=["at://post/1"],
+                feed_name="your-feed",
+                generated_at=datetime.now(UTC),
+                expires_at=datetime.now(UTC),
+            ),
+            [],
+        )
+        response = client.get(
+            "/xrpc/app.bsky.feed.getFeedSkeleton",
+            params={"feed": f"at://{SERVICE_DID}/app.bsky.feed.generator/your-feed"},
+            headers={"X-Probe-Secret": "test-secret"},
+        )
+        assert response.status_code == 200
+        record_mock.assert_awaited_once_with(app.state.es)
