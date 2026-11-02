@@ -8,7 +8,7 @@ interval, which is just noise during local development.
 
 Instrument type is inferred from the metric name suffix:
   - ``_count`` → Int64Counter  (cumulative sum)
-  - ``_rate``  → ObservableGauge (current value)
+  - ``_rate`` or ``_gauge`` → ObservableGauge (current value)
   - everything else → Float64Histogram  (timing, durations, etc.)
 
 Histograms carry explicit bucket boundaries chosen per metric family (see
@@ -164,6 +164,27 @@ RATIO_BOUNDARIES: tuple[float, ...] = (
     1.0,
 )
 
+# Megastream freshness lag in seconds (from sub-minute real-time up to multiple days of backlog).
+FRESHNESS_SEC_BOUNDARIES: tuple[float, ...] = (
+    10,
+    30,
+    60,
+    120,
+    300,
+    600,
+    900,
+    1200,
+    1800,
+    2400,
+    3600,
+    7200,
+    14400,
+    28800,
+    86400,
+    172800,
+    691200,
+)
+
 _NEAR_ZERO_MS_METRICS = frozenset({"client.pool.wait_ms", "client.connect.duration_ms"})
 
 
@@ -186,6 +207,8 @@ def histogram_boundaries(name: str) -> tuple[float, ...] | None:
         return FAST_MS_BOUNDARIES
     if name.endswith("_ms"):
         return LATENCY_MS_BOUNDARIES
+    if name.endswith("_sec"):
+        return FRESHNESS_SEC_BOUNDARIES
     return None
 
 
@@ -294,7 +317,7 @@ class MetricCollector:
         attrs = labels or None
         if name.endswith("_count"):
             self._get_counter(name).add(int(value), attrs)
-        elif name.endswith("_rate"):
+        elif name.endswith("_rate") or name.endswith("_gauge"):
             self._get_gauge(name).set(value, attrs)
         else:
             self._get_histogram(name).record(value, attrs)

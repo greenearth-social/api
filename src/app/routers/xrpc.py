@@ -71,6 +71,10 @@ from ..lib.firestore import (
     write_feed_debug,
 )
 from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
+from ..lib.megastream_freshness import (
+    record_megastream_freshness,
+    should_sample_freshness,
+)
 from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import (
     FAIL_FAST_FLAG,
@@ -1491,6 +1495,14 @@ async def get_feed_skeleton(
     is_load_test = _lt_did is not None
     if is_load_test:
         is_probe = False
+
+    if (
+        hasattr(request.app.state, "es")
+        and request.app.state.es is not None
+        and not is_load_test
+        and should_sample_freshness(is_probe)
+    ):
+        _spawn_background(record_megastream_freshness(request.app.state.es))
 
     # A logged-out caller has no identity, so nothing that is keyed on a user
     # (Firestore reads and writes, preferences, feature flags, analytics) runs

@@ -75,6 +75,39 @@ def test_gauge_inferred_for_rate_suffix():
     assert found, "throughput_rate not found in exported metrics"
 
 
+def test_gauge_inferred_for_gauge_suffix():
+    collector, reader = _make_collector()
+    collector.record("feed.megastream.freshness_sec_gauge", 120.0)
+    data = _get_metrics_data(reader)
+    found = False
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name == "feed.megastream.freshness_sec_gauge":
+                    from opentelemetry.sdk.metrics._internal.point import Gauge
+
+                    assert isinstance(metric.data, Gauge)
+                    found = True
+    assert found, "feed.megastream.freshness_sec_gauge not found in exported metrics"
+
+
+def test_histogram_inferred_for_sec_suffix():
+    collector, reader = _make_collector()
+    collector.record("feed.megastream.freshness_sec", 60.0)
+    data = _get_metrics_data(reader)
+    found = False
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name == "feed.megastream.freshness_sec":
+                    from opentelemetry.sdk.metrics._internal.point import Histogram
+
+                    assert isinstance(metric.data, Histogram)
+                    assert metric.data.data_points[0].explicit_bounds is not None
+                    found = True
+    assert found, "feed.megastream.freshness_sec not found in exported metrics"
+
+
 def test_histogram_inferred_for_ms_suffix():
     collector, reader = _make_collector()
     collector.record("feed.render.duration_ms", 123.4)
