@@ -397,11 +397,12 @@ def _item_panel(
     generators_by_uri: dict,
     rank_by_uri: dict,
     after_rank_pos: dict,
-    normalized_by_uri: dict,
     model_scores_by_uri: dict,
     politics_by_uri: dict,
     div_by_uri: dict,
     meta: dict,
+    *,
+    normalized_by_uri: dict | None = None,
 ) -> Panel:
     c = meta.get(uri)
 
@@ -433,7 +434,7 @@ def _item_panel(
         journey.append("  →  ranked ", style="dim")
         journey.append(f"#{rank}", style="yellow")
         journey.append(f" (score {_fmt_score(rank_score)})", style="dim")
-        normalized = normalized_by_uri.get(uri)
+        normalized = (normalized_by_uri or {}).get(uri)
         if normalized is not None and ar is not None:
             # Per-generator rescaling (issue #572): position entering MMR and
             # the score within this generator's own [min, max].
@@ -613,11 +614,11 @@ def _render_show(doc: FeedDebugDocument) -> None:
                 generators_by_uri,
                 rank_by_uri,
                 after_rank_pos,
-                normalized_by_uri,
                 model_scores_by_uri,
                 politics_by_uri,
                 div_by_uri,
                 meta,
+                normalized_by_uri=normalized_by_uri,
             )
         )
 
