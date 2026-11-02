@@ -29,21 +29,8 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | bool | SourceWeightsDocume
     "purpose": 0.5,
     "author_penalty": 0.7,
     "topic_penalty": 0.7,
+    "normalize_rank_by_generator": False,
 }
-
-# Controls that are per-user overrides of a SlateConfig field. Their default is
-# the feed's own value in feeds.py and the router copies them onto the
-# request-local config; exposing another pipeline constant means adding it here.
-SLATE_CONTROLS: tuple[FeedControlName, ...] = ("normalize_rank_by_generator",)
-
-
-def control_default(
-    feed_name: str, control: FeedControlName
-) -> int | float | bool | SourceWeightsDocument:
-    """The value a control takes when the user has not set it."""
-    if control in SLATE_CONTROLS:
-        return getattr(FEEDS[preference_source(feed_name)], control)
-    return CONTROL_DEFAULTS[control]
 
 
 def source_weights_for_social_radius(social_radius: int) -> SourceWeightsDocument:
@@ -98,9 +85,9 @@ def resolve_feed_preferences(
         elif user is not None:
             # Legacy flat preferences initialize every applicable feed until
             # that feed's resolved values are materialized by its first patch.
-            values[control] = getattr(user, control, control_default(feed_name, control))
+            values[control] = getattr(user, control, CONTROL_DEFAULTS[control])
         else:
-            values[control] = control_default(feed_name, control)
+            values[control] = CONTROL_DEFAULTS[control]
 
     return FeedPreferencesDocument.model_validate(values)
 
@@ -144,7 +131,7 @@ def control_value(
 ) -> int | float | bool | SourceWeightsDocument:
     """Resolve one value, returning its default when the feed does not expose it."""
     if control not in configured_controls(feed_name):
-        return control_default(feed_name, control)
+        return CONTROL_DEFAULTS[control]
     value = getattr(resolve_feed_preferences(user, feed_name), control)
     assert value is not None
     return value

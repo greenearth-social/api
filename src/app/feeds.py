@@ -173,9 +173,6 @@ FEEDS: dict[str, FeedConfig] = {
         max_render_share=PERSONALIZED_MAX_RENDER_SHARE,
         min_rank_score=PERSONALIZED_MIN_RANK_SCORE,
         min_mmr_score=None,
-        # Trial (issue #572): users override this via the Settings checkbox.
-        # Flip to True to turn it on for everyone.
-        normalize_rank_by_generator=False,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=SOCIAL_RADIUS_PRESETS.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,

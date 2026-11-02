@@ -51,7 +51,7 @@ from ..lib.config import set_fail_fast_for_request
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder
-from ..lib.feed_preferences import SLATE_CONTROLS, configured_controls, resolve_feed_preferences
+from ..lib.feed_preferences import configured_controls, resolve_feed_preferences
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
     claim_accepted_feed_slate,
@@ -515,11 +515,11 @@ def _configured_generation(
             }
         )
 
-    slate_overrides = {
-        control: getattr(effective, control) for control in SLATE_CONTROLS if control in controls
-    }
-    if slate_overrides:
-        feed_cfg = feed_cfg.model_copy(update=slate_overrides)
+    if "normalize_rank_by_generator" in controls:
+        assert effective.normalize_rank_by_generator is not None
+        feed_cfg = feed_cfg.model_copy(
+            update={"normalize_rank_by_generator": effective.normalize_rank_by_generator}
+        )
 
     generators_override: dict[str, list[GeneratorSpec]] = {}
     if "source_weights" in controls:
