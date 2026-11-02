@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import os
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,17 +55,46 @@ def resolve_destination(args: argparse.Namespace) -> Destination:
     return destination
 
 
+class ApiKeyArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that validates mutually exclusive destination options across subcommands."""
+
+    def parse_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        res = super().parse_args(args, namespace)
+        env = getattr(res, "environment", None)
+        legacy = getattr(res, "legacy_default", False)
+        if not env and not legacy:
+            self.error("one of the arguments --environment --legacy-default is required")
+        if env and legacy:
+            self.error("argument --legacy-default: not allowed with argument --environment")
+        if not hasattr(res, "environment"):
+            res.environment = None
+        if not hasattr(res, "legacy_default"):
+            res.legacy_default = False
+        return res
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    destination = parser.add_mutually_exclusive_group(required=True)
-    destination.add_argument("--environment", choices=DESTINATIONS)
+    destination_parser = argparse.ArgumentParser(add_help=False)
+    destination = destination_parser.add_mutually_exclusive_group()
+    destination.add_argument("--environment", choices=DESTINATIONS, default=argparse.SUPPRESS)
     destination.add_argument(
         "--legacy-default",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="Explicitly inspect/clean the unused legacy (default) database; never issue keys",
     )
+
+    parser = ApiKeyArgumentParser(description=__doc__, parents=[destination_parser])
     sub = parser.add_subparsers(dest="command", required=True)
-    gen = sub.add_parser("generate", help="Issue a key only if the owner has no active key")
+    gen = sub.add_parser(
+        "generate",
+        parents=[destination_parser],
+        help="Issue a key only if the owner has no active key",
+    )
     gen.add_argument("email")
     gen.add_argument("--admin", action="store_true", help="Green Earth team only")
     gen.add_argument(
@@ -74,14 +104,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Grant a named scope (repeatable; default is always included)",
     )
     rotate = sub.add_parser(
-        "rotate", help="Atomically replace an active key; old key stops working"
+        "rotate",
+        parents=[destination_parser],
+        help="Atomically replace an active key; old key stops working",
     )
     rotate.add_argument("key_id")
-    sub.add_parser("list", help="List key metadata (never plaintext or hashes)")
+    sub.add_parser(
+        "list",
+        parents=[destination_parser],
+        help="List key metadata (never plaintext or hashes)",
+    )
     for command in ("usage", "revoke"):
-        sub.add_parser(command).add_argument("key_id")
+        sub.add_parser(command, parents=[destination_parser]).add_argument("key_id")
     cleanup = sub.add_parser(
-        "deduplicate", help="Find duplicate active API keys and preview cleanup"
+        "deduplicate",
+        parents=[destination_parser],
+        help="Find duplicate active API keys and preview cleanup",
     )
     cleanup.add_argument(
         "--apply", action="store_true", help="Revoke duplicates and seed owner index"

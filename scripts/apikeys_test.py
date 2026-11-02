@@ -28,6 +28,53 @@ def test_environment_is_required_before_any_application_import():
     assert "Traceback" not in result.stderr
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--environment", "stage", "generate", "alice@example.com"],
+        ["generate", "--environment", "stage", "alice@example.com"],
+        ["generate", "alice@example.com", "--environment", "stage"],
+    ],
+)
+def test_environment_flag_accepted_before_or_after_subcommand(args):
+    import apikeys
+
+    parser = apikeys.build_parser()
+    parsed = parser.parse_args(args)
+    assert parsed.environment == "stage"
+    assert parsed.command == "generate"
+    assert parsed.email == "alice@example.com"
+    assert parsed.legacy_default is False
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--legacy-default", "list"],
+        ["list", "--legacy-default"],
+    ],
+)
+def test_legacy_default_flag_accepted_before_or_after_subcommand(args):
+    import apikeys
+
+    parser = apikeys.build_parser()
+    parsed = parser.parse_args(args)
+    assert parsed.legacy_default is True
+    assert parsed.environment is None
+    assert parsed.command == "list"
+
+
+def test_conflicting_destination_flags_are_rejected():
+    import apikeys
+
+    parser = apikeys.build_parser()
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(
+            ["generate", "--environment", "stage", "--legacy-default", "alice@example.com"]
+        )
+    assert exc.value.code == 2
+
+
 def test_help_does_not_import_unrelated_application_modules():
     code = """
 import importlib.abc, runpy, sys
