@@ -153,6 +153,10 @@ def _gen_request() -> CandidateGenerateRequest:
         ],
         user_did="did:plc:user",
         num_candidates=6,
+        video_only=False,
+        max_age_hours=168,
+        exclude_uris=[],
+        infill=None,
     )
 
 

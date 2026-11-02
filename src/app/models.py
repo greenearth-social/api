@@ -311,7 +311,7 @@ class SlateCutoffs(BaseModel):
         "applies when diversify is True. None disables.",
     )
     normalize_rank_by_generator: bool = Field(
-        False,
+        default=False,
         description="When True, after the min_rank_score cut each candidate generator's "
         "combined rank scores are rescaled linearly so that generator's worst survivor "
         "scores 0 and its best scores 1, before MMR and the share cap. This stops a "
