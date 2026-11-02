@@ -74,17 +74,10 @@ UNKNOWN_GENERATOR = "unknown"
 def normalize_scores_by_generator(ordered: list[CandidatePost]) -> list[CandidatePost]:
     """Rescale each generator's rank scores to [0, 1] and re-sort (issue #572).
 
-    The heavy ranker learns from what a user has already liked, so a generator
-    whose posts look unlike that history (the LLM prompt source, say) scores
-    low across the board and is crowded out of the slate even when its best
-    posts are exactly what the user asked for. Grading each generator on its
-    own curve instead: within each ``generator_name`` group the lowest score
-    maps to 0 and the highest to 1, linearly. A group whose scores are all
-    equal, including a lone candidate, maps to 1 so a source that surfaced a
-    single post still gets it served.
-
-    Returns copies of the candidates with ``score`` replaced, sorted by the new
-    score descending; ties keep the incoming (raw-score) order.
+    Within each ``generator_name`` group the lowest score maps to 0 and the
+    highest to 1; a group with a single score (one post, or all equal) maps
+    to 1. Returns copies with ``score`` replaced, sorted descending, ties in
+    incoming order.
     """
     by_generator: dict[str, list[CandidatePost]] = {}
     for c in ordered:
