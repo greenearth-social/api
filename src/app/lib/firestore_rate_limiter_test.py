@@ -522,7 +522,7 @@ async def test_route_emits_metrics_once_after_transaction_retry(store, monkeypat
         )
         outcome_metric = call("llm_query_vector.fit.success_count", 1)
 
-    fit.assert_awaited_once_with(None, "science")
+    fit.assert_awaited_once_with(None, "science", "cg")
     assert store.documents[fit_user_path] == {"attempts": [NOW] * 12}
     assert store.documents[fit_daily_path] == {"count": router.FIT_RATE_LIMITER.global_daily_limit}
     assert collector.record.call_args_list == [*before_fit_metrics, outcome_metric]

@@ -590,8 +590,7 @@ def test_fit_with_filter_role_reads_and_stores_the_filter_state(
 
     assert response.status_code == 200
     assert response.json()["vector_id"] == "f1"
-    # The same fit as a source prompt: the role only decides where it is stored.
-    assert mock_fit.await_args.args[1:] == ("uplifting, no airplanes",)
+    assert mock_fit.await_args.args[1:] == ("uplifting, no airplanes", "filter")
     prompt_revision.assert_awaited_once_with(app.state.firestore, "did:plc:test-user", "filter")
     mock_add.assert_awaited_once_with(
         app.state.firestore,

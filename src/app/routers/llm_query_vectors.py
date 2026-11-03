@@ -253,7 +253,7 @@ async def fit_llm_query_vector(
         outcome_labels = {"reason": "upstream"}
         try:
             async with asyncio.timeout(FIT_TIMEOUT_S):
-                result = await fit_query_vector(request.app.state.es, prompt)
+                result = await fit_query_vector(request.app.state.es, prompt, body.role)
         except TimeoutError as exc:
             outcome_labels = {"reason": "timeout"}
             logger.warning("llm_qv_fit timed out user_did=%s after %.0fs", user_did, FIT_TIMEOUT_S)
