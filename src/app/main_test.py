@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from . import main
 from .lib import average_user_embedding as prior_module
 from .lib import inflight
+from .lib.request_less_history import get_request_less_history_service
 from .main import (
     _es_connections_per_node,
     _is_deployed_environment,
@@ -153,8 +154,9 @@ def test_inflight_middleware_releases_on_handler_exception():
 
 
 @pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("producer_timeout", [False, True])
 def test_lifespan_loads_prior_once_and_keeps_api_available_on_failure(
-    monkeypatch, tmp_path, configured
+    monkeypatch, tmp_path, configured, producer_timeout
 ):
     """Optional prior loading cannot take unrelated API routes offline."""
     from pathlib import Path
@@ -176,13 +178,14 @@ def test_lifespan_loads_prior_once_and_keeps_api_available_on_failure(
     # Stub unrelated startup services so API availability needs no cloud access.
     load = MagicMock(wraps=prior_module._load_average_user_embedding)
     monkeypatch.setattr(prior_module, "_load_average_user_embedding", load)
-    monkeypatch.setattr(main, "AsyncElasticsearch", MagicMock(return_value=AsyncMock()))
+    shutdown_order = []
+    es = MagicMock(close=AsyncMock(side_effect=lambda: shutdown_order.append("es")))
+    monkeypatch.setattr(main, "AsyncElasticsearch", MagicMock(return_value=es))
     monkeypatch.setattr(main, "SlowQueryLoggingES", lambda es: es)
     metrics = MagicMock(shutdown=AsyncMock())
     monkeypatch.setattr(main, "MetricCollector", MagicMock(return_value=metrics))
     for name in (
         "init_id_resolver",
-        "init_firestore_client",
         "init_firebase_auth",
         "init_http_client",
         "start_eventloop_monitor",
@@ -196,6 +199,22 @@ def test_lifespan_loads_prior_once_and_keeps_api_available_on_failure(
         monkeypatch.setattr(main, name, MagicMock())
     for name in ("PopularityCache", "FollowedUsersCache", "FirestoreUserHistoryCache"):
         monkeypatch.setattr(main, name, MagicMock(return_value=MagicMock(drain=AsyncMock())))
+    history_service = MagicMock(
+        drain=AsyncMock(side_effect=lambda: shutdown_order.append("history"))
+    )
+    history_constructor = MagicMock(return_value=history_service)
+    monkeypatch.setattr(main, "RequestLessHistoryService", history_constructor)
+
+    async def drain_producers():
+        assert get_request_less_history_service() is history_service
+        shutdown_order.append("producers")
+        if producer_timeout:
+            raise TimeoutError
+
+    monkeypatch.setattr(main.xrpc, "drain_background_tasks", drain_producers)
+    db = MagicMock()
+    monkeypatch.setattr(main, "init_firestore_client", MagicMock(return_value=db))
+    db.close.side_effect = lambda: shutdown_order.append("firestore")
     for name in ("close_http_client", "close_perspective_client", "stop_eventloop_monitor"):
         monkeypatch.setattr(main, name, AsyncMock())
     monkeypatch.setattr(main, "get_posthog_client", lambda: None)
@@ -204,11 +223,21 @@ def test_lifespan_loads_prior_once_and_keeps_api_available_on_failure(
     local_app.include_router(main.health.router)
     with TestClient(local_app) as client:
         assert (prior_module.get_average_user_embedding() is not None) is configured
+        assert get_request_less_history_service() is history_service
+        assert local_app.state.request_less_history is history_service
+        es.options.assert_called_once_with(
+            max_retries=0,
+            retry_on_timeout=False,
+            request_timeout=main.HYDRATION_TIMEOUT_SECONDS,
+        )
+        history_constructor.assert_called_once_with(db, es.options.return_value)
         assert client.get("/health").status_code == 200
         assert client.get("/health").status_code == 200
         load.assert_called_once_with(str(uri))
 
     assert prior_module.get_average_user_embedding() is None
+    assert get_request_less_history_service() is None
+    assert shutdown_order == ["producers", "history", "es", "firestore"]
 
 
 def _api_routes(routes):
