@@ -22,9 +22,11 @@ logger = logging.getLogger(__name__)
 
 # The one strength the filter runs at when it is on. The preference is a switch
 # (#566: "most posts I see should ..."), so a post the prompt describes fully
-# keeps twice its rank score and one it does not describe keeps its score; the
-# ordering is the same as halving the posts it does not describe. Tune here.
-LLM_FILTER_MULTIPLIER = 2.0
+# keeps three times its rank score and one it does not describe keeps its
+# score; the ordering is the same as cutting the posts it does not describe to
+# a third. Raised from 2.0 on 2026-11-03: on prod data few posts predict near
+# 10, so at 2.0 real multipliers stayed under 1.2. Tune here.
+LLM_FILTER_MULTIPLIER = 3.0
 
 
 def llm_filter_scores(

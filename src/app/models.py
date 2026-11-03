@@ -219,7 +219,7 @@ class RankPredictRequest(BaseModel):
     llm_filter: float = Field(
         default=1.0,
         ge=1.0,
-        le=2.0,
+        le=3.0,
         description="Multiplier a post earns at a perfect match with the user's active LLM "
         "filter prompt (#566), scaled down linearly with the match; 1.0 leaves scores unchanged",
     )

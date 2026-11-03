@@ -6973,7 +6973,7 @@ async def test_explore_preserves_accepted_settings_slate_for_next_full_feed_load
     [
         (None, True, 1.0),
         ({"active_prompt_key": None, "revision": 2}, True, 1.0),
-        ({"active_prompt_key": "filter-1", "revision": 2}, True, 2.0),
+        ({"active_prompt_key": "filter-1", "revision": 2}, True, 3.0),
         ({"active_prompt_key": "filter-1", "revision": 2}, False, 1.0),
     ],
     ids=["no-state", "removed", "active-on", "active-off"],
@@ -6984,7 +6984,7 @@ def test_llm_filter_reaches_the_rank_template_only_switched_on_with_an_active_pr
     from ..lib.rankers.llm_filter import LLM_FILTER_MULTIPLIER
     from .xrpc import _configured_generation
 
-    assert LLM_FILTER_MULTIPLIER == 2.0
+    assert LLM_FILTER_MULTIPLIER == 3.0
     user = UserDocument(
         user_did="did:plc:testuser",
         llm_filter_prompt_state=state,
