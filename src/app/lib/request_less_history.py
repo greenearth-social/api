@@ -1,4 +1,4 @@
-"""Durable requestLess feedback and background hydration for future rankers.
+"""Durable requestLess feedback and background hydration for ranking.
 
 Feedback and retry budgets live together so concurrent API instances can claim
 attempts safely. Readers return the saved snapshot; ES work never delays them.
@@ -474,7 +474,11 @@ class RequestLessHistoryService:
         """Stop accepting work and finish tasks before shared clients close."""
         self._closing = True
         while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            tasks = list(self._tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Gathering completed tasks need not yield to their done callbacks.
+            # Remove them here too so shutdown cannot spin waiting for callbacks.
+            self._tasks.difference_update(tasks)
 
 
 # Installed by the application lifespan so callers share clients and task ownership.
