@@ -6969,30 +6969,35 @@ async def test_explore_preserves_accepted_settings_slate_for_next_full_feed_load
 
 
 @pytest.mark.parametrize(
-    ("state", "expected"),
+    ("state", "switch", "expected"),
     [
-        (None, 1.0),
-        ({"active_prompt_key": None, "revision": 2}, 1.0),
-        ({"active_prompt_key": "filter-1", "revision": 2}, 0.75),
+        (None, True, 1.0),
+        ({"active_prompt_key": None, "revision": 2}, True, 1.0),
+        ({"active_prompt_key": "filter-1", "revision": 2}, True, 2.0),
+        ({"active_prompt_key": "filter-1", "revision": 2}, False, 1.0),
     ],
-    ids=["no-state", "removed", "active"],
+    ids=["no-state", "removed", "active-on", "active-off"],
 )
-def test_llm_filter_reaches_the_rank_template_only_with_an_active_filter_prompt(state, expected):
+def test_llm_filter_reaches_the_rank_template_only_switched_on_with_an_active_prompt(
+    state, switch, expected
+):
+    from ..lib.rankers.llm_filter import LLM_FILTER_MULTIPLIER
     from .xrpc import _configured_generation
 
+    assert LLM_FILTER_MULTIPLIER == 2.0
     user = UserDocument(
         user_did="did:plc:testuser",
         llm_filter_prompt_state=state,
-        feed_preferences={"your-feed": FeedPreferencesDocument(llm_filter=0.75)},
+        feed_preferences={"your-feed": FeedPreferencesDocument(llm_filter=switch)},
     )
 
     configured = _configured_generation("your-feed", user)
 
-    assert configured.effective_preferences.llm_filter == 0.75
+    assert configured.effective_preferences.llm_filter is switch
     assert configured.feed_cfg.rank_request_template is not None
     assert configured.feed_cfg.rank_request_template.llm_filter == expected
     # The shared template is never mutated.
     assert FEEDS["your-feed"].rank_request_template is not None
     assert FEEDS["your-feed"].rank_request_template.llm_filter == 1.0
-    assert _configured_generation("your-feed", None).effective_preferences.llm_filter == 0.5
+    assert _configured_generation("your-feed", None).effective_preferences.llm_filter is True
     assert "llm_filter" not in FEEDS["best-of-friends"].controls

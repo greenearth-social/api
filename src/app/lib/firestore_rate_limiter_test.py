@@ -385,7 +385,7 @@ async def test_route_failures_keep_committed_quota_and_block_next_attempt(
     fit_daily_path = "llm_query_vector_fit_daily/2026-10-07"
     store.documents[fit_user_path] = {"attempts": [NOW - timedelta(hours=1)] * 11}
     store.documents[fit_daily_path] = {"count": 4}
-    fit = AsyncMock(return_value=SimpleNamespace(query_vector=[0.1], intercept=1.5, subject=None))
+    fit = AsyncMock(return_value=SimpleNamespace(query_vector=[0.1], intercept=1.5))
     add = AsyncMock()
     collector = MagicMock()
     monkeypatch.setattr(router, "fit_query_vector", fit)
@@ -519,11 +519,10 @@ async def test_route_emits_metrics_once_after_transaction_retry(store, monkeypat
             expected_revision=0,
             role="cg",
             intercept=1.5,
-            subject=None,
         )
         outcome_metric = call("llm_query_vector.fit.success_count", 1)
 
-    fit.assert_awaited_once_with(None, "science", "cg")
+    fit.assert_awaited_once_with(None, "science")
     assert store.documents[fit_user_path] == {"attempts": [NOW] * 12}
     assert store.documents[fit_daily_path] == {"count": router.FIT_RATE_LIMITER.global_daily_limit}
     assert collector.record.call_args_list == [*before_fit_metrics, outcome_metric]

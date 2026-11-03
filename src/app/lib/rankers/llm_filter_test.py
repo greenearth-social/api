@@ -56,9 +56,9 @@ def test_scores_empty_without_usable_candidates():
 @pytest.mark.parametrize(
     ("setting", "score", "expected"),
     [
-        (0.5, 1.0, 0.5),
-        (0.5, 0.0, 1.0),
-        (0.5, 0.5, 0.75),
+        (1.5, 1.0, 1.5),
+        (1.5, 0.0, 1.0),
+        (1.5, 0.5, 1.25),
         (2.0, 1.0, 2.0),
         (2.0, 0.5, 1.5),
         (1.0, 1.0, 1.0),

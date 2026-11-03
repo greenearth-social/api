@@ -218,10 +218,10 @@ class RankPredictRequest(BaseModel):
     )
     llm_filter: float = Field(
         default=1.0,
-        ge=0.5,
+        ge=1.0,
         le=2.0,
-        description="Multiplier applied to the final rank score based on how well each post "
-        "matches the user's active LLM filter prompt (#566); 1.0 leaves scores unchanged",
+        description="Multiplier a post earns at a perfect match with the user's active LLM "
+        "filter prompt (#566), scaled down linearly with the match; 1.0 leaves scores unchanged",
     )
 
     @model_validator(mode="after")

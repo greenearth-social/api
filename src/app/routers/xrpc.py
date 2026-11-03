@@ -51,6 +51,7 @@ from ..lib.config import set_fail_fast_for_request
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder
+from ..lib.rankers.llm_filter import LLM_FILTER_MULTIPLIER
 from ..lib.feed_preferences import configured_controls, resolve_feed_preferences
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
@@ -454,16 +455,17 @@ def _with_politics_multiplier(feed_cfg: FeedConfig, politics: float) -> FeedConf
 
 
 def _with_llm_filter_multiplier(
-    feed_cfg: FeedConfig, llm_filter: float, user_doc: UserDocument | None
+    feed_cfg: FeedConfig, llm_filter: bool, user_doc: UserDocument | None
 ) -> FeedConfig:
-    """Return a request-local feed config with the user's LLM filter multiplier.
+    """Return a request-local feed config with the LLM filter switched on.
 
-    Applied to the combined rank score like politics. Without an active filter
-    prompt the template stays neutral (1.0), so the ranker never goes to
-    Firestore for a vector that is not there: most users have none.
+    Applied to the combined rank score like politics, at the api's one strength.
+    Switched off, or without an active filter prompt, the template stays neutral
+    (1.0), so the ranker never goes to Firestore for a vector that is not there:
+    most users have none.
     """
     rank_template = feed_cfg.rank_request_template
-    if rank_template is None:
+    if rank_template is None or not llm_filter:
         return feed_cfg
     state = user_doc.llm_filter_prompt_state if user_doc is not None else None
     if state is None or state.active_prompt_key is None:
@@ -471,7 +473,9 @@ def _with_llm_filter_multiplier(
 
     return feed_cfg.model_copy(
         update={
-            "rank_request_template": rank_template.model_copy(update={"llm_filter": llm_filter})
+            "rank_request_template": rank_template.model_copy(
+                update={"llm_filter": LLM_FILTER_MULTIPLIER}
+            )
         }
     )
 

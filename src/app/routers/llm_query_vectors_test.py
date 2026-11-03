@@ -100,9 +100,9 @@ def test_fit_stores_vector_for_token_user(
         metrics.record.assert_called_once_with("llm_query_vector.fit.attempted_count", 1)
         return QuotaDecision()
 
-    async def store(*_args, expected_revision, role, intercept, subject):
+    async def store(*_args, expected_revision, role, intercept):
         assert expected_revision == 0
-        assert (role, intercept, subject) == ("cg", 1.5, None)
+        assert (role, intercept) == ("cg", 1.5)
         mock_fit.assert_awaited_once()
         metrics.record.assert_called_once_with("llm_query_vector.fit.attempted_count", 1)
         return stored
@@ -577,33 +577,30 @@ def test_fit_with_filter_role_reads_and_stores_the_filter_state(
     mock_fit, mock_add, client, quota, metrics, prompt_revision
 ):
     mock_fit.return_value = _fit_result()
-    mock_fit.return_value.subject = "posts about airplanes"
     mock_add.return_value = LlmQueryVectorDocument(
         prompt_key="f1",
         user_did="did:plc:test-user",
         query_vector=[0.1, 0.2],
         intercept=1.5,
         role="filter",
-        subject="posts about airplanes",
-        prompt="less airplanes",
+        prompt="uplifting, no airplanes",
     )
 
-    response = client.post(PATH, json={"prompt": "less airplanes", "role": "filter"})
+    response = client.post(PATH, json={"prompt": "uplifting, no airplanes", "role": "filter"})
 
     assert response.status_code == 200
     assert response.json()["vector_id"] == "f1"
-    assert response.json()["subject"] == "posts about airplanes"
-    assert mock_fit.await_args.args[1:] == ("less airplanes", "filter")
+    # The same fit as a source prompt: the role only decides where it is stored.
+    assert mock_fit.await_args.args[1:] == ("uplifting, no airplanes",)
     prompt_revision.assert_awaited_once_with(app.state.firestore, "did:plc:test-user", "filter")
     mock_add.assert_awaited_once_with(
         app.state.firestore,
         "did:plc:test-user",
         [0.1, 0.2],
-        "less airplanes",
+        "uplifting, no airplanes",
         expected_revision=0,
         role="filter",
         intercept=1.5,
-        subject="posts about airplanes",
     )
 
 
@@ -615,24 +612,22 @@ def test_current_takes_a_role(mock_current, client, metrics):
         query_vector=[0.1],
         intercept=1.5,
         role="filter",
-        subject="posts about airplanes",
-        prompt="less airplanes",
+        prompt="uplifting, no airplanes",
     )
 
     response = client.get(CURRENT_PATH, params={"role": "filter"})
 
     assert response.status_code == 200
-    assert response.json()["prompt"] == "less airplanes"
-    assert response.json()["subject"] == "posts about airplanes"
+    assert response.json()["prompt"] == "uplifting, no airplanes"
     assert mock_current.await_args.args[1:] == ("did:plc:test-user", "filter")
 
 
 @patch("app.routers.llm_query_vectors.remove_llm_prompt", new_callable=AsyncMock)
 def test_remove_takes_a_role(mock_remove, client, quota, metrics):
-    mock_remove.return_value = FeedPreferencesDocument(llm_filter=0.5)
+    mock_remove.return_value = FeedPreferencesDocument(llm_filter=True)
 
     response = client.delete(CURRENT_PATH, params={"prompt_key": "f1", "role": "filter"})
 
     assert response.status_code == 200
-    assert response.json()["llm_filter"] == 0.5
+    assert response.json()["llm_filter"] is True
     mock_remove.assert_awaited_once_with(app.state.firestore, "did:plc:test-user", "f1", "filter")

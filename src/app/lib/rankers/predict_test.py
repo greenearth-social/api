@@ -776,11 +776,11 @@ def _filter_vector():
     ("llm_filter", "expected"),
     [
         (
-            0.5,
+            1.5,
             [
-                ("at://post/unrelated", 1, pytest.approx(0.4)),
-                ("at://post/halfway", 2, pytest.approx(0.2625)),
-                ("at://post/matching", 3, pytest.approx(0.15)),
+                ("at://post/matching", 1, pytest.approx(0.45)),
+                ("at://post/halfway", 2, pytest.approx(0.4375)),
+                ("at://post/unrelated", 3, pytest.approx(0.4)),
             ],
         ),
         (
@@ -831,7 +831,7 @@ def test_run_predict_applies_llm_filter_multiplier_like_politics(monkeypatch, ll
 
 @pytest.mark.parametrize(
     ("llm_filter", "vector"),
-    [(1.0, _filter_vector()), (0.5, None)],
+    [(1.0, _filter_vector()), (2.0, None)],
     ids=["neutral-setting-skips-the-fetch", "no-active-filter"],
 )
 def test_run_predict_leaves_scores_alone_without_an_effective_filter(

@@ -72,7 +72,6 @@ async def save_fitted_llm_prompt(
     expected_revision: int,
     role: LlmPromptRole = "cg",
     intercept: float | None = None,
-    subject: str | None = None,
 ) -> LlmQueryVectorDocument:
     user_ref = db.collection(USERS_COLLECTION).document(user_doc_id(user_did))
     vector_ref = user_ref.collection(LLM_QUERY_VECTORS_SUBCOLLECTION).document()
@@ -83,7 +82,6 @@ async def save_fitted_llm_prompt(
         query_vector=query_vector,
         intercept=intercept,
         role=role,
-        subject=subject,
         prompt=prompt,
         created_at=now,
         updated_at=now,

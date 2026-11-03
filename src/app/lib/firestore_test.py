@@ -618,7 +618,7 @@ async def test_accept_feed_preview_stages_cache_without_rewriting_preferences(
         author_penalty=0.7,
         topic_penalty=0.7,
         normalize_rank_by_generator=False,
-        llm_filter=0.5,
+        llm_filter=True,
     )
     cache_ref.get = AsyncMock(
         return_value=_mock_doc_snapshot(

@@ -98,9 +98,6 @@ class QueryVectorFitRequest(BaseModel):
 class QueryVectorFitResponse(BaseModel):
     vector_id: str = Field(..., description="Firestore document id of the stored vector")
     user_did: str
-    subject: str | None = Field(
-        None, description="Filter fits: the neutral description the vector was fitted to"
-    )
     keywords: list[str] = Field(..., description="Search terms the prompt was expanded to")
     n_pool: int = Field(..., description="Deduplicated posts matching the keywords")
     n_keyword_posts: int = Field(..., description="Keyword posts in the fitting sample")
@@ -256,7 +253,7 @@ async def fit_llm_query_vector(
         outcome_labels = {"reason": "upstream"}
         try:
             async with asyncio.timeout(FIT_TIMEOUT_S):
-                result = await fit_query_vector(request.app.state.es, prompt, body.role)
+                result = await fit_query_vector(request.app.state.es, prompt)
         except TimeoutError as exc:
             outcome_labels = {"reason": "timeout"}
             logger.warning("llm_qv_fit timed out user_did=%s after %.0fs", user_did, FIT_TIMEOUT_S)
@@ -299,7 +296,6 @@ async def fit_llm_query_vector(
             expected_revision=revision,
             role=body.role,
             intercept=result.intercept,
-            subject=result.subject,
         )
         key = stored.prompt_key
         logger.info(
@@ -324,7 +320,6 @@ async def fit_llm_query_vector(
         response = QueryVectorFitResponse(
             vector_id=key,
             user_did=user_did,
-            subject=result.subject,
             keywords=result.keywords,
             n_pool=result.n_pool,
             n_keyword_posts=result.n_keyword_posts,
@@ -370,9 +365,6 @@ async def fit_llm_query_vector(
 class CurrentPromptResponse(BaseModel):
     prompt_key: str = Field(..., description="Firestore document id of the serving vector")
     prompt: str = Field(..., description="Prompt text the user sent")
-    subject: str | None = Field(
-        None, description="Filter prompts: the neutral description the vector was fitted to"
-    )
     created_at: datetime = Field(..., description="When it was fitted")
 
 
@@ -400,7 +392,6 @@ async def current_llm_prompt(
     return CurrentPromptResponse(
         prompt_key=stored.prompt_key,
         prompt=stored.prompt,
-        subject=stored.subject,
         created_at=stored.created_at,
     )
 

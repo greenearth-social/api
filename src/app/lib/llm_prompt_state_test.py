@@ -359,7 +359,6 @@ async def test_filter_fit_stores_role_and_intercept_under_its_own_state():
         expected_revision=0,
         role="filter",
         intercept=2.5,
-        subject="posts about airplanes",
     )
     saved = store.documents[USER_PATH]
     assert saved["llm_filter_prompt_state"] == {
@@ -369,7 +368,6 @@ async def test_filter_fit_stores_role_and_intercept_under_its_own_state():
     assert saved["llm_prompt_state"] == {"active_prompt_key": "latest", "revision": 1}
     vector = store.documents[f"{VECTORS}/{stored.prompt_key}"]
     assert (vector["role"], vector["intercept"], vector["query_vector"]) == ("filter", 2.5, [0.3])
-    assert vector["subject"] == "posts about airplanes"
     assert ACCEPTED not in store.documents
     current = await get_current_llm_query_vector(store.db, USER, role="filter")
     assert current is not None and current.prompt_key == stored.prompt_key

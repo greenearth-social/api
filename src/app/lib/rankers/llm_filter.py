@@ -20,6 +20,12 @@ from ..llm_query_vector_fit import MAX_SCORE, MIN_SCORE
 
 logger = logging.getLogger(__name__)
 
+# The one strength the filter runs at when it is on. The preference is a switch
+# (#566: "most posts I see should ..."), so a post the prompt describes fully
+# keeps twice its rank score and one it does not describe keeps its score; the
+# ordering is the same as halving the posts it does not describe. Tune here.
+LLM_FILTER_MULTIPLIER = 2.0
+
 
 def llm_filter_scores(
     candidates: Sequence[CandidatePost], query_vector: Sequence[float], intercept: float
@@ -49,7 +55,11 @@ def llm_filter_scores(
 
 
 def llm_filter_multiplier(setting: float, filter_score: float) -> float:
-    """Same shape as the politics multiplier: 1.0 at score 0, ``setting`` at score 1."""
+    """Same shape as the politics multiplier: 1.0 at score 0, ``setting`` at score 1.
+
+    ``setting`` is never below 1 (RankPredictRequest enforces it): the prompt says
+    what the person wants, so matching posts only ever move up.
+    """
     return (setting - 1.0) * filter_score + 1.0
 
 

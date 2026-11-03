@@ -63,7 +63,8 @@ class FeedPreferencesDocument(BaseModel):
     author_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     normalize_rank_by_generator: bool | None = None
-    llm_filter: float | None = Field(default=None, ge=0.5, le=2.0)
+    # Whether the ranking filter prompt (#566) is applied; the strength is the api's.
+    llm_filter: bool | None = None
 
 
 # The LLM prompt candidate generator ("cg") and the LLM ranking filter (#566).
@@ -799,9 +800,6 @@ class LlmQueryVectorDocument(BaseModel):
     )
     # Absent on documents written before #566, which are all cg vectors.
     role: LlmPromptRole = "cg"
-    # Filter vectors only: the neutral description of the kind of post the vector
-    # was fitted to ("posts about airplanes"), rewritten from the user's prompt.
-    subject: str | None = None
     prompt: str = Field(..., description="Prompt text used to generate the vector")
     created_at: datetime = Field(
         default_factory=_utcnow, description="When the document was first written"
