@@ -705,6 +705,7 @@ class PipelineItemMeta(BaseModel):
         description="Recorded politics adjustment; absent for older or unranked items",
     )
     diversification: DiversificationMeta | None = None
+    author_did: str | None = Field(default=None, description="Author DID of the post, if available")
 
 
 class FeedSnapshotDocument(BaseModel):

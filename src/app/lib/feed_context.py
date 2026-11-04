@@ -44,6 +44,9 @@ class FeedContextPayload(BaseModel):
     hrs: float | None = Field(
         default=None,
     )
+    adid: str | None = Field(
+        default=None,
+    )
 
 
 def _secret() -> bytes:

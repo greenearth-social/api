@@ -817,7 +817,13 @@ def _select_favorite_video_post_uri(
 
 
 def _make_feed_context(
-    user_did: str, feed_name: str, request_id: str, *, load_test: bool = False, heavy_ranker_score: float | None = None,
+    user_did: str,
+    feed_name: str,
+    request_id: str,
+    *,
+    load_test: bool = False,
+    heavy_ranker_score: float | None = None,
+    author_did: str | None = None,
 ) -> str:
     """Build the signed feedContext token shared by every item in a response.
 
@@ -836,6 +842,7 @@ def _make_feed_context(
             iat=int(time.time()),
             lt=load_test,
             hrs=heavy_ranker_score,
+            adid=author_did,
         )
     )
 
@@ -1640,7 +1647,11 @@ async def get_feed_skeleton(
 
     feed_cache = _get_feed_cache(request)
 
-    def feed_context_for(request_id: str, heavy_ranker_score: float | None = None) -> str | None:
+    def feed_context_for(
+        request_id: str,
+        heavy_ranker_score: float | None = None,
+        author_did: str | None = None,
+    ) -> str | None:
         """Signed interaction token for this response, or None when anonymous.
 
         ``sendInteractions`` carries no auth of its own — the token is the only
@@ -1649,7 +1660,14 @@ async def get_feed_skeleton(
         """
         if is_anonymous:
             return None
-        return _make_feed_context(user_did, feed_name, request_id, load_test=is_load_test, heavy_ranker_score=heavy_ranker_score)
+        return _make_feed_context(
+            user_did,
+            feed_name,
+            request_id,
+            load_test=is_load_test,
+            heavy_ranker_score=heavy_ranker_score,
+            author_did=author_did,
+        )
 
     async def generation_exclusions() -> list[str]:
         """Post URIs to exclude, including static pins for anonymous callers."""
@@ -2207,9 +2225,17 @@ async def get_feed_skeleton(
                     )
                 next_cursor = FeedCursor(id=request_id, offset=consumed).encode()
 
-            uri_heavy_ranker_map = _heavy_ranker_scores_from_items_meta(generated_snapshot.items_meta)            
+            heavy_ranker_score_by_uri = _heavy_ranker_scores_from_items_meta(generated_snapshot.items_meta)
+            author_did_by_uri = { meta.at_uri: meta.author_did for meta in generated_snapshot.items_meta }
             feed_skeleton_items = [
-                SkeletonItem(post=uri, feed_context=feed_context_for(request_id, uri_heavy_ranker_map.get(uri)))
+                SkeletonItem(
+                    post=uri,
+                    feed_context=feed_context_for(
+                        request_id,
+                        heavy_ranker_score_by_uri.get(uri),
+                        author_did_by_uri.get(uri),
+                    )
+                )
                 for uri in page
             ]
             response = FeedSkeletonResponse(feed=feed_skeleton_items, cursor=next_cursor)

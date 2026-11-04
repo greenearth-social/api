@@ -513,6 +513,8 @@ class FeedDebugRecorder:
                 topic_penalty_weight=self.topic_penalty_weight,
             )
 
+        author_did_by_uri = { c.at_uri: c.author_did for c in self.final_candidates }
+
         items_meta = []
         for pos, at_uri in enumerate(self.final_order):
             rank, rank_score = rank_by_uri.get(at_uri, (pos + 1, None))
@@ -527,6 +529,7 @@ class FeedDebugRecorder:
                     model_scores=model_scores_by_uri.get(at_uri, []),
                     politics_adjustment=politics_by_uri.get(at_uri),
                     diversification=div_by_uri.get(at_uri),
+                    author_did=author_did_by_uri.get(at_uri),
                 )
             )
 
