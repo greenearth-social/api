@@ -41,6 +41,9 @@ class FeedContextPayload(BaseModel):
         "from this feed as test data. Absent on tokens issued before this field existed, "
         "which decode to False.",
     )
+    hrs: float | None = Field(
+        default=None,
+    )
 
 
 def _secret() -> bytes:
