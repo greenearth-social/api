@@ -584,6 +584,60 @@ async def test_fit_query_vector_happy_path(small_sample):
 
 
 @pytest.mark.asyncio
+async def test_filter_fit_judges_the_random_posts_with_the_filter_rubric(small_sample):
+    """A filter vector (#566) scores every candidate, so the random posts are
+    judged too, with the filter rubric, instead of being labelled 1 unseen."""
+    pool = [
+        (f"at://k/{i}", f"airplane spotting {i}" if i % 2 else f"a kind, funny story {i}")
+        for i in range(8)
+    ]
+    randoms = [(f"at://r/{i}", f"unrelated chatter {i}") for i in range(12)]
+    es = FakeES(pool, randoms)
+    bag = [f"kw{i}" for i in range(fit.N_KEYWORDS)]
+    systems: list[str] = []
+
+    def handler(kw):
+        if "output_config" in kw:
+            return _reply(json.dumps({"keywords": bag}))
+        systems.append(kw["system"])
+        assert "Most of their feed should:\nbe funny, no airplanes" in kw["messages"][0]["content"]
+        text = _post_text(kw)
+        return _score_reply(1 if "airplane" in text else 9 if "funny" in text else 5)
+
+    client = FakeAnthropic(handler)
+    with (
+        patch.object(fit, "_get_anthropic_client", return_value=client),
+        patch.object(
+            fit, "fetch_post_embeddings_and_politics_scores", AsyncMock(side_effect=_hydrate_all)
+        ),
+    ):
+        result = await fit_query_vector(es, "be funny, no airplanes", role="filter")
+
+    # 4 keyword posts + 6 random posts, every one judged with the filter rubric.
+    assert (result.n_keyword_posts, result.n_random_posts) == (4, 6)
+    assert (result.n_scored, result.n_cancelled, result.n_failed) == (10, 0, 0)
+    assert systems and all(s == fit.FILTER_SCORING_SYSTEM for s in systems)
+    assert len(client.started) == 11
+    assert len(result.query_vector) == _DIM
+
+
+@pytest.mark.asyncio
+async def test_cg_fit_keeps_the_random_posts_unjudged(small_sample):
+    pool = [(f"at://k/{i}", f"solar panels story {i}") for i in range(8)]
+    es = FakeES(pool, [(f"at://r/{i}", f"chatter {i}") for i in range(12)])
+    client = _pipeline_client()
+    with (
+        patch.object(fit, "_get_anthropic_client", return_value=client),
+        patch.object(
+            fit, "fetch_post_embeddings_and_politics_scores", AsyncMock(side_effect=_hydrate_all)
+        ),
+    ):
+        result = await fit_query_vector(es, "hopeful solar news")
+    assert result.n_scored == 4
+    assert all(c["system"] != fit.FILTER_SCORING_SYSTEM for c in client.started)
+
+
+@pytest.mark.asyncio
 async def test_fit_query_vector_vector_points_toward_high_scoring_posts(small_sample):
     pool = [
         (f"at://k/{i}", f"solar panels story {i}" if i % 2 else f"wind turbines story {i}")

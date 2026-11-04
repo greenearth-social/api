@@ -14,6 +14,7 @@ from ...models import RankedCandidate, RankPredictRequest, RankPredictResult
 from ..feed_debug import current_recorder
 from ..telemetry import timed
 from .base import Ranker, RankerError, RankerExecutionError, RankerResult, get_ranker
+from .llm_filter import fetch_active_llm_filter, llm_filter_multiplier, llm_filter_scores
 from ..metrics import get_metric_collector
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,11 @@ async def run_predict(
         if ranker is None:
             raise RankModelNotFoundError(spec.name)
         resolved.append((spec.name, spec.weight, ranker))
+
+    # At the neutral setting every post's multiplier is 1, so nothing to fetch.
+    llm_filter_vector = (
+        await fetch_active_llm_filter(request.user_did) if request.llm_filter != 1.0 else None
+    )
 
     # return_exceptions=True so one ranker timing out doesn't cancel the
     # others mid-flight and discard their already-completed results.
@@ -202,6 +208,16 @@ async def run_predict(
 
     if rec is not None:
         rec.record_politics_adjustments(politics_multiplier, politics_adjustments)
+
+    # Apply the LLM filter multiplier (#566), same shape as politics.
+    if llm_filter_vector is not None and llm_filter_vector.intercept is not None:
+        filter_scores = llm_filter_scores(
+            request.candidates, llm_filter_vector.query_vector, llm_filter_vector.intercept
+        )
+        multiplied_scores_initial_order = [
+            (idx, uri, score * llm_filter_multiplier(request.llm_filter, filter_scores.get(uri, 0)))
+            for idx, uri, score in multiplied_scores_initial_order
+        ]
 
     ranked = enumerate(sorted(
         multiplied_scores_initial_order,

@@ -22,6 +22,7 @@ This module is pure library code: no FastAPI, no Firestore. The router
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 import json
 import logging
 import math
@@ -654,7 +655,35 @@ SCORING_TEMPLATE = (
     "and nothing else."
 )
 
+# The ranking filter's judge (#566). It scores every candidate in the feed, so
+# unrelated posts sit in the middle, not at the bottom as for the source prompt.
+FILTER_SCORING_SYSTEM = (
+    "Someone has described what most of the posts in their feed should be "
+    "like. For each post, rate how well it fits that description.\n\n"
+    f"{MAX_SCORE} = fits every part of it. {MIN_SCORE} = breaks part of it: it "
+    "is a kind of post they said they do not want, or the opposite of what "
+    "they asked for. An ordinary post about something else, which neither "
+    "fits nor breaks the description, belongs in the middle of the scale; do "
+    "not push it to either end. Judge the post as the thing they will actually "
+    "read: if the description names an effect - funny, uplifting, calming - "
+    "the post has to have that effect on someone reading it.\n\n"
+    f"Empty, truncated or unintelligible posts score {MIN_SCORE}. Judge "
+    "content, not language. Never decline to rate."
+)
+
+FILTER_SCORING_TEMPLATE = (
+    "Most of their feed should:\n{prompt}\n\n"
+    "Candidate post:\n{text}\n\n"
+    f"How well does this post fit that? Score {MIN_SCORE}-{MAX_SCORE}. "
+    "Reply with ONLY a JSON object of the form "
+    '{{"explanation": "<one or two sentences>", "score": <integer>}} '
+    "and nothing else."
+)
+
 _SCORE_RE = re.compile(r'"score"\s*:\s*(\d+)')
+
+if TYPE_CHECKING:
+    from ..documents import LlmPromptRole
 
 
 class ScoringError(FitError):
@@ -679,7 +708,9 @@ def parse_score(raw: str) -> int | None:
     return None
 
 
-async def _score_one(client: AsyncAnthropic, prompt: str, text: str, usage: Usage) -> int | None:
+async def _score_one(
+    client: AsyncAnthropic, prompt: str, text: str, usage: Usage, role: LlmPromptRole = "cg"
+) -> int | None:
     """One post's score, or None if the reply had no usable score.
 
     A `refusal` stop is a verdict, not an error: a post the model will not
@@ -691,8 +722,15 @@ async def _score_one(client: AsyncAnthropic, prompt: str, text: str, usage: Usag
     resp = await client.messages.create(
         model=SCORING_MODEL,
         max_tokens=_SCORE_MAX_TOKENS,
-        system=SCORING_SYSTEM,
-        messages=[{"role": "user", "content": SCORING_TEMPLATE.format(prompt=prompt, text=text)}],
+        system=FILTER_SCORING_SYSTEM if role == "filter" else SCORING_SYSTEM,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    FILTER_SCORING_TEMPLATE if role == "filter" else SCORING_TEMPLATE
+                ).format(prompt=prompt, text=text),
+            }
+        ],
     )
     usage.add(resp.usage)
     if resp.stop_reason == "refusal":
@@ -710,7 +748,11 @@ class ScoreOutcome:
 
 
 async def score_posts(
-    client: AsyncAnthropic, prompt: str, posts: list[Post], usage: Usage
+    client: AsyncAnthropic,
+    prompt: str,
+    posts: list[Post],
+    usage: Usage,
+    role: LlmPromptRole = "cg",
 ) -> ScoreOutcome:
     """Score `posts` concurrently with the deadline-and-floor rule above."""
     n = len(posts)
@@ -722,7 +764,7 @@ async def score_posts(
 
     async def one(post: Post) -> int | None:
         async with semaphore:
-            return await _score_one(client, prompt, post.content, scoring_usage)
+            return await _score_one(client, prompt, post.content, scoring_usage, role)
 
     def n_scored_in(done: set[asyncio.Task[int | None]]) -> int:
         return sum(
@@ -854,6 +896,8 @@ class PoolTooSmallError(FitError):
 @dataclass
 class FitResult:
     query_vector: list[float]
+    # unit_embedding @ query_vector + intercept predicts the 1-10 verdict.
+    intercept: float
     keywords: list[str]
     n_pool: int
     n_keyword_posts: int
@@ -868,8 +912,15 @@ class FitResult:
     output_tokens: int
 
 
-async def fit_query_vector(es, prompt: str) -> FitResult:
-    """Run the whole pipeline for `prompt`. Raises PoolTooSmallError,
+async def fit_query_vector(es, prompt: str, role: LlmPromptRole = "cg") -> FitResult:
+    """Run the whole pipeline for `prompt`.
+
+    A source prompt labels the random posts {MIN_SCORE} unjudged (they are not
+    what was asked for). The ranking filter (#566) meets exactly such posts in
+    the feed, so the judge rates them too with its own rubric; labelling them 1
+    would turn the filter into a topic detector.
+
+    Raises PoolTooSmallError,
     ExpansionError or ScoringError for the pipeline's own failures; client
     errors from Elasticsearch or Anthropic propagate as they are."""
     started = time.monotonic()
@@ -896,13 +947,14 @@ async def fit_query_vector(es, prompt: str) -> FitResult:
             f"only {len(keyword_posts)} keyword posts have embeddings (need {MIN_KEYWORD_POSTS})"
         )
 
-    worst_case = cost_usd(usage) + len(keyword_posts) * _SCORE_CALL_COST_BOUND_USD
+    judged = keyword_posts + random_posts if role == "filter" else keyword_posts
+    worst_case = cost_usd(usage) + len(judged) * _SCORE_CALL_COST_BOUND_USD
     if worst_case > MAX_COST_USD:
         raise ScoringError(
-            f"scoring {len(keyword_posts)} posts could cost ${worst_case:.2f}, "
+            f"scoring {len(judged)} posts could cost ${worst_case:.2f}, "
             f"over the ${MAX_COST_USD:.2f} cap; nothing sent"
         )
-    outcome = await score_posts(client, prompt, keyword_posts, usage)
+    outcome = await score_posts(client, prompt, judged, usage, role)
     cost = cost_usd(usage)
     if cost > MAX_COST_USD:
         # The calls are already billed, so failing here would only throw the
@@ -912,15 +964,17 @@ async def fit_query_vector(es, prompt: str) -> FitResult:
             "llm_qv_fit cost $%.2f exceeds the $%.2f cap; fitting anyway", cost, MAX_COST_USD
         )
 
-    labelled = [(p, s) for p, s in zip(keyword_posts, outcome.scores, strict=True) if s is not None]
+    labelled = [(p, s) for p, s in zip(judged, outcome.scores, strict=True) if s is not None]
     embeddings = [p.embedding for p, _ in labelled]
     scores = [s for _, s in labelled]
-    embeddings += [p.embedding for p in random_posts]
-    scores += [MIN_SCORE] * len(random_posts)
-    q, _intercept, train_r2 = fit_ridge(np.asarray(embeddings), np.asarray(scores), RIDGE_ALPHA)
+    if role == "cg":
+        embeddings += [p.embedding for p in random_posts]
+        scores += [MIN_SCORE] * len(random_posts)
+    q, intercept, train_r2 = fit_ridge(np.asarray(embeddings), np.asarray(scores), RIDGE_ALPHA)
 
     return FitResult(
         query_vector=q.tolist(),
+        intercept=intercept,
         keywords=keywords,
         n_pool=len(pool),
         n_keyword_posts=len(keyword_posts),

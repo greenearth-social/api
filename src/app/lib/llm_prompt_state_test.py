@@ -85,7 +85,7 @@ class PromptStore:
             assert not self.pending, "Firestore disallows reads after writes"
             rows = [key for key in self.documents if key.startswith(f"{path}/")]
             rows.sort(key=lambda key: self.documents[key]["updated_at"], reverse=True)
-            for key in rows[:1]:
+            for key in rows:
                 yield self.snapshot(key)
 
         collection.stream.side_effect = stream
@@ -306,3 +306,94 @@ async def test_first_fit_atomically_creates_activation_and_the_vector():
 def test_weight_redistribution(weights, expected):
     result = without_prompt_weight(SourceWeightsDocument.model_validate(weights))
     assert result.model_dump() == expected
+
+
+# --- the ranking filter prompt (issue #566) ---------------------------------
+
+
+def _seed_filter(store: PromptStore, *, active: str | None = "filter-latest", revision=2):
+    store.documents[USER_PATH]["llm_filter_prompt_state"] = {
+        "active_prompt_key": active,
+        "revision": revision,
+    }
+    store.documents[f"{VECTORS}/filter-latest"] = {
+        "prompt_key": "filter-latest",
+        "user_did": USER,
+        "query_vector": [0.3],
+        "intercept": 2.5,
+        "role": "filter",
+        "prompt": "less airplanes",
+        "created_at": NOW + timedelta(hours=1),
+        "updated_at": NOW + timedelta(hours=1),
+    }
+
+
+@pytest.mark.asyncio
+async def test_filter_has_no_legacy_fallback_and_does_not_disturb_the_source():
+    store = PromptStore()
+    store.seed()
+    # The newest vector would be the legacy source selection; the filter wants none of it.
+    assert await get_current_llm_query_vector(store.db, USER, role="filter") is None
+    assert await get_llm_prompt_revision(store.db, USER, role="filter") == 0
+
+    _seed_filter(store)
+    current = await get_current_llm_query_vector(store.db, USER, role="filter")
+    assert current is not None
+    assert (current.prompt_key, current.role, current.intercept) == ("filter-latest", "filter", 2.5)
+    assert await get_llm_prompt_revision(store.db, USER, role="filter") == 2
+    # The source still resolves on its own state.
+    source = await get_current_llm_query_vector(store.db, USER)
+    assert source is not None and source.prompt_key == "latest"
+    assert await get_llm_prompt_revision(store.db, USER) == 0
+
+
+@pytest.mark.asyncio
+async def test_filter_fit_stores_role_and_intercept_under_its_own_state():
+    store = PromptStore()
+    store.seed(explicit=True)
+    stored = await save_fitted_llm_prompt(
+        store.db,
+        USER,
+        [0.3],
+        "less airplanes",
+        expected_revision=0,
+        role="filter",
+        intercept=2.5,
+    )
+    saved = store.documents[USER_PATH]
+    assert saved["llm_filter_prompt_state"] == {
+        "active_prompt_key": stored.prompt_key,
+        "revision": 1,
+    }
+    assert saved["llm_prompt_state"] == {"active_prompt_key": "latest", "revision": 1}
+    vector = store.documents[f"{VECTORS}/{stored.prompt_key}"]
+    assert (vector["role"], vector["intercept"], vector["query_vector"]) == ("filter", 2.5, [0.3])
+    assert ACCEPTED not in store.documents
+    current = await get_current_llm_query_vector(store.db, USER, role="filter")
+    assert current is not None and current.prompt_key == stored.prompt_key
+    # Source vectors keep storing without an intercept and default to their role.
+    source = await save_fitted_llm_prompt(store.db, USER, [0.4], "more", expected_revision=1)
+    assert store.documents[f"{VECTORS}/{source.prompt_key}"]["role"] == "cg"
+    assert store.documents[f"{VECTORS}/{source.prompt_key}"]["intercept"] is None
+
+
+@pytest.mark.asyncio
+async def test_filter_removal_keeps_source_weights_and_its_own_revision():
+    store = PromptStore()
+    store.seed(explicit=True, llm=0.2)
+    _seed_filter(store)
+    before = deepcopy(store.documents[USER_PATH]["feed_preferences"])
+
+    updated = await remove_llm_prompt(store.db, USER, "filter-latest", role="filter")
+
+    saved = store.documents[USER_PATH]
+    assert saved["llm_filter_prompt_state"] == {"active_prompt_key": None, "revision": 3}
+    assert saved["llm_prompt_state"] == {"active_prompt_key": "latest", "revision": 1}
+    weights = saved["feed_preferences"]["your-feed"]["source_weights"]
+    assert weights == before["your-feed"]["source_weights"]
+    assert updated.source_weights is not None
+    assert updated.source_weights.llm == 0.2
+    assert ACCEPTED not in store.documents
+    assert await get_current_llm_query_vector(store.db, USER, role="filter") is None
+    with pytest.raises(PromptChangedError):
+        await remove_llm_prompt(store.db, USER, "filter-latest", role="cg")

@@ -66,6 +66,7 @@ def client(monkeypatch) -> Generator[TestClient]:
 def _fit_result() -> FitResult:
     return FitResult(
         query_vector=[0.1, 0.2],
+        intercept=1.5,
         keywords=["science", "hope"],
         n_pool=500,
         n_keyword_posts=80,
@@ -95,12 +96,13 @@ def test_fit_stores_vector_for_token_user(
     )
 
     async def reserve(*_args):
-        prompt_revision.assert_awaited_once_with(app.state.firestore, "did:plc:test-user")
+        prompt_revision.assert_awaited_once_with(app.state.firestore, "did:plc:test-user", "cg")
         metrics.record.assert_called_once_with("llm_query_vector.fit.attempted_count", 1)
         return QuotaDecision()
 
-    async def store(*_args, expected_revision):
+    async def store(*_args, expected_revision, role, intercept):
         assert expected_revision == 0
+        assert (role, intercept) == ("cg", 1.5)
         mock_fit.assert_awaited_once()
         metrics.record.assert_called_once_with("llm_query_vector.fit.attempted_count", 1)
         return stored
@@ -510,8 +512,9 @@ def test_remove_returns_saved_preferences_without_model_work_or_quota(
         "author_penalty": None,
         "topic_penalty": None,
         "normalize_rank_by_generator": None,
+        "llm_filter": None,
     }
-    mock_remove.assert_awaited_once_with(app.state.firestore, "did:plc:test-user", "v1")
+    mock_remove.assert_awaited_once_with(app.state.firestore, "did:plc:test-user", "v1", "cg")
     quota.assert_not_awaited()
     metrics.record.assert_not_called()
 
@@ -563,3 +566,67 @@ def test_superseded_fit_returns_conflict_and_records_one_outcome(
         call("llm_query_vector.fit.attempted_count", 1),
         call("llm_query_vector.fit.failed_exc_count", 1, reason="prompt_changed"),
     ]
+
+
+# --- the ranking filter prompt (issue #566) ---------------------------------
+
+
+@patch("app.routers.llm_query_vectors.save_fitted_llm_prompt", new_callable=AsyncMock)
+@patch("app.routers.llm_query_vectors.fit_query_vector", new_callable=AsyncMock)
+def test_fit_with_filter_role_reads_and_stores_the_filter_state(
+    mock_fit, mock_add, client, quota, metrics, prompt_revision
+):
+    mock_fit.return_value = _fit_result()
+    mock_add.return_value = LlmQueryVectorDocument(
+        prompt_key="f1",
+        user_did="did:plc:test-user",
+        query_vector=[0.1, 0.2],
+        intercept=1.5,
+        role="filter",
+        prompt="uplifting, no airplanes",
+    )
+
+    response = client.post(PATH, json={"prompt": "uplifting, no airplanes", "role": "filter"})
+
+    assert response.status_code == 200
+    assert response.json()["vector_id"] == "f1"
+    assert mock_fit.await_args.args[1:] == ("uplifting, no airplanes", "filter")
+    prompt_revision.assert_awaited_once_with(app.state.firestore, "did:plc:test-user", "filter")
+    mock_add.assert_awaited_once_with(
+        app.state.firestore,
+        "did:plc:test-user",
+        [0.1, 0.2],
+        "uplifting, no airplanes",
+        expected_revision=0,
+        role="filter",
+        intercept=1.5,
+    )
+
+
+@patch("app.routers.llm_query_vectors.get_current_llm_query_vector", new_callable=AsyncMock)
+def test_current_takes_a_role(mock_current, client, metrics):
+    mock_current.return_value = LlmQueryVectorDocument(
+        prompt_key="f1",
+        user_did="did:plc:test-user",
+        query_vector=[0.1],
+        intercept=1.5,
+        role="filter",
+        prompt="uplifting, no airplanes",
+    )
+
+    response = client.get(CURRENT_PATH, params={"role": "filter"})
+
+    assert response.status_code == 200
+    assert response.json()["prompt"] == "uplifting, no airplanes"
+    assert mock_current.await_args.args[1:] == ("did:plc:test-user", "filter")
+
+
+@patch("app.routers.llm_query_vectors.remove_llm_prompt", new_callable=AsyncMock)
+def test_remove_takes_a_role(mock_remove, client, quota, metrics):
+    mock_remove.return_value = FeedPreferencesDocument(llm_filter=True)
+
+    response = client.delete(CURRENT_PATH, params={"prompt_key": "f1", "role": "filter"})
+
+    assert response.status_code == 200
+    assert response.json()["llm_filter"] is True
+    mock_remove.assert_awaited_once_with(app.state.firestore, "did:plc:test-user", "f1", "filter")

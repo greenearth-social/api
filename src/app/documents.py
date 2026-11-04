@@ -63,6 +63,12 @@ class FeedPreferencesDocument(BaseModel):
     author_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     normalize_rank_by_generator: bool | None = None
+    # Whether the ranking filter prompt (#566) is applied; the strength is the api's.
+    llm_filter: bool | None = None
+
+
+# The LLM prompt candidate generator ("cg") and the LLM ranking filter (#566).
+LlmPromptRole = Literal["cg", "filter"]
 
 
 class LlmPromptStateDocument(BaseModel):
@@ -80,6 +86,7 @@ class UserDocument(BaseModel):
 
     user_did: str = Field(..., description="AT Protocol DID of the user (also the document ID)")
     llm_prompt_state: LlmPromptStateDocument | None = None
+    llm_filter_prompt_state: LlmPromptStateDocument | None = None
     username: str | None = Field(
         default=None,
         description="AT Protocol handle (e.g. foobar.bsky.app)",
@@ -786,6 +793,13 @@ class LlmQueryVectorDocument(BaseModel):
     prompt_key: str = Field(..., description="Prompt identifier (also the document ID)")
     user_did: str = Field(..., description="AT Protocol DID of the user")
     query_vector: list[float] = Field(..., description="Embedding vector for candidate retrieval")
+    intercept: float | None = Field(
+        default=None,
+        description="Ridge intercept; unit_embedding . query_vector + intercept predicts the "
+        "1-10 verdict. None on vectors fitted before #566.",
+    )
+    # Absent on documents written before #566, which are all cg vectors.
+    role: LlmPromptRole = "cg"
     prompt: str = Field(..., description="Prompt text used to generate the vector")
     created_at: datetime = Field(
         default_factory=_utcnow, description="When the document was first written"

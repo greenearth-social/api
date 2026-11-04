@@ -4,6 +4,9 @@ POST /api/feeds/llm-query-vectors/fit     fit a prompt and store its vector
 GET  /api/feeds/llm-query-vectors/current the active fitted prompt, 204 if none
 DELETE /api/feeds/llm-query-vectors/current remove activation and redistribute its weight
 
+Each takes a ``role`` (#566): ``cg`` (default) is the prompt behind the
+llm_query_vector candidate generator, ``filter`` the ranking filter's prompt.
+
 The pipeline lives in lib/llm_query_vector_fit.py; this router validates the
 request, runs it, writes the vector to Firestore (documents.LlmQueryVectorDocument,
 a new document under `users/{user}/llm_query_vectors/` per fit) and returns the
@@ -21,6 +24,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
+from ..documents import LlmPromptRole
 from ..lib.firebase_auth import FirebaseUser
 from ..lib.firestore_rate_limiter import FirestoreRateLimiter, QuotaScope
 from ..lib.llm_prompt_state import (
@@ -88,6 +92,7 @@ class QueryVectorFitRequest(BaseModel):
         max_length=MAX_PROMPT_CHARS,
         description="Free-text description of what the user wants to see",
     )
+    role: LlmPromptRole = "cg"
 
 
 class QueryVectorFitResponse(BaseModel):
@@ -197,7 +202,7 @@ async def fit_llm_query_vector(
 
         # Capture activation before quota/model work so a removal supersedes this fit.
         outcome_labels = {"reason": "prompt_state"}
-        revision = await get_llm_prompt_revision(db, user_did)
+        revision = await get_llm_prompt_revision(db, user_did, body.role)
         outcome_labels = {"reason": "quota_store"}
         try:
             quota = await FIT_RATE_LIMITER.reserve(db, user_did)
@@ -248,7 +253,7 @@ async def fit_llm_query_vector(
         outcome_labels = {"reason": "upstream"}
         try:
             async with asyncio.timeout(FIT_TIMEOUT_S):
-                result = await fit_query_vector(request.app.state.es, prompt)
+                result = await fit_query_vector(request.app.state.es, prompt, body.role)
         except TimeoutError as exc:
             outcome_labels = {"reason": "timeout"}
             logger.warning("llm_qv_fit timed out user_did=%s after %.0fs", user_did, FIT_TIMEOUT_S)
@@ -284,15 +289,22 @@ async def fit_llm_query_vector(
 
         outcome_labels = {"reason": "storage"}
         stored = await save_fitted_llm_prompt(
-            db, user_did, result.query_vector, prompt, expected_revision=revision
+            db,
+            user_did,
+            result.query_vector,
+            prompt,
+            expected_revision=revision,
+            role=body.role,
+            intercept=result.intercept,
         )
         key = stored.prompt_key
         logger.info(
-            "llm_qv_fit stored user_did=%s vector_id=%s n_pool=%d n_keyword=%d n_random=%d "
+            "llm_qv_fit stored user_did=%s vector_id=%s role=%s n_pool=%d n_keyword=%d n_random=%d "
             "n_scored=%d n_cancelled=%d n_failed=%d train_r2=%s duration_s=%.1f cost_usd=%.3f "
             "tokens_in=%d tokens_out=%d",
             user_did,
             key,
+            body.role,
             result.n_pool,
             result.n_keyword_posts,
             result.n_random_posts,
@@ -352,7 +364,7 @@ async def fit_llm_query_vector(
 
 class CurrentPromptResponse(BaseModel):
     prompt_key: str = Field(..., description="Firestore document id of the serving vector")
-    prompt: str = Field(..., description="Prompt text the vector was fitted to")
+    prompt: str = Field(..., description="Prompt text the user sent")
     created_at: datetime = Field(..., description="When it was fitted")
 
 
@@ -368,16 +380,19 @@ class CurrentPromptResponse(BaseModel):
 async def current_llm_prompt(
     request: Request,
     user_did: LlmCgUser,
+    role: Annotated[LlmPromptRole, Query()] = "cg",
 ) -> CurrentPromptResponse | Response:
     """The active prompt behind the vector the feed currently serves for this user."""
     db = getattr(request.app.state, "firestore", None)
     if db is None:
         raise HTTPException(status_code=503, detail="Firestore unavailable")
-    stored = await get_current_llm_query_vector(db, user_did)
+    stored = await get_current_llm_query_vector(db, user_did, role)
     if stored is None:
         return Response(status_code=204)
     return CurrentPromptResponse(
-        prompt_key=stored.prompt_key, prompt=stored.prompt, created_at=stored.created_at
+        prompt_key=stored.prompt_key,
+        prompt=stored.prompt,
+        created_at=stored.created_at,
     )
 
 
@@ -404,12 +419,13 @@ async def remove_current_llm_prompt(
     request: Request,
     user_did: LlmCgUser,
     prompt_key: Annotated[str, Query(min_length=1, max_length=1500)],
+    role: Annotated[LlmPromptRole, Query()] = "cg",
 ) -> FeedPreferences:
     db = getattr(request.app.state, "firestore", None)
     if db is None:
         raise HTTPException(status_code=503, detail="Firestore unavailable")
     try:
-        preferences = await remove_llm_prompt(db, user_did, prompt_key)
+        preferences = await remove_llm_prompt(db, user_did, prompt_key, role)
     except PromptChangedError as exc:
         logger.warning(
             "llm_qv_remove superseded error_type=PromptChangedError request_id=%s", get_request_id()

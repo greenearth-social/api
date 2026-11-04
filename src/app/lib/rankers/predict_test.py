@@ -1,6 +1,7 @@
 """Tests for the shared ranker pipeline."""
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -12,6 +13,7 @@ from ...models import (
     RankPredictRequest,
     RankPredictResult,
 )
+from ..embeddings import encode_float32_b64 as b64
 from ..feed_debug import FeedDebugRecorder, feed_debug_scope
 from . import predict as predict_module
 from .base import RankerExecutionError, RankerResult
@@ -100,12 +102,14 @@ def _request(
     candidates: list[CandidatePost],
     *,
     politics: float = 1.0,
+    llm_filter: float = 1.0,
 ) -> RankPredictRequest:
     return RankPredictRequest(
         models=models,
         user_did="did:plc:user1",
         candidates=candidates,
         politics=politics,
+        llm_filter=llm_filter,
     )
 
 
@@ -447,9 +451,7 @@ def test_run_predict_uses_ranker_median_for_explicit_missing_score(
     ("score_a", "score_c", "expected"),
     [(10.0, 0.0, [7.5, 3.75, 0.0]), (-2.0, -6.0, [-1.5, -3.0, -4.5])],
 )
-def test_run_predict_uses_ranker_median_for_omitted_score(
-    monkeypatch, score_a, score_c, expected
-):
+def test_run_predict_uses_ranker_median_for_omitted_score(monkeypatch, score_a, score_c, expected):
     """Median fallback also applies when a ranker omits a still-valid candidate."""
     candidates = [
         CandidatePost(at_uri="at://post/a", score=0.5),
@@ -752,3 +754,91 @@ def test_rank_predict_request_requires_user_did():
             models=[RankModelSpec(name="heavy_ranker", weight=1.0)],
             candidates=[CandidatePost(at_uri="at://post/1", score=0.5)],
         )
+
+
+def _filter_vector():
+    from ...documents import LlmQueryVectorDocument
+
+    # unit(e) . (9, 0) + 1 predicts 10 for a post along the x axis, 1 across it.
+    return LlmQueryVectorDocument(
+        prompt_key="f1",
+        user_did="did:plc:user1",
+        query_vector=[9.0, 0.0],
+        intercept=1.0,
+        role="filter",
+        prompt="less airplanes",
+    )
+
+
+def test_run_predict_applies_llm_filter_multiplier_like_politics(monkeypatch):
+    candidates = [
+        CandidatePost(at_uri="at://post/unrelated", minilm_l12_embedding=b64([0.0, 1.0])),
+        CandidatePost(at_uri="at://post/matching", minilm_l12_embedding=b64([1.0, 0.0])),
+        # Predicts 5.5 -> filter score 0.5.
+        CandidatePost(at_uri="at://post/halfway", minilm_l12_embedding=b64([0.5, 0.5 * 3**0.5])),
+    ]
+    ranker = StubRanker(
+        "x",
+        {
+            "at://post/unrelated": 0.4,
+            "at://post/matching": 0.3,
+            "at://post/halfway": 0.35,
+        },
+    )
+    monkeypatch.setattr(predict_module, "get_ranker", lambda _name: ranker)
+    fetch = AsyncMock(return_value=_filter_vector())
+    monkeypatch.setattr(predict_module, "fetch_active_llm_filter", fetch)
+
+    result = asyncio.run(
+        predict_module.run_predict(
+            _request(
+                models=[RankModelSpec(name="x", weight=1.0)],
+                candidates=candidates,
+                llm_filter=2.0,
+            ),
+            es=object(),
+        )
+    )
+
+    # Multiplier 2x at a full match, 1.5x halfway, 1x unrelated.
+    assert [(ranking.at_uri, ranking.rank, ranking.rank_score) for ranking in result.rankings] == [
+        ("at://post/matching", 1, pytest.approx(0.6)),
+        ("at://post/halfway", 2, pytest.approx(0.525)),
+        ("at://post/unrelated", 3, pytest.approx(0.4)),
+    ]
+    fetch.assert_awaited_once_with("did:plc:user1")
+
+
+@pytest.mark.parametrize(
+    ("llm_filter", "vector"),
+    [(1.0, _filter_vector()), (2.0, None)],
+    ids=["neutral-setting-skips-the-fetch", "no-active-filter"],
+)
+def test_run_predict_leaves_scores_alone_without_an_effective_filter(
+    monkeypatch, llm_filter, vector
+):
+    candidates = [
+        CandidatePost(at_uri="at://post/a", minilm_l12_embedding=b64([1.0, 0.0])),
+        CandidatePost(at_uri="at://post/b", minilm_l12_embedding=b64([0.0, 1.0])),
+    ]
+    ranker = StubRanker("x", {"at://post/a": 0.3, "at://post/b": 0.4})
+    monkeypatch.setattr(predict_module, "get_ranker", lambda _name: ranker)
+    fetch = AsyncMock(return_value=vector)
+    monkeypatch.setattr(predict_module, "fetch_active_llm_filter", fetch)
+
+    result = asyncio.run(
+        predict_module.run_predict(
+            _request(
+                models=[RankModelSpec(name="x", weight=1.0)],
+                candidates=candidates,
+                llm_filter=llm_filter,
+            ),
+            es=object(),
+        )
+    )
+
+    assert [(r.at_uri, r.rank_score) for r in result.rankings] == [
+        ("at://post/b", pytest.approx(0.4)),
+        ("at://post/a", pytest.approx(0.3)),
+    ]
+    assert fetch.await_count == (0 if llm_filter == 1.0 else 1)
