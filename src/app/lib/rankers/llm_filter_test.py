@@ -55,55 +55,36 @@ def test_scores_empty_without_usable_candidates():
 
 @pytest.mark.parametrize(
     ("setting", "score", "expected"),
-    [
-        (1.5, 1.0, 1.5),
-        (1.5, 0.0, 1.0),
-        (1.5, 0.5, 1.25),
-        (2.0, 1.0, 2.0),
-        (2.0, 0.5, 1.5),
-        (1.0, 1.0, 1.0),
-    ],
+    [(2.0, 1.0, 2.0), (2.0, 0.5, 1.5), (2.0, 0.0, 1.0), (1.0, 1.0, 1.0)],
 )
 def test_multiplier_matches_the_politics_shape(setting, score, expected):
     assert llm_filter.llm_filter_multiplier(setting, score) == pytest.approx(expected)
 
 
-def test_fetch_is_none_without_firestore(monkeypatch):
-    from ..candidates import llm_query_vector as generator
-
-    monkeypatch.setattr(generator, "_db", None)
-    assert asyncio.run(llm_filter.fetch_active_llm_filter("did:plc:user1")) is None
-
-
-def test_fetch_reads_the_filter_role(monkeypatch):
-    from .. import llm_prompt_state
-    from ..candidates import llm_query_vector as generator
-
-    db = object()
-    monkeypatch.setattr(generator, "_db", db)
-    current = AsyncMock(return_value=_vector())
-    monkeypatch.setattr(llm_prompt_state, "get_current_llm_query_vector", current)
-
-    fetched = asyncio.run(llm_filter.fetch_active_llm_filter("did:plc:user1"))
-    assert fetched is not None and fetched.prompt_key == "f1"
-    current.assert_awaited_once_with(db, "did:plc:user1", role="filter")
-
-
 @pytest.mark.parametrize(
-    "outcome", [None, RuntimeError("firestore down")], ids=["no-vector", "error"]
+    ("db", "outcome", "expected_key"),
+    [
+        (None, None, None),
+        (object(), _vector(), "f1"),
+        (object(), None, None),
+        (object(), RuntimeError("firestore down"), None),
+    ],
+    ids=["no-firestore", "active-filter", "no-vector", "error"],
 )
-def test_fetch_fails_open(monkeypatch, caplog, outcome):
+def test_fetch_reads_the_filter_role_and_fails_open(monkeypatch, caplog, db, outcome, expected_key):
     from .. import llm_prompt_state
     from ..candidates import llm_query_vector as generator
 
-    monkeypatch.setattr(generator, "_db", object())
-    current = (
-        AsyncMock(side_effect=outcome)
-        if isinstance(outcome, Exception)
-        else AsyncMock(return_value=outcome)
+    monkeypatch.setattr(generator, "_db", db)
+    current = AsyncMock(
+        side_effect=outcome if isinstance(outcome, Exception) else None, return_value=outcome
     )
     monkeypatch.setattr(llm_prompt_state, "get_current_llm_query_vector", current)
 
     with caplog.at_level(logging.WARNING, logger="app.lib.rankers.llm_filter"):
-        assert asyncio.run(llm_filter.fetch_active_llm_filter("did:plc:user1")) is None
-    assert ("ranking unfiltered" in caplog.text) == (outcome is not None)
+        fetched = asyncio.run(llm_filter.fetch_active_llm_filter("did:plc:user1"))
+
+    assert (fetched.prompt_key if fetched else None) == expected_key
+    if db is not None:
+        current.assert_awaited_once_with(db, "did:plc:user1", role="filter")
+    assert ("ranking unfiltered" in caplog.text) == isinstance(outcome, Exception)

@@ -655,11 +655,8 @@ SCORING_TEMPLATE = (
     "and nothing else."
 )
 
-# The ranking filter's judge (#566). The filter scores every candidate in the
-# feed, so its labels have to mean something for ordinary posts, not only for
-# posts near the prompt's keywords: fit = top, breaking the description =
-# bottom, unrelated = middle. (The source prompt's judge above asks a retrieval
-# question instead, "would you serve this", where unrelated is simply low.)
+# The ranking filter's judge (#566). It scores every candidate in the feed, so
+# unrelated posts sit in the middle, not at the bottom as for the source prompt.
 FILTER_SCORING_SYSTEM = (
     "Someone has described what most of the posts in their feed should be "
     "like. For each post, rate how well it fits that description.\n\n"
@@ -918,15 +915,10 @@ class FitResult:
 async def fit_query_vector(es, prompt: str, role: LlmPromptRole = "cg") -> FitResult:
     """Run the whole pipeline for `prompt`.
 
-    Both roles share the recipe; they differ in what the random posts are for.
-    A source prompt ("find posts that ...") wants a retrieval direction, so the
-    random posts are labelled {MIN_SCORE} unjudged: they are, by construction,
-    not what was asked for. The ranking filter (#566, "most posts I see should
-    ...") scores every candidate in the feed, and the random posts are exactly
-    the posts it will meet, so the judge rates them too, with the filter's own
-    rubric (unrelated = middle, breaking the description = bottom). Labelling
-    them 1 would teach the vector that anything off the prompt's keywords is
-    bad, which turns the filter into a topic detector.
+    A source prompt labels the random posts {MIN_SCORE} unjudged (they are not
+    what was asked for). The ranking filter (#566) meets exactly such posts in
+    the feed, so the judge rates them too with its own rubric; labelling them 1
+    would turn the filter into a topic detector.
 
     Raises PoolTooSmallError,
     ExpansionError or ScoringError for the pipeline's own failures; client
