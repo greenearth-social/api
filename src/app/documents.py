@@ -423,6 +423,15 @@ class InteractionDocument(BaseModel):
         "signed feedContext 'lt' claim). Excluded from analytics and deletable by "
         "scripts/load_test/cleanup.py.",
     )
+    heavy_ranker_score: float | None = Field(
+        default=None,
+        description="When the feedContext carried a heavy-ranker score, this is the "
+        "float value.  Used to analyze model performance",
+    )
+    author_did: str | None = Field(
+        default=None,
+        description="AT Protocol DID of the post author",
+    )
 
 
 class FeedDebugUserFeatures(BaseModel):

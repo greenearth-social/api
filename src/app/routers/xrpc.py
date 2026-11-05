@@ -714,6 +714,14 @@ def _heavy_ranker_scores_from_items_meta(
     return uri_score_map
 
 
+def _author_dids_from_items_meta(items_meta: list[PipelineItemMeta]) -> dict[str, str | None]:
+    """Build an ``{at_uri: author_did}`` lookup from pipeline metadata.
+
+    Items without an author DID are absent from the result.
+    """
+    return {meta.at_uri: meta.author_did for meta in items_meta if meta.author_did is not None}
+
+
 def _record_similarity_metric(
     page_uris: list[str],
     scores_by_uri: dict[str, float],
@@ -1347,6 +1355,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
             request_id=payload.rid,
             feed_generated_at=datetime.fromtimestamp(payload.iat, tz=UTC),
             load_test=payload.lt,
+            heavy_ranker_score=payload.hrs,
+            author_did=payload.adid,
         )
         try:
             await record_interaction(db, doc)
@@ -2226,7 +2236,7 @@ async def get_feed_skeleton(
                 next_cursor = FeedCursor(id=request_id, offset=consumed).encode()
 
             heavy_ranker_score_by_uri = _heavy_ranker_scores_from_items_meta(generated_snapshot.items_meta)
-            author_did_by_uri = { meta.at_uri: meta.author_did for meta in generated_snapshot.items_meta }
+            author_did_by_uri = _author_dids_from_items_meta(generated_snapshot.items_meta)
             feed_skeleton_items = [
                 SkeletonItem(
                     post=uri,
