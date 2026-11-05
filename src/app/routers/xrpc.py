@@ -1375,6 +1375,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
                     ix.item,
                     doc.created_at,
                     username=await _handle_for(payload.did),
+                    heavy_ranker_score=payload.hrs,
+                    author_did=payload.adid,
                 )
             except Exception:
                 logger.exception(

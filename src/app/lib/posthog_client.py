@@ -210,6 +210,8 @@ def track_interaction(
     item_uri: str | None,
     timestamp: datetime,
     username: str | None = None,
+    heavy_ranker_score: float | None = None,
+    author_did: str | None = None,
 ) -> None:
     """Capture a Bluesky interaction event.
 
@@ -226,6 +228,10 @@ def track_interaction(
     properties: dict = {"feed_name": feed_name}
     if item_uri:
         properties["item_uri"] = item_uri
+    if heavy_ranker_score is not None:
+        properties["heavy_ranker_score"] = heavy_ranker_score
+    if author_did is not None:
+        properties["author_did"] = author_did
     properties.update(user_identity_properties(username))
     client.capture(
         distinct_id=user_did,
