@@ -11,9 +11,10 @@ import argparse
 import asyncio
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, TypeVar, overload
 
 PROJECT_ID = "greenearth-471522"
 # Stage intentionally uses its Cloud Run URL; the old api-stage DNS is not configured.
@@ -55,15 +56,30 @@ def resolve_destination(args: argparse.Namespace) -> Destination:
     return destination
 
 
+_N = TypeVar("_N")
+
+
 class ApiKeyArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that validates mutually exclusive destination options across subcommands."""
 
+    @overload
+    def parse_args(
+        self, args: Iterable[str] | None = None, namespace: None = None
+    ) -> argparse.Namespace: ...
+
+    @overload
+    def parse_args(self, args: Iterable[str] | None, namespace: _N) -> _N: ...
+
+    @overload
+    def parse_args(self, *, namespace: _N) -> _N: ...
+
     def parse_args(
         self,
-        args: Sequence[str] | None = None,
-        namespace: argparse.Namespace | None = None,
-    ) -> argparse.Namespace:
+        args: Iterable[str] | None = None,
+        namespace: Any = None,
+    ) -> Any:
         res = super().parse_args(args, namespace)
+        assert res is not None
         env = getattr(res, "environment", None)
         legacy = getattr(res, "legacy_default", False)
         if not env and not legacy:
@@ -78,7 +94,7 @@ class ApiKeyArgumentParser(argparse.ArgumentParser):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    destination_parser = argparse.ArgumentParser(add_help=False)
+    destination_parser = ApiKeyArgumentParser(add_help=False)
     destination = destination_parser.add_mutually_exclusive_group()
     destination.add_argument("--environment", choices=DESTINATIONS, default=argparse.SUPPRESS)
     destination.add_argument(
@@ -176,6 +192,7 @@ async def execute(args: argparse.Namespace, destination: Destination) -> int:
             print(f"Scopes      : {', '.join(doc.scopes)}")
             print(f"Key         : {full_key}", flush=True)
             print("Save securely: plaintext is displayed once and never stored.", flush=True)
+            assert destination.api_url is not None
             if not await verify_key(destination.api_url, full_key):
                 print(
                     f"Key {doc.key_id} WAS CREATED. "

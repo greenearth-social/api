@@ -241,7 +241,7 @@ endpoints retain their existing authentication.
 
 ### Commands
 
-Run from `api/`; place `--environment` before the subcommand:
+Run from `api/`; `--environment` can be placed before or after the subcommand:
 
 ```bash
 pipenv run python scripts/apikeys.py --environment prod generate developer@example.com

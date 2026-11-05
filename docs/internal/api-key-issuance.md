@@ -7,7 +7,7 @@ Internal operational guidance. Do not put issued keys or developer emails in pub
 From `api/`, use Python 3.13, `pipenv sync --dev`, and `gcloud auth application-default login`.
 The Google application-default credential is separate from the gcloud CLI login.
 
-Always specify `--environment stage` or `--environment prod` before the subcommand.
+Specify `--environment stage` or `--environment prod` (either before or after the subcommand).
 This selects `greenearth-stage` or `greenearth-prod` in project `greenearth-471522`.
 The collection `api_keys` is already hardcoded. Unset conflicting project/database
 variables and both `GE_FIRESTORE_EMULATOR_HOST` / `FIRESTORE_EMULATOR_HOST` for cloud work.
