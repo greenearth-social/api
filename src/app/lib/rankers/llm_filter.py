@@ -25,6 +25,15 @@ logger = logging.getLogger(__name__)
 # Raised from 2.0 on 2026-11-03: on prod data predictions rarely near 10.
 LLM_FILTER_MULTIPLIER = 3.0
 
+# Experimental branch: the filter is a blend, not a multiplier. ``weight`` in [0, 1]
+# interpolates between the ranker's score (0) and the filter match alone (1).
+LLM_FILTER_WEIGHT = 0.5
+
+
+def llm_filter_blend(weight: float, score: float, filter_score: float) -> float:
+    """Experimental: ``(1 - weight) * score + weight * filter_score``."""
+    return (1.0 - weight) * score + weight * filter_score
+
 
 def llm_filter_scores(
     candidates: Sequence[CandidatePost], query_vector: Sequence[float], intercept: float

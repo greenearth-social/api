@@ -40,7 +40,9 @@ from ..models_feed_transparency import (
     FeedPreferences,
     FeedPreviewResponse,
     FeedSummary,
+    FilterAdjustmentView,
     GeneratorDiagnosticView,
+    GeneratorScoreStatsView,
     GeneratorView,
     MediaView,
     ModelScoreView,
@@ -121,6 +123,11 @@ def _build_items(
             if meta.politics_adjustment is not None
             else None
         )
+        filter_adjustment = (
+            FilterAdjustmentView.model_validate(meta.filter_adjustment.model_dump())
+            if meta.filter_adjustment is not None
+            else None
+        )
         hyd = hydrated.get(meta.at_uri, {})
         # The AppView applies user-specific moderation after this generator
         # returns skeleton URIs, so that exact state is not available here.
@@ -145,6 +152,7 @@ def _build_items(
                             for s in meta.model_scores
                         ],
                         politics_adjustment=politics_adjustment,
+                        filter_adjustment=filter_adjustment,
                         diversification=DiversificationView(
                             relevance=meta.diversification.relevance,
                             score=meta.diversification.score,
@@ -189,6 +197,7 @@ def _build_items(
                     for s in meta.model_scores
                 ],
                 politics_adjustment=politics_adjustment,
+                filter_adjustment=filter_adjustment,
                 diversification=DiversificationView(
                     relevance=meta.diversification.relevance,
                     score=meta.diversification.score,
@@ -390,6 +399,7 @@ async def get_feed_preview(
         api_release_sha=cache_doc.api_release_sha,
         expires_at=cache_doc.expires_at,
         generator_diagnostics=cache_doc.generator_diagnostics,
+        generator_score_stats=cache_doc.generator_score_stats,
         items_meta=cache_doc.items_meta,
     )
     db: AsyncClient = request.app.state.firestore
@@ -452,6 +462,9 @@ async def get_feed_preview(
         unavailable_count=unavailable_count,
         partial_item_count=partial_item_count,
         generator_diagnostics=diagnostics,
+        generator_score_stats=[
+            GeneratorScoreStatsView(**s.model_dump()) for s in snapshot.generator_score_stats
+        ],
     )
 
 

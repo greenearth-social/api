@@ -14,7 +14,7 @@ from ...models import RankedCandidate, RankPredictRequest, RankPredictResult
 from ..feed_debug import current_recorder
 from ..telemetry import timed
 from .base import Ranker, RankerError, RankerExecutionError, RankerResult, get_ranker
-from .llm_filter import fetch_active_llm_filter, llm_filter_multiplier, llm_filter_scores
+from .llm_filter import fetch_active_llm_filter, llm_filter_blend, llm_filter_scores
 from ..metrics import get_metric_collector
 
 logger = logging.getLogger(__name__)
@@ -96,9 +96,9 @@ async def run_predict(
             raise RankModelNotFoundError(spec.name)
         resolved.append((spec.name, spec.weight, ranker))
 
-    # At the neutral setting every post's multiplier is 1, so nothing to fetch.
+    # At weight 0 the filter contributes nothing, so nothing to fetch.
     llm_filter_vector = (
-        await fetch_active_llm_filter(request.user_did) if request.llm_filter != 1.0 else None
+        await fetch_active_llm_filter(request.user_did) if request.llm_filter != 0.0 else None
     )
 
     # return_exceptions=True so one ranker timing out doesn't cancel the
@@ -214,10 +214,16 @@ async def run_predict(
         filter_scores = llm_filter_scores(
             request.candidates, llm_filter_vector.query_vector, llm_filter_vector.intercept
         )
-        multiplied_scores_initial_order = [
-            (idx, uri, score * llm_filter_multiplier(request.llm_filter, filter_scores.get(uri, 0)))
-            for idx, uri, score in multiplied_scores_initial_order
-        ]
+        filtered: list[tuple[int, str, float]] = []
+        filter_adjustments: list[tuple[str, float | None, float, float, float]] = []
+        for idx, uri, score in multiplied_scores_initial_order:
+            filter_score = filter_scores.get(uri)
+            blended = llm_filter_blend(request.llm_filter, score, filter_score or 0.0)
+            filtered.append((idx, uri, blended))
+            filter_adjustments.append((uri, filter_score, request.llm_filter, score, blended))
+        multiplied_scores_initial_order = filtered
+        if rec is not None:
+            rec.record_filter_adjustments(request.llm_filter, filter_adjustments)
 
     ranked = enumerate(sorted(
         multiplied_scores_initial_order,

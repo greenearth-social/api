@@ -1348,6 +1348,9 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
                 "topic_penalty": 0.7,
                 "normalize_rank_by_generator": False,
                 "llm_filter": True,
+                "min_rank_score": 0.15,
+            "llm_filter_strength": 0.5,
+                "llm_filter_strength": 0.5,
             },
             "best-of-friends": {
                 "freshness": 5,
@@ -1392,6 +1395,8 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
             "topic_penalty": 0.7,
             "normalize_rank_by_generator": False,
             "llm_filter": True,
+            "min_rank_score": 0.15,
+            "llm_filter_strength": 0.5,
         },
         "best-of-friends": {
             "freshness": 3,

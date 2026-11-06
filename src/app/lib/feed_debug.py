@@ -26,7 +26,7 @@ import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..documents import FeedDebugDocument, FeedSnapshotDocument
+    from ..documents import FeedDebugDocument, FeedSnapshotDocument, GeneratorScoreStats
     from ..models import (
         CandidateGenerateRequest,
         CandidatePost,
@@ -67,10 +67,16 @@ class FeedDebugRecorder:
         # (at_uri, topic_score, score_multiplier, score_before, score_after)
         # per ranked candidate, in request order.
         self.politics_adjustments: list[tuple[str, float | None, float, float, float]] = []
+        # Experimental: (at_uri, filter_score, score_multiplier, score_before, score_after).
+        self.filter_setting: float | None = None
+        self.filter_adjustments: list[tuple[str, float | None, float, float, float]] = []
         # (at_uri, generator_name, score_before, score_after); only with the slate flag on.
         self.rank_normalization: list[tuple[str, str, float, float]] = []
         self.order_after_rank: list[str] = []
         self.final_order: list[str] = []
+        # Experimental: (at_uri, generator_name, combined rank score) for every
+        # ranked candidate, before the min_rank_score cut.
+        self.ranked_scores: list[tuple[str, str, float]] = []
         # (at_uri, relevance, score, author_penalty, content_penalty,
         # similarity_score) in final selection order; populated only when
         # diversification runs.
@@ -132,6 +138,61 @@ class FeedDebugRecorder:
 
     def record_final_order(self, uris: list[str]) -> None:
         self.final_order = list(uris)
+
+    def record_filter_adjustments(
+        self,
+        setting: float,
+        adjustments: list[tuple[str, float | None, float, float, float]],
+    ) -> None:
+        """Experimental: how the LLM filter changed each candidate's combined score."""
+        self.filter_setting = setting
+        self.filter_adjustments = list(adjustments)
+
+    def record_ranked_scores(self, entries: list[tuple[str, str, float]]) -> None:
+        """Experimental: every ranked candidate's generator and combined score, pre-cut."""
+        self.ranked_scores = list(entries)
+
+    def generator_score_stats(self) -> list["GeneratorScoreStats"]:
+        """Experimental: per-generator counts and combined-score quartiles."""
+        import statistics
+
+        from ..documents import GeneratorScoreStats
+
+        retrieved: dict[str, int] = {}
+        for result in self.generator_outputs:
+            retrieved[result.generator_name] = retrieved.get(result.generator_name, 0) + len(
+                result.candidates
+            )
+        cut = set(self.cutoff_uris.get("rank_score", []))
+        served = set(self.final_order)
+        by_generator: dict[str, list[tuple[str, float]]] = {}
+        for at_uri, generator_name, score in self.ranked_scores:
+            by_generator.setdefault(generator_name, []).append((at_uri, score))
+        stats: list[GeneratorScoreStats] = []
+        for name in sorted(set(retrieved) | set(by_generator)):
+            entries = by_generator.get(name, [])
+            scores = sorted(s for _uri, s in entries)
+            if len(scores) >= 2:
+                q1, median, q3 = statistics.quantiles(scores, n=4, method="inclusive")
+            elif len(scores) == 1:
+                q1 = median = q3 = scores[0]
+            else:
+                q1 = median = q3 = None
+            stats.append(
+                GeneratorScoreStats(
+                    name=name,
+                    retrieved=retrieved.get(name, 0),
+                    ranked=len(entries),
+                    after_floor=sum(1 for uri, _s in entries if uri not in cut),
+                    served=sum(1 for uri, _s in entries if uri in served),
+                    min=scores[0] if scores else None,
+                    q1=q1,
+                    median=median,
+                    q3=q3,
+                    max=scores[-1] if scores else None,
+                )
+            )
+        return stats
 
     def record_diversification(
         self,
@@ -325,6 +386,7 @@ class FeedDebugRecorder:
         from ..documents import (
             DiversificationMeta,
             FeedSnapshotDocument,
+            FilterAdjustmentMeta,
             GeneratorDiagnostic,
             GeneratorMeta,
             ModelScoreMeta,
@@ -481,6 +543,25 @@ class FeedDebugRecorder:
                 ) in self.politics_adjustments
             }
 
+        # Experimental: per-URI LLM filter adjustment.
+        filter_by_uri: dict[str, FilterAdjustmentMeta] = {}
+        if self.filter_setting is not None:
+            filter_by_uri = {
+                at_uri: FilterAdjustmentMeta(
+                    weight=weight,
+                    filter_score=filter_score,
+                    score_before=score_before,
+                    score_after=score_after,
+                )
+                for (
+                    at_uri,
+                    filter_score,
+                    weight,
+                    score_before,
+                    score_after,
+                ) in self.filter_adjustments
+            }
+
         # Per-URI position after ranking.
         after_rank_pos = {uri: i for i, uri in enumerate(self.order_after_rank, start=1)}
 
@@ -526,6 +607,7 @@ class FeedDebugRecorder:
                     generators=gens_by_uri.get(at_uri, []),
                     model_scores=model_scores_by_uri.get(at_uri, []),
                     politics_adjustment=politics_by_uri.get(at_uri),
+                    filter_adjustment=filter_by_uri.get(at_uri),
                     diversification=div_by_uri.get(at_uri),
                 )
             )
@@ -541,6 +623,7 @@ class FeedDebugRecorder:
             diversify=self.diversify,
             generator_legend=generator_legend,
             generator_diagnostics=diagnostics,
+            generator_score_stats=self.generator_score_stats(),
             items_meta=items_meta,
         )
 

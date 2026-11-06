@@ -65,6 +65,10 @@ class FeedPreferencesDocument(BaseModel):
     normalize_rank_by_generator: bool | None = None
     # Whether the ranking filter prompt (#566) is applied; the strength is the api's.
     llm_filter: bool | None = None
+    # Experimental, local only: per-user rank-score floor (SlateCutoffs.min_rank_score).
+    min_rank_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Experimental, local only: blend weight of the filter match, 0 (ranker only) to 1 (match only).
+    llm_filter_strength: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 # The LLM prompt candidate generator ("cg") and the LLM ranking filter (#566).
@@ -175,6 +179,28 @@ class UserDocument(BaseModel):
     )
 
 
+class GeneratorScoreStats(BaseModel):
+    """Experimental, local only: per-generator counts and combined-score quartiles.
+
+    ``retrieved`` is what the generator returned, ``ranked`` how many of its posts
+    reached the ranker (after merge/dedupe), ``after_floor`` how many survived the
+    min_rank_score cut and ``served`` how many are in the final slate. The five
+    numbers are the combined rank score (models x politics x filter) over the
+    ranked posts, before any cut. A post is counted under its first generator.
+    """
+
+    name: str
+    retrieved: int = 0
+    ranked: int = 0
+    after_floor: int = 0
+    served: int = 0
+    min: float | None = None
+    q1: float | None = None
+    median: float | None = None
+    q3: float | None = None
+    max: float | None = None
+
+
 class FeedCacheDocument(BaseModel):
     """Cached feed result set used by cursor pagination.
 
@@ -185,6 +211,7 @@ class FeedCacheDocument(BaseModel):
     expires_at: datetime = Field(..., description="UTC expiration timestamp for this cache entry")
     items_meta: list[PipelineItemMeta] = Field(default_factory=list)
     generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
+    generator_score_stats: list[GeneratorScoreStats] = Field(default_factory=list)
     user_did: str | None = None
     feed_name: str | None = None
     generated_at: datetime | None = None
@@ -694,6 +721,18 @@ class PoliticsAdjustmentMeta(BaseModel):
     score_after: float
 
 
+class FilterAdjustmentMeta(BaseModel):
+    """Experimental: LLM filter blend recorded when ranked.
+
+    ``score_after = (1 - weight) * score_before + weight * filter_score``.
+    """
+
+    weight: float = Field(ge=0.0, le=1.0)
+    filter_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    score_before: float
+    score_after: float
+
+
 class PipelineItemMeta(BaseModel):
     """Per-URI pipeline metadata — already joined so readers don't need to."""
 
@@ -710,6 +749,9 @@ class PipelineItemMeta(BaseModel):
     politics_adjustment: PoliticsAdjustmentMeta | None = Field(
         default=None,
         description="Recorded politics adjustment; absent for older or unranked items",
+    )
+    filter_adjustment: FilterAdjustmentMeta | None = Field(
+        default=None, description="Experimental: recorded LLM filter adjustment"
     )
     diversification: DiversificationMeta | None = None
 
@@ -738,6 +780,7 @@ class FeedSnapshotDocument(BaseModel):
     diversify: bool = False
     generator_legend: list[GeneratorMeta] = Field(default_factory=list)
     generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
+    generator_score_stats: list[GeneratorScoreStats] = Field(default_factory=list)
     items_meta: list[PipelineItemMeta] = Field(default_factory=list)
 
 

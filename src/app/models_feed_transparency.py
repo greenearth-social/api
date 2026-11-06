@@ -23,6 +23,21 @@ class FeedListResponse(BaseModel):
     feeds: list[FeedSummary]
 
 
+class GeneratorScoreStatsView(BaseModel):
+    """Experimental, local only (see documents.GeneratorScoreStats)."""
+
+    name: str
+    retrieved: int = 0
+    ranked: int = 0
+    after_floor: int = 0
+    served: int = 0
+    min: float | None = None
+    q1: float | None = None
+    median: float | None = None
+    q3: float | None = None
+    max: float | None = None
+
+
 class GeneratorDiagnosticView(BaseModel):
     name: str
     weight: float
@@ -60,6 +75,15 @@ class PoliticsAdjustmentView(BaseModel):
     setting: float
     topic_score: float | None = None
     score_multiplier: float
+    score_before: float
+    score_after: float
+
+
+class FilterAdjustmentView(BaseModel):
+    """Experimental: the LLM filter's per-post numbers (a blend, see FilterAdjustmentMeta)."""
+
+    weight: float
+    filter_score: float | None = None
     score_before: float
     score_after: float
 
@@ -102,6 +126,7 @@ class FeedItemView(BaseModel):
     generators: list[GeneratorView] = Field(default_factory=list)
     model_scores: list[ModelScoreView] = Field(default_factory=list)
     politics_adjustment: PoliticsAdjustmentView | None = None
+    filter_adjustment: FilterAdjustmentView | None = None
     diversification: DiversificationView | None = None
     media: MediaView | None = None
     engagement: EngagementView | None = None
@@ -120,6 +145,7 @@ class FeedDetailResponse(BaseModel):
     unavailable_count: int = 0
     partial_item_count: int = 0
     generator_diagnostics: list[GeneratorDiagnosticView] = Field(default_factory=list)
+    generator_score_stats: list[GeneratorScoreStatsView] = Field(default_factory=list)
 
 
 class FeedPreviewResponse(BaseModel):
@@ -162,6 +188,8 @@ class FeedPreferences(BaseModel):
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     normalize_rank_by_generator: bool | None = None
     llm_filter: bool | None = None
+    min_rank_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    llm_filter_strength: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class AcceptFeedPreviewRequest(BaseModel):

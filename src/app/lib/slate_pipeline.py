@@ -54,7 +54,7 @@ FEED_SNAPSHOT_RETENTION_SECONDS = 24 * 60 * 60  # 24 hours
 
 # When the slate cutoffs reject every retrieved candidate, serve the
 # pre-cutoff ordering rather than an empty slate. See issue #248.
-EMPTY_SLATE_FAIL_OPEN = True
+EMPTY_SLATE_FAIL_OPEN = False  # experimental branch: an emptied slate stays empty
 
 
 class PipelineResult(NamedTuple):
@@ -230,6 +230,16 @@ async def run_ranking_pipeline(
         # Kept for the fail-open fallback below: the best posts we retrieved,
         # before any quality gate fired.
         pre_cut_uris = [c.at_uri for c in ordered if c.at_uri]
+
+        if rec is not None and ranked:
+            # Experimental: per-generator score stats are computed from this.
+            rec.record_ranked_scores(
+                [
+                    (c.at_uri, c.generator_name or UNKNOWN_GENERATOR, c.score or 0.0)
+                    for c in ordered
+                    if c.at_uri
+                ]
+            )
 
         if slate.rank_request_template is not None and slate.min_rank_score is not None:
             # ordered is sorted desc by the combined score, so everything from

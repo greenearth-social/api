@@ -51,7 +51,7 @@ from ..lib.config import set_fail_fast_for_request
 from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder
-from ..lib.rankers.llm_filter import LLM_FILTER_MULTIPLIER
+from ..lib.rankers.llm_filter import LLM_FILTER_WEIGHT
 from ..lib.feed_preferences import configured_controls, resolve_feed_preferences
 from ..lib.firestore import (
     FEED_DEBUG_RETENTION_DAYS,
@@ -455,7 +455,10 @@ def _with_politics_multiplier(feed_cfg: FeedConfig, politics: float) -> FeedConf
 
 
 def _with_llm_filter_multiplier(
-    feed_cfg: FeedConfig, llm_filter: bool, user_doc: UserDocument | None
+    feed_cfg: FeedConfig,
+    llm_filter: bool,
+    user_doc: UserDocument | None,
+    strength: float = LLM_FILTER_WEIGHT,
 ) -> FeedConfig:
     """Return a request-local feed config with the LLM filter switched on.
 
@@ -473,9 +476,7 @@ def _with_llm_filter_multiplier(
 
     return feed_cfg.model_copy(
         update={
-            "rank_request_template": rank_template.model_copy(
-                update={"llm_filter": LLM_FILTER_MULTIPLIER}
-            )
+            "rank_request_template": rank_template.model_copy(update={"llm_filter": strength})
         }
     )
 
@@ -544,13 +545,26 @@ def _configured_generation(
 
     if "llm_filter" in controls:
         assert effective.llm_filter is not None
-        feed_cfg = _with_llm_filter_multiplier(feed_cfg, effective.llm_filter, user_doc)
+        # Experimental: the user's strength when the feed exposes it.
+        strength = (
+            effective.llm_filter_strength
+            if "llm_filter_strength" in controls and effective.llm_filter_strength is not None
+            else LLM_FILTER_WEIGHT
+        )
+        feed_cfg = _with_llm_filter_multiplier(
+            feed_cfg, effective.llm_filter, user_doc, strength=strength
+        )
 
     if "normalize_rank_by_generator" in controls:
         assert effective.normalize_rank_by_generator is not None
         feed_cfg = feed_cfg.model_copy(
             update={"normalize_rank_by_generator": effective.normalize_rank_by_generator}
         )
+
+    # Experimental, local only: the user's floor replaces the feed's fixed one.
+    if "min_rank_score" in controls:
+        assert effective.min_rank_score is not None
+        feed_cfg = feed_cfg.model_copy(update={"min_rank_score": effective.min_rank_score})
 
     generators_override: dict[str, list[GeneratorSpec]] = {}
     if "source_weights" in controls:
@@ -1023,6 +1037,7 @@ async def generate_feed_preview(
             items=cached_uris,
             items_meta=cached_meta,
             generator_diagnostics=snapshot.generator_diagnostics,
+            generator_score_stats=snapshot.generator_score_stats,
             user_did=user_did,
             feed_name=feed_name,
             generated_at=snapshot.generated_at,

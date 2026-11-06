@@ -9,7 +9,7 @@ from ..documents import (
     SourceWeightsDocument,
     UserDocument,
 )
-from ..feeds import FEEDS, SOCIAL_RADIUS_PRESETS
+from ..feeds import FEEDS, PERSONALIZED_MIN_RANK_SCORE, SOCIAL_RADIUS_PRESETS
 from ..models import FeedControlName
 
 DEFAULT_SOURCE_WEIGHTS = SourceWeightsDocument(
@@ -32,6 +32,10 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | bool | SourceWeightsDocume
     "normalize_rank_by_generator": False,
     # On by default (#566) so a freshly fitted filter prompt shows an effect at once.
     "llm_filter": True,
+    # Experimental, local only: the floor the feed config uses when not exposed.
+    "min_rank_score": PERSONALIZED_MIN_RANK_SCORE,
+    # Experimental, local only: matches rankers.llm_filter.LLM_FILTER_WEIGHT.
+    "llm_filter_strength": 0.5,
 }
 
 
@@ -114,7 +118,9 @@ def control_value(
 def control_value(
     user: UserDocument | None,
     feed_name: str,
-    control: Literal["politics", "purpose", "author_penalty", "topic_penalty"],
+    control: Literal[
+        "politics", "purpose", "author_penalty", "topic_penalty", "min_rank_score", "llm_filter_strength"
+    ],
 ) -> float: ...
 
 

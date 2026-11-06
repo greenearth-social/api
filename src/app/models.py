@@ -15,6 +15,10 @@ FeedControlName = Literal[
     "topic_penalty",
     "normalize_rank_by_generator",
     "llm_filter",
+    # Experimental, local only: the rank-score floor as a user setting.
+    "min_rank_score",
+    # Experimental, local only: the LLM filter multiplier at a perfect match.
+    "llm_filter_strength",
 ]
 
 # What a feed does when the AppView calls getFeedSkeleton with no (or an
@@ -217,11 +221,11 @@ class RankPredictRequest(BaseModel):
         description="Multiplier applied to the final rank score based on the post's politics score",
     )
     llm_filter: float = Field(
-        default=1.0,
-        ge=1.0,
-        le=3.0,
-        description="Multiplier a post earns at a perfect match with the user's active LLM "
-        "filter prompt (#566), scaled down linearly with the match; 1.0 leaves scores unchanged",
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Experimental branch: blend weight of the LLM filter match in the rank "
+        "score, (1 - w) * score + w * match; 0 leaves scores unchanged, 1 ranks by match alone",
     )
 
     @model_validator(mode="after")

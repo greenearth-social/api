@@ -2670,6 +2670,13 @@ class TestRankedFeed:
         monkeypatch.setattr(FEEDS["your-feed"], "max_render_share", None)
         monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", None)
         monkeypatch.setattr(FEEDS["your-feed"], "min_mmr_score", None)
+        # Experimental: the per-user floor control would override the feed's
+        # floor; these tests drive the floor through the feed config.
+        monkeypatch.setattr(
+            FEEDS["your-feed"],
+            "controls",
+            tuple(c for c in FEEDS["your-feed"].controls if c != "min_rank_score"),
+        )
 
     def _patch_generators(self, candidates):
         primary_gen = AsyncMock()
@@ -2963,6 +2970,13 @@ class TestSlateCutoffs:
         monkeypatch.setattr(FEEDS["your-feed"], "max_render_share", None)
         monkeypatch.setattr(FEEDS["your-feed"], "min_rank_score", None)
         monkeypatch.setattr(FEEDS["your-feed"], "min_mmr_score", None)
+        # Experimental: the per-user floor control would override the feed's
+        # floor; these tests drive the floor through the feed config.
+        monkeypatch.setattr(
+            FEEDS["your-feed"],
+            "controls",
+            tuple(c for c in FEEDS["your-feed"].controls if c != "min_rank_score"),
+        )
 
     def _patch_generators(self, candidates):
         primary_gen = AsyncMock()
@@ -6971,20 +6985,20 @@ async def test_explore_preserves_accepted_settings_slate_for_next_full_feed_load
 @pytest.mark.parametrize(
     ("state", "switch", "expected"),
     [
-        (None, True, 1.0),
-        ({"active_prompt_key": None, "revision": 2}, True, 1.0),
-        ({"active_prompt_key": "filter-1", "revision": 2}, True, 3.0),
-        ({"active_prompt_key": "filter-1", "revision": 2}, False, 1.0),
+        (None, True, 0.0),
+        ({"active_prompt_key": None, "revision": 2}, True, 0.0),
+        ({"active_prompt_key": "filter-1", "revision": 2}, True, 0.5),
+        ({"active_prompt_key": "filter-1", "revision": 2}, False, 0.0),
     ],
     ids=["no-state", "removed", "active-on", "active-off"],
 )
 def test_llm_filter_reaches_the_rank_template_only_switched_on_with_an_active_prompt(
     state, switch, expected
 ):
-    from ..lib.rankers.llm_filter import LLM_FILTER_MULTIPLIER
+    from ..lib.rankers.llm_filter import LLM_FILTER_WEIGHT
     from .xrpc import _configured_generation
 
-    assert LLM_FILTER_MULTIPLIER == 3.0
+    assert LLM_FILTER_WEIGHT == 0.5
     user = UserDocument(
         user_did="did:plc:testuser",
         llm_filter_prompt_state=state,
@@ -6998,6 +7012,6 @@ def test_llm_filter_reaches_the_rank_template_only_switched_on_with_an_active_pr
     assert configured.feed_cfg.rank_request_template.llm_filter == expected
     # The shared template is never mutated.
     assert FEEDS["your-feed"].rank_request_template is not None
-    assert FEEDS["your-feed"].rank_request_template.llm_filter == 1.0
+    assert FEEDS["your-feed"].rank_request_template.llm_filter == 0.0
     assert _configured_generation("your-feed", None).effective_preferences.llm_filter is True
     assert "llm_filter" not in FEEDS["best-of-friends"].controls
