@@ -1,6 +1,7 @@
 """Tests for the shared ranker pipeline."""
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -681,6 +682,52 @@ def test_run_predict_records_supplied_model_scores_and_weight(monkeypatch):
         ("x", 2.0, {"at://post/a": pytest.approx(2.0), "at://post/b": pytest.approx(0.0)}),
         ("y", 1.0, {"at://post/a": pytest.approx(0.5), "at://post/b": pytest.approx(-0.5)}),
     ]
+
+
+@pytest.mark.parametrize("include_missing", [False, True])
+def test_run_predict_preserves_actual_scores_before_median_filling(monkeypatch, include_missing):
+    uris = ["at://post/zero", "at://post/median", "at://post/high", "at://post/missing"]
+    predictions = dict(zip(uris[:3], [0.0, 0.4, 0.8]))
+    rankers = {
+        "heavy_ranker": StubRanker("heavy_ranker", predictions, include_missing=include_missing),
+        "perspective": StubRanker("perspective", dict.fromkeys(uris, 0.2)),
+    }
+    monkeypatch.setattr(predict_module, "get_ranker", lambda name: rankers[name])
+    rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+
+    with feed_debug_scope(rec):
+        result = asyncio.run(
+            predict_module.run_predict(
+                _request(
+                    models=[
+                        RankModelSpec(name="heavy_ranker", weight=1.0),
+                        RankModelSpec(name="perspective", weight=1.0),
+                    ],
+                    candidates=[CandidatePost(at_uri=uri) for uri in uris],
+                ),
+                es=object(),
+            )
+        )
+
+    assert [(item.at_uri, item.rank_score) for item in result.rankings] == [
+        (uris[2], pytest.approx(0.5)),
+        (uris[1], pytest.approx(0.3)),
+        (uris[3], pytest.approx(0.3)),
+        (uris[0], pytest.approx(0.1)),
+    ]
+    assert rec.model_scores[0] == (
+        "heavy_ranker", 1.0, {**predictions, uris[3]: 0.4}
+    )
+    rec.record_final_order([item.at_uri for item in result.rankings])
+    now = datetime.now(UTC)
+    snapshot = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
+    scores = {item.at_uri: item.model_scores[0] for item in snapshot.items_meta}
+
+    assert scores[uris[0]].raw_score == 0.0
+    # A real prediction equal to the median remains distinguishable from its substitute.
+    assert scores[uris[1]].raw_score == scores[uris[1]].score == 0.4
+    assert scores[uris[3]].raw_score is None
+    assert scores[uris[3]].score == 0.4
 
 
 def test_run_predict_records_politics_score_adjustments(monkeypatch):

@@ -262,11 +262,15 @@ class TestModelScoreCapture:
     def test_copies_scores_dict_defensively(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
         scores = {"at://p/1": 0.8}
-        rec.record_model_scores("heavy_ranker", 1.0, scores)
+        raw_scores = {"at://p/1": 0.8}
+        rec.record_model_scores("heavy_ranker", 1.0, scores, raw_scores=raw_scores)
         scores["at://p/1"] = 0.0
         scores["at://p/2"] = 1.0
+        raw_scores["at://p/1"] = 0.0
+        raw_scores["at://p/2"] = 1.0
 
         assert rec.model_scores[0][2] == {"at://p/1": 0.8}
+        assert rec.raw_model_scores["heavy_ranker"] == {"at://p/1": 0.8}
 
     def test_empty_when_not_recorded(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
@@ -486,7 +490,33 @@ class TestBuildPipelineMetadata:
         assert item.model_scores[0].name == "heavy_ranker"
         assert item.model_scores[0].weight == 1.0
         assert item.model_scores[0].score == top_score
+        assert item.model_scores[0].raw_score is None
         assert item.politics_adjustment is None
+
+    def test_raw_scores_survive_snapshot_serialization_without_changing_effective_scores(self):
+        from ..documents import FeedSnapshotDocument
+
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        rec.record_model_scores(
+            "heavy_ranker",
+            1.0,
+            {"at://actual": 0.0, "at://imputed": 0.4},
+            raw_scores={"at://actual": 0.0},
+        )
+        rec.record_final_order(["at://imputed", "at://actual"])
+        now = datetime.now(timezone.utc)
+        snapshot = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
+
+        restored = FeedSnapshotDocument.model_validate_json(snapshot.model_dump_json())
+
+        assert [item.at_uri for item in restored.items_meta] == ["at://imputed", "at://actual"]
+        assert [
+            (item.model_scores[0].score, item.model_scores[0].raw_score)
+            for item in restored.items_meta
+        ] == [
+            (0.4, None),
+            (0.0, 0.0),
+        ]
 
     @pytest.mark.parametrize("setting", [0.0, 1.0, 2.0])
     def test_politics_adjustments_follow_final_uri_order(self, setting):

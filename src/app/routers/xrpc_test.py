@@ -16,6 +16,7 @@ from ..documents import (
     FeedCacheDocument,
     FeedPreferencesDocument,
     FeedSnapshotDocument,
+    ModelScoreMeta,
     PipelineItemMeta,
     SourceWeightsDocument,
     UserDocument,
@@ -49,6 +50,22 @@ def _feature_flags(value: bool | str | None) -> MagicMock:
     flags = MagicMock(spec=FeatureFlagEvaluations)
     flags.get_flag.return_value = value
     return flags
+
+
+def _scored_items_meta(uris: list[str]) -> list[PipelineItemMeta]:
+    return [
+        PipelineItemMeta(
+            at_uri=uri,
+            author_did=f"did:plc:author{index}",
+            model_scores=[
+                ModelScoreMeta(name="perspective", weight=1.0, score=0.9),
+                ModelScoreMeta(
+                    name="heavy_ranker", weight=1.0, score=0.5 + index / 100, raw_score=index / 100
+                ),
+            ],
+        )
+        for index, uri in enumerate(uris)
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -1031,6 +1048,56 @@ class TestDescribeFeedGenerator:
 # ---------------------------------------------------------------------------
 
 
+def test_skeleton_items_support_missing_metadata_and_preserve_load_test_attribution():
+    uris = ["at://post/missing", "at://post/legacy", "at://post/imputed", "at://post/scored"]
+    items = xrpc._skeleton_items(
+        uris,
+        [
+            PipelineItemMeta(at_uri=uris[1]),
+            PipelineItemMeta(
+                at_uri=uris[2],
+                author_did="did:plc:imputed-author",
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.5)],
+            ),
+            *_scored_items_meta([uris[3]]),
+        ],
+        user_did="did:plc:testuser",
+        feed_name="your-feed",
+        request_id="request-with-injected-post",
+        load_test=True,
+    )
+
+    assert [item.post for item in items] == uris
+    for item, expected in zip(
+        items,
+        [(None, None), (None, None), (None, "did:plc:imputed-author"), (0.0, "did:plc:author0")],
+    ):
+        assert item.feed_context is not None
+        context = decode_feed_context(item.feed_context)
+        assert context is not None
+        assert context.did == "did:plc:testuser"
+        assert context.rid == "request-with-injected-post"
+        assert context.lt is True
+        assert context.uri == item.post
+        assert (context.hrs, context.adid) == expected
+
+
+def test_skeleton_items_omit_anonymous_tokens_even_with_metadata(monkeypatch):
+    monkeypatch.delenv("GE_FEED_CONTEXT_SECRET")
+    uris = ["at://post/anonymous"]
+    items = xrpc._skeleton_items(
+        uris,
+        _scored_items_meta(uris),
+        user_did=None,
+        feed_name="random",
+        request_id="anonymous-request",
+    )
+
+    assert [item.model_dump(by_alias=True, exclude_none=True) for item in items] == [
+        {"post": uris[0]}
+    ]
+
+
 class TestGetFeedSkeleton:
     """Tests for the getFeedSkeleton endpoint."""
 
@@ -1913,7 +1980,7 @@ class TestFeedSkeletonCursor:
         replacement = FeedSnapshotDocument(
             request_id="replacement",
             items=replacement_uris,
-            items_meta=[PipelineItemMeta(at_uri=uri) for uri in replacement_uris],
+            items_meta=_scored_items_meta(replacement_uris),
             feed_name=FEED_RKEY,
             generated_at=now,
             expires_at=now + timedelta(minutes=10),
@@ -1948,6 +2015,12 @@ class TestFeedSkeletonCursor:
         replacement_cursor = FeedCursor.decode(data["cursor"])
         assert replacement_cursor.id != cache_id
         assert replacement_cursor.offset == 2
+        for index, item in enumerate(data["feed"]):
+            context = decode_feed_context(item["feedContext"])
+            assert context is not None
+            assert context.rid == replacement_cursor.id
+            assert context.hrs == index / 100
+            assert context.adid == f"did:plc:author{index}"
         assert pipeline.await_args is not None
         request_body = pipeline.await_args.args[3]
         assert request_body.exclude_uris == [*old_uris[:2], "at://seen/one"]
@@ -3473,6 +3546,94 @@ class TestSendInteractions:
         # The app.bsky.feed.defs# prefix is stripped before storage.
         assert doc.event == "interactionLike"
         assert doc.feed_generated_at is not None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_score", [0.0, 0.25, None])
+    @pytest.mark.parametrize("author_did", ["did:plc:author", None])
+    async def test_raw_score_round_trips_to_storage_and_posthog(self, raw_score, author_did):
+        (post,) = xrpc._skeleton_items(
+            ["at://post/1"],
+            [
+                PipelineItemMeta(
+                    at_uri="at://post/1",
+                    author_did=author_did,
+                    model_scores=[
+                        ModelScoreMeta(
+                            name="heavy_ranker", weight=1.0, score=0.25, raw_score=raw_score
+                        )
+                    ],
+                )
+            ],
+            user_did="did:plc:u",
+            feed_name="your-feed",
+            request_id="request-1",
+        )
+        interaction = xrpc.Interaction(
+            item=post.post,
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context=post.feed_context,
+        )
+        posthog = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
+            patch("app.routers.xrpc.get_posthog_client", return_value=posthog),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            await xrpc._record_interactions(MagicMock(), [interaction])
+
+        rec.assert_awaited_once()
+        assert rec.await_args is not None
+        doc = rec.await_args.args[1]
+        assert doc.heavy_ranker_score == raw_score
+        assert doc.author_did == author_did
+        posthog.capture.assert_called_once()
+        properties = posthog.capture.call_args.kwargs["properties"]
+        assert properties["heavy_ranker_score"] == raw_score
+        assert properties["author_did"] == author_did
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("token_post_uri", "item_uri"),
+        [
+            ("at://post/other", "at://post/1"),
+            (None, "at://post/1"),
+            ("at://post/1", None),
+            (None, None),
+        ],
+    )
+    async def test_unbound_metadata_is_null_but_interaction_is_recorded(self, token_post_uri, item_uri):
+        from ..lib.feed_context import FeedContextPayload, encode_feed_context
+
+        token = encode_feed_context(FeedContextPayload(
+            did="did:plc:u", feed="your-feed", rid="request-1", iat=1730000000,
+            uri=token_post_uri, hrs=0.75, adid="did:plc:author",
+        ))
+        interaction = xrpc.Interaction(
+            item=item_uri,
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context=token,
+        )
+        posthog = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
+            patch("app.routers.xrpc.get_posthog_client", return_value=posthog),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            await xrpc._record_interactions(MagicMock(), [interaction])
+
+        rec.assert_awaited_once()
+        assert rec.await_args is not None
+        doc = rec.await_args.args[1]
+        assert doc.user_did == "did:plc:u"
+        assert doc.item_uri == item_uri
+        assert doc.event == "interactionLike"
+        assert doc.heavy_ranker_score is None
+        assert doc.author_did is None
+        posthog.capture.assert_called_once()
+        properties = posthog.capture.call_args.kwargs["properties"]
+        assert properties.get("item_uri") == item_uri
+        assert properties["heavy_ranker_score"] is None
+        assert properties["author_did"] is None
 
     @pytest.mark.asyncio
     async def test_drops_forged_token(self):
@@ -6666,6 +6827,19 @@ SURVEY_URI = "at://ux/survey"
 POST_URIS = [f"at://posts/{index}" for index in range(40)]
 
 
+def _assert_session_contexts(response, uris: list[str], request_id: str):
+    expected = {uri: (index / 100, f"did:plc:author{index}") for index, uri in enumerate(uris)}
+    for item in response.feed:
+        assert item.feed_context is not None
+        context = decode_feed_context(item.feed_context)
+        assert context is not None
+        assert context.did == USER_DID
+        assert context.feed == "your-feed"
+        assert context.rid == request_id
+        assert context.uri == item.post
+        assert (context.hrs, context.adid) == expected.get(item.post, (None, None))
+
+
 @pytest.fixture
 def feed_session(monkeypatch):
     monkeypatch.setenv("GE_FEED_GENERATOR_DID", "did:web:test.example.com")
@@ -6691,7 +6865,8 @@ def feed_session(monkeypatch):
     snapshot = FeedSnapshotDocument(
         request_id="generated-preview",
         items=POST_URIS,
-        items_meta=[PipelineItemMeta(at_uri=uri) for uri in POST_URIS],
+        # Metadata order is independent of the rendered order; attribution is by URI.
+        items_meta=list(reversed(_scored_items_meta(POST_URIS))),
         feed_name="your-feed",
         generated_at=now,
         expires_at=now + timedelta(hours=24),
@@ -6784,6 +6959,7 @@ async def test_explore_skips_feed_state_but_keeps_personalization_and_analytics(
     assert context.did == USER_DID
     assert context.feed == "your-feed"
     assert context.rid == pipeline_call.kwargs["request_id"]
+    _assert_session_contexts(response, POST_URIS, pipeline_call.kwargs["request_id"])
 
 
 @pytest.mark.asyncio
@@ -6812,6 +6988,8 @@ async def test_full_feed_load_still_records_feed_state_and_shows_eligible_survey
     cursor = FeedCursor.decode(response.cursor)
     assert cursor.id == stored_id
     assert cursor.offset == limit - 2
+    _assert_session_contexts(response, POST_URIS, stored_id)
+    assert stored_document.items_meta == _scored_items_meta(POST_URIS)
     state.get_recent_seen_uris.assert_awaited_once_with(state.db, USER_DID)
     state.get_recent_discarded_uris.assert_awaited_once_with(state.db, USER_DID)
     generation = state._run_pipeline_capturing_with_timeout.await_args.args[3]
@@ -6841,6 +7019,7 @@ async def test_small_cursor_page_still_reads_cache_and_records_activity(feed_ses
 
     assert [item.post for item in response.feed] == POST_URIS[9 : 9 + limit]
     assert FeedCursor.decode(response.cursor) == FeedCursor(id="existing-feed", offset=9 + limit)
+    _assert_session_contexts(response, POST_URIS, "existing-feed")
     state.cache.retrieve_document.assert_awaited_once_with("existing-feed")
     state._run_pipeline_capturing_with_timeout.assert_not_awaited()
     state._write_feed_snapshot_background.assert_awaited_once()
@@ -6851,11 +7030,44 @@ async def test_small_cursor_page_still_reads_cache_and_records_activity(feed_ses
 
 
 @pytest.mark.asyncio
+async def test_cached_effective_scores_without_raw_scores_are_not_forwarded(feed_session):
+    state = feed_session
+    uri = POST_URIS[0]
+    state.cache.retrieve_document.return_value = FeedCacheDocument(
+        items=[uri],
+        items_meta=[
+            PipelineItemMeta(
+                at_uri=uri,
+                author_did="did:plc:author",
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.25)],
+            )
+        ],
+        user_did=USER_DID,
+        feed_name="your-feed",
+        generated_at=state.snapshot.generated_at,
+        expires_at=state.snapshot.expires_at,
+        preference_fingerprint=xrpc._configured_generation(
+            "your-feed", state.user
+        ).preference_fingerprint,
+    )
+
+    response = await state.load(8, FeedCursor(id="legacy-feed", offset=0).encode())
+
+    assert [item.post for item in response.feed] == [uri]
+    context = decode_feed_context(response.feed[0].feed_context)
+    assert context is not None
+    assert context.hrs is None
+    assert context.adid == "did:plc:author"
+    state._run_pipeline_capturing_with_timeout.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_small_expired_cursor_regenerates_with_normal_persistence(feed_session):
     state = feed_session
     response = await state.load(8, FeedCursor(id="expired-feed", offset=9).encode())
 
     assert response.cursor is not None
+    _assert_session_contexts(response, POST_URIS, FeedCursor.decode(response.cursor).id)
     state.cache.retrieve_document.assert_awaited_once_with("expired-feed")
     state.cache.store_document.assert_awaited_once()
     state._write_feed_snapshot_background.assert_awaited_once()
@@ -6870,6 +7082,31 @@ async def test_small_expired_cursor_regenerates_with_normal_persistence(feed_ses
     state.record_discarded_posts.assert_awaited_once_with(
         state.db, USER_DID, ["at://newly-discarded"], load_test=False
     )
+
+
+@pytest.mark.asyncio
+async def test_exhausted_cursor_carries_new_post_metadata_and_retains_it_in_cache(feed_session):
+    state = feed_session
+    state.cache.retrieve_document.return_value = FeedCacheDocument(
+        items=["at://already/served"],
+        items_meta=_scored_items_meta(["at://already/served"]),
+        user_did=USER_DID,
+        feed_name="your-feed",
+        generated_at=state.snapshot.generated_at,
+        expires_at=state.snapshot.expires_at,
+        preference_fingerprint=xrpc._configured_generation(
+            "your-feed", state.user
+        ).preference_fingerprint,
+    )
+
+    response = await state.load(8, FeedCursor(id="existing-feed", offset=1).encode())
+
+    assert [item.post for item in response.feed] == POST_URIS[:8]
+    _assert_session_contexts(response, POST_URIS, "existing-feed")
+    state._run_pipeline_capturing_with_timeout.assert_awaited_once()
+    assert state._run_pipeline_capturing_with_timeout.await_args.kwargs["regenerated"] is True
+    state.cache.append_document.assert_awaited_once()
+    assert state.cache.append_document.await_args.args[2] == _scored_items_meta(POST_URIS)
 
 
 @pytest.mark.asyncio
@@ -6909,7 +7146,8 @@ async def test_reported_explore_impression_still_records_interaction_and_seen_hi
     monkeypatch.setattr(xrpc, "record_interaction", record_interaction)
     monkeypatch.setattr(xrpc, "record_seen_posts", record_seen_posts)
     monkeypatch.setattr(xrpc, "record_user_post_seen", record_user_post_seen)
-    monkeypatch.setattr(xrpc, "track_interaction", MagicMock())
+    track_interaction = MagicMock()
+    monkeypatch.setattr(xrpc, "track_interaction", track_interaction)
 
     await xrpc.send_interactions(
         request=state.request,
@@ -6931,6 +7169,11 @@ async def test_reported_explore_impression_still_records_interaction_and_seen_hi
     assert interaction.item_uri == post.post
     assert interaction.user_did == USER_DID
     assert interaction.event == "interactionSeen"
+    assert interaction.heavy_ranker_score == 0.0
+    assert interaction.author_did == "did:plc:author0"
+    track_interaction.assert_called_once()
+    assert track_interaction.call_args.kwargs["heavy_ranker_score"] == 0.0
+    assert track_interaction.call_args.kwargs["author_did"] == "did:plc:author0"
     record_seen_posts.assert_awaited_once_with(state.db, USER_DID, [post.post], load_test=False)
     record_user_post_seen.assert_awaited_once_with(state.db, USER_DID)
 
@@ -6943,6 +7186,7 @@ async def test_explore_preserves_accepted_settings_slate_for_next_full_feed_load
     state.claim_accepted_feed_slate.return_value = accepted_id
     state.cache.retrieve_document.return_value = FeedCacheDocument(
         items=accepted_uris,
+        items_meta=_scored_items_meta(accepted_uris),
         user_did=USER_DID,
         feed_name="your-feed",
         generated_at=state.snapshot.generated_at,
@@ -6960,6 +7204,7 @@ async def test_explore_preserves_accepted_settings_slate_for_next_full_feed_load
 
     assert [item.post for item in full_feed.feed] == [PIN_URI, *accepted_uris[:29]]
     assert FeedCursor.decode(full_feed.cursor).id == accepted_id
+    _assert_session_contexts(full_feed, accepted_uris, accepted_id)
     state.claim_accepted_feed_slate.assert_awaited_once()
     state.cache.retrieve_document.assert_awaited_once_with(accepted_id)
     state._write_feed_snapshot_background.assert_awaited_once()

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ..documents import FeedCacheDocument, ModelScoreMeta, PipelineItemMeta
 from ..lib.feed_cache import (
     DEFAULT_TTL_SECONDS,
     FEED_CACHE_COLLECTION,
@@ -72,6 +73,35 @@ def _mock_firestore_client() -> tuple[MagicMock, MagicMock, AsyncMock]:
 
 class TestFirestoreFeedCacheStore:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_score", [0.0, 0.6, None])
+    async def test_prediction_provenance_survives_store_and_retrieve(self, raw_score):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+        document = FeedCacheDocument(
+            items=["at://a/1"],
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            items_meta=[PipelineItemMeta(
+                at_uri="at://a/1",
+                model_scores=[ModelScoreMeta(
+                    name="heavy_ranker", weight=1.0, score=0.6, raw_score=raw_score,
+                )],
+            )],
+        )
+
+        await cache.store_document("key1", document)
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = doc_ref.set.call_args[0][0]
+        doc_ref.get.return_value = snap
+
+        result = await cache.retrieve_document("key1")
+
+        assert result is not None
+        model_score = result.items_meta[0].model_scores[0]
+        assert model_score.score == 0.6
+        assert model_score.raw_score == raw_score
+
+    @pytest.mark.asyncio
     async def test_stores_items_and_expiry(self):
         db, col_ref, doc_ref = _mock_firestore_client()
         cache = FirestoreFeedCache(db)
@@ -95,6 +125,29 @@ class TestFirestoreFeedCacheStore:
 # ---------------------------------------------------------------------------
 
 class TestFirestoreFeedCacheRetrieve:
+    @pytest.mark.asyncio
+    async def test_legacy_model_score_does_not_become_an_actual_prediction(self):
+        db, _col, doc_ref = _mock_firestore_client()
+        cache = FirestoreFeedCache(db)
+        snap = MagicMock()
+        snap.exists = True
+        snap.to_dict.return_value = {
+            "items": ["at://a/1"],
+            "items_meta": [{
+                "at_uri": "at://a/1",
+                "model_scores": [{"name": "heavy_ranker", "weight": 1.0, "score": 0.6}],
+            }],
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+        doc_ref.get.return_value = snap
+
+        result = await cache.retrieve_document("legacy-key")
+
+        assert result is not None
+        model_score = result.items_meta[0].model_scores[0]
+        assert model_score.score == 0.6
+        assert model_score.raw_score is None
+
     @pytest.mark.asyncio
     async def test_reads_legacy_radius_metadata_without_losing_cached_feed(self):
         db, _col, doc_ref = _mock_firestore_client()
