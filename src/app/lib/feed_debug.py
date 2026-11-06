@@ -63,6 +63,7 @@ class FeedDebugRecorder:
         # (model_name, weight, {at_uri: score}) per configured rank
         # model, in the order they were run; populated only when ranking runs.
         self.model_scores: list[tuple[str, float, dict[str, float]]] = []
+        self.raw_model_scores: dict[str, dict[str, float]] = {}
         self.politics_setting: float | None = None
         # (at_uri, topic_score, score_multiplier, score_before, score_after)
         # per ranked candidate, in request order.
@@ -105,14 +106,24 @@ class FeedDebugRecorder:
     def record_ranking(self, ranking: "RankPredictResult") -> None:
         self.ranking = ranking
 
-    def record_model_scores(self, model_name: str, weight: float, scores: dict[str, float]) -> None:
+    def record_model_scores(
+        self,
+        model_name: str,
+        weight: float,
+        scores: dict[str, float],
+        *,
+        raw_scores: dict[str, float] | None = None,
+    ) -> None:
         """Record one rank model's per-candidate blend contributions and weight.
 
         Missing scores have been filled from the model's median. Contributions
         may be negative or exceed one; weights are normalized when blending.
         Pre- and post-politics combined scores are captured separately.
+        Raw scores contain only actual model predictions; missing provenance
+        must not turn an imputed contribution into a prediction.
         """
         self.model_scores.append((model_name, weight, dict(scores)))
+        self.raw_model_scores[model_name] = dict(raw_scores or {})
 
     def record_politics_adjustments(
         self,
@@ -455,9 +466,15 @@ class FeedDebugRecorder:
         # Per-URI model scores.
         model_scores_by_uri: dict[str, list[ModelScoreMeta]] = {}
         for model_name, weight, scores in self.model_scores:
+            raw_scores = self.raw_model_scores.get(model_name, {})
             for at_uri, score in scores.items():
                 model_scores_by_uri.setdefault(at_uri, []).append(
-                    ModelScoreMeta(name=model_name, weight=weight, score=score)
+                    ModelScoreMeta(
+                        name=model_name,
+                        weight=weight,
+                        score=score,
+                        raw_score=raw_scores.get(at_uri),
+                    )
                 )
 
         # Keep the setting with each item: cached pages can contain posts from

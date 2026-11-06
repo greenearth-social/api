@@ -701,16 +701,17 @@ def _similarity_scores_from_items_meta(items_meta: list[PipelineItemMeta]) -> di
 
 def _heavy_ranker_scores_from_items_meta(
     items_meta: list[PipelineItemMeta]
-) -> dict[str, float | None]:
+) -> dict[str, float]:
     """Build an ``{at_uri: heavy_ranker_score}`` lookup from pipeline metadata.
 
-    Items without a heavy ranker score are absent from the result.
+    Only actual predictions belong in interaction analytics. Never fall back to
+    ``score``: imputed scores and older metadata lack prediction provenance.
     """
-    uri_score_map: dict[str, float | None] = {}
+    uri_score_map: dict[str, float] = {}
     for meta in items_meta:
         for model_score in meta.model_scores:
-            if model_score.name == 'heavy_ranker':
-                uri_score_map.update({meta.at_uri: model_score.score})
+            if model_score.name == 'heavy_ranker' and model_score.raw_score is not None:
+                uri_score_map[meta.at_uri] = model_score.raw_score
     return uri_score_map
 
 

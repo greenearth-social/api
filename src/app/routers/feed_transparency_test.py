@@ -1826,6 +1826,36 @@ def test_get_feed_detail_returns_all_when_no_newer_snapshots(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("has_hydration", [True, False])
+def test_transparency_preserves_imputed_blend_contributions(has_hydration):
+    from .feed_transparency import _build_items
+
+    uri = "at://did:plc:author/app.bsky.feed.post/post1"
+    snapshot = _snapshot_doc(items_meta=[PipelineItemMeta(
+        at_uri=uri,
+        rank_score=0.4,
+        model_scores=[
+            ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.6, raw_score=None),
+            ModelScoreMeta(name="perspective", weight=1.0, score=0.2, raw_score=0.2),
+        ],
+    )])
+
+    items, *_ = _build_items(
+        snapshot,
+        _hydrated(uri) if has_hydration else {},
+        include_unavailable=True,
+    )
+
+    assert len(items) == 1
+    assert items[0].rank_score == 0.4
+    # The UI reconstructs the weighted blend from these effective scores,
+    # including the heavy-ranker's median replacement.
+    assert [score.model_dump() for score in items[0].model_scores] == [
+        {"name": "heavy_ranker", "weight": 1.0, "score": 0.6},
+        {"name": "perspective", "weight": 1.0, "score": 0.2},
+    ]
+
+
 @patch("app.routers.feed_transparency.hydrate_posts")
 @patch("app.routers.feed_transparency.get_feed_snapshot")
 def test_get_feed_detail_diverse_pipeline_metadata(mock_get_snapshot, mock_hydrate, client):

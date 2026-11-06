@@ -138,23 +138,17 @@ def test_track_interaction_captures_event_with_uri():
         properties={
             "feed_name": "your-feed",
             "item_uri": "at://did/post/1",
+            "heavy_ranker_score": None,
+            "author_did": None,
             **ANNOTATIONS,
         },
         timestamp=NOW,
     )
 
 
-@pytest.mark.parametrize(
-    ("score", "author_did", "metadata"),
-    [
-        (0.75, "did:plc:author", {"heavy_ranker_score": 0.75, "author_did": "did:plc:author"}),
-        (0.0, "did:plc:author", {"heavy_ranker_score": 0.0, "author_did": "did:plc:author"}),
-        (None, "did:plc:author", {"author_did": "did:plc:author"}),
-        (0.75, None, {"heavy_ranker_score": 0.75}),
-        (None, None, {}),
-    ],
-)
-def test_track_interaction_carries_available_post_metadata(score, author_did, metadata):
+@pytest.mark.parametrize("score", [0.75, 0.0, None])
+@pytest.mark.parametrize("author_did", ["did:plc:author", None])
+def test_track_interaction_carries_nullable_post_metadata(score, author_did):
     mock = MagicMock()
     track_interaction(
         mock,
@@ -175,7 +169,8 @@ def test_track_interaction_carries_available_post_metadata(score, author_did, me
             "item_uri": "at://did/post/1",
             "$set": {"username": "alice.bsky.app"},
             "user_handle": "alice.bsky.app",
-            **metadata,
+            "heavy_ranker_score": score,
+            "author_did": author_did,
             **ANNOTATIONS,
         },
         timestamp=NOW,
@@ -220,6 +215,8 @@ def test_track_interaction_carries_the_handle():
             "item_uri": "at://did/post/1",
             "$set": {"username": "alice.bsky.app"},
             "user_handle": "alice.bsky.app",
+            "heavy_ranker_score": None,
+            "author_did": None,
             **ANNOTATIONS,
         },
         timestamp=NOW,
@@ -266,7 +263,12 @@ def test_track_interaction_captures_event_without_uri():
     mock.capture.assert_called_once_with(
         distinct_id=USER_DID,
         event="requestMore",
-        properties={"feed_name": "your-feed", **ANNOTATIONS},
+        properties={
+            "feed_name": "your-feed",
+            "heavy_ranker_score": None,
+            "author_did": None,
+            **ANNOTATIONS,
+        },
         timestamp=NOW,
     )
 

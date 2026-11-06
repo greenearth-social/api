@@ -43,9 +43,11 @@ class FeedContextPayload(BaseModel):
     )
     hrs: float | None = Field(
         default=None,
+        description="Actual heavy-ranker score before median imputation; None when unavailable",
     )
     adid: str | None = Field(
         default=None,
+        description="ATProto DID of the user who authored the item, if known; None when unavailable",
     )
 
 

@@ -425,12 +425,12 @@ class InteractionDocument(BaseModel):
     )
     heavy_ranker_score: float | None = Field(
         default=None,
-        description="When the feedContext carried a heavy-ranker score, this is the "
-        "float value.  Used to analyze model performance",
+        description="Raw heavy-ranker score from the feedContext 'hrs' claim, before "
+        "median imputation. Missing when no actual score is known.",
     )
     author_did: str | None = Field(
         default=None,
-        description="AT Protocol DID of the post author",
+        description="ATProto DID of the user who authored the item, if known; None when unavailable",
     )
 
 
@@ -683,7 +683,17 @@ class ModelScoreMeta(BaseModel):
 
     name: str
     weight: float
-    score: float
+    score: float = Field(
+        ...,
+        description="Model's contribution to the item's combined score, which could include "
+        "post-processing like median imputation.",
+    )
+    raw_score: float | None = Field(
+        default=None,
+        description="Actual model prediction before median imputation. None for imputed "
+        "scores or older metadata without prediction provenance; score remains the "
+        "effective contribution used for ranking.",
+    )
 
 
 class PoliticsAdjustmentMeta(BaseModel):

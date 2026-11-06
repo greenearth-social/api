@@ -59,7 +59,9 @@ def _scored_items_meta(uris: list[str]) -> list[PipelineItemMeta]:
             author_did=f"did:plc:author{index}",
             model_scores=[
                 ModelScoreMeta(name="perspective", weight=1.0, score=0.9),
-                ModelScoreMeta(name="heavy_ranker", weight=1.0, score=index / 100),
+                ModelScoreMeta(
+                    name="heavy_ranker", weight=1.0, score=0.5 + index / 100, raw_score=index / 100
+                ),
             ],
         )
         for index, uri in enumerate(uris)
@@ -1047,10 +1049,18 @@ class TestDescribeFeedGenerator:
 
 
 def test_skeleton_items_support_missing_metadata_and_preserve_load_test_attribution():
-    uris = ["at://post/missing", "at://post/legacy", "at://post/scored"]
+    uris = ["at://post/missing", "at://post/legacy", "at://post/imputed", "at://post/scored"]
     items = xrpc._skeleton_items(
         uris,
-        [PipelineItemMeta(at_uri=uris[1]), *_scored_items_meta([uris[2]])],
+        [
+            PipelineItemMeta(at_uri=uris[1]),
+            PipelineItemMeta(
+                at_uri=uris[2],
+                author_did="did:plc:imputed-author",
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.5)],
+            ),
+            *_scored_items_meta([uris[3]]),
+        ],
         user_did="did:plc:testuser",
         feed_name="your-feed",
         request_id="request-with-injected-post",
@@ -1058,7 +1068,10 @@ def test_skeleton_items_support_missing_metadata_and_preserve_load_test_attribut
     )
 
     assert [item.post for item in items] == uris
-    for item, expected in zip(items, [(None, None), (None, None), (0.0, "did:plc:author0")]):
+    for item, expected in zip(
+        items,
+        [(None, None), (None, None), (None, "did:plc:imputed-author"), (0.0, "did:plc:author0")],
+    ):
         assert item.feed_context is not None
         context = decode_feed_context(item.feed_context)
         assert context is not None
@@ -3532,6 +3545,50 @@ class TestSendInteractions:
         # The app.bsky.feed.defs# prefix is stripped before storage.
         assert doc.event == "interactionLike"
         assert doc.feed_generated_at is not None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_score", [0.0, 0.25, None])
+    @pytest.mark.parametrize("author_did", ["did:plc:author", None])
+    async def test_raw_score_round_trips_to_storage_and_posthog(self, raw_score, author_did):
+        (post,) = xrpc._skeleton_items(
+            ["at://post/1"],
+            [
+                PipelineItemMeta(
+                    at_uri="at://post/1",
+                    author_did=author_did,
+                    model_scores=[
+                        ModelScoreMeta(
+                            name="heavy_ranker", weight=1.0, score=0.25, raw_score=raw_score
+                        )
+                    ],
+                )
+            ],
+            user_did="did:plc:u",
+            feed_name="your-feed",
+            request_id="request-1",
+        )
+        interaction = xrpc.Interaction(
+            item=post.post,
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context=post.feed_context,
+        )
+        posthog = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
+            patch("app.routers.xrpc.get_posthog_client", return_value=posthog),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            await xrpc._record_interactions(MagicMock(), [interaction])
+
+        rec.assert_awaited_once()
+        assert rec.await_args is not None
+        doc = rec.await_args.args[1]
+        assert doc.heavy_ranker_score == raw_score
+        assert doc.author_did == author_did
+        posthog.capture.assert_called_once()
+        properties = posthog.capture.call_args.kwargs["properties"]
+        assert properties["heavy_ranker_score"] == raw_score
+        assert properties["author_did"] == author_did
 
     @pytest.mark.asyncio
     async def test_drops_forged_token(self):
@@ -6924,6 +6981,38 @@ async def test_small_cursor_page_still_reads_cache_and_records_activity(feed_ses
         state.db, USER_DID, "your-feed", is_initial_load=False
     )
     assert state.track_session.call_args.kwargs["has_cursor"] is True
+
+
+@pytest.mark.asyncio
+async def test_cached_effective_scores_without_raw_scores_are_not_forwarded(feed_session):
+    state = feed_session
+    uri = POST_URIS[0]
+    state.cache.retrieve_document.return_value = FeedCacheDocument(
+        items=[uri],
+        items_meta=[
+            PipelineItemMeta(
+                at_uri=uri,
+                author_did="did:plc:author",
+                model_scores=[ModelScoreMeta(name="heavy_ranker", weight=1.0, score=0.25)],
+            )
+        ],
+        user_did=USER_DID,
+        feed_name="your-feed",
+        generated_at=state.snapshot.generated_at,
+        expires_at=state.snapshot.expires_at,
+        preference_fingerprint=xrpc._configured_generation(
+            "your-feed", state.user
+        ).preference_fingerprint,
+    )
+
+    response = await state.load(8, FeedCursor(id="legacy-feed", offset=0).encode())
+
+    assert [item.post for item in response.feed] == [uri]
+    context = decode_feed_context(response.feed[0].feed_context)
+    assert context is not None
+    assert context.hrs is None
+    assert context.adid == "did:plc:author"
+    state._run_pipeline_capturing_with_timeout.assert_not_awaited()
 
 
 @pytest.mark.asyncio

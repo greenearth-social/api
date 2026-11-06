@@ -109,6 +109,7 @@ async def run_predict(
 
     # loop through results once to calculate medians and get scores per candidate
     medians_by_model: dict[str, float] = {}  # {model_name: median_score}
+    raw_scores_by_model: dict[str, dict[str, float]] = {}
     results_by_candidate: dict[str, dict[str, float]] = {}  # {uri: {model_name: score}}
     models_with_valid_results: list[tuple[str, float, Ranker]] = [] # filtered version of resolved
     for (name, weight, ranker), result in zip(resolved, results):
@@ -129,6 +130,8 @@ async def run_predict(
             for r in result.result.rankings
             if r.at_uri is not None and r.rank_score is not None
         }
+        # Preserve actual predictions separately from the median-filled blend inputs.
+        raw_scores_by_model[name] = scores_by_uri
         if scores_by_uri:
             medians_by_model[name] = statistics.median(scores_by_uri.values())
             models_with_valid_results.append((name, weight, ranker))
@@ -174,6 +177,7 @@ async def run_predict(
                 model_name,
                 weight,
                 scores_by_model.get(model_name, {}),
+                raw_scores=raw_scores_by_model.get(model_name, {}),
             )
 
     total_weight = sum(weight for _name, weight, _ranker in models_with_valid_results)

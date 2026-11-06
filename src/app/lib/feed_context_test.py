@@ -4,6 +4,7 @@ import pytest
 
 from .feed_context import (
     FeedContextPayload,
+    _b64decode,
     _b64encode,
     _secret,
     _sign,
@@ -91,6 +92,22 @@ class TestPostMetadataClaims:
         assert decoded is not None
         assert decoded.hrs is None
         assert decoded.adid is None
+
+    @pytest.mark.parametrize("author_did", ["did:plc:author", None])
+    def test_missing_metadata_is_nullable_in_signed_payload(self, author_did):
+        import json
+
+        token = encode_feed_context(_payload(adid=author_did))
+        payload_b64, _signature = token.split(".", 1)
+        assert json.loads(_b64decode(payload_b64)) == {
+            "did": "did:plc:abc123",
+            "feed": "your-feed",
+            "rid": "req-1",
+            "iat": 1730000000,
+            "lt": False,
+            "hrs": None,
+            "adid": author_did,
+        }
 
 
 class TestVerificationFailures:

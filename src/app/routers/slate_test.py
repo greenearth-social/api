@@ -462,9 +462,9 @@ def _start_session(n: int = 5, limit: int = 2):
 
 
 class TestCursor:
-    def test_heavy_ranker_scores_and_authors_survive_fresh_and_cached_pages(self):
-        candidates = _candidates("pop", [0.9, 0.8, 0.7])
-        scores = {"at://pop/0": 0.0, "at://pop/1": 0.25, "at://pop/2": 0.75}
+    def test_raw_heavy_scores_and_authors_survive_fresh_and_cached_pages(self):
+        candidates = _candidates("pop", [0.9, 0.8, 0.7, 0.6])
+        raw_scores = {"at://pop/0": 0.0, "at://pop/1": 0.25, "at://pop/2": 0.5}
         gen_patch, lookup_patch, _ = _fake_generators(popularity=candidates)
         ranker = AsyncMock()
         ranker.predict.return_value = RankerResult(
@@ -472,33 +472,53 @@ class TestCursor:
             result=RankPredictResult(
                 rankings=[
                     RankedCandidate(at_uri=uri, rank=i + 1, rank_score=score)
-                    for i, (uri, score) in enumerate(scores.items())
+                    for i, (uri, score) in enumerate(raw_scores.items())
                 ]
             ),
         )
+        secondary_ranker = AsyncMock()
+        secondary_ranker.predict.return_value = RankerResult(
+            model="perspective",
+            result=RankPredictResult(
+                rankings=[
+                    RankedCandidate(at_uri=candidate.at_uri, rank=i + 1, rank_score=0.2)
+                    for i, candidate in enumerate(candidates)
+                    if candidate.at_uri is not None
+                ]
+            ),
+        )
+        rankers = {"heavy_ranker": ranker, "perspective": secondary_ranker}
         with (
             gen_patch,
             lookup_patch,
-            patch("app.routers.slate.get_ranker", return_value=ranker),
-            patch("app.lib.rankers.predict.get_ranker", return_value=ranker),
+            patch("app.routers.slate.get_ranker", side_effect=rankers.get),
+            patch("app.lib.rankers.predict.get_ranker", side_effect=rankers.get),
         ):
-            first = _post(_body(limit=2, rankers=[{"name": "heavy_ranker"}]))
+            first = _post(
+                _body(limit=2, rankers=[{"name": "heavy_ranker"}, {"name": "perspective"}])
+            )
 
         assert first.status_code == 200, first.text
         data = first.json()
         second = _post(_cursor_body(data["cursor"]))
         assert second.status_code == 200, second.text
         items = [*data["items"], *second.json()["items"]]
-        # Ranking reverses the candidate order; page boundaries must not change the join.
-        assert [item["at_uri"] for item in items] == ["at://pop/2", "at://pop/1", "at://pop/0"]
+        # The imputed and actual zero scores are both on the cached page.
+        assert [item["at_uri"] for item in items] == [
+            "at://pop/2", "at://pop/1", "at://pop/3", "at://pop/0"
+        ]
         authors = {candidate.at_uri: candidate.author_did for candidate in candidates}
         for item in items:
             payload = decode_feed_context(item["feed_context"])
             assert payload is not None
             assert (payload.did, payload.feed, payload.rid) == (USER_DID, FEED_NAME, data["request_id"])
-            assert payload.hrs == scores[item["at_uri"]]
+            assert payload.hrs == raw_scores.get(item["at_uri"])
             assert payload.adid == authors[item["at_uri"]]
-            assert item["model_scores"][0]["score"] == payload.hrs
+            heavy_score = next(
+                model for model in item["model_scores"] if model["name"] == "heavy_ranker"
+            )
+            assert heavy_score["raw_score"] == payload.hrs
+            assert heavy_score["score"] == raw_scores.get(item["at_uri"], 0.25)
             assert item["author_did"] == payload.adid
         assert len({item["feed_context"] for item in items}) == len(items)
         assert second.json()["cursor"] is None
