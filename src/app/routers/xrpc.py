@@ -833,7 +833,7 @@ def _make_feed_context(
     heavy_ranker_score: float | None = None,
     author_did: str | None = None,
 ) -> str:
-    """Build the signed feedContext token shared by every item in a response.
+    """Build a signed feedContext token for one feed item.
 
     ``request_id`` doubles as the feed-cache key, so the served item order can be
     recovered from the cache during its TTL window.
@@ -855,8 +855,40 @@ def _make_feed_context(
     )
 
 
-def _skeleton_items(uris: list[str], feed_context: str | None) -> list[SkeletonItem]:
-    return [SkeletonItem(post=uri, feed_context=feed_context) for uri in uris]
+def _skeleton_items(
+    uris: list[str],
+    items_meta: list[PipelineItemMeta],
+    *,
+    user_did: str | None,
+    feed_name: str,
+    request_id: str,
+    load_test: bool = False,
+) -> list[SkeletonItem]:
+    """Attach each post's metadata to its signed interaction token.
+
+    Metadata is joined by URI because pages can reorder or omit cached items.
+    Injected posts and older cache entries may have no metadata. Anonymous
+    responses omit tokens because there is no user to attribute interactions to.
+    """
+    if user_did is None:
+        return [SkeletonItem(post=uri) for uri in uris]
+
+    heavy_ranker_score_by_uri = _heavy_ranker_scores_from_items_meta(items_meta)
+    author_did_by_uri = _author_dids_from_items_meta(items_meta)
+    return [
+        SkeletonItem(
+            post=uri,
+            feed_context=_make_feed_context(
+                user_did,
+                feed_name,
+                request_id,
+                load_test=load_test,
+                heavy_ranker_score=heavy_ranker_score_by_uri.get(uri),
+                author_did=author_did_by_uri.get(uri),
+            ),
+        )
+        for uri in uris
+    ]
 
 
 # Fire-and-forget background tasks (Firestore session writes, …). Keeping a
@@ -1658,28 +1690,7 @@ async def get_feed_skeleton(
     )
 
     feed_cache = _get_feed_cache(request)
-
-    def feed_context_for(
-        request_id: str,
-        heavy_ranker_score: float | None = None,
-        author_did: str | None = None,
-    ) -> str | None:
-        """Signed interaction token for this response, or None when anonymous.
-
-        ``sendInteractions`` carries no auth of its own — the token is the only
-        thing tying a reported interaction to a user, and a logged-out request
-        has no user to tie it to. Omitting it drops those interactions.
-        """
-        if is_anonymous:
-            return None
-        return _make_feed_context(
-            user_did,
-            feed_name,
-            request_id,
-            load_test=is_load_test,
-            heavy_ranker_score=heavy_ranker_score,
-            author_did=author_did,
-        )
+    context_user_did = None if is_anonymous else user_did
 
     async def generation_exclusions() -> list[str]:
         """Post URIs to exclude, including static pins for anonymous callers."""
@@ -1830,7 +1841,11 @@ async def get_feed_skeleton(
                     return FeedSkeletonResponse(
                         feed=_skeleton_items(
                             page,
-                            feed_context_for(replacement_request_id),
+                            generated_snapshot.items_meta,
+                            user_did=context_user_did,
+                            feed_name=feed_name,
+                            request_id=replacement_request_id,
+                            load_test=is_load_test,
                         ),
                         cursor=next_cursor,
                     )
@@ -1850,7 +1865,6 @@ async def get_feed_skeleton(
                     _record_similarity_metric(
                         page, scores_by_uri, feed_name, batch=parsed.offset // limit
                     )
-                    feed_context = feed_context_for(parsed.id)
                     cached_snapshot = FeedSnapshotDocument(
                         request_id=parsed.id,
                         items=cached_uris,
@@ -1871,7 +1885,14 @@ async def get_feed_skeleton(
                             load_test=is_load_test,
                         )
                     return FeedSkeletonResponse(
-                        feed=_skeleton_items(page, feed_context),
+                        feed=_skeleton_items(
+                            page,
+                            cache_doc.items_meta,
+                            user_did=context_user_did,
+                            feed_name=feed_name,
+                            request_id=parsed.id,
+                            load_test=is_load_test,
+                        ),
                         cursor=next_cursor,
                     )
 
@@ -1935,7 +1956,6 @@ async def get_feed_skeleton(
                         _record_similarity_metric(
                             page, scores_by_uri, feed_name, batch=parsed.offset // limit
                         )
-                        feed_context = feed_context_for(parsed.id)
                         if not is_probe and not is_anonymous:
                             await _write_feed_snapshot_background(
                                 db,
@@ -1946,7 +1966,14 @@ async def get_feed_skeleton(
                                 load_test=is_load_test,
                             )
                         return FeedSkeletonResponse(
-                            feed=_skeleton_items(page, feed_context),
+                            feed=_skeleton_items(
+                                page,
+                                generated_snapshot.items_meta,
+                                user_did=context_user_did,
+                                feed_name=feed_name,
+                                request_id=parsed.id,
+                                load_test=is_load_test,
+                            ),
                             cursor=next_cursor,
                         )
 
@@ -2065,7 +2092,11 @@ async def get_feed_skeleton(
                         response = FeedSkeletonResponse(
                             feed=_skeleton_items(
                                 page,
-                                feed_context_for(accepted_request_id),
+                                accepted_cache.items_meta,
+                                user_did=context_user_did,
+                                feed_name=feed_name,
+                                request_id=accepted_request_id,
+                                load_test=is_load_test,
                             ),
                             cursor=next_cursor,
                         )
@@ -2237,20 +2268,17 @@ async def get_feed_skeleton(
                     )
                 next_cursor = FeedCursor(id=request_id, offset=consumed).encode()
 
-            heavy_ranker_score_by_uri = _heavy_ranker_scores_from_items_meta(generated_snapshot.items_meta)
-            author_did_by_uri = _author_dids_from_items_meta(generated_snapshot.items_meta)
-            feed_skeleton_items = [
-                SkeletonItem(
-                    post=uri,
-                    feed_context=feed_context_for(
-                        request_id,
-                        heavy_ranker_score_by_uri.get(uri),
-                        author_did_by_uri.get(uri),
-                    )
-                )
-                for uri in page
-            ]
-            response = FeedSkeletonResponse(feed=feed_skeleton_items, cursor=next_cursor)
+            response = FeedSkeletonResponse(
+                feed=_skeleton_items(
+                    page,
+                    generated_snapshot.items_meta,
+                    user_did=context_user_did,
+                    feed_name=feed_name,
+                    request_id=request_id,
+                    load_test=is_load_test,
+                ),
+                cursor=next_cursor,
+            )
             if reuse_future is not None:
                 _complete_initial_request(
                     user_did,

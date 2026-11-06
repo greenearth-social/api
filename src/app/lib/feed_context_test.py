@@ -65,6 +65,34 @@ class TestLoadTestClaim:
         assert decoded.lt is False
 
 
+class TestPostMetadataClaims:
+    @pytest.mark.parametrize("score", [0.75, 0.0])
+    def test_post_metadata_round_trips(self, score):
+        token = encode_feed_context(_payload(hrs=score, adid="did:plc:author"))
+        decoded = decode_feed_context(token)
+        assert decoded is not None
+        assert decoded.hrs == score
+        assert decoded.adid == "did:plc:author"
+        assert len(token) < 2000
+
+    def test_legacy_token_without_post_metadata_decodes_to_none(self):
+        import json
+
+        legacy = {
+            "did": "did:plc:abc123",
+            "feed": "your-feed",
+            "rid": "req-1",
+            "iat": 1730000000,
+            "lt": False,
+        }
+        payload_b64 = _b64encode(json.dumps(legacy).encode())
+        token = f"{payload_b64}.{_sign(payload_b64, _secret())}"
+        decoded = decode_feed_context(token)
+        assert decoded is not None
+        assert decoded.hrs is None
+        assert decoded.adid is None
+
+
 class TestVerificationFailures:
     def test_tampered_payload_rejected(self):
         token = encode_feed_context(_payload())

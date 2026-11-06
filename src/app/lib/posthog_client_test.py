@@ -144,6 +144,44 @@ def test_track_interaction_captures_event_with_uri():
     )
 
 
+@pytest.mark.parametrize(
+    ("score", "author_did", "metadata"),
+    [
+        (0.75, "did:plc:author", {"heavy_ranker_score": 0.75, "author_did": "did:plc:author"}),
+        (0.0, "did:plc:author", {"heavy_ranker_score": 0.0, "author_did": "did:plc:author"}),
+        (None, "did:plc:author", {"author_did": "did:plc:author"}),
+        (0.75, None, {"heavy_ranker_score": 0.75}),
+        (None, None, {}),
+    ],
+)
+def test_track_interaction_carries_available_post_metadata(score, author_did, metadata):
+    mock = MagicMock()
+    track_interaction(
+        mock,
+        USER_DID,
+        "interactionLike",
+        "your-feed",
+        "at://did/post/1",
+        NOW,
+        username="alice.bsky.app",
+        heavy_ranker_score=score,
+        author_did=author_did,
+    )
+    mock.capture.assert_called_once_with(
+        distinct_id=USER_DID,
+        event="interactionLike",
+        properties={
+            "feed_name": "your-feed",
+            "item_uri": "at://did/post/1",
+            "$set": {"username": "alice.bsky.app"},
+            "user_handle": "alice.bsky.app",
+            **metadata,
+            **ANNOTATIONS,
+        },
+        timestamp=NOW,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Handle as the user-facing identifier
 # ---------------------------------------------------------------------------
