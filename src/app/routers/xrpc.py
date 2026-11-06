@@ -670,6 +670,10 @@ def _snapshot_page(
 
 BATCH_MULTIPLIER = 5  # how many pages of results to fetch for each cursor session
 MAX_BATCH_SIZE = 200  # maximum number of candidates per cursor session
+# Upper bound on items in one cursor session's cache document. Each item
+# carries ~800 bytes of items_meta, and Firestore rejects documents over
+# 1 MiB, so an unbounded deep scroll eventually fails every append.
+MAX_CURSOR_SESSION_ITEMS = 1000
 
 
 def _batch_size(limit: int) -> int:
@@ -1829,8 +1833,27 @@ async def get_feed_skeleton(
                         cursor=next_cursor,
                     )
 
-                # Offset is at or past the end — regenerate with exclusions.
-                batch = _batch_size(limit)
+                # Offset is at or past the end — regenerate with exclusions,
+                # unless the session is already as large as it may grow.
+                session_room = MAX_CURSOR_SESSION_ITEMS - len(cache_doc.items)
+                if session_room <= 0:
+                    if collector := get_metric_collector():
+                        collector.record(
+                            "feed.cache.session_cap_reached_count",
+                            1,
+                            feed_name=feed_name,
+                        )
+                    logger.info(
+                        "Cursor session reached its item cap; ending feed",
+                        extra={
+                            "request_id": parsed.id,
+                            "feed_name": feed_name,
+                            "stored_item_count": len(cache_doc.items),
+                        },
+                    )
+                    return FeedSkeletonResponse(feed=[])
+
+                batch = min(_batch_size(limit), session_room)
                 excluded = await generation_exclusions()
                 # Dedup while preserving order; the cached batch and the
                 # seen/discarded posts can overlap.
@@ -1862,7 +1885,7 @@ async def get_feed_skeleton(
                     )
                 new_uris = [
                     uri for uri in generated_snapshot.items if uri not in contextual_pin_uris
-                ]
+                ][:session_room]
                 if new_uris:
                     async with timed(logger, "feedcache_append", cache_id=parsed.id):
                         new_meta_by_uri = {
