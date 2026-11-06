@@ -49,6 +49,11 @@ class FeedContextPayload(BaseModel):
         default=None,
         description="ATProto DID of the user who authored the item, if known; None when unavailable",
     )
+    uri: str | None = Field(
+        default=None,
+        description="Post URI that binds the score and author metadata to an interaction item; "
+        "None for legacy tokens without this binding.",
+    )
 
 
 def _secret() -> bytes:

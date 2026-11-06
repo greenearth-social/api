@@ -512,6 +512,7 @@ class TestCursor:
             payload = decode_feed_context(item["feed_context"])
             assert payload is not None
             assert (payload.did, payload.feed, payload.rid) == (USER_DID, FEED_NAME, data["request_id"])
+            assert payload.uri == item["at_uri"]
             assert payload.hrs == raw_scores.get(item["at_uri"])
             assert payload.adid == authors[item["at_uri"]]
             heavy_score = next(

@@ -1078,6 +1078,7 @@ def test_skeleton_items_support_missing_metadata_and_preserve_load_test_attribut
         assert context.did == "did:plc:testuser"
         assert context.rid == "request-with-injected-post"
         assert context.lt is True
+        assert context.uri == item.post
         assert (context.hrs, context.adid) == expected
 
 
@@ -3589,6 +3590,50 @@ class TestSendInteractions:
         properties = posthog.capture.call_args.kwargs["properties"]
         assert properties["heavy_ranker_score"] == raw_score
         assert properties["author_did"] == author_did
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("token_post_uri", "item_uri"),
+        [
+            ("at://post/other", "at://post/1"),
+            (None, "at://post/1"),
+            ("at://post/1", None),
+            (None, None),
+        ],
+    )
+    async def test_unbound_metadata_is_null_but_interaction_is_recorded(self, token_post_uri, item_uri):
+        from ..lib.feed_context import FeedContextPayload, encode_feed_context
+
+        token = encode_feed_context(FeedContextPayload(
+            did="did:plc:u", feed="your-feed", rid="request-1", iat=1730000000,
+            uri=token_post_uri, hrs=0.75, adid="did:plc:author",
+        ))
+        interaction = xrpc.Interaction(
+            item=item_uri,
+            event="app.bsky.feed.defs#interactionLike",
+            feed_context=token,
+        )
+        posthog = MagicMock()
+        with (
+            patch("app.routers.xrpc.record_interaction", new_callable=AsyncMock) as rec,
+            patch("app.routers.xrpc.get_posthog_client", return_value=posthog),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            await xrpc._record_interactions(MagicMock(), [interaction])
+
+        rec.assert_awaited_once()
+        assert rec.await_args is not None
+        doc = rec.await_args.args[1]
+        assert doc.user_did == "did:plc:u"
+        assert doc.item_uri == item_uri
+        assert doc.event == "interactionLike"
+        assert doc.heavy_ranker_score is None
+        assert doc.author_did is None
+        posthog.capture.assert_called_once()
+        properties = posthog.capture.call_args.kwargs["properties"]
+        assert properties.get("item_uri") == item_uri
+        assert properties["heavy_ranker_score"] is None
+        assert properties["author_did"] is None
 
     @pytest.mark.asyncio
     async def test_drops_forged_token(self):
@@ -6791,6 +6836,7 @@ def _assert_session_contexts(response, uris: list[str], request_id: str):
         assert context.did == USER_DID
         assert context.feed == "your-feed"
         assert context.rid == request_id
+        assert context.uri == item.post
         assert (context.hrs, context.adid) == expected.get(item.post, (None, None))
 
 

@@ -69,14 +69,19 @@ class TestLoadTestClaim:
 class TestPostMetadataClaims:
     @pytest.mark.parametrize("score", [0.75, 0.0])
     def test_post_metadata_round_trips(self, score):
-        token = encode_feed_context(_payload(hrs=score, adid="did:plc:author"))
+        post_uri = "at://did:plc:author/app.bsky.feed.post/1"
+        token = encode_feed_context(
+            _payload(hrs=score, adid="did:plc:author", uri=post_uri)
+        )
         decoded = decode_feed_context(token)
         assert decoded is not None
         assert decoded.hrs == score
         assert decoded.adid == "did:plc:author"
+        assert decoded.uri == post_uri
         assert len(token) < 2000
 
-    def test_legacy_token_without_post_metadata_decodes_to_none(self):
+    @pytest.mark.parametrize("metadata", [{}, {"hrs": 0.75, "adid": "did:plc:author"}])
+    def test_legacy_token_without_post_uri_decodes_to_none(self, metadata):
         import json
 
         legacy = {
@@ -85,13 +90,15 @@ class TestPostMetadataClaims:
             "rid": "req-1",
             "iat": 1730000000,
             "lt": False,
+            **metadata,
         }
         payload_b64 = _b64encode(json.dumps(legacy).encode())
         token = f"{payload_b64}.{_sign(payload_b64, _secret())}"
         decoded = decode_feed_context(token)
         assert decoded is not None
-        assert decoded.hrs is None
-        assert decoded.adid is None
+        assert decoded.hrs == metadata.get("hrs")
+        assert decoded.adid == metadata.get("adid")
+        assert decoded.uri is None
 
     @pytest.mark.parametrize("author_did", ["did:plc:author", None])
     def test_missing_metadata_is_nullable_in_signed_payload(self, author_did):
@@ -107,10 +114,27 @@ class TestPostMetadataClaims:
             "lt": False,
             "hrs": None,
             "adid": author_did,
+            "uri": None,
         }
 
 
 class TestVerificationFailures:
+    def test_tampered_post_uri_rejected(self):
+        import json
+
+        token = encode_feed_context(
+            _payload(
+                hrs=0.75,
+                adid="did:plc:author",
+                post_uri="at://did:plc:author/app.bsky.feed.post/1",
+            )
+        )
+        payload_b64, sig = token.split(".", 1)
+        claims = json.loads(_b64decode(payload_b64))
+        claims["uri"] = "at://did:plc:other/app.bsky.feed.post/2"
+        tampered_payload = _b64encode(json.dumps(claims).encode())
+        assert decode_feed_context(f"{tampered_payload}.{sig}") is None
+
     def test_tampered_payload_rejected(self):
         token = encode_feed_context(_payload())
         payload_b64, sig = token.split(".", 1)

@@ -830,6 +830,7 @@ def _make_feed_context(
     feed_name: str,
     request_id: str,
     *,
+    post_uri: str,
     load_test: bool = False,
     heavy_ranker_score: float | None = None,
     author_did: str | None = None,
@@ -849,6 +850,7 @@ def _make_feed_context(
             feed=feed_name,
             rid=request_id,
             iat=int(time.time()),
+            uri=post_uri,
             lt=load_test,
             hrs=heavy_ranker_score,
             adid=author_did,
@@ -883,6 +885,7 @@ def _skeleton_items(
                 user_did,
                 feed_name,
                 request_id,
+                post_uri=uri,
                 load_test=load_test,
                 heavy_ranker_score=heavy_ranker_score_by_uri.get(uri),
                 author_did=author_did_by_uri.get(uri),
@@ -1380,6 +1383,9 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
                     "Failed to update survey_post_last_seen_at for user '%s'", payload.did
                 )
 
+        # Post metadata is valid only for the URI bound into its signed token.
+        # Legacy tokens and mismatched items still record the interaction.
+        metadata_matches = payload.uri is not None and payload.uri == ix.item
         doc = InteractionDocument(
             user_did=payload.did,
             item_uri=ix.item,
@@ -1388,8 +1394,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
             request_id=payload.rid,
             feed_generated_at=datetime.fromtimestamp(payload.iat, tz=UTC),
             load_test=payload.lt,
-            heavy_ranker_score=payload.hrs,
-            author_did=payload.adid,
+            heavy_ranker_score=payload.hrs if metadata_matches else None,
+            author_did=payload.adid if metadata_matches else None,
         )
         try:
             await record_interaction(db, doc)
@@ -1408,8 +1414,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
                     ix.item,
                     doc.created_at,
                     username=await _handle_for(payload.did),
-                    heavy_ranker_score=payload.hrs,
-                    author_did=payload.adid,
+                    heavy_ranker_score=doc.heavy_ranker_score,
+                    author_did=doc.author_did,
                 )
             except Exception:
                 logger.exception(
