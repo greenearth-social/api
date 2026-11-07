@@ -21,7 +21,17 @@ gcloud() {
             record deploy
             printf '%s\0' "$@" > "$TEST_DIRECTORY/deploy_args"
             ;;
-        "run services describe") printf '%s\n' "https://test-api.run.app" ;;
+        "run services describe")
+            case "$*" in
+                *latestReadyRevisionName*) printf '%s\n' "greenearth-api-test-00001" ;;
+                *) printf '%s\n' "https://test-api.run.app" ;;
+            esac
+            ;;
+        "run revisions describe") printf '%s\n' "${FAKE_IMAGE-registry.test/api@sha256:abc}" ;;
+        "run jobs deploy")
+            record deploy_job
+            printf '%s\0' "$@" > "$TEST_DIRECTORY/job_args"
+            ;;
         "run services update-traffic") record update_traffic ;;
         *) record unexpected_gcloud_command; return 90 ;;
     esac
@@ -217,3 +227,25 @@ def test_invalid_options_fail_before_resolving_or_deploying(
 
     assert result.returncode != 0
     assert not (tmp_path / "events").exists()
+
+
+@pytest.mark.parametrize("environment_name", ["stage", "prod"])
+def test_refresh_job_runs_the_deployed_image(tmp_path: Path, environment_name: str) -> None:
+    result = run_deploy(tmp_path, ["--environment", environment_name])
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    job_args = recorded_args(tmp_path, "job_args")
+    assert job_args[:4] == ["run", "jobs", "deploy", f"greenearth-follows-refresh-{environment_name}"]
+    assert "--image=registry.test/api@sha256:abc" in job_args
+    assert "--command=/cnb/lifecycle/launcher" in job_args
+    assert "--args=python,-m,src.app.jobs.refresh_followed_users" in job_args
+    assert f"--set-env-vars=GE_FIRESTORE_DATABASE=greenearth-{environment_name}" in job_args
+    events = (tmp_path / "events").read_text().splitlines()
+    assert events.index("deploy") < events.index("deploy_job") < events.index("sync_feeds")
+
+
+def test_unresolvable_image_stops_before_deploying_the_job(tmp_path: Path) -> None:
+    result = run_deploy(tmp_path, environment={"FAKE_IMAGE": ""})
+
+    assert result.returncode != 0
+    assert "deploy_job" not in (tmp_path / "events").read_text().splitlines()

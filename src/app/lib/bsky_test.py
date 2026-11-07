@@ -7,6 +7,7 @@ from . import bsky as bsky_module
 from .bsky import (
     FollowedUsersLookupError,
     FollowsFetch,
+    fetch_follow_records,
     fetch_followed_user_dids,
     get_followed_user_dids,
 )
@@ -545,3 +546,106 @@ class TestFetchFollowedUserDidsCompleteness:
         fake_http_client.response = FakeResponse({"follows": [{"did": "did:plc:follow1"}]})
 
         assert await get_followed_user_dids("did:plc:user1", limit=100) == ["did:plc:follow1"]
+
+
+def _record(rkey: str, subject: str) -> dict:
+    return {
+        "uri": f"at://did:plc:me/app.bsky.graph.follow/{rkey}",
+        "value": {"subject": subject, "createdAt": "2026-01-01T00:00:00Z"},
+    }
+
+
+class TestFetchFollowRecords:
+    @pytest.fixture(autouse=True)
+    def _pds(self, monkeypatch):
+        self.resolved: list[str] = []
+
+        async def resolve(user_did):
+            self.resolved.append(user_did)
+            return "https://pds.example"
+
+        monkeypatch.setattr(bsky_module, "_resolve_pds", resolve)
+
+    @pytest.mark.asyncio
+    async def test_walks_the_users_follow_records_on_their_pds(self, fake_http_client):
+        fake_http_client.responses = [
+            FakeResponse({"records": [_record("r1", "did:plc:a")], "cursor": "c1"}),
+            FakeResponse({"records": [_record("r2", "did:plc:b")]}),
+        ]
+
+        fetch = await fetch_follow_records("did:plc:me", limit=10, timeout_seconds=5)
+
+        assert fetch == FollowsFetch(
+            dids=["did:plc:a", "did:plc:b"], complete=True, rkeys=["r1", "r2"]
+        )
+        # The PDS is resolved once per walk, not per page.
+        assert self.resolved == ["did:plc:me"]
+        first, second = fake_http_client.get_calls
+        assert first["url"] == "https://pds.example/xrpc/com.atproto.repo.listRecords"
+        assert first["params"] == {
+            "repo": "did:plc:me",
+            "collection": "app.bsky.graph.follow",
+            "limit": 10,
+        }
+        assert second["params"]["cursor"] == "c1"
+
+    @pytest.mark.asyncio
+    async def test_caps_at_limit_and_keeps_rkeys_aligned(self, fake_http_client):
+        fake_http_client.response = FakeResponse({
+            "records": [_record("r1", "did:plc:a"), _record("r2", "did:plc:b"),
+                        _record("r3", "did:plc:c")],
+            "cursor": "more",
+        })
+
+        fetch = await fetch_follow_records("did:plc:me", limit=2, timeout_seconds=5)
+
+        assert fetch.dids == ["did:plc:a", "did:plc:b"]
+        assert fetch.rkeys == ["r1", "r2"]
+        assert fetch.complete is True
+
+    @pytest.mark.asyncio
+    async def test_skips_malformed_records(self, fake_http_client):
+        fake_http_client.response = FakeResponse({
+            "records": [
+                _record("r1", "did:plc:a"),
+                {"uri": "at://did:plc:me/app.bsky.graph.follow/r2"},
+                {"value": {"subject": "did:plc:c"}},
+                "nonsense",
+            ],
+        })
+
+        fetch = await fetch_follow_records("did:plc:me", limit=10, timeout_seconds=5)
+
+        assert fetch.dids == ["did:plc:a"]
+        assert fetch.rkeys == ["r1"]
+
+    @pytest.mark.asyncio
+    async def test_partial_walk_is_incomplete_with_aligned_rkeys(self, fake_http_client):
+        request = httpx.Request("GET", "https://pds.example")
+        fake_http_client.responses = [
+            FakeResponse({"records": [_record("r1", "did:plc:a")], "cursor": "c1"}),
+            httpx.ConnectError("down", request=request),
+        ]
+
+        fetch = await fetch_follow_records("did:plc:me", limit=10, timeout_seconds=5)
+
+        assert fetch == FollowsFetch(dids=["did:plc:a"], complete=False, rkeys=["r1"])
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_pds_raises_lookup_error(self, fake_http_client, monkeypatch):
+        async def fail(user_did):
+            raise FollowedUsersLookupError("no pds")
+
+        monkeypatch.setattr(bsky_module, "_resolve_pds", fail)
+
+        with pytest.raises(FollowedUsersLookupError):
+            await fetch_follow_records("did:plc:me", limit=10, timeout_seconds=5)
+        assert fake_http_client.get_calls == []
+
+    @pytest.mark.asyncio
+    async def test_getfollows_walks_carry_no_rkeys(self, fake_http_client):
+        fake_http_client.response = FakeResponse({"follows": [{"did": "did:plc:a"}]})
+
+        fetch = await fetch_followed_user_dids("did:plc:me", limit=10)
+
+        assert fetch.rkeys == []
