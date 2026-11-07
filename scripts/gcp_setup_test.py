@@ -32,7 +32,8 @@ for step in \
     ensure_firestore_api_key_secret ensure_inference_api_key_secret_access \
     ensure_feed_context_secret ensure_probe_secret ensure_load_test_secret \
     setup_secrets setup_bsky_secret setup_perspective_secret setup_posthog_secret \
-    check_vpc_connector setup_feed_probe_cloud_scheduler; do
+    check_vpc_connector setup_feed_probe_cloud_scheduler \
+    setup_follows_refresh_cloud_scheduler; do
     eval "$step() { record '$step'; }"
 done
 main
@@ -107,7 +108,7 @@ def test_grants_runtime_read_access_only_to_environment_bucket(
         "ensure_frontend_deployer_roles",
     ]
     assert events.count("grant_bucket_access") == 1
-    assert events[-1] == "setup_feed_probe_cloud_scheduler"
+    assert events[-1] == "setup_follows_refresh_cloud_scheduler"
     assert "GCP setup complete!" in result.stdout
 
 

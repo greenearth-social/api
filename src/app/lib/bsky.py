@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 import httpx
@@ -36,7 +37,8 @@ def _count_failure(metric: str, exc: BaseException) -> None:
 # Parameters
 # ---------------------------------------------------------------------------
 
-# Maximum page size accepted by app.bsky.graph.getFollows (should not be changed)
+# Maximum page size accepted by app.bsky.graph.getFollows and
+# com.atproto.repo.listRecords (should not be changed)
 FOLLOWS_PAGE_LIMIT = 100
 
 # Maximum total time spent paginating followed users for one request
@@ -76,6 +78,10 @@ class FollowsFetch:
 
     dids: list[str] = field(default_factory=list)
     complete: bool = True
+    rkeys: list[str] = field(default_factory=list)
+    """Follow-record keys, parallel to ``dids``.  Only a walk of the user's own
+    repo (:func:`fetch_follow_records`) has them; ``getFollows`` does not
+    expose record keys, so its walks leave this empty."""
 
 
 def _is_retryable_follow_lookup_error(exc: httpx.HTTPError) -> bool:
@@ -108,6 +114,12 @@ async def _get_follows_page(
     raise AssertionError("unreachable follow lookup retry state")
 
 
+# One page of a walk: (did, rkey) pairs and the next cursor, if any.  The rkey
+# is None for sources that do not expose record keys.
+FollowsPage = tuple[list[tuple[str, str | None]], str | None]
+PageFetcher = Callable[[str | None, int], Awaitable[FollowsPage]]
+
+
 async def get_followed_user_dids(user_did: str, limit: int) -> list[str]:
     """Followed DIDs only, discarding the completeness signal."""
     return (await fetch_followed_user_dids(user_did, limit)).dids
@@ -128,43 +140,143 @@ async def fetch_followed_user_dids(
     fetched. Any partial result comes back with ``complete=False``.
     """
     base_url = "https://public.api.bsky.app/xrpc/app.bsky.graph.getFollows"
-    followed_dids: list[str] = []
+    client = get_http_client()
+
+    async def fetch_page(cursor: str | None, page_limit: int) -> FollowsPage:
+        params: dict[str, str | int] = {"actor": user_did, "limit": page_limit}
+        if cursor:
+            params["cursor"] = cursor
+        data = await _get_follows_page(client, base_url, params)
+        if not isinstance(data, dict):
+            raise FollowedUsersLookupError(f"Unexpected follows response for {user_did}")
+        follows = data.get("follows", [])
+        if not isinstance(follows, list):
+            raise FollowedUsersLookupError(f"Unexpected follows response for {user_did}")
+        items: list[tuple[str, str | None]] = [
+            (follow["did"], None)
+            for follow in follows
+            if isinstance(follow, dict) and isinstance(follow.get("did"), str)
+        ]
+        return items, data.get("cursor")
+
+    return await _walk(user_did, limit, timeout_seconds, fetch_page)
+
+
+# Resolves a user's DID to their PDS for fetch_follow_records.  Created lazily
+# and shared by the process: its in-memory cache saves a PLC directory round
+# trip per refresh for users seen before.
+_id_resolver = None
+
+
+async def _resolve_pds(user_did: str) -> str:
+    """The base URL of *user_did*'s PDS."""
+    global _id_resolver
+    if _id_resolver is None:
+        from .atproto_auth import init_id_resolver
+
+        _id_resolver = init_id_resolver()
+    try:
+        data = await _id_resolver.did.resolve_atproto_data(user_did)
+    except Exception as exc:
+        raise FollowedUsersLookupError(f"Could not resolve PDS for {user_did}") from exc
+    if not data.pds:
+        raise FollowedUsersLookupError(f"No PDS in DID document for {user_did}")
+    return data.pds.rstrip("/")
+
+
+async def fetch_follow_records(
+    user_did: str,
+    limit: int,
+    timeout_seconds: float | None = None,
+) -> FollowsFetch:
+    """Walk *user_did*'s ``app.bsky.graph.follow`` records on their own PDS.
+
+    Same contract as :func:`fetch_followed_user_dids`, plus record keys: a
+    jetstream unfollow names only the deleted record's rkey, so the cache needs
+    them to drop exactly the unfollowed account without a re-walk.  Records
+    come back newest first, like ``getFollows``, so *limit* keeps the same
+    follows.  Unlike ``getFollows`` this includes follows of deactivated
+    accounts, which is harmless: they have no posts to retrieve.
+
+    Resolving the PDS costs a PLC directory lookup on first use per user, so
+    this is for off-request refreshes; the request path uses
+    :func:`fetch_followed_user_dids`.
+    """
+    client = get_http_client()
+    base_url: str | None = None
+
+    async def fetch_page(cursor: str | None, page_limit: int) -> FollowsPage:
+        nonlocal base_url
+        if base_url is None:
+            pds = await _resolve_pds(user_did)
+            base_url = f"{pds}/xrpc/com.atproto.repo.listRecords"
+        params: dict[str, str | int] = {
+            "repo": user_did,
+            "collection": "app.bsky.graph.follow",
+            "limit": page_limit,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        data = await _get_follows_page(client, base_url, params)
+        if not isinstance(data, dict):
+            raise FollowedUsersLookupError(f"Unexpected listRecords response for {user_did}")
+        records = data.get("records", [])
+        if not isinstance(records, list):
+            raise FollowedUsersLookupError(f"Unexpected listRecords response for {user_did}")
+        items: list[tuple[str, str | None]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            uri, value = record.get("uri"), record.get("value")
+            subject = value.get("subject") if isinstance(value, dict) else None
+            if isinstance(uri, str) and isinstance(subject, str):
+                items.append((subject, uri.rsplit("/", 1)[-1]))
+        return items, data.get("cursor")
+
+    return await _walk(user_did, limit, timeout_seconds, fetch_page)
+
+
+async def _walk(
+    user_did: str,
+    limit: int,
+    timeout_seconds: float | None,
+    fetch_page: PageFetcher,
+) -> FollowsFetch:
+    """Paginate *fetch_page* up to *limit* follows within *timeout_seconds*.
+
+    Raises :class:`FollowedUsersLookupError` only when nothing at all could be
+    fetched. Any partial result comes back with ``complete=False``.
+    """
+    followed: list[tuple[str, str | None]] = []
     cursor: str | None = None
 
     if limit <= 0:
-        return FollowsFetch(dids=followed_dids, complete=True)
+        return FollowsFetch(complete=True)
 
     if timeout_seconds is None:
         timeout_seconds = FOLLOWS_LOOKUP_TIMEOUT_SECONDS
 
-    client = get_http_client()
+    def result(complete: bool) -> FollowsFetch:
+        kept = followed[:limit]
+        rkeys = [rkey for _, rkey in kept if rkey is not None]
+        return FollowsFetch(
+            dids=[did for did, _ in kept],
+            complete=complete,
+            rkeys=rkeys if len(rkeys) == len(kept) else [],
+        )
 
     try:
         async with asyncio.timeout(timeout_seconds):
-            while len(followed_dids) < limit:
-                page_limit = min(FOLLOWS_PAGE_LIMIT, limit - len(followed_dids))
-                params = {"actor": user_did, "limit": page_limit}
-                if cursor:
-                    params["cursor"] = cursor
-
+            while len(followed) < limit:
+                page_limit = min(FOLLOWS_PAGE_LIMIT, limit - len(followed))
                 try:
-                    data = await _get_follows_page(client, base_url, params)
-                    if not isinstance(data, dict):
-                        raise FollowedUsersLookupError(
-                            f"Unexpected follows response for {user_did}"
-                        )
-
-                    follows = data.get("follows", [])
-                    if not isinstance(follows, list):
-                        raise FollowedUsersLookupError(
-                            f"Unexpected follows response for {user_did}"
-                        )
+                    items, cursor = await fetch_page(cursor, page_limit)
                 except (
                     httpx.HTTPError,
                     ValueError,
                     FollowedUsersLookupError,
                 ) as exc:
-                    if followed_dids:
+                    if followed:
                         # Terminal outcome for this lookup (partial success) —
                         # count it here since it never reaches the outer
                         # handlers below. A bare re-raise, in contrast, is
@@ -174,34 +286,27 @@ async def fetch_followed_user_dids(
                         logger.warning(
                             "Returning %s partial followed users for %s after "
                             "follow lookup page failed: %s",
-                            len(followed_dids),
+                            len(followed),
                             user_did,
                             exc,
                         )
-                        return FollowsFetch(dids=followed_dids[:limit], complete=False)
+                        return result(complete=False)
                     raise
 
-                followed_dids.extend(
-                    follow["did"]
-                    for follow in follows
-                    if isinstance(follow, dict)
-                    and isinstance(follow.get("did"), str)
-                )
-
-                cursor = data.get("cursor")
+                followed.extend(items)
                 if not isinstance(cursor, str) or not cursor:
                     break
     except TimeoutError as exc:
         _count_failure("bsky.follows.failure_count", exc)
-        if followed_dids:
+        if followed:
             logger.warning(
                 "Returning %s partial followed users for %s after follow lookup "
                 "exceeded %.1fs",
-                len(followed_dids),
+                len(followed),
                 user_did,
                 timeout_seconds,
             )
-            return FollowsFetch(dids=followed_dids[:limit], complete=False)
+            return result(complete=False)
         raise FollowedUsersLookupError(
             f"Failed to fetch followed users for {user_did}"
         ) from exc
@@ -216,4 +321,4 @@ async def fetch_followed_user_dids(
 
     # Fell out of the loop on an exhausted cursor or a reached limit: both are
     # the walk finishing on its own terms.
-    return FollowsFetch(dids=followed_dids[:limit], complete=True)
+    return result(complete=True)

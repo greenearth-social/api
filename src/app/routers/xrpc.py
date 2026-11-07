@@ -70,6 +70,7 @@ from ..lib.firestore import (
     upsert_user,
     write_feed_debug,
 )
+from ..lib.followed_users_cache import set_precompute_user
 from ..lib.freshness import DEFAULT_FRESHNESS_INDEX, max_age_hours_for_freshness
 from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import (
@@ -1008,6 +1009,8 @@ async def generate_feed_preview(
         bool(feature_flags.get_flag(FAIL_FAST_FLAG)) if feature_flags is not None else False
     )
 
+    # Lets the followed-users cache leave this user's TTL refresh to the job.
+    set_precompute_user(bool(user_doc and user_doc.precompute_artifacts))
     configured = _configured_generation(
         feed_name,
         user_doc,
@@ -1686,6 +1689,8 @@ async def get_feed_skeleton(
         except Exception:
             logger.exception("Failed to read debug flag for user '%s'", user_did)
 
+    # Lets the followed-users cache leave this user's TTL refresh to the job.
+    set_precompute_user(bool(user_doc and user_doc.precompute_artifacts))
     configured = _configured_generation(
         feed_name,
         user_doc,

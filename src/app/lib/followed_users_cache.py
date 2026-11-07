@@ -16,14 +16,20 @@ only their own entry.
 
 Freshness comes from three places:
 
-1. **Jetstream** (``ingex``) appends newly-followed DIDs to ``pending_adds``
-   and stamps ``invalidated_at`` on an unfollow.  This is the primary
-   mechanism; the TTL below is the backstop for anything it misses.
-2. **A TTL refresh**, run in the background after a response has been served,
-   so no user request ever waits on Bluesky.
+1. **Jetstream** (``ingex``) appends each follow to ``pending_add_records`` and
+   each unfollow's record key to ``pending_removes``, for users the API flags
+   ``precompute_artifacts``.  Both apply on the next read: refreshes walk the
+   user's own follow records, so ``follow_rkeys`` maps an unfollow's rkey back
+   to the DID to drop.  This is the primary mechanism; the TTL below is the
+   backstop for anything it misses.
+2. **A TTL refresh.**  For ``precompute_artifacts`` users it is owned by an
+   hourly job (``app.jobs.refresh_followed_users``), so their requests never
+   touch Bluesky; everyone else (mostly Explore-tab previews) is refreshed in
+   the background after a response has been served.  Either way no user
+   request waits on Bluesky.
 3. **The completeness flag** — see :class:`~app.lib.bsky.FollowsFetch`.  A
-   truncated walk is still served, but is never trusted: it refreshes on every
-   read until one walk finishes, and it can never overwrite a complete entry.
+   truncated walk is still served, but is never trusted: it is refreshed until
+   one walk finishes, and it can never overwrite a complete entry.
 
 Every failure degrades to the pre-cache behaviour rather than breaking feed
 serving: a Firestore outage means a live Bluesky walk, and a Bluesky outage
@@ -36,6 +42,7 @@ import asyncio
 import logging
 import os
 import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Awaitable, Callable
 
@@ -45,7 +52,12 @@ from google.cloud.firestore import (  # type: ignore[import-untyped]
     async_transactional,
 )
 
-from .bsky import FollowedUsersLookupError, FollowsFetch, fetch_followed_user_dids
+from .bsky import (
+    FollowedUsersLookupError,
+    FollowsFetch,
+    fetch_follow_records,
+    fetch_followed_user_dids,
+)
 from .metrics import get_metric_collector
 from .release import api_release_sha
 from .request_cache import get_request_cache
@@ -66,8 +78,14 @@ MAX_FOLLOWED_USERS = 1_000
 RETENTION_DAYS = 30
 
 # Beyond this many un-folded jetstream deltas, refresh instead of merging on
-# every read. Keeps the array (and the read-time merge) bounded.
-MAX_PENDING_ADDS = 500
+# every read. Keeps the arrays (and the read-time merge) bounded.
+MAX_PENDING_DELTAS = 500
+
+# Staleness the refresh job owns for precompute_artifacts users.  Their request
+# path serves these without refreshing, unless the job looks dead (see
+# job_grace_seconds).  Anything else (an unfollow that can't be applied, or an
+# overflowing delta list) is refreshed from the request path as for everyone.
+JOB_OWNED_STALENESS = frozenset({"stale", "incomplete"})
 
 # Single-flight key for the population sweep. A NUL byte cannot appear in a
 # Firestore document ID, so this can never collide with a user's key.
@@ -111,9 +129,30 @@ def retry_cooldown_seconds() -> int:
     return _int_env("GE_FOLLOWS_CACHE_RETRY_COOLDOWN_SEC", 60)
 
 
+def job_grace_seconds() -> int:
+    """Age past which a precompute user's request refreshes despite the job.
+
+    The job refreshes these users hourly, so an entry this old means it is not
+    running; falling back to the request path keeps follow lists from freezing.
+    """
+    return _int_env("GE_FOLLOWS_CACHE_JOB_GRACE_SEC", 4 * ttl_seconds())
+
+
 def sweep_interval_seconds() -> int:
     """How often one process samples population health (see ``_sweep``)."""
     return _int_env("GE_FOLLOWS_CACHE_SWEEP_SEC", 300)
+
+
+# Whether the current feed request's user is flagged precompute_artifacts, so
+# the refresh job owns their TTL refresh.  Set by the router once it has read
+# the user document; unset (False) means "treat as an Explore user", which
+# keeps today's request-path refresh and so is the safe default.
+_precompute_user: ContextVar[bool] = ContextVar("ge_follows_precompute_user", default=False)
+
+
+def set_precompute_user(flag: bool) -> None:
+    """Record whether the current request's user is a precompute_artifacts user."""
+    _precompute_user.set(flag)
 
 
 # Rate-limits the population sweep per process. Module-level rather than
@@ -151,15 +190,57 @@ def _age_seconds(value: datetime | None, now: datetime) -> float | None:
     return (now - _as_utc(value)).total_seconds()
 
 
-def _merge(follows: list[str], pending_adds: list[str]) -> list[str]:
-    """``follows`` then any jetstream additions, de-duplicated, order preserved."""
-    seen = set(follows)
-    merged = list(follows)
-    for did in pending_adds:
-        if did not in seen:
-            seen.add(did)
-            merged.append(did)
+def _pending_adds(entry: "FollowedUsersCacheDocument") -> list[tuple[str, str]]:
+    """``pending_add_records`` as ``(rkey, did)``; malformed records are skipped."""
+    adds = []
+    for record in entry.pending_add_records:
+        rkey, sep, did = record.partition(":")
+        if sep and rkey and did:
+            adds.append((rkey, did))
+    return adds
+
+
+def _has_rkeys(entry: "FollowedUsersCacheDocument") -> bool:
+    """Whether every stored follow has its record key (i.e. came from a repo walk)."""
+    return len(entry.follow_rkeys) == len(entry.follows)
+
+
+def _merge(entry: "FollowedUsersCacheDocument") -> list[str]:
+    """``follows`` then jetstream additions, minus jetstream removals.
+
+    De-duplicated, order preserved.  A removal is matched by record key, so a
+    follow that was removed and re-made (a new rkey) stays.
+    """
+    removed = set(entry.pending_removes)
+    stored: list[tuple[str | None, str]] = (
+        list(zip(entry.follow_rkeys, entry.follows, strict=True))
+        if _has_rkeys(entry)
+        else [(None, did) for did in entry.follows]
+    )
+    seen: set[str] = set()
+    merged: list[str] = []
+    for rkey, did in stored + list(_pending_adds(entry)):
+        if rkey in removed or did in seen:
+            continue
+        seen.add(did)
+        merged.append(did)
     return merged
+
+
+def _has_unresolved_removes(entry: "FollowedUsersCacheDocument") -> bool:
+    """Whether an unfollow names a record key this entry cannot map to a DID.
+
+    With record keys, an unknown key on a capped list is a follow beyond the
+    cap — never stored, so nothing to drop.  Otherwise (an entry from
+    getFollows, or an uncapped one missing the key) the unfollowed DID is
+    unknown and only a refresh can drop it.
+    """
+    if not entry.pending_removes:
+        return False
+    if _has_rkeys(entry) and len(entry.follows) >= MAX_FOLLOWED_USERS:
+        return False
+    known = set(entry.follow_rkeys) | {rkey for rkey, _ in _pending_adds(entry)}
+    return any(rkey not in known for rkey in entry.pending_removes)
 
 
 class FollowedUsersCache:
@@ -207,7 +288,7 @@ class FollowedUsersCache:
             self._spawn(key, self._store_cold(key, user_did, fetch))
             return fetch.dids
 
-        follows = _merge(entry.follows, entry.pending_adds)
+        follows = _merge(entry)
         # Recorded for every served entry, fresh or not: a series containing
         # only overdue entries says nothing about how fresh the healthy
         # population is, and reads as alarming even when nothing is wrong.
@@ -218,8 +299,16 @@ class FollowedUsersCache:
             self._record("hit")
             return follows
 
+        if _precompute_user.get() and reason in JOB_OWNED_STALENESS:
+            age = _age_seconds(entry.generated_at, datetime.now(timezone.utc))
+            if age is None or age <= job_grace_seconds():
+                # The refresh job owns this; serve what we have.
+                self._record(reason)
+                return follows
+            reason = "job_overdue"
+
         self._record(reason)
-        self._spawn(key, self._refresh(key, user_did))
+        self._spawn(key, self.refresh(key, user_did, records=_precompute_user.get()))
         return follows
 
     async def drain(self) -> None:
@@ -233,11 +322,14 @@ class FollowedUsersCache:
         return self._db.collection(FOLLOWED_USERS_CACHE_COLLECTION).document(key)
 
     async def _read(self, key: str) -> "FollowedUsersCacheDocument | None":
+        return self.entry_from(await self._doc_ref(key).get(), key)
+
+    def entry_from(self, snapshot, key: str) -> "FollowedUsersCacheDocument | None":
+        """The usable cache entry in *snapshot*, or ``None`` (treated as a miss)."""
         # Imported here (not at module top) to avoid an import cycle:
         # documents -> candidates.base -> ... -> followed_users_cache -> documents.
         from ..documents import FollowedUsersCacheDocument
 
-        snapshot = await self._doc_ref(key).get()
         if not snapshot.exists:
             return None
         data = snapshot.to_dict()
@@ -262,14 +354,28 @@ class FollowedUsersCache:
         if not entry.complete:
             # However young: a truncated follow list must never be trusted.
             return "incomplete"
-        if entry.invalidated_at is not None:
-            return "invalidated"
-        if len(entry.pending_adds) > MAX_PENDING_ADDS:
+        if _has_unresolved_removes(entry):
+            return "unresolved_remove"
+        if len(entry.pending_add_records) + len(entry.pending_removes) > MAX_PENDING_DELTAS:
             return "pending_overflow"
         age = _age_seconds(entry.generated_at, datetime.now(timezone.utc))
         if age is None or age > ttl_seconds():
             return "stale"
         return None
+
+    def refresh_reason(self, entry: "FollowedUsersCacheDocument | None") -> str | None:
+        """Why the refresh job should re-walk *entry*, or ``None``.
+
+        :meth:`_staleness`, plus the two cases only a repo walk fixes: no entry
+        at all, and an entry without record keys (written by the request-path
+        cold walk), which cannot apply jetstream unfollows.
+        """
+        if entry is None:
+            return "missing"
+        reason = self._staleness(entry)
+        if reason is None and not _has_rkeys(entry):
+            reason = "no_rkeys"
+        return reason
 
     def _note_age(self, entry: "FollowedUsersCacheDocument") -> None:
         # Refreshes run on demand, so age alone does not indicate a failure.
@@ -280,22 +386,32 @@ class FollowedUsersCache:
             mc.record("follows_cache.age_seconds", age)
 
     async def _fetch(self, user_did: str, timeout_seconds: float | None = None) -> FollowsFetch:
+        """Walk getFollows; the request-path budget unless *timeout_seconds* is given."""
         return await fetch_followed_user_dids(
             user_did,
             MAX_FOLLOWED_USERS,
             timeout_seconds=timeout_seconds,
         )
 
+    async def _fetch_records(self, user_did: str) -> FollowsFetch:
+        """Walk the user's follow records, with rkeys.  Off the request path only."""
+        return await fetch_follow_records(
+            user_did,
+            MAX_FOLLOWED_USERS,
+            timeout_seconds=refresh_timeout_seconds(),
+        )
+
     def _document(self, fetch: FollowsFetch) -> dict:
-        from ..documents import FollowedUsersCacheDocument  # cycle; see _read
+        from ..documents import FollowedUsersCacheDocument  # cycle; see entry_from
 
         now = datetime.now(timezone.utc)
         return FollowedUsersCacheDocument(
             follows=fetch.dids,
+            follow_rkeys=fetch.rkeys,
             complete=fetch.complete,
             generated_at=now,
-            pending_adds=[],
-            invalidated_at=None,
+            pending_add_records=[],
+            pending_removes=[],
             refresh_started_at=None,
             refresh_failed_at=None,
             expires_at=now + timedelta(days=RETENTION_DAYS),
@@ -316,14 +432,14 @@ class FollowedUsersCache:
             fetch.complete,
         )
 
-    async def _claim(self, key: str) -> bool:
+    async def _claim(self, key: str, *, records: bool) -> bool:
         """Take the refresh lease for *key*, transactionally.
 
         Returns ``False`` when another instance already refreshed the entry,
         is refreshing it now under an unexpired lease, or failed so recently
         that a retry would be pointless.
         """
-        from ..documents import FollowedUsersCacheDocument  # cycle; see _read
+        from ..documents import FollowedUsersCacheDocument  # cycle; see entry_from
 
         ref = self._doc_ref(key)
         lease = lease_seconds()
@@ -340,7 +456,12 @@ class FollowedUsersCache:
                     # Unreadable: claim it and overwrite with a good one.
                     entry = FollowedUsersCacheDocument()
                 else:
-                    if self._staleness(entry) is None:
+                    # A records walk also upgrades an entry lacking rkeys; a
+                    # getFollows walk could not, so only staleness counts.
+                    fresh = (
+                        self.refresh_reason(entry) if records else self._staleness(entry)
+                    ) is None
+                    if fresh:
                         return False
                 started = _age_seconds(entry.refresh_started_at, now)
                 if started is not None and started < lease:
@@ -362,25 +483,35 @@ class FollowedUsersCache:
         """
         return await async_transactional(body)(self._db.transaction())
 
-    async def _refresh(self, key: str, user_did: str) -> None:
+    async def refresh(self, key: str, user_did: str, *, records: bool) -> str:
         """Re-walk one user's follows, if this process wins the lease.
 
-        Runs detached from any request, so every failure is contained here:
-        the worst outcome is that the entry stays stale until the next request
-        tries again.
+        *records* walks the user's own follow records, which carry the rkeys
+        jetstream unfollows need; it is for precompute_artifacts users, the
+        only ones jetstream tracks.  Everyone else is walked through getFollows,
+        which needs no per-user PDS resolution.
+
+        Runs detached from any request — spawned after a response, or from the
+        refresh job — so every failure is contained here: the worst outcome is
+        that the entry stays stale until the next attempt.  Returns the
+        outcome recorded in ``follows_cache.refresh_count``.
         """
         outcome = "error"
         try:
-            if not await self._claim(key):
+            if not await self._claim(key, records=records):
                 outcome = "skipped"
-                return
+                return outcome
             try:
-                fetch = await self._fetch(user_did, timeout_seconds=refresh_timeout_seconds())
+                fetch = await (
+                    self._fetch_records(user_did)
+                    if records
+                    else self._fetch(user_did, timeout_seconds=refresh_timeout_seconds())
+                )
             except FollowedUsersLookupError:
                 logger.warning("Followed-users refresh for %s found nothing", user_did)
                 outcome = "failed"
                 await self._release(key, failed=True)
-                return
+                return outcome
 
             previous = await self._read(key)
             if not fetch.complete and previous is not None and previous.complete:
@@ -394,7 +525,7 @@ class FollowedUsersCache:
                 )
                 outcome = "partial_discarded"
                 await self._release(key, failed=True)
-                return
+                return outcome
 
             self._note_drift(previous, fetch, user_did)
             await self._doc_ref(key).set(self._document(fetch))
@@ -412,6 +543,7 @@ class FollowedUsersCache:
             self._refreshing.discard(key)
             if mc := get_metric_collector():
                 mc.record("follows_cache.refresh_count", 1, outcome=outcome)
+        return outcome
 
     def _note_drift(
         self,
@@ -430,7 +562,7 @@ class FollowedUsersCache:
         """
         if previous is None:
             return  # Nothing was being served; there is no drift to speak of.
-        served = set(_merge(previous.follows, previous.pending_adds))
+        served = set(_merge(previous))
         refreshed = set(fetch.dids)
         added = len(refreshed - served)
         removed = len(served - refreshed)
