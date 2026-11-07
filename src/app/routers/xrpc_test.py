@@ -2362,6 +2362,61 @@ class TestFeedSkeletonCursor:
         assert data["feed"] == []
         assert "cursor" not in data
 
+    def test_session_at_item_cap_ends_feed(self):
+        """A session whose cache is full ends instead of regenerating."""
+        initial = _make_candidates("p", 11)
+        with self._patch_generators(initial):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 9},
+            ).json()
+
+        parsed = FeedCursor.decode(first["cursor"])
+        end_cursor = FeedCursor(id=parsed.id, offset=11).encode()
+
+        with (
+            patch("app.routers.xrpc.MAX_CURSOR_SESSION_ITEMS", 11),
+            self._patch_generators(_make_candidates("fresh", 4)),
+        ):
+            data = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 3, "cursor": end_cursor},
+            ).json()
+
+        assert data["feed"] == []
+        assert "cursor" not in data
+
+    def test_regeneration_is_trimmed_to_session_item_cap(self):
+        """The append that reaches the cap keeps only what fits, then the feed ends."""
+        initial = _make_candidates("p", 11)
+        with self._patch_generators(initial):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 9},
+            ).json()
+
+        parsed = FeedCursor.decode(first["cursor"])
+        end_cursor = FeedCursor(id=parsed.id, offset=11).encode()
+
+        with patch("app.routers.xrpc.MAX_CURSOR_SESSION_ITEMS", 13):
+            with self._patch_generators(_make_candidates("fresh", 4)):
+                data = client.get(
+                    "/xrpc/app.bsky.feed.getFeedSkeleton",
+                    params={"feed": FEED_URI, "limit": 3, "cursor": end_cursor},
+                ).json()
+
+            assert [item["post"] for item in data["feed"]] == ["at://fresh/0", "at://fresh/1"]
+            assert "cursor" in data
+
+            with self._patch_generators(_make_candidates("more", 4)):
+                more = client.get(
+                    "/xrpc/app.bsky.feed.getFeedSkeleton",
+                    params={"feed": FEED_URI, "limit": 3, "cursor": data["cursor"]},
+                ).json()
+
+        assert more["feed"] == []
+        assert "cursor" not in more
+
     def test_exclude_uris_passed_to_generator_on_regen(self):
         """Verify exclude_uris is populated with previously-shown URIs."""
         initial = _make_candidates("p", 5)
