@@ -12,7 +12,7 @@ from .llm_query_vector import LlmQueryVectorCandidateGenerator, set_llm_query_ve
 
 GENERATOR_NAME = "llm_query_vector"
 KNN_SEARCH_POSTS = "app.lib.candidates.llm_query_vector.knn_search_posts"
-GET_LATEST = "app.lib.firestore.get_latest_llm_query_vector"
+GET_LATEST = "app.lib.llm_prompt_state.get_current_llm_query_vector"
 DB = MagicMock()  # stands in for the Firestore AsyncClient
 
 

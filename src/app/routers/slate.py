@@ -63,9 +63,9 @@ from ..security import require_api_scope, scope_responses
 from .xrpc import (
     SendInteractionsRequest,
     _get_feed_cache,
-    _make_feed_context,
     _record_discarded,
     _record_interactions,
+    _skeleton_items,
     _spawn_background,
     user_exclusions,
 )
@@ -160,15 +160,28 @@ class SlateInteractionsResponse(BaseModel):
 
 
 def _page_items(
-    items_meta: list[PipelineItemMeta], uris: list[str], feed_context: str
+    items_meta: list[PipelineItemMeta],
+    uris: list[str],
+    *,
+    user_did: str,
+    feed_name: str,
+    request_id: str,
 ) -> list[SlateItem]:
     meta_by_uri = {meta.at_uri: meta for meta in items_meta}
     return [
-        SlateItem(
-            **meta_by_uri.get(uri, PipelineItemMeta(at_uri=uri)).model_dump(),
-            feed_context=feed_context,
+        SlateItem.model_validate(
+            {
+                **meta_by_uri.get(item.post, PipelineItemMeta(at_uri=item.post)).model_dump(),
+                "feed_context": item.feed_context,
+            }
         )
-        for uri in uris
+        for item in _skeleton_items(
+            uris,
+            items_meta,
+            user_did=user_did,
+            feed_name=feed_name,
+            request_id=request_id,
+        )
     ]
 
 
@@ -243,7 +256,11 @@ def _session_page(
         else None
     )
     items = _page_items(
-        cache_doc.items_meta, page, _make_feed_context(body.user_did, body.feed_name, request_id)
+        cache_doc.items_meta,
+        page,
+        user_did=body.user_did,
+        feed_name=body.feed_name,
+        request_id=request_id,
     )
     return SlateGenerateResponse(
         request_id=request_id,
@@ -553,6 +570,7 @@ async def _generate_and_store(
         min_rank_score=body.min_rank_score,
         min_mmr_score=body.min_mmr_score,
         max_render_share=body.max_render_share,
+        normalize_rank_by_generator=body.normalize_rank_by_generator,
     )
     extra_generators = (
         {EXTERNAL_GENERATOR_NAME: SuppliedCandidatesGenerator(body.external_candidates)}
