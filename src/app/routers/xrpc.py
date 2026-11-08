@@ -515,6 +515,12 @@ def _configured_generation(
             }
         )
 
+    if "normalize_rank_by_generator" in controls:
+        assert effective.normalize_rank_by_generator is not None
+        feed_cfg = feed_cfg.model_copy(
+            update={"normalize_rank_by_generator": effective.normalize_rank_by_generator}
+        )
+
     generators_override: dict[str, list[GeneratorSpec]] = {}
     if "source_weights" in controls:
         source_weights = effective.source_weights
@@ -664,6 +670,10 @@ def _snapshot_page(
 
 BATCH_MULTIPLIER = 5  # how many pages of results to fetch for each cursor session
 MAX_BATCH_SIZE = 200  # maximum number of candidates per cursor session
+# Upper bound on items in one cursor session's cache document. Each item
+# carries ~800 bytes of items_meta, and Firestore rejects documents over
+# 1 MiB, so an unbounded deep scroll eventually fails every append.
+MAX_CURSOR_SESSION_ITEMS = 1000
 
 
 def _batch_size(limit: int) -> int:
@@ -691,6 +701,30 @@ def _similarity_scores_from_items_meta(items_meta: list[PipelineItemMeta]) -> di
         for meta in items_meta
         if meta.diversification is not None
     }
+
+
+def _heavy_ranker_scores_from_items_meta(
+    items_meta: list[PipelineItemMeta]
+) -> dict[str, float]:
+    """Build an ``{at_uri: heavy_ranker_score}`` lookup from pipeline metadata.
+
+    Only actual predictions belong in interaction analytics. Never fall back to
+    ``score``: imputed scores and older metadata lack prediction provenance.
+    """
+    uri_score_map: dict[str, float] = {}
+    for meta in items_meta:
+        for model_score in meta.model_scores:
+            if model_score.name == 'heavy_ranker' and model_score.raw_score is not None:
+                uri_score_map[meta.at_uri] = model_score.raw_score
+    return uri_score_map
+
+
+def _author_dids_from_items_meta(items_meta: list[PipelineItemMeta]) -> dict[str, str | None]:
+    """Build an ``{at_uri: author_did}`` lookup from pipeline metadata.
+
+    Items without an author DID are absent from the result.
+    """
+    return {meta.at_uri: meta.author_did for meta in items_meta if meta.author_did is not None}
 
 
 def _record_similarity_metric(
@@ -796,9 +830,16 @@ def _select_favorite_video_post_uri(
 
 
 def _make_feed_context(
-    user_did: str, feed_name: str, request_id: str, *, load_test: bool = False
+    user_did: str,
+    feed_name: str,
+    request_id: str,
+    *,
+    post_uri: str,
+    load_test: bool = False,
+    heavy_ranker_score: float | None = None,
+    author_did: str | None = None,
 ) -> str:
-    """Build the signed feedContext token shared by every item in a response.
+    """Build a signed feedContext token for one feed item.
 
     ``request_id`` doubles as the feed-cache key, so the served item order can be
     recovered from the cache during its TTL window.
@@ -813,13 +854,49 @@ def _make_feed_context(
             feed=feed_name,
             rid=request_id,
             iat=int(time.time()),
+            uri=post_uri,
             lt=load_test,
+            hrs=heavy_ranker_score,
+            adid=author_did,
         )
     )
 
 
-def _skeleton_items(uris: list[str], feed_context: str | None) -> list[SkeletonItem]:
-    return [SkeletonItem(post=uri, feed_context=feed_context) for uri in uris]
+def _skeleton_items(
+    uris: list[str],
+    items_meta: list[PipelineItemMeta],
+    *,
+    user_did: str | None,
+    feed_name: str,
+    request_id: str,
+    load_test: bool = False,
+) -> list[SkeletonItem]:
+    """Attach each post's metadata to its signed interaction token.
+
+    Metadata is joined by URI because pages can reorder or omit cached items.
+    Injected posts and older cache entries may have no metadata. Anonymous
+    responses omit tokens because there is no user to attribute interactions to.
+    """
+    if user_did is None:
+        return [SkeletonItem(post=uri) for uri in uris]
+
+    heavy_ranker_score_by_uri = _heavy_ranker_scores_from_items_meta(items_meta)
+    author_did_by_uri = _author_dids_from_items_meta(items_meta)
+    return [
+        SkeletonItem(
+            post=uri,
+            feed_context=_make_feed_context(
+                user_did,
+                feed_name,
+                request_id,
+                post_uri=uri,
+                load_test=load_test,
+                heavy_ranker_score=heavy_ranker_score_by_uri.get(uri),
+                author_did=author_did_by_uri.get(uri),
+            ),
+        )
+        for uri in uris
+    ]
 
 
 # Fire-and-forget background tasks (Firestore session writes, …). Keeping a
@@ -1143,6 +1220,7 @@ async def _write_feed_snapshot_background(
     snapshot,
     *,
     limit: int,
+    injected_post_count: int = 0,
     load_test: bool = False,
 ) -> None:
     """Create or extend the lightweight feed snapshot in a background task.
@@ -1167,9 +1245,12 @@ async def _write_feed_snapshot_background(
             collector.record(
                 "feed.snapshot.posts_requested_count", limit, feed_name=snapshot.feed_name
             )
+            # Injected posts occupy response slots but are excluded from snapshots.
+            generated_posts_requested = limit - injected_post_count
+            # A page filled entirely by injected posts has no generated slots to fulfill.
             collector.record(
                 "feed.snapshot.posts_fulfilled_ratio",
-                posts_returned / limit,
+                posts_returned / generated_posts_requested if generated_posts_requested else 1.0,
                 feed_name=snapshot.feed_name,
             )
         truncated = await merge_feed_snapshot(
@@ -1306,6 +1387,9 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
                     "Failed to update survey_post_last_seen_at for user '%s'", payload.did
                 )
 
+        # Post metadata is valid only for the URI bound into its signed token.
+        # Legacy tokens and mismatched items still record the interaction.
+        metadata_matches = payload.uri is not None and payload.uri == ix.item
         doc = InteractionDocument(
             user_did=payload.did,
             item_uri=ix.item,
@@ -1314,6 +1398,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
             request_id=payload.rid,
             feed_generated_at=datetime.fromtimestamp(payload.iat, tz=UTC),
             load_test=payload.lt,
+            heavy_ranker_score=payload.hrs if metadata_matches else None,
+            author_did=payload.adid if metadata_matches else None,
         )
         try:
             await record_interaction(db, doc)
@@ -1332,6 +1418,8 @@ async def _record_interactions(db, interactions: list[Interaction]) -> None:
                     ix.item,
                     doc.created_at,
                     username=await _handle_for(payload.did),
+                    heavy_ranker_score=doc.heavy_ranker_score,
+                    author_did=doc.author_did,
                 )
             except Exception:
                 logger.exception(
@@ -1613,17 +1701,7 @@ async def get_feed_skeleton(
     )
 
     feed_cache = _get_feed_cache(request)
-
-    def feed_context_for(request_id: str) -> str | None:
-        """Signed interaction token for this response, or None when anonymous.
-
-        ``sendInteractions`` carries no auth of its own — the token is the only
-        thing tying a reported interaction to a user, and a logged-out request
-        has no user to tie it to. Omitting it drops those interactions.
-        """
-        if is_anonymous:
-            return None
-        return _make_feed_context(user_did, feed_name, request_id, load_test=is_load_test)
+    context_user_did = None if is_anonymous else user_did
 
     async def generation_exclusions() -> list[str]:
         """Post URIs to exclude, including static pins for anonymous callers."""
@@ -1774,7 +1852,11 @@ async def get_feed_skeleton(
                     return FeedSkeletonResponse(
                         feed=_skeleton_items(
                             page,
-                            feed_context_for(replacement_request_id),
+                            generated_snapshot.items_meta,
+                            user_did=context_user_did,
+                            feed_name=feed_name,
+                            request_id=replacement_request_id,
+                            load_test=is_load_test,
                         ),
                         cursor=next_cursor,
                     )
@@ -1794,7 +1876,6 @@ async def get_feed_skeleton(
                     _record_similarity_metric(
                         page, scores_by_uri, feed_name, batch=parsed.offset // limit
                     )
-                    feed_context = feed_context_for(parsed.id)
                     cached_snapshot = FeedSnapshotDocument(
                         request_id=parsed.id,
                         items=cached_uris,
@@ -1815,12 +1896,38 @@ async def get_feed_skeleton(
                             load_test=is_load_test,
                         )
                     return FeedSkeletonResponse(
-                        feed=_skeleton_items(page, feed_context),
+                        feed=_skeleton_items(
+                            page,
+                            cache_doc.items_meta,
+                            user_did=context_user_did,
+                            feed_name=feed_name,
+                            request_id=parsed.id,
+                            load_test=is_load_test,
+                        ),
                         cursor=next_cursor,
                     )
 
-                # Offset is at or past the end — regenerate with exclusions.
-                batch = _batch_size(limit)
+                # Offset is at or past the end — regenerate with exclusions,
+                # unless the session is already as large as it may grow.
+                session_room = MAX_CURSOR_SESSION_ITEMS - len(cache_doc.items)
+                if session_room <= 0:
+                    if collector := get_metric_collector():
+                        collector.record(
+                            "feed.cache.session_cap_reached_count",
+                            1,
+                            feed_name=feed_name,
+                        )
+                    logger.info(
+                        "Cursor session reached its item cap; ending feed",
+                        extra={
+                            "request_id": parsed.id,
+                            "feed_name": feed_name,
+                            "stored_item_count": len(cache_doc.items),
+                        },
+                    )
+                    return FeedSkeletonResponse(feed=[])
+
+                batch = min(_batch_size(limit), session_room)
                 excluded = await generation_exclusions()
                 # Dedup while preserving order; the cached batch and the
                 # seen/discarded posts can overlap.
@@ -1852,7 +1959,7 @@ async def get_feed_skeleton(
                     )
                 new_uris = [
                     uri for uri in generated_snapshot.items if uri not in contextual_pin_uris
-                ]
+                ][:session_room]
                 if new_uris:
                     async with timed(logger, "feedcache_append", cache_id=parsed.id):
                         new_meta_by_uri = {
@@ -1879,7 +1986,6 @@ async def get_feed_skeleton(
                         _record_similarity_metric(
                             page, scores_by_uri, feed_name, batch=parsed.offset // limit
                         )
-                        feed_context = feed_context_for(parsed.id)
                         if not is_probe and not is_anonymous:
                             await _write_feed_snapshot_background(
                                 db,
@@ -1890,7 +1996,14 @@ async def get_feed_skeleton(
                                 load_test=is_load_test,
                             )
                         return FeedSkeletonResponse(
-                            feed=_skeleton_items(page, feed_context),
+                            feed=_skeleton_items(
+                                page,
+                                generated_snapshot.items_meta,
+                                user_did=context_user_did,
+                                feed_name=feed_name,
+                                request_id=parsed.id,
+                                load_test=is_load_test,
+                            ),
                             cursor=next_cursor,
                         )
 
@@ -1998,6 +2111,7 @@ async def get_feed_skeleton(
                             accepted_request_id,
                             _snapshot_page(accepted_snapshot, generated_page),
                             limit=limit,
+                            injected_post_count=1 if pinned_post_uri else 0,
                             load_test=False,
                         )
                         next_cursor = (
@@ -2008,7 +2122,11 @@ async def get_feed_skeleton(
                         response = FeedSkeletonResponse(
                             feed=_skeleton_items(
                                 page,
-                                feed_context_for(accepted_request_id),
+                                accepted_cache.items_meta,
+                                user_did=context_user_did,
+                                feed_name=feed_name,
+                                request_id=accepted_request_id,
+                                load_test=is_load_test,
                             ),
                             cursor=next_cursor,
                         )
@@ -2145,6 +2263,7 @@ async def get_feed_skeleton(
                     request_id,
                     _snapshot_page(generated_snapshot, generated_page),
                     limit=limit,
+                    injected_post_count=n_injected,
                     load_test=is_load_test,
                 )
 
@@ -2179,9 +2298,15 @@ async def get_feed_skeleton(
                     )
                 next_cursor = FeedCursor(id=request_id, offset=consumed).encode()
 
-            feed_context = feed_context_for(request_id)
             response = FeedSkeletonResponse(
-                feed=_skeleton_items(page, feed_context),
+                feed=_skeleton_items(
+                    page,
+                    generated_snapshot.items_meta,
+                    user_did=context_user_did,
+                    feed_name=feed_name,
+                    request_id=request_id,
+                    load_test=is_load_test,
+                ),
                 cursor=next_cursor,
             )
             if reuse_future is not None:

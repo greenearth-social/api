@@ -17,8 +17,9 @@ from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import InMemoryFeedCache
 from ..lib.feed_context import decode_feed_context
 from ..lib.metrics import MetricCollector, set_metric_collector
+from ..lib.rankers.base import RankerResult
 from ..main import app
-from ..models import CandidatePost, FeedCursor
+from ..models import CandidatePost, FeedCursor, RankedCandidate, RankPredictResult
 from .slate import require_user_config_scope
 
 USER_DID = "did:plc:slateuser"
@@ -213,7 +214,11 @@ class TestGenerate:
         payload = decode_feed_context(first["feed_context"])
         assert payload is not None
         assert (payload.did, payload.feed, payload.rid) == (USER_DID, FEED_NAME, data["request_id"])
-        assert {item["feed_context"] for item in data["items"]} == {first["feed_context"]}
+        for item in data["items"]:
+            payload = decode_feed_context(item["feed_context"])
+            assert payload is not None
+            assert payload.adid == item["author_did"]
+            assert payload.hrs is None
 
         (diag,) = data["generator_diagnostics"]
         assert diag["name"] == "popularity"
@@ -316,7 +321,7 @@ class TestGenerate:
         # min_rank_score cuts three; max_render_share caps at floor(0.5 * 6) = 3.
         assert uris == ["at://pop/0", "at://pop/1", "at://pop/2"]
         assert [item["rank"] for item in data["items"]] == [1, 2, 3]
-        assert data["items"][0]["rank_score"] == pytest.approx(0.9)
+        assert data["items"][0]["rank_score"] == pytest.approx(1.0)
         assert [m["name"] for m in data["items"][0]["model_scores"]] == ["candidate_score"]
         discarded.assert_called_once()
         assert discarded.call_args.args[1:] == (USER_DID, ["at://pop/3", "at://pop/4", "at://pop/5"])
@@ -457,6 +462,69 @@ def _start_session(n: int = 5, limit: int = 2):
 
 
 class TestCursor:
+    def test_raw_heavy_scores_and_authors_survive_fresh_and_cached_pages(self):
+        candidates = _candidates("pop", [0.9, 0.8, 0.7, 0.6])
+        raw_scores = {"at://pop/0": 0.0, "at://pop/1": 0.25, "at://pop/2": 0.5}
+        gen_patch, lookup_patch, _ = _fake_generators(popularity=candidates)
+        ranker = AsyncMock()
+        ranker.predict.return_value = RankerResult(
+            model="heavy_ranker",
+            result=RankPredictResult(
+                rankings=[
+                    RankedCandidate(at_uri=uri, rank=i + 1, rank_score=score)
+                    for i, (uri, score) in enumerate(raw_scores.items())
+                ]
+            ),
+        )
+        secondary_ranker = AsyncMock()
+        secondary_ranker.predict.return_value = RankerResult(
+            model="perspective",
+            result=RankPredictResult(
+                rankings=[
+                    RankedCandidate(at_uri=candidate.at_uri, rank=i + 1, rank_score=0.2)
+                    for i, candidate in enumerate(candidates)
+                    if candidate.at_uri is not None
+                ]
+            ),
+        )
+        rankers = {"heavy_ranker": ranker, "perspective": secondary_ranker}
+        with (
+            gen_patch,
+            lookup_patch,
+            patch("app.routers.slate.get_ranker", side_effect=rankers.get),
+            patch("app.lib.rankers.predict.get_ranker", side_effect=rankers.get),
+        ):
+            first = _post(
+                _body(limit=2, rankers=[{"name": "heavy_ranker"}, {"name": "perspective"}])
+            )
+
+        assert first.status_code == 200, first.text
+        data = first.json()
+        second = _post(_cursor_body(data["cursor"]))
+        assert second.status_code == 200, second.text
+        items = [*data["items"], *second.json()["items"]]
+        # The imputed and actual zero scores are both on the cached page.
+        assert [item["at_uri"] for item in items] == [
+            "at://pop/2", "at://pop/1", "at://pop/3", "at://pop/0"
+        ]
+        authors = {candidate.at_uri: candidate.author_did for candidate in candidates}
+        for item in items:
+            payload = decode_feed_context(item["feed_context"])
+            assert payload is not None
+            assert (payload.did, payload.feed, payload.rid) == (USER_DID, FEED_NAME, data["request_id"])
+            assert payload.uri == item["at_uri"]
+            assert payload.hrs == raw_scores.get(item["at_uri"])
+            assert payload.adid == authors[item["at_uri"]]
+            heavy_score = next(
+                model for model in item["model_scores"] if model["name"] == "heavy_ranker"
+            )
+            assert heavy_score["raw_score"] == payload.hrs
+            assert heavy_score["score"] == raw_scores.get(item["at_uri"], 0.25)
+            assert item["author_did"] == payload.adid
+        assert len({item["feed_context"] for item in items}) == len(items)
+        assert second.json()["cursor"] is None
+        ranker.predict.assert_awaited_once()
+
     def test_pages_through_the_cached_slate_then_ends(self):
         first = _start_session(n=5, limit=2)
         assert [i["at_uri"] for i in first["items"]] == ["at://pop/0", "at://pop/1"]

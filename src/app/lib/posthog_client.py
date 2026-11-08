@@ -210,6 +210,8 @@ def track_interaction(
     item_uri: str | None,
     timestamp: datetime,
     username: str | None = None,
+    heavy_ranker_score: float | None = None,
+    author_did: str | None = None,
 ) -> None:
     """Capture a Bluesky interaction event.
 
@@ -220,10 +222,17 @@ def track_interaction(
     ``username`` is the caller's handle, carried so interaction events identify
     the user the same way ``feedLoaded`` does. It is optional and best-effort:
     an unresolved handle costs the identity properties, never the event.
+
+    ``heavy_ranker_score`` contains only actual model output before median
+    imputation. Both it and ``author_did`` are null when unavailable.
     """
     if client is None:
         return
-    properties: dict = {"feed_name": feed_name}
+    properties: dict = {
+        "feed_name": feed_name,
+        "heavy_ranker_score": heavy_ranker_score,
+        "author_did": author_did,
+    }
     if item_uri:
         properties["item_uri"] = item_uri
     properties.update(user_identity_properties(username))

@@ -2,14 +2,14 @@
 
 Scores each candidate's text content for conversational quality via the
 Perspective API (see :mod:`app.lib.perspective`) and exposes the rescaled PRC
-scores as a `Ranker` so they can be normalized and combined with other rank
-models (e.g. the two-tower model) by `run_predict`.
+scores in [0, 1] as a `Ranker` so they can be combined with other rank models
+by `run_predict`.
 """
 
 import logging
 
 from ...models import CandidatePost, RankedCandidate, RankPredictResult
-from ..perspective import PERSPECTIVE_SCORE_BOUNDS, score_candidates
+from ..perspective import score_candidates
 from .base import Ranker, RankerResult
 
 logger = logging.getLogger(__name__)
@@ -23,10 +23,6 @@ class PerspectiveRanker(Ranker):
     @property
     def name(self) -> str:
         return PERSPECTIVE_MODEL_NAME
-
-    @property
-    def score_bounds(self) -> tuple[float, float]:
-        return PERSPECTIVE_SCORE_BOUNDS
 
     async def predict(
         self,

@@ -163,6 +163,22 @@ async def test_expand_keywords_rejects_short_bag_and_empty_reply():
         await expand_keywords(empty.typed, "x")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["", "I cannot help with that", '{"keywords": ["science"]}'])
+async def test_expansion_refusal_is_explicit_before_parsing_and_counts_usage(text):
+    reply = _reply(text, input_tokens=25, output_tokens=10, stop_reason="refusal")
+    reply._request_id = "provider-request-123"
+    client = FakeAnthropic(lambda kw: reply)
+    usage = Usage()
+
+    with pytest.raises(fit.PromptNotAcceptedError) as error:
+        await expand_keywords(client.typed, "a prompt", usage)
+
+    assert error.value.request_id == "provider-request-123"
+    assert (usage.input_tokens, usage.output_tokens, usage.calls) == (25, 10, 1)
+    assert len(client.started) == 1
+
+
 # --------------------------------------------------------------------------- #
 # 2. Pool: tokenizer, query, hit parsing, similarity, near-dup filter           #
 # --------------------------------------------------------------------------- #

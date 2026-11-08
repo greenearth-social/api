@@ -401,6 +401,8 @@ def _item_panel(
     politics_by_uri: dict,
     div_by_uri: dict,
     meta: dict,
+    *,
+    normalized_by_uri: dict | None = None,
 ) -> Panel:
     c = meta.get(uri)
 
@@ -432,14 +434,19 @@ def _item_panel(
         journey.append("  →  ranked ", style="dim")
         journey.append(f"#{rank}", style="yellow")
         journey.append(f" (score {_fmt_score(rank_score)})", style="dim")
+        normalized = (normalized_by_uri or {}).get(uri)
+        if normalized is not None and ar is not None:
+            journey.append("  →  within ", style="dim")
+            journey.append(normalized.generator_name, style="cyan")
+            journey.append(f" #{ar + 1}", style="yellow")
+            journey.append(f" (score {_fmt_score(normalized.score_after)})", style="dim")
     elif ar is not None:
         journey.append("  →  by score ", style="dim")
         journey.append(f"#{ar}", style="white")
     journey.append("  →  final ", style="dim")
     journey.append(f"#{pos}", style="bold green")
 
-    # --- per-model normalized score breakdown (only when multiple rank
-    # models combined to produce the model score above) ---
+    # --- per-model contributions to the combined model score above ---
     model_breakdown = model_scores_by_uri.get(uri)
     breakdown_line = None
     if model_breakdown:
@@ -554,6 +561,9 @@ def _render_show(doc: FeedDebugDocument) -> None:
         adjustment.at_uri: adjustment for adjustment in getattr(doc, "politics_adjustments", [])
     }
     after_rank_pos = {uri: i for i, uri in enumerate(doc.order_after_rank)}
+    normalized_by_uri = {
+        entry.at_uri: entry for entry in getattr(doc, "rank_normalization", [])
+    }
     final_pos = {uri: i for i, uri in enumerate(doc.final_order)}
     div_by_uri = {e.at_uri: e for e in doc.diversification}
 
@@ -580,9 +590,9 @@ def _render_show(doc: FeedDebugDocument) -> None:
     console.print(f"[dim]journey: retrieved by generator (gen score) → {legend}[/dim]")
     if doc.model_scores:
         console.print(
-            "[dim]model scores = each rank model's per-candidate score normalized to "
-            "[0, 1], with its configured weight — the inputs to the combined "
-            "score before the politics adjustment[/dim]"
+            "[dim]model scores = each ranker's blend contribution with its configured "
+            "weight; weights are normalized for the combined score before politics "
+            "adjustment. Contributions may be negative or exceed one.[/dim]"
         )
     if politics_by_uri:
         console.print(
@@ -606,6 +616,7 @@ def _render_show(doc: FeedDebugDocument) -> None:
                 politics_by_uri,
                 div_by_uri,
                 meta,
+                normalized_by_uri=normalized_by_uri,
             )
         )
 

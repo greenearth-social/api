@@ -71,25 +71,24 @@ def test_predict_ranks_candidates_by_score_desc(app):
         },
     )
 
-    # candidate_score's bounds are [0, 1], so run_predict keeps the raw scores
-    # in [0, 1] before combining/ranking.
+    # candidate_score scales this batch from its minimum (0.1) to maximum (0.9).
     assert resp.status_code == 200
     assert resp.json() == {
         "rankings": [
             {
                 "at_uri": "at://post/high",
                 "rank": 1,
-                "rank_score": pytest.approx(0.9),
+                "rank_score": pytest.approx(1.0),
             },
             {
                 "at_uri": "at://post/mid",
                 "rank": 2,
-                "rank_score": pytest.approx(0.4),
+                "rank_score": pytest.approx(0.375),
             },
             {
                 "at_uri": "at://post/low",
                 "rank": 3,
-                "rank_score": pytest.approx(0.1),
+                "rank_score": pytest.approx(0.0),
             },
         ],
     }
@@ -115,21 +114,32 @@ def test_predict_applies_politics_multiplier(app):
                     "score": 0.3,
                     "politics_score": 1.0,
                 },
+                {
+                    "at_uri": "at://post/low",
+                    "score": 0.0,
+                    "politics_score": 0.0,
+                },
             ],
         },
     )
 
+    # The political post's normalized score is 0.75, so the boost changes the winner.
     assert response.status_code == 200
     assert response.json()["rankings"] == [
         {
             "at_uri": "at://post/political",
             "rank": 1,
-            "rank_score": pytest.approx(0.6),
+            "rank_score": pytest.approx(1.5),
         },
         {
             "at_uri": "at://post/non-political",
             "rank": 2,
-            "rank_score": pytest.approx(0.4),
+            "rank_score": pytest.approx(1.0),
+        },
+        {
+            "at_uri": "at://post/low",
+            "rank": 3,
+            "rank_score": pytest.approx(0.0),
         },
     ]
 
@@ -151,25 +161,48 @@ def test_predict_accepts_zero_politics_multiplier(app):
                 },
                 {
                     "at_uri": "at://post/political",
-                    "score": 0.3,
+                    "score": 0.4,
                     "politics_score": 1.0,
                 },
             ],
         },
     )
 
+    # Equal input scores become 0.5 before politics suppresses only the political post.
     assert response.status_code == 200
     assert response.json()["rankings"] == [
         {
             "at_uri": "at://post/non-political",
             "rank": 1,
-            "rank_score": pytest.approx(0.4),
+            "rank_score": pytest.approx(0.5),
         },
         {
             "at_uri": "at://post/political",
             "rank": 2,
             "rank_score": pytest.approx(0.0),
         },
+    ]
+
+
+def test_predict_normalizes_candidate_scores_and_drops_unscored_candidates(app):
+    client = TestClient(app, headers=HEADERS)
+    response = client.post(
+        "/rank/predict",
+        json={
+            "user_did": "did:plc:user1",
+            "models": [{"name": "candidate_score", "weight": 1.0}],
+            "candidates": [
+                {"at_uri": "at://post/low", "score": 2.0},
+                {"at_uri": "at://post/missing", "score": None},
+                {"at_uri": "at://post/high", "score": 10.0},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["rankings"] == [
+        {"at_uri": "at://post/high", "rank": 1, "rank_score": pytest.approx(1.0)},
+        {"at_uri": "at://post/low", "rank": 2, "rank_score": pytest.approx(0.0)},
     ]
 
 
@@ -207,7 +240,7 @@ def test_predict_rejects_all_zero_model_weights(app):
 
 def test_predict_keeps_duplicate_candidate_count_and_collapses_scores_by_uri(app):
     """Combination is keyed by `at_uri`, so duplicate-uri candidates collapse to
-    a single (last-write-wins) raw score per uri before normalization — but the
+    a single (last-write-wins) normalized score per uri after candidate ranking, but the
     output still contains one ranking per input candidate, with ties among
     same-uri duplicates broken by original candidate order."""
     client = TestClient(app, headers=HEADERS)
@@ -229,17 +262,17 @@ def test_predict_keeps_duplicate_candidate_count_and_collapses_scores_by_uri(app
         {
             "at_uri": "at://post/b",
             "rank": 1,
-            "rank_score": pytest.approx(0.7),
+            "rank_score": pytest.approx(0.5),
         },
         {
             "at_uri": "at://post/a",
             "rank": 2,
-            "rank_score": pytest.approx(0.5),
+            "rank_score": pytest.approx(0.0),
         },
         {
             "at_uri": "at://post/a",
             "rank": 3,
-            "rank_score": pytest.approx(0.5),
+            "rank_score": pytest.approx(0.0),
         },
     ]
 

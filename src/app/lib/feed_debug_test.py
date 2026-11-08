@@ -162,15 +162,15 @@ class TestBuildDocument:
 
     def test_includes_model_scores(self):
         rec = self._recorder()
-        rec.record_model_scores("heavy_ranker", 1.0, {"at://p/1": 0.8, "at://p/2": 0.2})
+        rec.record_model_scores("heavy_ranker", 1.0, {"at://p/1": 1.8, "at://p/2": -0.2})
         rec.record_model_scores("perspective", 2.0, {"at://p/1": 0.25, "at://p/2": 0.1})
         doc = self._build(rec)
 
         assert [e.model_name for e in doc.model_scores] == ["heavy_ranker", "perspective"]
         assert doc.model_scores[0].weight == 1.0
         assert {s.at_uri: s.score for s in doc.model_scores[0].scores} == {
-            "at://p/1": 0.8,
-            "at://p/2": 0.2,
+            "at://p/1": 1.8,
+            "at://p/2": -0.2,
         }
         assert doc.model_scores[1].weight == 2.0
         assert {s.at_uri: s.score for s in doc.model_scores[1].scores} == {
@@ -262,11 +262,15 @@ class TestModelScoreCapture:
     def test_copies_scores_dict_defensively(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
         scores = {"at://p/1": 0.8}
-        rec.record_model_scores("heavy_ranker", 1.0, scores)
+        raw_scores = {"at://p/1": 0.8}
+        rec.record_model_scores("heavy_ranker", 1.0, scores, raw_scores=raw_scores)
         scores["at://p/1"] = 0.0
         scores["at://p/2"] = 1.0
+        raw_scores["at://p/1"] = 0.0
+        raw_scores["at://p/2"] = 1.0
 
         assert rec.model_scores[0][2] == {"at://p/1": 0.8}
+        assert rec.raw_model_scores["heavy_ranker"] == {"at://p/1": 0.8}
 
     def test_empty_when_not_recorded(self):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
@@ -447,7 +451,8 @@ class TestBuildPipelineMetadata:
         assert snapshot.generator_diagnostics[0].status == "empty"
         assert snapshot.generator_diagnostics[0].reason == expected_reason
 
-    def test_per_uri_rank_and_model_scores(self):
+    @pytest.mark.parametrize("top_score", [0.92, -0.2, 1.5])
+    def test_per_uri_rank_and_model_scores(self, top_score):
         rec = FeedDebugRecorder(feed_name="f", regenerated=False)
         rec.set_generate_request(
             CandidateGenerateRequest(
@@ -462,12 +467,14 @@ class TestBuildPipelineMetadata:
         rec.record_ranking(
             RankPredictResult(
                 rankings=[
-                    RankedCandidate(at_uri="at://a", rank=1, rank_score=0.92),
-                    RankedCandidate(at_uri="at://b", rank=2, rank_score=0.88),
+                    RankedCandidate(at_uri="at://a", rank=1, rank_score=top_score),
+                    RankedCandidate(at_uri="at://b", rank=2, rank_score=top_score - 0.04),
                 ]
             )
         )
-        rec.record_model_scores("heavy_ranker", 1.0, {"at://a": 0.92, "at://b": 0.88})
+        rec.record_model_scores(
+            "heavy_ranker", 1.0, {"at://a": top_score, "at://b": top_score - 0.04}
+        )
         rec.ranker_model = "heavy_ranker"
         rec.final_order = ["at://a", "at://b"]
         rec.order_after_rank = ["at://a", "at://b"]
@@ -478,12 +485,38 @@ class TestBuildPipelineMetadata:
         assert snap.ranker_model == "heavy_ranker"
         item = snap.items_meta[0]
         assert item.rank == 1
-        assert item.rank_score == 0.92
+        assert item.rank_score == top_score
         assert len(item.model_scores) == 1
         assert item.model_scores[0].name == "heavy_ranker"
         assert item.model_scores[0].weight == 1.0
-        assert item.model_scores[0].score == 0.92
+        assert item.model_scores[0].score == top_score
+        assert item.model_scores[0].raw_score is None
         assert item.politics_adjustment is None
+
+    def test_raw_scores_survive_snapshot_serialization_without_changing_effective_scores(self):
+        from ..documents import FeedSnapshotDocument
+
+        rec = FeedDebugRecorder(feed_name="f", regenerated=False)
+        rec.record_model_scores(
+            "heavy_ranker",
+            1.0,
+            {"at://actual": 0.0, "at://imputed": 0.4},
+            raw_scores={"at://actual": 0.0},
+        )
+        rec.record_final_order(["at://imputed", "at://actual"])
+        now = datetime.now(timezone.utc)
+        snapshot = rec.build_pipeline_metadata(request_id="r", generated_at=now, expires_at=now)
+
+        restored = FeedSnapshotDocument.model_validate_json(snapshot.model_dump_json())
+
+        assert [item.at_uri for item in restored.items_meta] == ["at://imputed", "at://actual"]
+        assert [
+            (item.model_scores[0].score, item.model_scores[0].raw_score)
+            for item in restored.items_meta
+        ] == [
+            (0.4, None),
+            (0.0, 0.0),
+        ]
 
     @pytest.mark.parametrize("setting", [0.0, 1.0, 2.0])
     def test_politics_adjustments_follow_final_uri_order(self, setting):
