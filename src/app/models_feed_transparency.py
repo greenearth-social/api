@@ -160,6 +160,7 @@ class FeedPreferences(BaseModel):
     purpose: float | None = Field(default=None, ge=0.0, le=1.0)
     author_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    normalize_rank_by_generator: bool | None = None
 
 
 class AcceptFeedPreviewRequest(BaseModel):

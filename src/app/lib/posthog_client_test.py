@@ -138,6 +138,39 @@ def test_track_interaction_captures_event_with_uri():
         properties={
             "feed_name": "your-feed",
             "item_uri": "at://did/post/1",
+            "heavy_ranker_score": None,
+            "author_did": None,
+            **ANNOTATIONS,
+        },
+        timestamp=NOW,
+    )
+
+
+@pytest.mark.parametrize("score", [0.75, 0.0, None])
+@pytest.mark.parametrize("author_did", ["did:plc:author", None])
+def test_track_interaction_carries_nullable_post_metadata(score, author_did):
+    mock = MagicMock()
+    track_interaction(
+        mock,
+        USER_DID,
+        "interactionLike",
+        "your-feed",
+        "at://did/post/1",
+        NOW,
+        username="alice.bsky.app",
+        heavy_ranker_score=score,
+        author_did=author_did,
+    )
+    mock.capture.assert_called_once_with(
+        distinct_id=USER_DID,
+        event="interactionLike",
+        properties={
+            "feed_name": "your-feed",
+            "item_uri": "at://did/post/1",
+            "$set": {"username": "alice.bsky.app"},
+            "user_handle": "alice.bsky.app",
+            "heavy_ranker_score": score,
+            "author_did": author_did,
             **ANNOTATIONS,
         },
         timestamp=NOW,
@@ -182,6 +215,8 @@ def test_track_interaction_carries_the_handle():
             "item_uri": "at://did/post/1",
             "$set": {"username": "alice.bsky.app"},
             "user_handle": "alice.bsky.app",
+            "heavy_ranker_score": None,
+            "author_did": None,
             **ANNOTATIONS,
         },
         timestamp=NOW,
@@ -228,7 +263,12 @@ def test_track_interaction_captures_event_without_uri():
     mock.capture.assert_called_once_with(
         distinct_id=USER_DID,
         event="requestMore",
-        properties={"feed_name": "your-feed", **ANNOTATIONS},
+        properties={
+            "feed_name": "your-feed",
+            "heavy_ranker_score": None,
+            "author_did": None,
+            **ANNOTATIONS,
+        },
         timestamp=NOW,
     )
 

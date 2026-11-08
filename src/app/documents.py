@@ -62,6 +62,14 @@ class FeedPreferencesDocument(BaseModel):
     purpose: float | None = Field(default=None, ge=0.0, le=1.0)
     author_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    normalize_rank_by_generator: bool | None = None
+
+
+class LlmPromptStateDocument(BaseModel):
+    """Explicit activation state; an absent state keeps legacy newest-vector behavior."""
+
+    active_prompt_key: str | None = None
+    revision: int = Field(default=0, ge=0)
 
 
 class UserDocument(BaseModel):
@@ -71,6 +79,7 @@ class UserDocument(BaseModel):
     """
 
     user_did: str = Field(..., description="AT Protocol DID of the user (also the document ID)")
+    llm_prompt_state: LlmPromptStateDocument | None = None
     username: str | None = Field(
         default=None,
         description="AT Protocol handle (e.g. foobar.bsky.app)",
@@ -414,6 +423,15 @@ class InteractionDocument(BaseModel):
         "signed feedContext 'lt' claim). Excluded from analytics and deletable by "
         "scripts/load_test/cleanup.py.",
     )
+    heavy_ranker_score: float | None = Field(
+        default=None,
+        description="Raw heavy-ranker score from the feedContext 'hrs' claim, before "
+        "median imputation. Missing when no actual score is known.",
+    )
+    author_did: str | None = Field(
+        default=None,
+        description="ATProto DID of the user who authored the item, if known; None when unavailable",
+    )
 
 
 class FeedDebugUserFeatures(BaseModel):
@@ -445,17 +463,18 @@ class FeedDebugScoreEntry(BaseModel):
 class FeedDebugModelScoreEntry(BaseModel):
     """One rank model's contribution to the combined ranking.
 
-    Captures the model's normalized (to [0, 1]) per-candidate scores and its
-    configured relative weight — i.e. the inputs to the weighted-average
-    combination — so the pre-politics combined score can be explained. The
-    final politics-adjusted score is captured in ``ranking``.
+    Captures the model's per-candidate blend contributions and configured
+    relative weight so the pre-politics combined score can be explained.
+    Contributions may be negative or exceed one; missing scores use the
+    model's median. The final politics-adjusted score is captured in ``ranking``.
     """
 
     model_name: str = Field(..., description="Name of the rank model, e.g. 'heavy_ranker'")
     weight: float = Field(..., description="Configured relative weight for this model")
     scores: list[FeedDebugScoreEntry] = Field(
         default_factory=list,
-        description="Per-candidate scores after normalization to [0, 1]",
+        description="Per-candidate blend contributions, with missing scores filled "
+        "from the model's median",
     )
 
 
@@ -474,7 +493,7 @@ class FeedDebugPoliticsAdjustment(BaseModel):
         le=2.0,
         description="Per-post multiplier derived from the user setting and topic score",
     )
-    score_before: float = Field(description="Combined normalized score before politics adjustment")
+    score_before: float = Field(description="Combined score before politics adjustment")
     score_after: float = Field(description="Combined score after politics adjustment")
 
 
@@ -510,6 +529,15 @@ class FeedDebugDiversificationEntry(BaseModel):
     relevance_weight: float = Field(default=0.3, ge=0.0, le=1.0)
     author_penalty_weight: float = Field(default=0.35, ge=0.0, le=0.5)
     topic_penalty_weight: float = Field(default=0.35, ge=0.0, le=0.5)
+
+
+class FeedDebugRankNormalization(BaseModel):
+    """A candidate's rank score before and after per-generator rescaling (#572)."""
+
+    at_uri: str
+    generator_name: str
+    score_before: float
+    score_after: float
 
 
 class FeedDebugDocument(BaseModel):
@@ -562,7 +590,7 @@ class FeedDebugDocument(BaseModel):
     )
     model_scores: list[FeedDebugModelScoreEntry] = Field(
         default_factory=list,
-        description="Per-model normalized ([0, 1]) scores and configured weight, "
+        description="Per-model blend contributions and configured weight, "
         "in the order rank models ran (empty when no ranking ran)",
     )
     politics_setting: float | None = Field(
@@ -574,6 +602,10 @@ class FeedDebugDocument(BaseModel):
     politics_adjustments: list[FeedDebugPoliticsAdjustment] = Field(
         default_factory=list,
         description="Per-candidate politics score adjustment captured during ranking",
+    )
+    rank_normalization: list[FeedDebugRankNormalization] = Field(
+        default_factory=list,
+        description="Per-generator rank-score rescaling; empty when the slate flag was off",
     )
     order_after_rank: list[str] = Field(
         default_factory=list, description="AT URIs in order after ranking, before diversification"
@@ -647,11 +679,21 @@ class GeneratorDiagnostic(BaseModel):
 
 
 class ModelScoreMeta(BaseModel):
-    """One rank model's normalized score for a single item."""
+    """One rank model's blend contribution for an item; may be negative or exceed one."""
 
     name: str
     weight: float
-    score: float
+    score: float = Field(
+        ...,
+        description="Model's contribution to the item's combined score, which could include "
+        "post-processing like median imputation.",
+    )
+    raw_score: float | None = Field(
+        default=None,
+        description="Actual model prediction before median imputation. None for imputed "
+        "scores or older metadata without prediction provenance; score remains the "
+        "effective contribution used for ranking.",
+    )
 
 
 class PoliticsAdjustmentMeta(BaseModel):
@@ -670,6 +712,10 @@ class PipelineItemMeta(BaseModel):
     at_uri: str
     rank: int | None = None
     rank_score: float | None = None
+    normalized_rank_score: float | None = Field(
+        default=None,
+        description="rank_score rescaled within its generator; set only when the slate flag was on",
+    )
     after_rank_position: int | None = None
     generators: list[GeneratorMeta] = Field(default_factory=list)
     model_scores: list[ModelScoreMeta] = Field(default_factory=list)
@@ -678,6 +724,7 @@ class PipelineItemMeta(BaseModel):
         description="Recorded politics adjustment; absent for older or unranked items",
     )
     diversification: DiversificationMeta | None = None
+    author_did: str | None = Field(default=None, description="Author DID of the post, if available")
 
 
 class FeedSnapshotDocument(BaseModel):

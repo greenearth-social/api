@@ -7,8 +7,9 @@ and hands this module a ``CandidateGenerateRequest`` plus a ``SlateConfig``
 (ranking template and the post-ranking cutoffs).
 
 Stages, in order: generate → hydrate embeddings → rank (optional) →
-``min_rank_score`` cut → MMR diversification (optional) → ``min_mmr_score``
-cut → ``max_render_share`` cap. The ``FeedDebugRecorder`` and
+``min_rank_score`` cut → per-generator score normalization (optional) →
+MMR diversification (optional) → ``min_mmr_score`` cut → ``max_render_share``
+cap. The ``FeedDebugRecorder`` and
 ``PipelineContext`` installed by :func:`run_pipeline_capturing` observe every
 stage so a snapshot of the run can be stored or returned to the caller.
 """
@@ -28,7 +29,7 @@ from typing import NamedTuple
 from fastapi import HTTPException
 
 from ..documents import FeedSnapshotDocument
-from ..models import CandidateGenerateRequest, SlateConfig
+from ..models import CandidateGenerateRequest, CandidatePost, SlateConfig
 from .candidates import run_generate
 from .candidates.base import CandidateGenerator
 from .candidates.generate import hydrate_posts
@@ -65,6 +66,34 @@ class PipelineResult(NamedTuple):
     low_score_uris: list[str]
 
 
+# Group for candidates without a generator_name (e.g. slate API caller-supplied posts).
+UNKNOWN_GENERATOR = "unknown"
+
+
+def normalize_scores_by_generator(ordered: list[CandidatePost]) -> list[CandidatePost]:
+    """Rescale each generator's rank scores to [0, 1] and re-sort (issue #572).
+
+    Within each ``generator_name`` group the lowest score maps to 0 and the
+    highest to 1; a group with a single score (one post, or all equal) maps
+    to 1. Returns copies with ``score`` replaced, sorted descending, ties in
+    incoming order.
+    """
+    by_generator: dict[str, list[CandidatePost]] = {}
+    for c in ordered:
+        by_generator.setdefault(c.generator_name or UNKNOWN_GENERATOR, []).append(c)
+
+    normalized: dict[str, float] = {}
+    for group in by_generator.values():
+        scores = [c.score or 0.0 for c in group]
+        lo, hi = min(scores), max(scores)
+        for c, s in zip(group, scores, strict=True):
+            assert c.at_uri is not None
+            normalized[c.at_uri] = 1.0 if hi == lo else (s - lo) / (hi - lo)
+
+    rescored = [c.model_copy(update={"score": normalized[c.at_uri]}) for c in ordered if c.at_uri]
+    return sorted(rescored, key=lambda c: -(c.score or 0.0))
+
+
 def record_cutoff(feed_name: str, reason: str, uris: list[str]) -> None:
     """Emit the slate-cutoff metric and debug-record the removed URIs."""
     if not uris:
@@ -90,7 +119,9 @@ async def run_ranking_pipeline(
     After ranking/diversification the slate is cut down by the configured
     quality gates (``min_rank_score``, ``min_mmr_score``, ``max_render_share``);
     posts cut for low rank score are surfaced so the caller can persist them as
-    discarded.
+    discarded. With ``normalize_rank_by_generator`` set, the survivors of the
+    rank-score cut are rescaled within each generator before MMR so every
+    source is represented (see :func:`normalize_scores_by_generator`).
 
     ``extra_generators`` are request-scoped generators resolved by name ahead
     of the registry (see ``run_generate``).
@@ -148,6 +179,8 @@ async def run_ranking_pipeline(
         candidates = await hydrate_posts(es, candidates)
 
         low_score_uris: list[str] = []
+        # True once model rank scores are on the candidates, not the fail-open ordering.
+        ranked = False
         if slate.rank_request_template is not None:
             candidates = [c for c in candidates if c.minilm_l12_embedding]
             if not candidates:
@@ -174,6 +207,7 @@ async def run_ranking_pipeline(
                     for r in rank_result.rankings
                     if r.at_uri in by_uri
                 ]
+                ranked = True
             except Exception as exc:
                 logger.exception("Ranking stage failed; falling back to unranked ordering")
                 if ctx is not None:
@@ -207,6 +241,23 @@ async def run_ranking_pipeline(
             low_score_uris = [c.at_uri for c in ordered[cut_idx:] if c.at_uri]
             ordered = ordered[:cut_idx]
             record_cutoff(feed_name, "rank_score", low_score_uris)
+
+        if ranked and slate.normalize_rank_by_generator and ordered:
+            raw_by_uri = {c.at_uri: c.score or 0.0 for c in ordered if c.at_uri}
+            ordered = normalize_scores_by_generator(ordered)
+            if rec is not None:
+                rec.record_rank_normalization(
+                    [
+                        (
+                            c.at_uri,
+                            c.generator_name or UNKNOWN_GENERATOR,
+                            raw_by_uri[c.at_uri],
+                            c.score or 0.0,
+                        )
+                        for c in ordered
+                        if c.at_uri
+                    ]
+                )
 
         if rec is not None:
             rec.record_order_after_rank([c.at_uri for c in ordered if c.at_uri])

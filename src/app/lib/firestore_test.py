@@ -617,6 +617,7 @@ async def test_accept_feed_preview_stages_cache_without_rewriting_preferences(
         purpose=0.5,
         author_penalty=0.7,
         topic_penalty=0.7,
+        normalize_rank_by_generator=False,
     )
     cache_ref.get = AsyncMock(
         return_value=_mock_doc_snapshot(
@@ -967,7 +968,9 @@ class TestUpsertFeedActivity:
 
 class TestRecordInteraction:
     @pytest.mark.asyncio
-    async def test_adds_auto_id_doc_to_interactions_collection(self):
+    @pytest.mark.parametrize("score", [0.0, 0.75, None])
+    @pytest.mark.parametrize("author_did", ["did:plc:author", None])
+    async def test_adds_auto_id_doc_to_interactions_collection(self, score, author_did):
         db = MagicMock()
         collection_ref = MagicMock()
         collection_ref.add = AsyncMock()
@@ -979,6 +982,8 @@ class TestRecordInteraction:
             event="interactionLike",
             feed_name=FEED_NAME,
             request_id="req-1",
+            heavy_ranker_score=score,
+            author_did=author_did,
         )
 
         await record_interaction(db, doc)
@@ -992,6 +997,9 @@ class TestRecordInteraction:
         assert written["feed_name"] == FEED_NAME
         assert written["request_id"] == "req-1"
         assert "created_at" in written
+        assert written["author_did"] == author_did
+        assert written["heavy_ranker_score"] == score
+        assert "heavy_ranker_prediction" not in written
 
 
 class TestPostSeenClassification:

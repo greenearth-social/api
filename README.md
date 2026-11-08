@@ -330,7 +330,7 @@ curl --fail-with-body http://localhost:8000/slate/generate \
     "external_candidates": [{"at_uri": "at://did:plc:.../app.bsky.feed.post/...", "score": 0.9}],
     "rankers": [{"name": "heavy_ranker", "weight": 1.0}, {"name": "perspective", "weight": 1.0}],
     "diversify": true,
-    "min_rank_score": 0.425,
+    "min_rank_score": 0.15,
     "max_render_share": 0.5
   }'
 ```
