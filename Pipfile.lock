@@ -803,12 +803,12 @@
         },
         "google-cloud-firestore": {
             "hashes": [
-                "sha256:833fefd9a8b9c68c750da1c0fdd93e4ca1a3ab728081c7d6c57c362e06accf8b",
-                "sha256:972ac92717c8c0c1ead18c28a3d6f739253cdf0940039bc172d5cbbbb399c6fd"
+                "sha256:6279f049336e49181e8c1d2dbf14e9c0cfb75ddf03c70971adc88fb272cdae29",
+                "sha256:d403b12375e4f68176bb638451417330a7a66d11c9cace98f7778109b884d9ab"
             ],
             "index": "pypi",
             "markers": "python_version >= '3.10'",
-            "version": "==2.28.1"
+            "version": "==2.34.1"
         },
         "google-cloud-monitoring": {
             "hashes": [
