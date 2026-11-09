@@ -1346,7 +1346,6 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
                 "purpose": 0.5,
                 "author_penalty": 0.7,
                 "topic_penalty": 0.7,
-                "normalize_rank_by_generator": False,
             },
             "best-of-friends": {
                 "freshness": 5,
@@ -1389,7 +1388,6 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
             "purpose": 0.65,
             "author_penalty": 0.7,
             "topic_penalty": 0.7,
-            "normalize_rank_by_generator": False,
         },
         "best-of-friends": {
             "freshness": 3,

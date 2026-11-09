@@ -29,7 +29,6 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | bool | SourceWeightsDocume
     "purpose": 0.5,
     "author_penalty": 0.7,
     "topic_penalty": 0.7,
-    "normalize_rank_by_generator": False,
 }
 
 
@@ -114,14 +113,6 @@ def control_value(
     feed_name: str,
     control: Literal["politics", "purpose", "author_penalty", "topic_penalty"],
 ) -> float: ...
-
-
-@overload
-def control_value(
-    user: UserDocument | None,
-    feed_name: str,
-    control: Literal["normalize_rank_by_generator"],
-) -> bool: ...
 
 
 def control_value(

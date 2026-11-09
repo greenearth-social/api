@@ -13,7 +13,6 @@ FeedControlName = Literal[
     "purpose",
     "author_penalty",
     "topic_penalty",
-    "normalize_rank_by_generator",
 ]
 
 # What a feed does when the AppView calls getFeedSkeleton with no (or an
