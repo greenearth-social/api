@@ -5,6 +5,7 @@ from app.feeds import (
     DEFAULT_SOCIAL_RADIUS,
     FEEDS,
     LOGGED_OUT_POST_URI,
+    NORMALIZE_RANK_BY_GENERATOR,
     SOCIAL_RADIUS_PRESETS,
     canonical_feed_name,
 )
@@ -252,3 +253,10 @@ class TestFeedNameLengths:
             f"{feed_name}: display_name {cfg.display_name!r} exceeds "
             f"{MAX_DISPLAY_NAME_GRAPHEMES} graphemes"
         )
+
+
+def test_your_feed_normalizes_rank_scores_by_generator_for_everyone():
+    for feed_name in ("your-feed", "cutoff-preview"):
+        assert FEEDS[feed_name].normalize_rank_by_generator is NORMALIZE_RANK_BY_GENERATOR
+    # A code constant, not something a user can switch (issue #572).
+    assert "normalize_rank_by_generator" not in FEEDS["your-feed"].controls

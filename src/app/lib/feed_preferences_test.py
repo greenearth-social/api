@@ -128,3 +128,15 @@ def test_feed_preferences_document_accepts_politics_boundaries(politics):
 def test_feed_preferences_document_rejects_politics_outside_boundaries(politics):
     with pytest.raises(ValidationError):
         FeedPreferencesDocument(politics=politics)
+
+
+def test_resolver_ignores_a_saved_normalize_toggle():
+    # Saved while this was a team-only toggle: the document still loads, the value is unused.
+    user = UserDocument(
+        user_did="did:plc:test",
+        feed_preferences={
+            "your-feed": FeedPreferencesDocument(normalize_rank_by_generator=False),
+        },
+    )
+
+    assert resolve_feed_preferences(user, "your-feed").normalize_rank_by_generator is None
