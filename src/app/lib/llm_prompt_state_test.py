@@ -152,14 +152,19 @@ class PromptStore:
 
 
 @pytest.mark.asyncio
-async def test_legacy_read_uses_latest_until_activation_state_exists():
+@pytest.mark.parametrize("raise_on_missing_active", [False, True])
+async def test_legacy_read_uses_latest_until_activation_state_exists(raise_on_missing_active):
     store = PromptStore()
     store.seed()
-    current = await get_current_llm_query_vector(store.db, USER)
+    current = await get_current_llm_query_vector(
+        store.db, USER, raise_on_missing_active=raise_on_missing_active
+    )
     assert current is not None and current.prompt_key == "latest"
     assert await get_llm_prompt_revision(store.db, USER) == 0
     store.documents[USER_PATH]["llm_prompt_state"] = {"active_prompt_key": "older", "revision": 1}
-    current = await get_current_llm_query_vector(store.db, USER)
+    current = await get_current_llm_query_vector(
+        store.db, USER, raise_on_missing_active=raise_on_missing_active
+    )
     assert current is not None and current.prompt_key == "older"
 
 
@@ -173,6 +178,32 @@ async def test_explicit_state_never_reactivates_history(active_key):
         "revision": 3,
     }
     assert await get_current_llm_query_vector(store.db, USER) is None
+
+
+@pytest.mark.asyncio
+async def test_missing_active_vector_is_an_error_for_serving():
+    store = PromptStore()
+    store.seed(explicit=True)
+    del store.documents[f"{VECTORS}/latest"]
+
+    with pytest.raises(RuntimeError, match="Active LLM query vector 'latest' not found"):
+        await get_current_llm_query_vector(store.db, USER, raise_on_missing_active=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("removed", [False, True])
+async def test_no_active_prompt_remains_absent_for_serving(removed):
+    store = PromptStore()
+    if removed:
+        store.seed()
+        store.documents[USER_PATH]["llm_prompt_state"] = {
+            "active_prompt_key": None,
+            "revision": 3,
+        }
+
+    assert await get_current_llm_query_vector(
+        store.db, USER, raise_on_missing_active=True
+    ) is None
 
 
 @pytest.mark.asyncio

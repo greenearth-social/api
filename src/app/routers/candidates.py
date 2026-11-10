@@ -74,7 +74,9 @@ async def candidates_generate(
     across pagination pages.
     """
     try:
-        result = await run_generate(payload, request.app.state.es)
+        result = await run_generate(
+            payload, request.app.state.es, feed_name="candidates_api"
+        )
     except GeneratorNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except GeneratorError as exc:

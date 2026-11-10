@@ -76,7 +76,7 @@ async def test_prior_fallback_preserves_other_source_and_diagnostics(
     context = PipelineContext(feed_name="your-feed", fail_fast=True)
     recorder = FeedDebugRecorder(feed_name="your-feed", regenerated=True)
     with pipeline_context_scope(context), feed_debug_scope(recorder):
-        result = await generate.run_generate(request(), object())
+        result = await generate.run_generate(request(), object(), feed_name="your-feed")
     sources = {post.generator_name for post in result.candidates}
     assert sources == ({"two_tower", "popularity"} if has_prior or has_history else {"popularity"})
     # An optional missing prior is an expected fallback; inference/search errors
@@ -97,7 +97,7 @@ async def test_actual_failures_keep_other_sources_and_record_degradation(
     getattr(dependencies, failure_stage).side_effect = error
     context = PipelineContext(feed_name="your-feed")
     with pipeline_context_scope(context):
-        result = await generate.run_generate(request(), object())
+        result = await generate.run_generate(request(), object(), feed_name="your-feed")
     assert [post.generator_name for post in result.candidates] == ["popularity"]
     assert len(context.degradations) == 1
     assert context.degradations[0].component == "two_tower"
@@ -108,7 +108,9 @@ async def test_actual_failures_keep_other_sources_and_record_degradation(
 async def test_zero_allocation_does_not_force_two_tower_with_a_prior(dependencies):
     # This small positive weight rounds to zero allocated candidates. Having a
     # prior must not force the generator to run outside the caller's allocation.
-    await generate.run_generate(request(tower_weight=0.01, count=1), object())
+    await generate.run_generate(
+        request(tower_weight=0.01, count=1), object(), feed_name="your-feed"
+    )
     dependencies.history.assert_not_awaited()
     dependencies.prediction.assert_not_awaited()
     dependencies.search.assert_not_awaited()

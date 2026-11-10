@@ -284,7 +284,8 @@ def test_generate_dedup_keeps_first():
     assert len(at_uris) == len(set(at_uris))
 
 
-def test_infill_tops_up_when_primary_returns_few():
+@patch("app.lib.metrics._metric_collector")
+def test_infill_tops_up_when_primary_returns_few(collector):
     """Infill generator fills remaining slots when primaries fall short."""
     client = TestClient(app, headers=HEADERS)
     # two_tower fake returns only 1 result; requesting 5 with infill
@@ -305,6 +306,13 @@ def test_infill_tops_up_when_primary_returns_few():
     assert "popularity" in gen_names
     # Should have de-duplicated mix, capped at num_candidates
     assert len(data["candidates"]) <= 5
+
+    metric_calls = [
+        call for call in collector.record.call_args_list
+        if call.args[0].startswith("candidates.generate.")
+    ]
+    assert {call.kwargs["generator_name"] for call in metric_calls} == {"two_tower", "popularity"}
+    assert all(call.kwargs["feed_name"] == "candidates_api" for call in metric_calls)
 
 
 def test_infill_not_called_when_enough_results():

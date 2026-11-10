@@ -19,7 +19,13 @@ from ...models import CandidatePost, MaxAgeHours
 
 
 class CandidateResult(BaseModel):
-    """The output of a candidate generator invocation."""
+    """The output of a candidate generator invocation.
+
+    ``not_run`` means retrieval was skipped because an expected prerequisite
+    was absent. Return no candidates and a stable reason for diagnostics;
+    the pipeline excludes these skips from success and fill-share metrics.
+    Unexpected configuration or dependency failures should raise instead.
+    """
 
     generator_name: str = Field(..., description="Name of the generator that produced these candidates")
     candidates: list[CandidatePost] = Field(default_factory=list)

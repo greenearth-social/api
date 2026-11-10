@@ -50,13 +50,12 @@ class TestLlmQueryVectorCandidateGenerator:
         assert generator.name == GENERATOR_NAME
 
     @pytest.mark.asyncio
-    async def test_returns_empty_when_db_not_set(self, generator):
-        result = await generator.generate(object(), "did:plc:user1")
+    async def test_missing_db_is_a_configuration_error(self, generator):
+        with patch(KNN_SEARCH_POSTS, new_callable=AsyncMock) as knn:
+            with pytest.raises(RuntimeError, match="Firestore client is not configured"):
+                await generator.generate(object(), "did:plc:user1")
 
-        assert result.generator_name == GENERATOR_NAME
-        assert result.candidates == []
-        assert result.status == "not_run"
-        assert result.reason == "firestore_not_configured"
+        knn.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_vectors_in_firestore(self, generator):
@@ -69,6 +68,21 @@ class TestLlmQueryVectorCandidateGenerator:
         assert result.candidates == []
         assert result.status == "not_run"
         assert result.reason == "no_query_vector"
+
+    @pytest.mark.asyncio
+    async def test_firestore_read_errors_propagate(self, generator):
+        set_llm_query_vector_db(DB)
+        error = RuntimeError("Firestore unavailable")
+
+        with (
+            patch(GET_LATEST, new_callable=AsyncMock, side_effect=error),
+            patch(KNN_SEARCH_POSTS, new_callable=AsyncMock) as knn,
+        ):
+            with pytest.raises(RuntimeError) as exc:
+                await generator.generate(object(), "did:plc:user1")
+
+        assert exc.value is error
+        knn.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_queries_es_with_vector_using_minilm_field(self, generator):
@@ -145,7 +159,9 @@ class TestLlmQueryVectorCandidateGenerator:
         with _latest(None) as get_latest:
             await generator.generate(object(), "did:plc:specificuser")
 
-        get_latest.assert_awaited_once_with(DB, "did:plc:specificuser")
+        get_latest.assert_awaited_once_with(
+            DB, "did:plc:specificuser", raise_on_missing_active=True
+        )
 
     @pytest.mark.asyncio
     async def test_uses_default_options(self, generator):

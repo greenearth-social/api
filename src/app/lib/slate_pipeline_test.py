@@ -15,6 +15,7 @@ from ..models import (
     RankPredictResult,
     SlateConfig,
 )
+from .candidates.base import CandidateGenerator, CandidateResult
 from .embeddings import encode_float32_b64
 from .feed_debug import FeedDebugRecorder, feed_debug_scope
 from .slate_pipeline import normalize_scores_by_generator, run_ranking_pipeline
@@ -186,6 +187,36 @@ async def _run(slate: SlateConfig, recorder: FeedDebugRecorder | None = None):
             return await run_ranking_pipeline(
                 slate, _gen_request(), MagicMock(), feed_name="your-feed"
             )
+
+
+@pytest.mark.asyncio
+async def test_candidate_fill_metrics_distinguish_feeds():
+    collector = MagicMock()
+    generator = MagicMock(spec=CandidateGenerator)
+    generator.generate = AsyncMock(
+        return_value=CandidateResult(generator_name="llm_query_vector", candidates=[])
+    )
+    request = _gen_request().model_copy(
+        update={"generators": [GeneratorSpec(name="llm_query_vector", weight=1.0)]}
+    )
+    feed_names = ["your-feed", "llm-qv-dev"]
+
+    # Empty retrievals must still identify the feed that requested them.
+    with patch("app.lib.metrics._metric_collector", collector):
+        for feed_name in feed_names:
+            await run_ranking_pipeline(
+                _slate(),
+                request,
+                es=None,
+                feed_name=feed_name,
+                extra_generators={"llm_query_vector": generator},
+            )
+
+    fill_calls = [
+        call for call in collector.record.call_args_list
+        if call.args[0] == "candidates.generate.fill_share"
+    ]
+    assert [call.kwargs["feed_name"] for call in fill_calls] == feed_names
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,6 @@ search over the quality corpus using the MiniLM-L12 embedding field.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 from ...models import MaxAgeHours
@@ -18,13 +17,11 @@ from .es_candidates import knn_search_posts
 if TYPE_CHECKING:
     from google.cloud.firestore import AsyncClient  # type: ignore[import-untyped]
 
-logger = logging.getLogger(__name__)
-
 # Candidate generators are constructed at import time and ``generate`` only
 # receives the Elasticsearch client, so the Firestore client is reached the
 # same way the popularity and followed-users caches are: a process-level
-# handle installed during app startup.  When it is unset (unit tests,
-# scripts) the generator returns an empty result.
+# handle installed during app startup. An unset client is a configuration
+# failure, distinct from a user who has not fitted a query vector.
 _db: AsyncClient | None = None
 
 
@@ -41,9 +38,9 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
     """Candidate generator driven by a user's LLM-generated query vector.
 
     Reads the active query vector from Firestore and searches
-    Elasticsearch using the MiniLM-L12 embedding field.  If no vector is
-    found the generator returns an empty result so the pipeline can fall
-    back to other sources.
+    Elasticsearch using the MiniLM-L12 embedding field. Users without an
+    active prompt are skipped so the pipeline can fall back to other sources.
+    Missing configuration or a missing referenced vector raises an error.
     """
 
     @property
@@ -61,20 +58,14 @@ class LlmQueryVectorCandidateGenerator(CandidateGenerator):
     ) -> CandidateResult:
         db = get_llm_query_vector_db()
         if db is None:
-            logger.warning("llm_query_vector generator called before Firestore was configured")
-            return CandidateResult(
-                generator_name=self.name,
-                candidates=[],
-                status="not_run",
-                reason="firestore_not_configured",
-            )
+            raise RuntimeError("llm_query_vector Firestore client is not configured")
 
         # Imported here (not at module top) to avoid an import cycle:
         # documents -> candidates.base -> candidates -> llm_query_vector
         # -> lib.llm_prompt_state -> lib.firestore -> documents.
         from ..llm_prompt_state import get_current_llm_query_vector
 
-        latest = await get_current_llm_query_vector(db, user_did)
+        latest = await get_current_llm_query_vector(db, user_did, raise_on_missing_active=True)
         if latest is None:
             return CandidateResult(
                 generator_name=self.name,

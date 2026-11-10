@@ -38,15 +38,25 @@ async def get_llm_prompt_revision(db: AsyncClient, user_did: str) -> int:
 
 
 async def get_current_llm_query_vector(
-    db: AsyncClient, user_did: str
+    db: AsyncClient, user_did: str, *, raise_on_missing_active: bool = False
 ) -> LlmQueryVectorDocument | None:
+    """Read the selected vector, optionally rejecting a dangling active reference.
+
+    Serving can distinguish an unavailable active vector from an expected
+    no-prompt skip, while prompt management can still treat either as absent.
+    """
     snapshot = await db.collection(USERS_COLLECTION).document(user_doc_id(user_did)).get()
     state = _state(snapshot.to_dict() if snapshot.exists else None)
     if state is None:
         return await get_latest_llm_query_vector(db, user_did)
     if state.active_prompt_key is None:
         return None
-    return await get_llm_query_vector(db, user_did, state.active_prompt_key)
+    vector = await get_llm_query_vector(db, user_did, state.active_prompt_key)
+    if vector is None and raise_on_missing_active:
+        raise RuntimeError(
+            f"Active LLM query vector '{state.active_prompt_key}' not found for user '{user_did}'"
+        )
+    return vector
 
 
 async def save_fitted_llm_prompt(
