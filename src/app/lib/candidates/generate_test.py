@@ -13,6 +13,7 @@ from ...models import CandidateGenerateRequest, CandidatePost, GeneratorSpec, Ma
 from ..candidates import generate as generate_module
 from ..candidates.base import CandidateGenerator, CandidateResult
 from ..candidates.generate import GeneratorError, run_generate
+from ..candidates.llm_query_vector import LlmQueryVectorCandidateGenerator
 from ..config import set_fail_fast_for_request
 from ..embeddings import decode_float32_b64, encode_float32_b64
 from ..feed_debug import FeedDebugRecorder, feed_debug_scope
@@ -497,6 +498,52 @@ class TestGeneratorTimeout:
             {"generator_name": "popular", "feed_name": "llm-qv-dev"},
             {"generator_name": "popular", "feed_name": ""},
         ]
+
+
+class TestLlmConfigurationFailures:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_infill", [False, True])
+    async def test_missing_llm_configuration_records_failure(self, monkeypatch, is_infill):
+        monkeypatch.setattr("app.lib.candidates.llm_query_vector._db", None)
+        _stub_generators(
+            monkeypatch,
+            {
+                "llm_query_vector": LlmQueryVectorCandidateGenerator(),
+                "popular": _EmptyGenerator("popular"),
+            },
+        )
+        mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, mc))
+        ctx = PipelineContext(feed_name="your-feed")
+        request = (
+            _make_request("popular", infill="llm_query_vector")
+            if is_infill
+            else _make_request("llm_query_vector")
+        )
+
+        with pipeline_context_scope(ctx):
+            await run_generate(request, es=None, feed_name="your-feed")
+
+        llm_outcomes = [
+            c
+            for c in mc.calls
+            if c[2].get("generator_name") == "llm_query_vector"
+            and c[0] != "candidates.generate.duration_ms"
+        ]
+        assert llm_outcomes == [
+            (
+                "candidates.generate.failure_count",
+                1,
+                {
+                    "generator_name": "llm_query_vector",
+                    "outcome": "error",
+                    "is_infill": "true" if is_infill else "false",
+                    "feed_name": "your-feed",
+                },
+            )
+        ]
+        assert len(ctx.degradations) == 1
+        assert isinstance(ctx.degradations[0].cause, RuntimeError)
 
 
 # ---------------------------------------------------------------------------
