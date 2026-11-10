@@ -240,6 +240,19 @@ async def run_generate(
                         timeout=_GENERATOR_TIMEOUT_SEC,
                     )
                 ]
+            if results[0].status == "not_run":
+                if mc := get_metric_collector():
+                    mc.record(
+                        "candidates.generate.skipped_count",
+                        1,
+                        generator_name=spec.name,
+                        is_infill="false",
+                        feed_name=feed_name if feed_name is not None else "",
+                        reason=results[0].reason or "",
+                    )
+                # Preserve diagnostics and infill without treating a skipped
+                # retrieval as a successful call with zero fill.
+                return results
             if mc := get_metric_collector():
                 mc.record(
                     "candidates.generate.success_count",
@@ -364,13 +377,23 @@ async def run_generate(
                 timeout=_GENERATOR_TIMEOUT_SEC,
             )
             if mc := get_metric_collector():
-                mc.record(
-                    "candidates.generate.success_count",
-                    1,
-                    generator_name=request.infill,
-                    is_infill="true",
-                    feed_name=feed_name if feed_name is not None else "",
-                )
+                if infill_result.status == "not_run":
+                    mc.record(
+                        "candidates.generate.skipped_count",
+                        1,
+                        generator_name=request.infill,
+                        is_infill="true",
+                        feed_name=feed_name if feed_name is not None else "",
+                        reason=infill_result.reason or "",
+                    )
+                else:
+                    mc.record(
+                        "candidates.generate.success_count",
+                        1,
+                        generator_name=request.infill,
+                        is_infill="true",
+                        feed_name=feed_name if feed_name is not None else "",
+                    )
         except Exception as exc:
             if isinstance(exc, TimeoutError):
                 logger.warning(

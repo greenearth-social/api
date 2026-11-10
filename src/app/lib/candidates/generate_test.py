@@ -500,6 +500,116 @@ class TestGeneratorTimeout:
         ]
 
 
+class TestGeneratorNotRun:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "generator_name, reason",
+        [
+            ("llm_query_vector", "no_query_vector"),
+            ("two_tower", "no_user_like_history"),
+            ("custom", None),
+        ],
+    )
+    @pytest.mark.parametrize("is_infill", [False, True])
+    @pytest.mark.parametrize("feed_name", [None, "llm-qv-dev"])
+    async def test_not_run_records_skip_and_preserves_fallback_and_diagnostics(
+        self, monkeypatch, generator_name, reason, is_infill, feed_name
+    ):
+        if generator_name == "llm_query_vector":
+            # Exercise the real no-vector result; other names prove that the
+            # pipeline relies on the status rather than the generator name.
+            monkeypatch.setattr("app.lib.candidates.llm_query_vector._db", object())
+            monkeypatch.setattr(
+                "app.lib.llm_prompt_state.get_current_llm_query_vector",
+                AsyncMock(return_value=None),
+            )
+            generator = LlmQueryVectorCandidateGenerator()
+        else:
+            generator = MagicMock(spec=CandidateGenerator)
+            generator.generate = AsyncMock(
+                return_value=CandidateResult(
+                    generator_name=generator_name, status="not_run", reason=reason
+                )
+            )
+        _stub_generators(
+            monkeypatch,
+            {
+                generator_name: generator,
+                "empty": _EmptyGenerator("empty"),
+                "popular": _StaticGenerator("popular", [_candidate("at://fallback", "popular")]),
+            },
+        )
+        mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, mc))
+        recorder = FeedDebugRecorder(feed_name="llm-qv-dev", regenerated=False)
+        ctx = PipelineContext(feed_name="llm-qv-dev", fail_fast=True)
+        request = (
+            _make_request("empty", num_candidates=1, infill=generator_name)
+            if is_infill
+            else _make_request(generator_name, num_candidates=1, infill="popular")
+        )
+
+        with pipeline_context_scope(ctx), feed_debug_scope(recorder):
+            result = await run_generate(request, es=None, feed_name=feed_name)
+
+        assert [c.at_uri for c in result.candidates] == ([] if is_infill else ["at://fallback"])
+        assert ctx.degradations == []
+        outcomes = [
+            c for c in mc.calls
+            if c[2].get("generator_name") == generator_name
+            and c[0] != "candidates.generate.duration_ms"
+        ]
+        assert outcomes == [
+            (
+                "candidates.generate.skipped_count",
+                1,
+                {
+                    "generator_name": generator_name,
+                    "is_infill": "true" if is_infill else "false",
+                    "feed_name": feed_name or "",
+                    "reason": reason or "",
+                },
+            )
+        ]
+        assert [
+            (r.status, r.reason, r.mode)
+            for r in recorder.generator_outputs if r.generator_name == generator_name
+        ] == [("not_run", reason, "infill" if is_infill else "primary")]
+        if not is_infill:
+            assert any(
+                name == "candidates.generate.duration_ms"
+                and attrs["generator_name"] == generator_name
+                for name, _, attrs in mc.calls
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "returned_count, status", [(0, "success"), (0, "empty"), (2, "success")]
+    )
+    async def test_attempted_retrieval_still_records_fill_share(
+        self, monkeypatch, returned_count, status
+    ):
+        generator = MagicMock(spec=CandidateGenerator)
+        generator.generate = AsyncMock(
+            return_value=CandidateResult(
+                generator_name="llm_query_vector",
+                candidates=[_candidate(f"at://post/{i}") for i in range(returned_count)],
+                status=status,
+            )
+        )
+        _stub_generators(monkeypatch, {"llm_query_vector": generator})
+        mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, mc))
+
+        await run_generate(_make_request("llm_query_vector", num_candidates=4), es=None)
+
+        assert [v for n, v, _ in mc.calls if n == "candidates.generate.fill_share"] == [
+            returned_count / 4
+        ]
+        assert [v for n, v, _ in mc.calls if n == "candidates.generate.success_count"] == [1]
+        assert not [c for c in mc.calls if c[0] == "candidates.generate.skipped_count"]
+
+
 class TestLlmConfigurationFailures:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("is_infill", [False, True])

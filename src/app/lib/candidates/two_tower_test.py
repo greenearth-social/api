@@ -218,6 +218,7 @@ async def test_different_users_with_no_history_use_the_same_prior(generator, dep
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prior_error", [None, "not_configured"])
 @pytest.mark.parametrize(
     "history_mode,reason",
     [
@@ -225,10 +226,12 @@ async def test_different_users_with_no_history_use_the_same_prior(generator, dep
         ("empty", "average_user_embedding_unavailable"),
     ],
 )
-async def test_no_history_and_no_prior_returns_no_candidates(dependencies, history_mode, reason):
+async def test_no_history_and_no_prior_returns_no_candidates(
+    dependencies, history_mode, reason, prior_error
+):
     dependencies.history.return_value = make_history(0)
     dependencies.prior.return_value = None
-    dependencies.prior_error.return_value = "Artifact not configured"
+    dependencies.prior_error.return_value = prior_error
     generator = TwoTowerCandidateGenerator("two_tower", history_mode)
     result = await generator.generate(object(), "did:plc:user1")
     assert result.candidates == []
@@ -251,7 +254,26 @@ async def test_no_history_and_no_prior_returns_no_candidates(dependencies, histo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("prior_error", ["Not configured", "Invalid artifact", "GCS unavailable"])
+@pytest.mark.parametrize("history_mode", ["actual", "empty"])
+async def test_failed_prior_load_without_history_raises(dependencies, history_mode):
+    dependencies.history.return_value = make_history(0)
+    dependencies.prior.return_value = None
+    dependencies.prior_error.return_value = "load_failed"
+    generator = TwoTowerCandidateGenerator("two_tower", history_mode)
+
+    with pytest.raises(RuntimeError, match="Average user embedding is unavailable: load_failed"):
+        await generator.generate(object(), "did:plc:user1")
+
+    dependencies.knn.assert_not_awaited()
+    dependencies.prediction.assert_not_awaited()
+    dependencies.settings.assert_not_called()
+    assert dependencies.metrics.record.call_args_list == [
+        call("candidates.two_tower.history_size", 0, generator_name="two_tower")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior_error", ["load_failed", "Invalid artifact", "GCS unavailable"])
 async def test_actual_only_when_prior_unavailable(generator, dependencies, caplog, prior_error):
     dependencies.prior.return_value = None
     dependencies.prior_error.return_value = prior_error
