@@ -285,7 +285,12 @@ class TestPostHydration:
 
 class TestGeneratorTimeout:
     @pytest.mark.asyncio
-    async def test_timeout_swallow_returns_no_candidates_and_records_metric(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
+    )
+    async def test_timeout_swallow_returns_no_candidates_and_records_metric(
+        self, monkeypatch, feed_name, expected_feed_name
+    ):
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"slow_generator": _HangingGenerator("slow_generator")})
         mc = FakeMetricCollector()
@@ -293,7 +298,9 @@ class TestGeneratorTimeout:
 
         ctx = PipelineContext(feed_name="test-feed")
         with pipeline_context_scope(ctx):
-            result = await run_generate(_make_request("slow_generator"), es=None)
+            result = await run_generate(
+                _make_request("slow_generator"), es=None, feed_name=feed_name
+            )
 
         assert result.candidates == []
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -304,6 +311,7 @@ class TestGeneratorTimeout:
             "generator_name": "slow_generator",
             "outcome": "timeout",
             "is_infill": "false",
+            "feed_name": expected_feed_name,
         }
 
     @pytest.mark.asyncio
@@ -361,7 +369,12 @@ class TestGeneratorTimeout:
         assert attrs["is_infill"] == "false"
 
     @pytest.mark.asyncio
-    async def test_exception_records_error_outcome_metric(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
+    )
+    async def test_exception_records_error_outcome_metric(
+        self, monkeypatch, feed_name, expected_feed_name
+    ):
         gen = _FailingGenerator(ValueError("boom"), name="network_likes")
         _stub_generators(monkeypatch, {"network_likes": gen})
         mc = FakeMetricCollector()
@@ -369,7 +382,9 @@ class TestGeneratorTimeout:
 
         ctx = PipelineContext(feed_name="test-feed")
         with pipeline_context_scope(ctx):
-            result = await run_generate(_make_request("network_likes"), es=None)
+            result = await run_generate(
+                _make_request("network_likes"), es=None, feed_name=feed_name
+            )
 
         assert result.candidates == []
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -379,6 +394,7 @@ class TestGeneratorTimeout:
             "generator_name": "network_likes",
             "outcome": "error",
             "is_infill": "false",
+            "feed_name": expected_feed_name,
         }
 
     @pytest.mark.asyncio
@@ -409,32 +425,78 @@ class TestGeneratorTimeout:
         ]
 
     @pytest.mark.asyncio
-    async def test_success_records_success_count_metric(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
+    )
+    async def test_success_records_success_count_metric(
+        self, monkeypatch, feed_name, expected_feed_name
+    ):
         _stub_generators(monkeypatch, {"popular": _EmptyGenerator("popular")})
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
-        await run_generate(_make_request("popular"), es=None)
+        await run_generate(_make_request("popular"), es=None, feed_name=feed_name)
 
         success_calls = [c for c in mc.calls if c[0] == "candidates.generate.success_count"]
         assert len(success_calls) == 1
         _, _, attrs = success_calls[0]
-        assert attrs == {"generator_name": "popular", "is_infill": "false"}
+        assert attrs == {
+            "generator_name": "popular",
+            "is_infill": "false",
+            "feed_name": expected_feed_name,
+        }
 
     @pytest.mark.asyncio
-    async def test_success_records_fill_share_metric(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
+    )
+    async def test_success_records_fill_share_metric(
+        self, monkeypatch, feed_name, expected_feed_name
+    ):
         """A generator that under-fills its allocation is visible per generator."""
         _stub_generators(monkeypatch, {"popular": _EmptyGenerator("popular")})
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
-        await run_generate(_make_request("popular", num_candidates=4), es=None)
+        await run_generate(
+            _make_request("popular", num_candidates=4), es=None, feed_name=feed_name
+        )
 
         fill_calls = [c for c in mc.calls if c[0] == "candidates.generate.fill_share"]
         assert len(fill_calls) == 1
         _, value, attrs = fill_calls[0]
         assert value == 0.0
-        assert attrs == {"generator_name": "popular", "is_infill": "false"}
+        assert attrs == {
+            "generator_name": "popular",
+            "is_infill": "false",
+            "feed_name": expected_feed_name,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["success", "error", "timeout"])
+    async def test_duration_metric_keeps_feed_labels_separate(self, monkeypatch, outcome):
+        monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
+        generators = {
+            "success": _EmptyGenerator("popular"),
+            "error": _FailingGenerator(ValueError("boom"), name="popular"),
+            "timeout": _HangingGenerator("popular"),
+        }
+        _stub_generators(monkeypatch, {"popular": generators[outcome]})
+        mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, mc))
+
+        # The same generator can serve public feeds, development feeds, and
+        # direct API calls without feed context in the same process.
+        for kwargs in [{"feed_name": "your-feed"}, {"feed_name": "llm-qv-dev"}, {}]:
+            with pipeline_context_scope(PipelineContext(feed_name="test-feed")):
+                await run_generate(_make_request("popular"), es=None, **kwargs)
+
+        duration_calls = [c for c in mc.calls if c[0] == "candidates.generate.duration_ms"]
+        assert [attrs for _, _, attrs in duration_calls] == [
+            {"generator_name": "popular", "feed_name": "your-feed"},
+            {"generator_name": "popular", "feed_name": "llm-qv-dev"},
+            {"generator_name": "popular", "feed_name": ""},
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +527,12 @@ class TestInfillGeneratorTimeout:
         assert fallback.calls == []
 
     @pytest.mark.asyncio
-    async def test_infill_timeout_swallow_returns_empty_and_records_metric(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
+    )
+    async def test_infill_timeout_swallow_returns_empty_and_records_metric(
+        self, monkeypatch, feed_name, expected_feed_name
+    ):
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(
             monkeypatch,
@@ -482,6 +549,7 @@ class TestInfillGeneratorTimeout:
             result = await run_generate(
                 _make_request("random", num_candidates=5, infill="popular"),
                 es=None,
+                feed_name=feed_name,
             )
 
         assert result.candidates == []
@@ -492,6 +560,7 @@ class TestInfillGeneratorTimeout:
             "generator_name": "popular",
             "outcome": "timeout",
             "is_infill": "true",
+            "feed_name": expected_feed_name,
         }
 
     @pytest.mark.asyncio
@@ -546,7 +615,12 @@ class TestInfillGeneratorTimeout:
         assert attrs["outcome"] == "timeout"
 
     @pytest.mark.asyncio
-    async def test_infill_exception_records_error_outcome(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
+    )
+    async def test_infill_exception_records_error_outcome(
+        self, monkeypatch, feed_name, expected_feed_name
+    ):
         _stub_generators(
             monkeypatch,
             {
@@ -562,6 +636,7 @@ class TestInfillGeneratorTimeout:
             result = await run_generate(
                 _make_request("random", num_candidates=5, infill="popular"),
                 es=None,
+                feed_name=feed_name,
             )
 
         assert result.candidates == []
@@ -572,10 +647,16 @@ class TestInfillGeneratorTimeout:
             "generator_name": "popular",
             "outcome": "error",
             "is_infill": "true",
+            "feed_name": expected_feed_name,
         }
 
     @pytest.mark.asyncio
-    async def test_infill_success_records_success_count_metric(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
+    )
+    async def test_infill_success_records_success_count_metric(
+        self, monkeypatch, feed_name, expected_feed_name
+    ):
         _stub_generators(
             monkeypatch,
             {
@@ -589,13 +670,18 @@ class TestInfillGeneratorTimeout:
         await run_generate(
             _make_request("random", num_candidates=5, infill="popular"),
             es=None,
+            feed_name=feed_name,
         )
 
         success_calls = [c for c in mc.calls if c[0] == "candidates.generate.success_count"]
         assert len(success_calls) == 2  # one for "random", one for "popular" infill
         infill_success = [c for c in success_calls if c[2].get("is_infill") == "true"]
         assert len(infill_success) == 1
-        assert infill_success[0][2] == {"generator_name": "popular", "is_infill": "true"}
+        assert infill_success[0][2] == {
+            "generator_name": "popular",
+            "is_infill": "true",
+            "feed_name": expected_feed_name,
+        }
 
     @pytest.mark.asyncio
     async def test_infill_excludes_request_and_primary_candidate_uris(self, monkeypatch):
