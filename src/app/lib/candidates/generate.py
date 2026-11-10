@@ -182,6 +182,7 @@ async def run_generate(
     es,
     *,
     extra_generators: Mapping[str, CandidateGenerator] | None = None,
+    feed_name: str | None = None,
 ) -> CandidateGenerateResult:
     """Execute a candidate-generation pipeline described by *request*.
 
@@ -220,7 +221,10 @@ async def run_generate(
                 logger,
                 "candidates.generate.duration_ms",
                 record_metric=True,
-                metric_attrs={"generator_name": spec.name},
+                metric_attrs={
+                    "generator_name": spec.name,
+                    "feed_name": feed_name if feed_name is not None else ""
+                },
                 count=count,
             ):
                 results = [
@@ -242,6 +246,7 @@ async def run_generate(
                     1,
                     generator_name=spec.name,
                     is_infill="false",
+                    feed_name=feed_name if feed_name is not None else "",
                 )
                 # Share of the requested allocation actually returned, so a
                 # generator that quietly under-fills for some users is visible
@@ -252,6 +257,7 @@ async def run_generate(
                     min(returned / count, 1.0),
                     generator_name=spec.name,
                     is_infill="false",
+                    feed_name=feed_name if feed_name is not None else "",
                 )
             normalized: list[CandidateResult] = []
             for result in results:
@@ -292,6 +298,7 @@ async def run_generate(
                     generator_name=spec.name,
                     outcome=outcome,
                     is_infill="false",
+                    feed_name=feed_name if feed_name is not None else "",
                 )
             ctx = current_pipeline_context()
             if ctx is not None:
@@ -362,6 +369,7 @@ async def run_generate(
                     1,
                     generator_name=request.infill,
                     is_infill="true",
+                    feed_name=feed_name if feed_name is not None else "",
                 )
         except Exception as exc:
             if isinstance(exc, TimeoutError):
@@ -381,6 +389,7 @@ async def run_generate(
                     generator_name=request.infill,
                     outcome=outcome,
                     is_infill="true",
+                    feed_name=feed_name if feed_name is not None else "",
                 )
             ctx = current_pipeline_context()
             if ctx is not None:
