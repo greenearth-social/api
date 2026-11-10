@@ -286,11 +286,9 @@ class TestPostHydration:
 
 class TestGeneratorTimeout:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
-    )
+    @pytest.mark.parametrize("feed_name", ["your-feed", "candidates_api"])
     async def test_timeout_swallow_returns_no_candidates_and_records_metric(
-        self, monkeypatch, feed_name, expected_feed_name
+        self, monkeypatch, feed_name
     ):
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(monkeypatch, {"slow_generator": _HangingGenerator("slow_generator")})
@@ -312,7 +310,7 @@ class TestGeneratorTimeout:
             "generator_name": "slow_generator",
             "outcome": "timeout",
             "is_infill": "false",
-            "feed_name": expected_feed_name,
+            "feed_name": feed_name,
         }
 
     @pytest.mark.asyncio
@@ -323,7 +321,7 @@ class TestGeneratorTimeout:
         ctx = PipelineContext(feed_name="test-feed")
         with pipeline_context_scope(ctx):
             with caplog.at_level(logging.WARNING):
-                await run_generate(_make_request("slow_generator"), es=None)
+                await run_generate(_make_request("slow_generator"), es=None, feed_name="test-feed")
 
         timeout_warnings = [
             r for r in caplog.records if "timed out" in r.message and r.levelno == logging.WARNING
@@ -345,7 +343,7 @@ class TestGeneratorTimeout:
 
         with pytest.raises(GeneratorError) as exc_info:
             await asyncio.wait_for(
-                run_generate(_make_request("slow_generator"), es=None),
+                run_generate(_make_request("slow_generator"), es=None, feed_name="test-feed"),
                 timeout=1.0,
             )
 
@@ -361,7 +359,7 @@ class TestGeneratorTimeout:
         set_metric_collector(cast(MetricCollector, mc))
 
         with pytest.raises(GeneratorError):
-            await run_generate(_make_request("slow_generator"), es=None)
+            await run_generate(_make_request("slow_generator"), es=None, feed_name="test-feed")
 
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
         assert len(failure_calls) == 1
@@ -370,11 +368,9 @@ class TestGeneratorTimeout:
         assert attrs["is_infill"] == "false"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
-    )
+    @pytest.mark.parametrize("feed_name", ["your-feed", "candidates_api"])
     async def test_exception_records_error_outcome_metric(
-        self, monkeypatch, feed_name, expected_feed_name
+        self, monkeypatch, feed_name
     ):
         gen = _FailingGenerator(ValueError("boom"), name="network_likes")
         _stub_generators(monkeypatch, {"network_likes": gen})
@@ -395,7 +391,7 @@ class TestGeneratorTimeout:
             "generator_name": "network_likes",
             "outcome": "error",
             "is_infill": "false",
-            "feed_name": expected_feed_name,
+            "feed_name": feed_name,
         }
 
     @pytest.mark.asyncio
@@ -414,6 +410,7 @@ class TestGeneratorTimeout:
                 result = await run_generate(
                     _make_request("popular", num_candidates=1, infill="popular"),
                     es=None,
+                    feed_name="test-feed",
                 )
 
         assert [c.at_uri for c in result.candidates] == ["at://infill/1"]
@@ -426,11 +423,9 @@ class TestGeneratorTimeout:
         ]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
-    )
+    @pytest.mark.parametrize("feed_name", ["your-feed", "candidates_api"])
     async def test_success_records_success_count_metric(
-        self, monkeypatch, feed_name, expected_feed_name
+        self, monkeypatch, feed_name
     ):
         _stub_generators(monkeypatch, {"popular": _EmptyGenerator("popular")})
         mc = FakeMetricCollector()
@@ -444,15 +439,13 @@ class TestGeneratorTimeout:
         assert attrs == {
             "generator_name": "popular",
             "is_infill": "false",
-            "feed_name": expected_feed_name,
+            "feed_name": feed_name,
         }
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
-    )
+    @pytest.mark.parametrize("feed_name", ["your-feed", "candidates_api"])
     async def test_success_records_fill_share_metric(
-        self, monkeypatch, feed_name, expected_feed_name
+        self, monkeypatch, feed_name
     ):
         """A generator that under-fills its allocation is visible per generator."""
         _stub_generators(monkeypatch, {"popular": _EmptyGenerator("popular")})
@@ -470,7 +463,7 @@ class TestGeneratorTimeout:
         assert attrs == {
             "generator_name": "popular",
             "is_infill": "false",
-            "feed_name": expected_feed_name,
+            "feed_name": feed_name,
         }
 
     @pytest.mark.asyncio
@@ -487,16 +480,16 @@ class TestGeneratorTimeout:
         set_metric_collector(cast(MetricCollector, mc))
 
         # The same generator can serve public feeds, development feeds, and
-        # direct API calls without feed context in the same process.
-        for kwargs in [{"feed_name": "your-feed"}, {"feed_name": "llm-qv-dev"}, {}]:
+        # direct API calls in the same process.
+        for feed_name in ["your-feed", "llm-qv-dev", "candidates_api"]:
             with pipeline_context_scope(PipelineContext(feed_name="test-feed")):
-                await run_generate(_make_request("popular"), es=None, **kwargs)
+                await run_generate(_make_request("popular"), es=None, feed_name=feed_name)
 
         duration_calls = [c for c in mc.calls if c[0] == "candidates.generate.duration_ms"]
         assert [attrs for _, _, attrs in duration_calls] == [
             {"generator_name": "popular", "feed_name": "your-feed"},
             {"generator_name": "popular", "feed_name": "llm-qv-dev"},
-            {"generator_name": "popular", "feed_name": ""},
+            {"generator_name": "popular", "feed_name": "candidates_api"},
         ]
 
 
@@ -511,7 +504,7 @@ class TestGeneratorNotRun:
         ],
     )
     @pytest.mark.parametrize("is_infill", [False, True])
-    @pytest.mark.parametrize("feed_name", [None, "llm-qv-dev"])
+    @pytest.mark.parametrize("feed_name", ["candidates_api", "llm-qv-dev"])
     async def test_not_run_records_skip_and_preserves_fallback_and_diagnostics(
         self, monkeypatch, generator_name, reason, is_infill, feed_name
     ):
@@ -566,7 +559,7 @@ class TestGeneratorNotRun:
                 {
                     "generator_name": generator_name,
                     "is_infill": "true" if is_infill else "false",
-                    "feed_name": feed_name or "",
+                    "feed_name": feed_name,
                     "reason": reason or "",
                 },
             )
@@ -601,7 +594,10 @@ class TestGeneratorNotRun:
         mc = FakeMetricCollector()
         set_metric_collector(cast(MetricCollector, mc))
 
-        await run_generate(_make_request("llm_query_vector", num_candidates=4), es=None)
+        await run_generate(
+            _make_request("llm_query_vector", num_candidates=4), es=None,
+            feed_name="test-feed",
+        )
 
         assert [v for n, v, _ in mc.calls if n == "candidates.generate.fill_share"] == [
             returned_count / 4
@@ -677,6 +673,7 @@ class TestInfillGeneratorTimeout:
         result = await run_generate(
             _make_request("network_likes", num_candidates=5, infill=None),
             es=None,
+            feed_name="test-feed",
         )
 
         assert result.candidates == []
@@ -684,11 +681,9 @@ class TestInfillGeneratorTimeout:
         assert fallback.calls == []
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
-    )
+    @pytest.mark.parametrize("feed_name", ["your-feed", "candidates_api"])
     async def test_infill_timeout_swallow_returns_empty_and_records_metric(
-        self, monkeypatch, feed_name, expected_feed_name
+        self, monkeypatch, feed_name
     ):
         monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 0.01)
         _stub_generators(
@@ -717,7 +712,7 @@ class TestInfillGeneratorTimeout:
             "generator_name": "popular",
             "outcome": "timeout",
             "is_infill": "true",
-            "feed_name": expected_feed_name,
+            "feed_name": feed_name,
         }
 
     @pytest.mark.asyncio
@@ -739,6 +734,7 @@ class TestInfillGeneratorTimeout:
             await run_generate(
                 _make_request("random", num_candidates=5, infill="popular"),
                 es=None,
+                feed_name="test-feed",
             )
 
         assert exc_info.value.name == "popular"
@@ -763,6 +759,7 @@ class TestInfillGeneratorTimeout:
             await run_generate(
                 _make_request("random", num_candidates=5, infill="popular"),
                 es=None,
+                feed_name="test-feed",
             )
 
         failure_calls = [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
@@ -772,11 +769,9 @@ class TestInfillGeneratorTimeout:
         assert attrs["outcome"] == "timeout"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
-    )
+    @pytest.mark.parametrize("feed_name", ["your-feed", "candidates_api"])
     async def test_infill_exception_records_error_outcome(
-        self, monkeypatch, feed_name, expected_feed_name
+        self, monkeypatch, feed_name
     ):
         _stub_generators(
             monkeypatch,
@@ -804,15 +799,13 @@ class TestInfillGeneratorTimeout:
             "generator_name": "popular",
             "outcome": "error",
             "is_infill": "true",
-            "feed_name": expected_feed_name,
+            "feed_name": feed_name,
         }
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "feed_name, expected_feed_name", [(None, ""), ("your-feed", "your-feed")]
-    )
+    @pytest.mark.parametrize("feed_name", ["your-feed", "candidates_api"])
     async def test_infill_success_records_success_count_metric(
-        self, monkeypatch, feed_name, expected_feed_name
+        self, monkeypatch, feed_name
     ):
         _stub_generators(
             monkeypatch,
@@ -837,7 +830,7 @@ class TestInfillGeneratorTimeout:
         assert infill_success[0][2] == {
             "generator_name": "popular",
             "is_infill": "true",
-            "feed_name": expected_feed_name,
+            "feed_name": feed_name,
         }
 
     @pytest.mark.asyncio
@@ -870,6 +863,7 @@ class TestInfillGeneratorTimeout:
                 exclude_uris=["at://seen/1"],
             ),
             es=None,
+            feed_name="test-feed",
         )
 
         assert infill.calls[0]["exclude_uris"] == [
@@ -946,7 +940,7 @@ class TestNoPipelineContext:
             lambda name: _make_failing(name),
         )
         with pytest.raises(GeneratorError):
-            await run_generate(_request("two_tower"), es=object())
+            await run_generate(_request("two_tower"), es=object(), feed_name="test-feed")
 
     @pytest.mark.asyncio
     async def test_generator_success_returns_candidates(self, monkeypatch):
@@ -954,7 +948,7 @@ class TestNoPipelineContext:
             "app.lib.candidates.generate.get_generator",
             lambda name: _make_success(name),
         )
-        result = await run_generate(_request("two_tower"), es=object())
+        result = await run_generate(_request("two_tower"), es=object(), feed_name="test-feed")
         assert len(result.candidates) == 1
         assert result.candidates[0].at_uri == "at://two_tower/1"
 
@@ -968,7 +962,7 @@ class TestWithPipelineContext:
         )
         ctx = PipelineContext(feed_name="your-feed")
         with pipeline_context_scope(ctx):
-            result = await run_generate(_request("two_tower"), es=object())
+            result = await run_generate(_request("two_tower"), es=object(), feed_name="test-feed")
 
         assert result.candidates == []
         assert len(ctx.degradations) == 1
@@ -983,7 +977,10 @@ class TestWithPipelineContext:
         monkeypatch.setattr("app.lib.candidates.generate.get_generator", _get)
         ctx = PipelineContext(feed_name="your-feed")
         with pipeline_context_scope(ctx):
-            result = await run_generate(_request("two_tower", "followed_users"), es=object())
+            result = await run_generate(
+                _request("two_tower", "followed_users"), es=object(),
+                feed_name="test-feed",
+            )
 
         assert len(result.candidates) == 1
         assert result.candidates[0].at_uri == "at://followed_users/1"
@@ -999,7 +996,7 @@ class TestWithPipelineContext:
         ctx = PipelineContext(feed_name="your-feed", fail_fast=True)
         with pipeline_context_scope(ctx):
             with pytest.raises(RuntimeError, match="es connection refused"):
-                await run_generate(_request("two_tower"), es=object())
+                await run_generate(_request("two_tower"), es=object(), feed_name="test-feed")
 
     @pytest.mark.asyncio
     async def test_infill_failure_records_degradation(self, monkeypatch):
@@ -1021,7 +1018,7 @@ class TestWithPipelineContext:
             max_age_hours=168,
         )
         with pipeline_context_scope(ctx):
-            result = await run_generate(req, es=object())
+            result = await run_generate(req, es=object(), feed_name="test-feed")
 
         assert len(result.candidates) == 1
         assert any(d.component == "popularity:infill" for d in ctx.degradations)
@@ -1095,7 +1092,7 @@ class TestHydrateEmbeddingsRequestFlag:
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
         monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
-        result = await run_generate(_make_request("gen"), es=object())
+        result = await run_generate(_make_request("gen"), es=object(), feed_name="test-feed")
 
         assert fetch.calls == []
         assert result.candidates[0].minilm_l12_embedding is None
@@ -1106,7 +1103,10 @@ class TestHydrateEmbeddingsRequestFlag:
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
         monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
-        result = await run_generate(_hydrate_request("gen", hydrate=False), es=object())
+        result = await run_generate(
+            _hydrate_request("gen", hydrate=False), es=object(),
+            feed_name="test-feed",
+        )
 
         assert fetch.calls == []
         assert result.candidates[0].minilm_l12_embedding is None
@@ -1118,7 +1118,7 @@ class TestHydrateEmbeddingsRequestFlag:
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
         monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
-        result = await run_generate(_hydrate_request("gen"), es=object())
+        result = await run_generate(_hydrate_request("gen"), es=object(), feed_name="test-feed")
 
         assert len(fetch.calls) == 1
         assert fetch.calls[0]["at_uris"] == ["at://a"]
@@ -1141,7 +1141,7 @@ class TestHydrateEmbeddingsRequestFlag:
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
         monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
-        result = await run_generate(_hydrate_request("gen"), es=object())
+        result = await run_generate(_hydrate_request("gen"), es=object(), feed_name="test-feed")
 
         assert fetch.calls[0]["at_uris"] == ["at://b"]
         assert result.candidates[0].minilm_l12_embedding == existing
@@ -1157,7 +1157,7 @@ class TestHydrateEmbeddingsRequestFlag:
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
         monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
-        result = await run_generate(_hydrate_request("gen"), es=object())
+        result = await run_generate(_hydrate_request("gen"), es=object(), feed_name="test-feed")
 
         assert fetch.calls == []
         assert result.candidates[0].minilm_l12_embedding == existing
@@ -1170,7 +1170,7 @@ class TestHydrateEmbeddingsRequestFlag:
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
         monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
-        result = await run_generate(_hydrate_request("gen"), es=object())
+        result = await run_generate(_hydrate_request("gen"), es=object(), feed_name="test-feed")
 
         assert fetch.calls[0]["at_uris"] == ["at://a", "at://b"]
         assert [c.at_uri for c in result.candidates] == ["at://a", "at://b"]
@@ -1186,7 +1186,7 @@ class TestHydrateEmbeddingsRequestFlag:
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
         monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
-        result = await run_generate(_hydrate_request("gen"), es=object())
+        result = await run_generate(_hydrate_request("gen"), es=object(), feed_name="test-feed")
 
         assert [c.at_uri for c in result.candidates] == ["at://a", "at://b"]
         encoded = result.candidates[0].minilm_l12_embedding
@@ -1200,7 +1200,7 @@ class TestHydrateEmbeddingsRequestFlag:
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
         monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
-        result = await run_generate(_hydrate_request("gen"), es=object())
+        result = await run_generate(_hydrate_request("gen"), es=object(), feed_name="test-feed")
 
         assert len(fetch.calls) == 1
         assert result.candidates[0].minilm_l12_embedding is None
@@ -1219,7 +1219,10 @@ class TestHydrateEmbeddingsRequestFlag:
         _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
         monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
 
-        result = await run_generate(_hydrate_request("gen", num_candidates=2), es=object())
+        result = await run_generate(
+            _hydrate_request("gen", num_candidates=2), es=object(),
+            feed_name="test-feed",
+        )
 
         assert len(fetch.calls) == 1
         assert fetch.calls[0]["at_uris"] == ["at://a", "at://b"]
@@ -1243,7 +1246,10 @@ class TestHydrateEmbeddingsFailures:
         ctx = PipelineContext(feed_name="test-feed")
         with pipeline_context_scope(ctx):
             with caplog.at_level(logging.WARNING, logger=generate_module.logger.name):
-                result = await run_generate(_hydrate_request("gen"), es=object())
+                result = await run_generate(
+                    _hydrate_request("gen"), es=object(),
+                    feed_name="test-feed",
+                )
 
         assert [c.at_uri for c in result.candidates] == ["at://a"]
         assert result.candidates[0].minilm_l12_embedding is None
@@ -1282,7 +1288,10 @@ class TestHydrateEmbeddingsFailures:
         ctx = PipelineContext(feed_name="test-feed")
         with pipeline_context_scope(ctx):
             with caplog.at_level(logging.ERROR, logger=generate_module.logger.name):
-                result = await run_generate(_hydrate_request("gen"), es=object())
+                result = await run_generate(
+                    _hydrate_request("gen"), es=object(),
+                    feed_name="test-feed",
+                )
 
         assert [c.at_uri for c in result.candidates] == ["at://a"]
         assert result.candidates[0].minilm_l12_embedding is None
@@ -1315,7 +1324,7 @@ class TestHydrateEmbeddingsFailures:
 
         # No PipelineContext: generator failures would hard-fail here, but a
         # hydration failure is never fatal — the slate is served unhydrated.
-        result = await run_generate(_hydrate_request("gen"), es=object())
+        result = await run_generate(_hydrate_request("gen"), es=object(), feed_name="test-feed")
 
         assert [c.at_uri for c in result.candidates] == ["at://a"]
         assert result.candidates[0].minilm_l12_embedding is None
@@ -1334,7 +1343,7 @@ class TestHydrateEmbeddingsFailures:
         ctx = PipelineContext(feed_name="test-feed", fail_fast=True)
         with pipeline_context_scope(ctx):
             with pytest.raises(RuntimeError, match="Elasticsearch failed"):
-                await run_generate(_hydrate_request("gen"), es=object())
+                await run_generate(_hydrate_request("gen"), es=object(), feed_name="test-feed")
 
         assert len(ctx.degradations) == 1
         assert ctx.degradations[0].stage == DegradationStage.EMBED_HYDRATION
@@ -1393,7 +1402,8 @@ async def test_extra_generators_shadow_registry_for_specs_and_infill(monkeypatch
         infill="backfill",
     )
     result = await run_generate(
-        request, es=object(), extra_generators={"external": external, "backfill": infill}
+        request, es=object(), extra_generators={"external": external, "backfill": infill},
+        feed_name="test-feed",
     )
 
     uris = [c.at_uri for c in result.candidates]
@@ -1418,5 +1428,6 @@ async def test_unknown_name_still_raises_with_extra_generators(monkeypatch):
     )
     with pytest.raises(generate_module.GeneratorNotFoundError):
         await run_generate(
-            request, es=object(), extra_generators={"external": _UriGenerator("external", [])}
+            request, es=object(), extra_generators={"external": _UriGenerator("external", [])},
+            feed_name="test-feed",
         )

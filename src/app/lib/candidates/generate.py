@@ -182,9 +182,12 @@ async def run_generate(
     es,
     *,
     extra_generators: Mapping[str, CandidateGenerator] | None = None,
-    feed_name: str | None = None,
+    feed_name: str,
 ) -> CandidateGenerateResult:
     """Execute a candidate-generation pipeline described by *request*.
+
+    ``feed_name`` labels metrics with the requested feed, or ``candidates_api``
+    for direct candidate-generation requests.
 
     ``extra_generators`` are request-scoped generators (e.g. the slate API's
     ``external`` generator wrapping caller-supplied posts) consulted by name
@@ -223,7 +226,7 @@ async def run_generate(
                 record_metric=True,
                 metric_attrs={
                     "generator_name": spec.name,
-                    "feed_name": feed_name if feed_name is not None else ""
+                    "feed_name": feed_name
                 },
                 count=count,
             ):
@@ -247,7 +250,7 @@ async def run_generate(
                         1,
                         generator_name=spec.name,
                         is_infill="false",
-                        feed_name=feed_name if feed_name is not None else "",
+                        feed_name=feed_name,
                         reason=results[0].reason or "",
                     )
                 # Preserve diagnostics and infill without treating a skipped
@@ -259,7 +262,7 @@ async def run_generate(
                     1,
                     generator_name=spec.name,
                     is_infill="false",
-                    feed_name=feed_name if feed_name is not None else "",
+                    feed_name=feed_name,
                 )
                 # Share of the requested allocation actually returned, so a
                 # generator that quietly under-fills for some users is visible
@@ -270,7 +273,7 @@ async def run_generate(
                     min(returned / count, 1.0),
                     generator_name=spec.name,
                     is_infill="false",
-                    feed_name=feed_name if feed_name is not None else "",
+                    feed_name=feed_name,
                 )
             normalized: list[CandidateResult] = []
             for result in results:
@@ -311,7 +314,7 @@ async def run_generate(
                     generator_name=spec.name,
                     outcome=outcome,
                     is_infill="false",
-                    feed_name=feed_name if feed_name is not None else "",
+                    feed_name=feed_name,
                 )
             ctx = current_pipeline_context()
             if ctx is not None:
@@ -383,7 +386,7 @@ async def run_generate(
                         1,
                         generator_name=request.infill,
                         is_infill="true",
-                        feed_name=feed_name if feed_name is not None else "",
+                        feed_name=feed_name,
                         reason=infill_result.reason or "",
                     )
                 else:
@@ -392,7 +395,7 @@ async def run_generate(
                         1,
                         generator_name=request.infill,
                         is_infill="true",
-                        feed_name=feed_name if feed_name is not None else "",
+                        feed_name=feed_name,
                     )
         except Exception as exc:
             if isinstance(exc, TimeoutError):
@@ -412,7 +415,7 @@ async def run_generate(
                     generator_name=request.infill,
                     outcome=outcome,
                     is_infill="true",
-                    feed_name=feed_name if feed_name is not None else "",
+                    feed_name=feed_name,
                 )
             ctx = current_pipeline_context()
             if ctx is not None:
