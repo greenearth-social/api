@@ -9,6 +9,7 @@ from .bsky import (
     FollowsFetch,
     fetch_follow_records,
     fetch_followed_user_dids,
+    fetch_visible_follow_records,
     get_followed_user_dids,
 )
 
@@ -590,6 +591,14 @@ class TestFetchFollowRecords:
         assert second["params"]["cursor"] == "c1"
 
     @pytest.mark.asyncio
+    async def test_walk_ending_on_its_own_is_not_capped(self, fake_http_client):
+        fake_http_client.response = FakeResponse({"records": [_record("r1", "did:plc:a")]})
+
+        fetch = await fetch_follow_records("did:plc:me", limit=1, timeout_seconds=5)
+
+        assert fetch.capped is False
+
+    @pytest.mark.asyncio
     async def test_caps_at_limit_and_keeps_rkeys_aligned(self, fake_http_client):
         fake_http_client.response = FakeResponse({
             "records": [_record("r1", "did:plc:a"), _record("r2", "did:plc:b"),
@@ -602,6 +611,7 @@ class TestFetchFollowRecords:
         assert fetch.dids == ["did:plc:a", "did:plc:b"]
         assert fetch.rkeys == ["r1", "r2"]
         assert fetch.complete is True
+        assert fetch.capped is True
 
     @pytest.mark.asyncio
     async def test_skips_malformed_records(self, fake_http_client):
@@ -649,3 +659,59 @@ class TestFetchFollowRecords:
         fetch = await fetch_followed_user_dids("did:plc:me", limit=10)
 
         assert fetch.rkeys == []
+
+
+class TestFetchVisibleFollowRecords:
+    """Follow records filtered to the follows getFollows shows."""
+
+    @pytest.fixture
+    def walks(self, monkeypatch):
+        self.records: FollowsFetch | Exception = FollowsFetch(
+            dids=["did:plc:a", "did:plc:blocked", "did:plc:b"],
+            rkeys=["ra", "rx", "rb"],
+            capped=True,
+        )
+        self.visible: FollowsFetch | Exception = FollowsFetch(dids=["did:plc:b", "did:plc:a"])
+
+        async def records(*args, **kwargs):
+            if isinstance(self.records, Exception):
+                raise self.records
+            return self.records
+
+        async def visible(*args, **kwargs):
+            if isinstance(self.visible, Exception):
+                raise self.visible
+            return self.visible
+
+        monkeypatch.setattr(bsky_module, "fetch_follow_records", records)
+        monkeypatch.setattr(bsky_module, "fetch_followed_user_dids", visible)
+
+    @pytest.mark.asyncio
+    async def test_drops_records_getfollows_hides(self, walks):
+        fetch = await fetch_visible_follow_records("did:plc:me", 10, 5)
+
+        assert fetch == FollowsFetch(
+            dids=["did:plc:a", "did:plc:b"], rkeys=["ra", "rb"], complete=True, capped=True
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "visible",
+        [FollowedUsersLookupError("appview down"), FollowsFetch(dids=["did:plc:a"],
+                                                                complete=False)],
+    )
+    async def test_unfiltered_but_incomplete_without_a_full_getfollows(self, walks, visible):
+        self.visible = visible
+
+        fetch = await fetch_visible_follow_records("did:plc:me", 10, 5)
+
+        assert fetch.dids == ["did:plc:a", "did:plc:blocked", "did:plc:b"]
+        assert fetch.rkeys == ["ra", "rx", "rb"]
+        assert fetch.complete is False
+
+    @pytest.mark.asyncio
+    async def test_records_failure_raises(self, walks):
+        self.records = FollowedUsersLookupError("pds down")
+
+        with pytest.raises(FollowedUsersLookupError):
+            await fetch_visible_follow_records("did:plc:me", 10, 5)

@@ -55,8 +55,8 @@ from google.cloud.firestore import (  # type: ignore[import-untyped]
 from .bsky import (
     FollowedUsersLookupError,
     FollowsFetch,
-    fetch_follow_records,
     fetch_followed_user_dids,
+    fetch_visible_follow_records,
 )
 from .metrics import get_metric_collector
 from .release import api_release_sha
@@ -232,12 +232,12 @@ def _has_unresolved_removes(entry: "FollowedUsersCacheDocument") -> bool:
 
     With record keys, an unknown key on a capped list is a follow beyond the
     cap — never stored, so nothing to drop.  Otherwise (an entry from
-    getFollows, or an uncapped one missing the key) the unfollowed DID is
-    unknown and only a refresh can drop it.
+    getFollows, a follow getFollows hid, or one missing for any other reason)
+    the unfollowed DID is unknown and only a refresh can drop it.
     """
     if not entry.pending_removes:
         return False
-    if _has_rkeys(entry) and len(entry.follows) >= MAX_FOLLOWED_USERS:
+    if _has_rkeys(entry) and entry.capped:
         return False
     known = set(entry.follow_rkeys) | {rkey for rkey, _ in _pending_adds(entry)}
     return any(rkey not in known for rkey in entry.pending_removes)
@@ -350,14 +350,19 @@ class FollowedUsersCache:
         return entry
 
     def _staleness(self, entry: "FollowedUsersCacheDocument") -> str | None:
-        """Why *entry* needs refreshing, or ``None`` if it does not."""
-        if not entry.complete:
-            # However young: a truncated follow list must never be trusted.
-            return "incomplete"
+        """Why *entry* needs refreshing, or ``None`` if it does not.
+
+        The delta reasons come first: for precompute_artifacts users they are
+        the ones refreshed from the request path (everything else waits for
+        the job), so an unfollow is never held up behind another reason.
+        """
         if _has_unresolved_removes(entry):
             return "unresolved_remove"
         if len(entry.pending_add_records) + len(entry.pending_removes) > MAX_PENDING_DELTAS:
             return "pending_overflow"
+        if not entry.complete:
+            # However young: a truncated follow list must never be trusted.
+            return "incomplete"
         age = _age_seconds(entry.generated_at, datetime.now(timezone.utc))
         if age is None or age > ttl_seconds():
             return "stale"
@@ -394,8 +399,8 @@ class FollowedUsersCache:
         )
 
     async def _fetch_records(self, user_did: str) -> FollowsFetch:
-        """Walk the user's follow records, with rkeys.  Off the request path only."""
-        return await fetch_follow_records(
+        """Walk the user's visible follow records, with rkeys.  Off the request path only."""
+        return await fetch_visible_follow_records(
             user_did,
             MAX_FOLLOWED_USERS,
             timeout_seconds=refresh_timeout_seconds(),
@@ -409,6 +414,7 @@ class FollowedUsersCache:
             follows=fetch.dids,
             follow_rkeys=fetch.rkeys,
             complete=fetch.complete,
+            capped=fetch.capped,
             generated_at=now,
             pending_add_records=[],
             pending_removes=[],

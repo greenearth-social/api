@@ -290,6 +290,12 @@ class FollowedUsersCacheDocument(BaseModel):
     generated_at: datetime | None = Field(
         default=None, description="When 'follows' was fetched from Bluesky"
     )
+    capped: bool = Field(
+        default=False,
+        description="True when the walk that produced 'follows' stopped at the follow cap "
+        "with follows left unread.  An unfollow whose rkey is unknown to a capped "
+        "entry was of a follow beyond the cap, so there is nothing to drop.",
+    )
     follow_rkeys: list[str] = Field(
         default_factory=list,
         description="Follow-record keys, parallel to 'follows'.  Empty when 'follows' came "

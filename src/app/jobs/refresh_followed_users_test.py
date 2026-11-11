@@ -156,7 +156,7 @@ class RecordingWalk:
 @pytest.fixture
 def walk(monkeypatch):
     records = RecordingWalk(FollowsFetch(dids=["did:plc:new"], complete=True, rkeys=["rn"]))
-    monkeypatch.setattr(cache_module, "fetch_follow_records", records)
+    monkeypatch.setattr(cache_module, "fetch_visible_follow_records", records)
 
     async def no_getfollows(*args, **kwargs):
         raise AssertionError("the job walks follow records, never getFollows")

@@ -82,6 +82,8 @@ class FollowsFetch:
     """Follow-record keys, parallel to ``dids``.  Only a walk of the user's own
     repo (:func:`fetch_follow_records`) has them; ``getFollows`` does not
     expose record keys, so its walks leave this empty."""
+    capped: bool = False
+    """The walk stopped at ``limit`` with follows left unread."""
 
 
 def _is_retryable_follow_lookup_error(exc: httpx.HTTPError) -> bool:
@@ -256,13 +258,14 @@ async def _walk(
     if timeout_seconds is None:
         timeout_seconds = FOLLOWS_LOOKUP_TIMEOUT_SECONDS
 
-    def result(complete: bool) -> FollowsFetch:
+    def result(complete: bool, capped: bool = False) -> FollowsFetch:
         kept = followed[:limit]
         rkeys = [rkey for _, rkey in kept if rkey is not None]
         return FollowsFetch(
             dids=[did for did, _ in kept],
             complete=complete,
             rkeys=rkeys if len(rkeys) == len(kept) else [],
+            capped=capped,
         )
 
     try:
@@ -295,7 +298,7 @@ async def _walk(
 
                 followed.extend(items)
                 if not isinstance(cursor, str) or not cursor:
-                    break
+                    return result(complete=True)
     except TimeoutError as exc:
         _count_failure("bsky.follows.failure_count", exc)
         if followed:
@@ -319,6 +322,56 @@ async def _walk(
             f"Failed to fetch followed users for {user_did}"
         ) from exc
 
-    # Fell out of the loop on an exhausted cursor or a reached limit: both are
-    # the walk finishing on its own terms.
-    return result(complete=True)
+    # Fell out of the loop on a reached limit with a cursor left: a deliberate
+    # bound, so the walk is still complete.
+    return result(complete=True, capped=True)
+
+
+async def fetch_visible_follow_records(
+    user_did: str,
+    limit: int,
+    timeout_seconds: float | None = None,
+) -> FollowsFetch:
+    """*user_did*'s follow records, limited to follows ``getFollows`` shows.
+
+    The repo holds every follow record, including follows of accounts that
+    have since deactivated, or that block or are blocked by *user_did*;
+    ``getFollows`` hides those.  Walking both (concurrently, within one
+    budget) gives ``getFollows``' DIDs with the record keys only the repo has.
+    Both lists are newest first, so the visible follows among the first
+    *limit* records are all within ``getFollows``' first *limit*.
+
+    When ``getFollows`` cannot be walked in full the records are returned
+    unfiltered and marked incomplete: never trusted, and never allowed to
+    replace a complete entry.
+    """
+    if timeout_seconds is None:
+        timeout_seconds = FOLLOWS_LOOKUP_TIMEOUT_SECONDS
+    records, visible = await asyncio.gather(
+        fetch_follow_records(user_did, limit, timeout_seconds),
+        fetch_followed_user_dids(user_did, limit, timeout_seconds),
+        return_exceptions=True,
+    )
+    if isinstance(records, BaseException):
+        raise records
+    if isinstance(visible, BaseException) or not visible.complete:
+        if isinstance(visible, BaseException) and not isinstance(
+            visible, FollowedUsersLookupError
+        ):
+            raise visible
+        logger.warning(
+            "Could not walk getFollows for %s; keeping unfiltered follow records",
+            user_did,
+        )
+        return FollowsFetch(
+            dids=records.dids, complete=False, rkeys=records.rkeys, capped=records.capped
+        )
+    shown = set(visible.dids)
+    kept = [(did, rkey) for did, rkey in zip(records.dids, records.rkeys, strict=True)
+            if did in shown]
+    return FollowsFetch(
+        dids=[did for did, _ in kept],
+        complete=records.complete,
+        rkeys=[rkey for _, rkey in kept],
+        capped=records.capped,
+    )

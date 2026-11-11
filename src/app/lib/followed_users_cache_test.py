@@ -194,7 +194,7 @@ def records(monkeypatch):
     fetcher = RecordingOrigin(
         FollowsFetch(dids=["did:plc:a"], complete=True, rkeys=["ra"])
     )
-    monkeypatch.setattr(cache_module, "fetch_follow_records", fetcher)
+    monkeypatch.setattr(cache_module, "fetch_visible_follow_records", fetcher)
     return fetcher
 
 
@@ -387,14 +387,17 @@ class TestReadPath:
 
     @pytest.mark.asyncio
     async def test_unknown_rkey_on_a_capped_list_is_a_follow_beyond_the_cap(self, origin):
+        # Capped is the walk's own flag, not the list length: filtering out
+        # follows getFollows hides can leave a capped list short of the cap.
         db = FakeDb()
-        n = cache_module.MAX_FOLLOWED_USERS
+        n = cache_module.MAX_FOLLOWED_USERS - 50
         put(
             db,
             USER,
             follows=[f"did:plc:f{i}" for i in range(n)],
             follow_rkeys=[f"r{i}" for i in range(n)],
             complete=True,
+            capped=True,
             generated_at=now(),
             pending_removes=["beyond-the-cap"],
         )
@@ -484,6 +487,40 @@ class TestPrecomputeUsers:
         assert origin.calls == []
         assert len(records.calls) == 1
         assert stored(db, USER).follows == ["did:plc:a"]
+
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_unfollow_on_an_incomplete_entry_is_not_left_to_the_job(
+        self, origin, records, precompute_user, metrics
+    ):
+        # Incomplete alone waits for the job; an unfollow must not wait with it.
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:x"], complete=False, generated_at=now(),
+            pending_removes=["rx"])
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert len(records.calls) == 1
+        lookups = [a["outcome"] for n, _, a in metrics.records
+                   if n == "follows_cache.lookup_count"]
+        assert lookups == ["unresolved_remove"]
+
+    @pytest.mark.asyncio
+    async def test_refresh_stores_whether_the_walk_was_capped(
+        self, origin, records, precompute_user
+    ):
+        records.results = [FollowsFetch(dids=["did:plc:a"], rkeys=["ra"], capped=True)]
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:x"], complete=True, generated_at=now(),
+            pending_removes=["rx"])
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert stored(db, USER).capped is True
 
 
 class TestRefreshReason:
