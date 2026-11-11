@@ -77,6 +77,7 @@ def test_search_returns_embedding():
                 "politics_score": None,
                 "combined_perspective_score": None,
                 "perspective_scored_at": None,
+                "perspective_scores": None,
             }
         ]
     }

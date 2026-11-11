@@ -18,7 +18,10 @@ from ...models import (
     CandidatePost,
     GeneratorSpec,
 )
-from ..elasticsearch import fetch_post_embeddings_and_politics_scores
+from ..elasticsearch import (
+    fetch_post_embeddings_and_politics_scores,
+    fetch_post_perspective_scores,
+)
 from ..embeddings import encode_float32_b64
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
@@ -104,6 +107,10 @@ class GeneratorError(Exception):
         super().__init__(f"Generator '{name}' failed: {cause}")
 
 
+class DetailHydrationError(Exception):
+    """Raised when the extra data for ``detail="complete"`` could not be fetched."""
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -177,13 +184,40 @@ async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePo
     return final_candidates
 
 
+async def hydrate_complete_details(
+    es, candidates: list[CandidatePost]
+) -> list[CandidatePost]:
+    """Add the fields that ``detail="complete"`` returns beyond the essentials.
+
+    Raises rather than degrading: a caller that asked for complete data can't
+    tell a failed lookup from a post that simply has none.
+    """
+    uris = [c.at_uri for c in candidates if c.at_uri]
+    try:
+        scores = await asyncio.wait_for(
+            fetch_post_perspective_scores(es, uris),
+            timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        raise DetailHydrationError(f"Fetching complete post details failed: {exc!r}") from exc
+    return [
+        c.model_copy(update={"perspective_scores": scores[c.at_uri]})
+        if c.at_uri in scores else c
+        for c in candidates
+    ]
+
+
 async def run_generate(
     request: CandidateGenerateRequest,
     es,
     *,
     extra_generators: Mapping[str, CandidateGenerator] | None = None,
+    feed_name: str,
 ) -> CandidateGenerateResult:
     """Execute a candidate-generation pipeline described by *request*.
+
+    ``feed_name`` labels metrics with the requested feed, or ``candidates_api``
+    for direct candidate-generation requests.
 
     ``extra_generators`` are request-scoped generators (e.g. the slate API's
     ``external`` generator wrapping caller-supplied posts) consulted by name
@@ -220,7 +254,10 @@ async def run_generate(
                 logger,
                 "candidates.generate.duration_ms",
                 record_metric=True,
-                metric_attrs={"generator_name": spec.name},
+                metric_attrs={
+                    "generator_name": spec.name,
+                    "feed_name": feed_name
+                },
                 count=count,
             ):
                 results = [
@@ -236,12 +273,26 @@ async def run_generate(
                         timeout=_GENERATOR_TIMEOUT_SEC,
                     )
                 ]
+            if results[0].status == "not_run":
+                if mc := get_metric_collector():
+                    mc.record(
+                        "candidates.generate.skipped_count",
+                        1,
+                        generator_name=spec.name,
+                        is_infill="false",
+                        feed_name=feed_name,
+                        reason=results[0].reason or "",
+                    )
+                # Preserve diagnostics and infill without treating a skipped
+                # retrieval as a successful call with zero fill.
+                return results
             if mc := get_metric_collector():
                 mc.record(
                     "candidates.generate.success_count",
                     1,
                     generator_name=spec.name,
                     is_infill="false",
+                    feed_name=feed_name,
                 )
                 # Share of the requested allocation actually returned, so a
                 # generator that quietly under-fills for some users is visible
@@ -252,6 +303,7 @@ async def run_generate(
                     min(returned / count, 1.0),
                     generator_name=spec.name,
                     is_infill="false",
+                    feed_name=feed_name,
                 )
             normalized: list[CandidateResult] = []
             for result in results:
@@ -292,6 +344,7 @@ async def run_generate(
                     generator_name=spec.name,
                     outcome=outcome,
                     is_infill="false",
+                    feed_name=feed_name,
                 )
             ctx = current_pipeline_context()
             if ctx is not None:
@@ -357,12 +410,23 @@ async def run_generate(
                 timeout=_GENERATOR_TIMEOUT_SEC,
             )
             if mc := get_metric_collector():
-                mc.record(
-                    "candidates.generate.success_count",
-                    1,
-                    generator_name=request.infill,
-                    is_infill="true",
-                )
+                if infill_result.status == "not_run":
+                    mc.record(
+                        "candidates.generate.skipped_count",
+                        1,
+                        generator_name=request.infill,
+                        is_infill="true",
+                        feed_name=feed_name,
+                        reason=infill_result.reason or "",
+                    )
+                else:
+                    mc.record(
+                        "candidates.generate.success_count",
+                        1,
+                        generator_name=request.infill,
+                        is_infill="true",
+                        feed_name=feed_name,
+                    )
         except Exception as exc:
             if isinstance(exc, TimeoutError):
                 logger.warning(
@@ -381,6 +445,7 @@ async def run_generate(
                     generator_name=request.infill,
                     outcome=outcome,
                     is_infill="true",
+                    feed_name=feed_name,
                 )
             ctx = current_pipeline_context()
             if ctx is not None:
@@ -408,6 +473,8 @@ async def run_generate(
     final = deduped[:request.num_candidates]
     if getattr(request, 'hydrate_embeddings', False):
         final = await hydrate_posts(es, final)
+    if request.detail == "complete":
+        final = await hydrate_complete_details(es, final)
     if rec is not None:
         rec.record_final_candidates(final)
     return CandidateGenerateResult(candidates=final)

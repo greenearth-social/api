@@ -31,6 +31,10 @@ FOLLOWED_USERS_ONLY_GENERATORS = [GeneratorSpec(name="followed_users", weight=1.
 PERSONALIZED_MAX_RENDER_SHARE = 0.5
 PERSONALIZED_MIN_RANK_SCORE = 0.15
 PERSONALIZED_MIN_MMR_SCORE = -0.05
+# Grade each candidate generator's rank scores on its own 0..1 curve before MMR,
+# so a source the heavy ranker scores low still reaches the feed (issue #572).
+# False serves the raw rank order again.
+NORMALIZE_RANK_BY_GENERATOR = True
 PERSONALIZED_RANK_REQUEST_TEMPLATE = RankPredictRequest.model_construct(
     models=[
         RankModelSpec(name="heavy_ranker", weight=1.0),
@@ -159,7 +163,6 @@ FEEDS: dict[str, FeedConfig] = {
             "politics",
             "author_penalty",
             "topic_penalty",
-            "normalize_rank_by_generator",
         ),
         pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED),
         explore_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_EXPLORE),
@@ -173,6 +176,7 @@ FEEDS: dict[str, FeedConfig] = {
         max_render_share=PERSONALIZED_MAX_RENDER_SHARE,
         min_rank_score=PERSONALIZED_MIN_RANK_SCORE,
         min_mmr_score=None,
+        normalize_rank_by_generator=NORMALIZE_RANK_BY_GENERATOR,
         gen_request_template=CandidateGenerateRequest.model_construct(
             generators=SOCIAL_RADIUS_PRESETS.get(DEFAULT_SOCIAL_RADIUS),
             infill=None,
@@ -246,6 +250,7 @@ FEEDS: dict[str, FeedConfig] = {
         max_render_share=0.5,
         min_rank_score=0.15,
         min_mmr_score=-0.05,
+        normalize_rank_by_generator=NORMALIZE_RANK_BY_GENERATOR,
     ),
     ### (Private) Pure Candidate Generator Feeds, mostly for testing and debugging ###
     "followed-users": FeedConfig(

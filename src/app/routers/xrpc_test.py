@@ -870,6 +870,8 @@ async def test_politics_explanation_survives_pipeline_cache_and_pagination(
             "min_rank_score": None,
             "min_mmr_score": None,
             "max_render_share": None,
+            # Relevance below is checked against the raw adjusted scores.
+            "normalize_rank_by_generator": False,
         }
     )
 

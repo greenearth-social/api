@@ -284,7 +284,8 @@ def test_generate_dedup_keeps_first():
     assert len(at_uris) == len(set(at_uris))
 
 
-def test_infill_tops_up_when_primary_returns_few():
+@patch("app.lib.metrics._metric_collector")
+def test_infill_tops_up_when_primary_returns_few(collector):
     """Infill generator fills remaining slots when primaries fall short."""
     client = TestClient(app, headers=HEADERS)
     # two_tower fake returns only 1 result; requesting 5 with infill
@@ -305,6 +306,13 @@ def test_infill_tops_up_when_primary_returns_few():
     assert "popularity" in gen_names
     # Should have de-duplicated mix, capped at num_candidates
     assert len(data["candidates"]) <= 5
+
+    metric_calls = [
+        call for call in collector.record.call_args_list
+        if call.args[0].startswith("candidates.generate.")
+    ]
+    assert {call.kwargs["generator_name"] for call in metric_calls} == {"two_tower", "popularity"}
+    assert all(call.kwargs["feed_name"] == "candidates_api" for call in metric_calls)
 
 
 def test_infill_not_called_when_enough_results():
@@ -461,3 +469,68 @@ def test_generate_default_num_candidates():
         },
     )
     assert resp.status_code == 200
+
+
+def test_generate_complete_detail_returns_perspective_scores():
+    client = TestClient(app, headers=HEADERS)
+    scores = {"at://popular/1": {"toxicity": 0.1, "reasoning_experimental": 0.7}}
+    with patch(
+        "app.lib.candidates.generate.fetch_post_perspective_scores",
+        AsyncMock(return_value=scores),
+    ):
+        resp = client.post(
+            "/candidates/generate",
+            json={
+                "generators": [{"name": "popularity"}],
+                "user_did": "did:plc:user1",
+                "num_candidates": 2,
+                "detail": "complete",
+            },
+        )
+    assert resp.status_code == 200
+    by_uri = {c["at_uri"]: c for c in resp.json()["candidates"]}
+    assert by_uri["at://popular/1"]["perspective_scores"] == scores["at://popular/1"]
+    assert by_uri["at://popular/2"]["perspective_scores"] is None
+
+
+def test_generate_essential_detail_omits_perspective_scores():
+    client = TestClient(app, headers=HEADERS)
+    fetch = AsyncMock(return_value={})
+    with patch("app.lib.candidates.generate.fetch_post_perspective_scores", fetch):
+        resp = client.post(
+            "/candidates/generate",
+            json={"generators": [{"name": "popularity"}], "user_did": "did:plc:user1"},
+        )
+    assert resp.status_code == 200
+    fetch.assert_not_called()
+    assert all(c["perspective_scores"] is None for c in resp.json()["candidates"])
+
+
+def test_generate_complete_detail_fetch_failure_returns_502():
+    client = TestClient(app, headers=HEADERS)
+    with patch(
+        "app.lib.candidates.generate.fetch_post_perspective_scores",
+        AsyncMock(side_effect=RuntimeError("es down")),
+    ):
+        resp = client.post(
+            "/candidates/generate",
+            json={
+                "generators": [{"name": "popularity"}],
+                "user_did": "did:plc:user1",
+                "detail": "complete",
+            },
+        )
+    assert resp.status_code == 502
+
+
+def test_generate_rejects_unknown_detail_level():
+    client = TestClient(app, headers=HEADERS)
+    resp = client.post(
+        "/candidates/generate",
+        json={
+            "generators": [{"name": "popularity"}],
+            "user_did": "did:plc:user1",
+            "detail": "everything",
+        },
+    )
+    assert resp.status_code == 422

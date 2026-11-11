@@ -62,7 +62,8 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
     With usable history, blend the user prediction with a compatible prior,
     falling back to the actual prediction if the prior cannot be used.
     Without usable history (or in empty-history mode), use the prior alone if
-    available; otherwise return no candidates.
+    available. An unconfigured prior permits an empty result, while a failed
+    prior load raises when no actual-user prediction can replace it.
     All paths search post embeddings from the corresponding post-tower model.
     """
 
@@ -178,6 +179,11 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                 post_tower_uuid = prior.post_model_uuid
                 retrieval_mode = "prior_only"
             else:
+                # A failed configured prior is an error when there is no user
+                # embedding to fall back to, rather than an expected skip.
+                prior_error = get_average_user_embedding_error()
+                if prior_error not in (None, "not_configured"):
+                    raise RuntimeError(f"Average user embedding is unavailable: {prior_error}")
                 # No vector to search with. Other configured sources can still
                 # contribute through the existing candidate pipeline.
                 reason = (
@@ -196,7 +202,7 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                 logger.info(
                     "%s skipped: no usable history or average embedding; prior_error=%s",
                     self.name,
-                    get_average_user_embedding_error(),
+                    prior_error,
                 )
                 return CandidateResult(
                     generator_name=self.name,

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from ..models import CandidateGenerateRequest, CandidateGenerateResult
 from ..lib.candidates import (
+    DetailHydrationError,
     GeneratorError,
     GeneratorNotFoundError,
     list_generators,
@@ -54,7 +55,10 @@ async def candidates_list_generators() -> GeneratorListResponse:
     response_model=CandidateGenerateResult,
     responses={
         404: {"description": "A named generator was not found"},
-        502: {"description": "Upstream generator service failed"},
+        502: {
+            "description": "Upstream generator service failed, or the extra data "
+            "for `detail: complete` could not be fetched"
+        },
     },
 )
 async def candidates_generate(
@@ -72,12 +76,16 @@ async def candidates_generate(
     primary generators return fewer candidates than `num_candidates`.
     Pass previously shown AT URIs in `exclude_uris` to avoid repeating posts
     across pagination pages.
+    Set `detail: "complete"` to also get each post's per-attribute Perspective
+    scores in `perspective_scores`.
     """
     try:
-        result = await run_generate(payload, request.app.state.es)
+        result = await run_generate(
+            payload, request.app.state.es, feed_name="candidates_api"
+        )
     except GeneratorNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except GeneratorError as exc:
+    except (GeneratorError, DetailHydrationError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return CandidateGenerateResult(candidates=result.candidates)

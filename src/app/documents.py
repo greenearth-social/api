@@ -62,6 +62,8 @@ class FeedPreferencesDocument(BaseModel):
     purpose: float | None = Field(default=None, ge=0.0, le=1.0)
     author_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     topic_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    # No longer a control (always on for the feed, see feeds.NORMALIZE_RANK_BY_GENERATOR).
+    # Kept so documents saved while it was a team-only toggle still load.
     normalize_rank_by_generator: bool | None = None
 
 

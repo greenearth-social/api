@@ -13,7 +13,6 @@ FeedControlName = Literal[
     "purpose",
     "author_penalty",
     "topic_penalty",
-    "normalize_rank_by_generator",
 ]
 
 # What a feed does when the AppView calls getFeedSkeleton with no (or an
@@ -113,6 +112,13 @@ class CandidatePost(BaseModel):
         "with no combined_perspective_score means the post is permanently unscorable "
         "(no text, or an unsupported language); absent means it has never been scored.",
     )
+    perspective_scores: dict[str, float] | None = Field(
+        default=None,
+        description="Raw Perspective attribute scores in [0, 1] that combined_perspective_score "
+        "is computed from, keyed by lower-cased attribute name (e.g. toxicity, "
+        "reasoning_experimental). Only returned with `detail: complete`; None otherwise, "
+        "and when the post has not been scored or was unscorable.",
+    )
 
 
 class GeneratorSpec(BaseModel):
@@ -125,6 +131,11 @@ class GeneratorSpec(BaseModel):
 
 
 MaxAgeHours = Literal[6, 12, 24, 48, 72, 168]
+
+# How much per-post data an endpoint returns. `essential` is what ranking
+# needs; `complete` adds data that is useful to callers but costs extra
+# retrieval, so it is fetched only on request.
+ResponseDetail = Literal["essential", "complete"]
 
 
 class CandidateGenerateRequest(BaseModel):
@@ -159,6 +170,14 @@ class CandidateGenerateRequest(BaseModel):
     hydrate_embeddings: bool = Field(
         default=False,
         description="When true, refetches the 384-dim embedding arrays for the final candidates.",
+    )
+    detail: ResponseDetail = Field(
+        default="essential",
+        description=(
+            "`essential` returns the fields ranking uses. `complete` also returns "
+            "`perspective_scores` (the per-attribute Perspective scores), at the "
+            "cost of an extra lookup."
+        ),
     )
 
     infill: str | None = Field(

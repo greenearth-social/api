@@ -149,7 +149,12 @@ async def run_ranking_pipeline(
             num_candidates=gen_request.num_candidates,
             n_generators=len(gen_request.generators),
         ):
-            result = await run_generate(gen_request, es, extra_generators=extra_generators)
+            result = await run_generate(
+                gen_request,
+                es,
+                extra_generators=extra_generators,
+                feed_name=feed_name,
+            )
         candidates = result.candidates
 
         n_retrieved = len(candidates)
