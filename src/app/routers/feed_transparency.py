@@ -1,7 +1,14 @@
-"""Feed-transparency API endpoints.
+"""Feed-transparency API endpoints, authenticated with a Firebase ID token.
 
-GET  /api/feeds              — list recent feed snapshots (summary)
-GET  /api/feeds/{request_id} — full detail with pipeline metadata + hydrated posts
+GET   /api/feeds                     — recent feed snapshots (summary)
+GET   /api/feeds/{request_id}        — one load's pipeline detail + hydrated posts
+POST  /api/feeds/settings-visit      — record the user's first Settings visit
+GET   /api/feeds/preferences         — the user's feed preferences
+PATCH /api/feeds/preferences/{feed}  — update one feed's controls
+POST  /api/feeds/{feed}/preview      — preview a feed with unsaved settings
+GET   /api/feeds/previews/{id}       — one preview's detail
+POST  /api/feeds/{feed}/previews/{id}/accept
+                                     — save a preview's settings; next load shows it
 """
 
 from __future__ import annotations
