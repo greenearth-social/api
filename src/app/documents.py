@@ -264,10 +264,12 @@ class FollowedUsersCacheDocument(BaseModel):
     The document ID is the user's ``user_doc_id``.  Replaces a live
     ``app.bsky.graph.getFollows`` walk on every feed request (see issue #83).
 
-    Two writers touch this document.  The API owns ``follows`` and rewrites it
-    on refresh; the jetstream ingester only ever appends to ``pending_adds``
-    (via ``ArrayUnion``, so it never reads first) or stamps ``invalidated_at``.
-    That split is what keeps the two writers from clobbering each other.
+    Two writers touch this document.  The API owns ``follows`` and
+    ``follow_rkeys`` and rewrites them on refresh, from the feed request path
+    or the hourly refresh job; the jetstream ingester only ever appends to
+    ``pending_add_records`` and ``pending_removes`` (via ``ArrayUnion``, so it
+    never reads first).  That split is what keeps the two writers from
+    clobbering each other.
     """
 
     follows: list[str] = Field(
@@ -288,16 +290,27 @@ class FollowedUsersCacheDocument(BaseModel):
     generated_at: datetime | None = Field(
         default=None, description="When 'follows' was fetched from Bluesky"
     )
-    pending_adds: list[str] = Field(
-        default_factory=list,
-        description="DIDs followed since the last refresh, appended by jetstream ingest.  "
-        "Merged into 'follows' on read and folded in on refresh.",
+    capped: bool = Field(
+        default=False,
+        description="True when the walk that produced 'follows' stopped at the follow cap "
+        "with follows left unread.  An unfollow whose rkey is unknown to a capped "
+        "entry was of a follow beyond the cap, so there is nothing to drop.",
     )
-    invalidated_at: datetime | None = Field(
-        default=None,
-        description="Stamped by jetstream ingest on an unfollow.  Jetstream deletes carry no "
-        "subject DID, so the entry is marked stale and reconciled by the next "
-        "refresh rather than edited in place.",
+    follow_rkeys: list[str] = Field(
+        default_factory=list,
+        description="Follow-record keys, parallel to 'follows'.  Empty when 'follows' came "
+        "from getFollows, which does not expose them (the request-path cold walk).",
+    )
+    pending_add_records: list[str] = Field(
+        default_factory=list,
+        description="Follows since the last refresh as 'rkey:did', appended by jetstream "
+        "ingest.  Merged into 'follows' on read and folded in on refresh.",
+    )
+    pending_removes: list[str] = Field(
+        default_factory=list,
+        description="Record keys of follows deleted since the last refresh, appended by "
+        "jetstream ingest.  A jetstream delete carries only the rkey, which "
+        "'follow_rkeys' maps back to the unfollowed DID; the DID is dropped on read.",
     )
     refresh_started_at: datetime | None = Field(
         default=None, description="Refresh lease; held across instances, expires on its own"

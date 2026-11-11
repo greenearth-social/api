@@ -824,6 +824,45 @@ setup_feed_probe_cloud_scheduler() {
     done
 }
 
+# Hourly trigger for the followed-users refresh job (api#453), which deploy.sh
+# creates from the deployed api image. Paired with the job's 50-minute task
+# timeout, so two executions never overlap.
+setup_follows_refresh_cloud_scheduler() {
+    local job="greenearth-follows-refresh-$ENVIRONMENT"
+    local scheduler_job="follows-refresh-$ENVIRONMENT"
+    local invoker="21637448064-compute@developer.gserviceaccount.com"
+    local uri="https://run.googleapis.com/v2/projects/$PROJECT_ID/locations/$REGION/jobs/$job:run"
+    local schedule="0 * * * *"
+    local description="Hourly followed-users cache refresh for precompute_artifacts users ($ENVIRONMENT)"
+
+    log_info "Setting up Cloud Scheduler for $job..."
+    if ! gcloud run jobs describe "$job" --region="$REGION" --project="$PROJECT_ID" > /dev/null 2>&1; then
+        log_warn "Cloud Run Job $job not found — skipping its scheduler setup"
+        log_warn "Deploy the API first (it creates the job), then re-run gcp_setup.sh"
+        return 0
+    fi
+
+    gcloud run jobs add-iam-policy-binding "$job" \
+        --region="$REGION" \
+        --project="$PROJECT_ID" \
+        --member="serviceAccount:$invoker" \
+        --role="roles/run.invoker" > /dev/null
+
+    local verb=update
+    if ! gcloud scheduler jobs describe "$scheduler_job" --location="$REGION" --project="$PROJECT_ID" > /dev/null 2>&1; then
+        verb=create
+    fi
+    gcloud scheduler jobs "$verb" http "$scheduler_job" \
+        --location="$REGION" \
+        --project="$PROJECT_ID" \
+        --schedule="$schedule" \
+        --uri="$uri" \
+        --http-method=POST \
+        --oauth-service-account-email="$invoker" \
+        --description="$description"
+    log_info "Cloud Scheduler job ${verb}d: $scheduler_job"
+}
+
 check_vpc_connector() {
     log_info "Checking for VPC connector..."
 
@@ -907,6 +946,7 @@ main() {
     setup_posthog_secret
     check_vpc_connector
     setup_feed_probe_cloud_scheduler
+    setup_follows_refresh_cloud_scheduler
 
     echo ""
     log_info "✓ GCP setup complete!"
@@ -917,6 +957,7 @@ main() {
     log_info "     via ../inference-service/scripts/gcp_setup.sh"
     log_info "  3. Run ./scripts/deploy.sh to deploy the API to Cloud Run"
     log_info "  4. Feed probe schedulers: 3 jobs fire every minute to produce latency signal in Cloud Monitoring"
+    log_info "  5. Followed-users refresh: runs hourly once deploy.sh has created the job (re-run this script after a first deploy)"
     echo ""
 }
 

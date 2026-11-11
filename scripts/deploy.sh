@@ -436,6 +436,52 @@ deploy_api_service() {
     reset_traffic_to_latest
 }
 
+# The hourly followed-users refresh (api#453) runs as a Cloud Run Job on the
+# exact image the service just deployed, pinned by digest, so job and service
+# never run different code. The image is a buildpacks build whose entrypoint is
+# the web process; the job runs the CNB launcher directly instead, which sets up
+# the same Python environment. Cloud Scheduler triggers it (see gcp_setup.sh).
+deploy_follows_refresh_job() {
+    local job_name="greenearth-follows-refresh-$ENVIRONMENT"
+    log_info "Deploying $job_name Cloud Run Job..."
+
+    local revision image
+    revision=$(gcloud run services describe "greenearth-api-$ENVIRONMENT" --region="$REGION" --project="$PROJECT_ID" --format="value(status.latestReadyRevisionName)")
+    image=$(gcloud run revisions describe "$revision" --region="$REGION" --project="$PROJECT_ID" --format="value(status.imageDigest)")
+    if [ -z "$image" ]; then
+        log_error "Could not resolve the deployed image for greenearth-api-$ENVIRONMENT"
+        exit 1
+    fi
+
+    local firestore_database="greenearth-stage"
+    if [ "$ENVIRONMENT" = "prod" ]; then
+        firestore_database="greenearth-prod"
+    fi
+
+    # Hourly schedule, 50-minute timeout: two executions can never overlap.
+    # No retries: the next hourly run is the retry.
+    if ! gcloud run jobs deploy "$job_name" \
+        --image="$image" \
+        --region="$REGION" \
+        --project="$PROJECT_ID" \
+        --service-account="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com" \
+        --command=/cnb/lifecycle/launcher \
+        --args=python,-m,src.app.jobs.refresh_followed_users \
+        --set-env-vars="ENVIRONMENT=$ENVIRONMENT" \
+        --set-env-vars="GE_GIT_SHA=$GIT_SHA" \
+        --set-env-vars="GE_FIRESTORE_PROJECT=$PROJECT_ID" \
+        --set-env-vars="GE_FIRESTORE_DATABASE=$firestore_database" \
+        --labels="git-sha=$GIT_SHA" \
+        --cpu=1 \
+        --memory=512Mi \
+        --task-timeout=3000 \
+        --max-retries=0; then
+        log_error "Failed to deploy $job_name"
+        exit 1
+    fi
+    log_info "✓ $job_name deployed (image $image)"
+}
+
 # A rollback (scripts/rollback.sh) pins traffic to a named revision, which takes
 # LATEST out of the traffic split — after that, deploying would create a
 # perfectly healthy revision that serves nothing. Resetting to LATEST here makes
@@ -697,6 +743,7 @@ main() {
     get_elasticsearch_internal_lb_ip
     generate_requirements
     deploy_api_service
+    deploy_follows_refresh_job
     if ! sync_feeds; then
         log_error "Cloud Run deployed, but Bluesky feed sync failed."
         exit 1

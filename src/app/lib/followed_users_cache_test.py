@@ -188,6 +188,24 @@ def origin(monkeypatch):
     return fetcher
 
 
+@pytest.fixture
+def records(monkeypatch):
+    """Stands in for the follow-records walk, which carries rkeys."""
+    fetcher = RecordingOrigin(
+        FollowsFetch(dids=["did:plc:a"], complete=True, rkeys=["ra"])
+    )
+    monkeypatch.setattr(cache_module, "fetch_visible_follow_records", fetcher)
+    return fetcher
+
+
+@pytest.fixture
+def precompute_user():
+    """Run the test as a precompute_artifacts user's request."""
+    token = cache_module._precompute_user.set(True)
+    yield
+    cache_module._precompute_user.reset(token)
+
+
 class RecordingCollector:
     def __init__(self):
         self.records: list[tuple[str, float, dict]] = []
@@ -251,7 +269,8 @@ class TestReadPath:
             db,
             USER,
             follows=["did:plc:a", "did:plc:b"],
-            pending_adds=["did:plc:c", "did:plc:a"],
+            follow_rkeys=["ra", "rb"],
+            pending_add_records=["rc:did:plc:c", "ra2:did:plc:a"],
             complete=True,
             generated_at=now(),
         )
@@ -263,6 +282,43 @@ class TestReadPath:
             "did:plc:b",
             "did:plc:c",
         ]
+
+    @pytest.mark.asyncio
+    async def test_unfollow_is_dropped_on_the_next_read_without_a_refresh(self, origin):
+        db = FakeDb()
+        put(
+            db,
+            USER,
+            follows=["did:plc:a", "did:plc:b"],
+            follow_rkeys=["ra", "rb"],
+            pending_add_records=["rc:did:plc:c"],
+            pending_removes=["rb", "rc"],
+            complete=True,
+            generated_at=now(),
+        )
+        cache = make_cache(db)
+
+        # Both a stored follow and one jetstream added since are dropped.
+        assert await cache.get_followed_dids(USER) == ["did:plc:a"]
+        await cache.drain()
+        assert origin.calls == []
+
+    @pytest.mark.asyncio
+    async def test_refollow_after_unfollow_is_kept(self, origin):
+        db = FakeDb()
+        put(
+            db,
+            USER,
+            follows=["did:plc:a"],
+            follow_rkeys=["ra"],
+            pending_removes=["ra"],
+            pending_add_records=["ra2:did:plc:a"],
+            complete=True,
+            generated_at=now(),
+        )
+        cache = make_cache(db)
+
+        assert await cache.get_followed_dids(USER) == ["did:plc:a"]
 
     @pytest.mark.asyncio
     async def test_stale_entry_is_served_immediately_and_refreshed_in_background(self, origin):
@@ -291,7 +347,8 @@ class TestReadPath:
         assert stored(db, USER).complete is True
 
     @pytest.mark.asyncio
-    async def test_invalidated_entry_refreshes(self, origin):
+    async def test_unfollow_on_an_entry_without_rkeys_refreshes(self, origin):
+        # A getFollows entry cannot map the rkey to a DID; only a walk can.
         db = FakeDb()
         put(
             db,
@@ -299,7 +356,7 @@ class TestReadPath:
             follows=["did:plc:x"],
             complete=True,
             generated_at=now(),
-            invalidated_at=now(),
+            pending_removes=["rx"],
         )
         cache = make_cache(db)
 
@@ -307,20 +364,186 @@ class TestReadPath:
         await cache.drain()
 
         assert len(origin.calls) == 1
-        assert stored(db, USER).invalidated_at is None
+        assert stored(db, USER).pending_removes == []
 
     @pytest.mark.asyncio
-    async def test_overfull_pending_adds_forces_a_refresh(self, origin):
+    async def test_unknown_rkey_below_the_cap_refreshes(self, origin):
         db = FakeDb()
-        pending = [f"did:plc:p{i}" for i in range(cache_module.MAX_PENDING_ADDS + 1)]
-        put(db, USER, follows=[], complete=True, generated_at=now(), pending_adds=pending)
+        put(
+            db,
+            USER,
+            follows=["did:plc:x"],
+            follow_rkeys=["rx"],
+            complete=True,
+            generated_at=now(),
+            pending_removes=["unknown"],
+        )
         cache = make_cache(db)
 
         await cache.get_followed_dids(USER)
         await cache.drain()
 
         assert len(origin.calls) == 1
-        assert stored(db, USER).pending_adds == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_rkey_on_a_capped_list_is_a_follow_beyond_the_cap(self, origin):
+        # Capped is the walk's own flag, not the list length: filtering out
+        # follows getFollows hides can leave a capped list short of the cap.
+        db = FakeDb()
+        n = cache_module.MAX_FOLLOWED_USERS - 50
+        put(
+            db,
+            USER,
+            follows=[f"did:plc:f{i}" for i in range(n)],
+            follow_rkeys=[f"r{i}" for i in range(n)],
+            complete=True,
+            capped=True,
+            generated_at=now(),
+            pending_removes=["beyond-the-cap"],
+        )
+        cache = make_cache(db)
+
+        assert len(await cache.get_followed_dids(USER)) == n
+        await cache.drain()
+
+        assert origin.calls == []
+
+    @pytest.mark.asyncio
+    async def test_overfull_pending_deltas_force_a_refresh(self, origin):
+        db = FakeDb()
+        half = cache_module.MAX_PENDING_DELTAS // 2 + 1
+        put(
+            db,
+            USER,
+            follows=[],
+            complete=True,
+            generated_at=now(),
+            pending_add_records=[f"r{i}:did:plc:p{i}" for i in range(half)],
+            pending_removes=[f"r{i}" for i in range(half)],
+        )
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert len(origin.calls) == 1
+        assert stored(db, USER).pending_add_records == []
+
+
+class TestPrecomputeUsers:
+    """The refresh job owns TTL refreshes for precompute_artifacts users."""
+
+    @pytest.mark.asyncio
+    async def test_stale_entry_is_served_without_a_request_path_refresh(
+        self, origin, records, precompute_user, metrics
+    ):
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(db, USER, follows=["did:plc:stale"], follow_rkeys=["rs"], complete=True,
+            generated_at=old)
+        cache = make_cache(db)
+
+        assert await cache.get_followed_dids(USER) == ["did:plc:stale"]
+        await cache.drain()
+
+        assert origin.calls == [] and records.calls == []
+        lookups = [a["outcome"] for n, _, a in metrics.records
+                   if n == "follows_cache.lookup_count"]
+        assert lookups == ["stale"]
+
+    @pytest.mark.asyncio
+    async def test_overdue_entry_falls_back_to_a_records_refresh(
+        self, origin, records, precompute_user, metrics
+    ):
+        # The job looks dead; don't let the follow list freeze.
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.job_grace_seconds() + 60)
+        put(db, USER, follows=["did:plc:old"], follow_rkeys=["ro"], complete=True,
+            generated_at=old)
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert origin.calls == []
+        assert records.calls == [(USER, cache_module.refresh_timeout_seconds())]
+        assert stored(db, USER).follow_rkeys == ["ra"]
+        lookups = [a["outcome"] for n, _, a in metrics.records
+                   if n == "follows_cache.lookup_count"]
+        assert lookups == ["job_overdue"]
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_unfollow_still_refreshes_from_the_request_path(
+        self, origin, records, precompute_user
+    ):
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:x"], complete=True, generated_at=now(),
+            pending_removes=["rx"])
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert origin.calls == []
+        assert len(records.calls) == 1
+        assert stored(db, USER).follows == ["did:plc:a"]
+
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_unfollow_on_an_incomplete_entry_is_not_left_to_the_job(
+        self, origin, records, precompute_user, metrics
+    ):
+        # Incomplete alone waits for the job; an unfollow must not wait with it.
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:x"], complete=False, generated_at=now(),
+            pending_removes=["rx"])
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert len(records.calls) == 1
+        lookups = [a["outcome"] for n, _, a in metrics.records
+                   if n == "follows_cache.lookup_count"]
+        assert lookups == ["unresolved_remove"]
+
+    @pytest.mark.asyncio
+    async def test_refresh_stores_whether_the_walk_was_capped(
+        self, origin, records, precompute_user
+    ):
+        records.results = [FollowsFetch(dids=["did:plc:a"], rkeys=["ra"], capped=True)]
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:x"], complete=True, generated_at=now(),
+            pending_removes=["rx"])
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert stored(db, USER).capped is True
+
+
+class TestRefreshReason:
+    """What the refresh job re-walks."""
+
+    def test_missing_entry(self):
+        assert make_cache(FakeDb()).refresh_reason(None) == "missing"
+
+    def test_fresh_entry_without_rkeys_needs_a_records_walk(self):
+        entry = FollowedUsersCacheDocument(follows=["did:plc:a"], complete=True,
+                                           generated_at=now())
+        assert make_cache(FakeDb()).refresh_reason(entry) == "no_rkeys"
+
+    def test_fresh_entry_with_rkeys_is_left_alone(self):
+        entry = FollowedUsersCacheDocument(follows=["did:plc:a"], follow_rkeys=["ra"],
+                                           complete=True, generated_at=now())
+        assert make_cache(FakeDb()).refresh_reason(entry) is None
+
+    def test_staleness_takes_precedence(self):
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        entry = FollowedUsersCacheDocument(follows=["did:plc:a"], complete=True,
+                                           generated_at=old)
+        assert make_cache(FakeDb()).refresh_reason(entry) == "stale"
 
 
 class TestColdStart:

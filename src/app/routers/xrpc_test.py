@@ -237,6 +237,55 @@ async def test_preview_exclusions_ignore_seen_and_retain_discarded():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("precompute_artifacts", [True, False])
+async def test_feed_generation_knows_whether_the_job_owns_follows_refresh(
+    precompute_artifacts: bool,
+):
+    """Generators see the user's precompute_artifacts flag, so the followed-users
+    cache leaves their TTL refresh to the hourly job."""
+    from ..lib import followed_users_cache
+    from .xrpc import generate_feed_preview
+
+    now = datetime.now(UTC)
+    snapshot = FeedSnapshotDocument(
+        request_id="preview-request",
+        items=["at://preview/0"],
+        feed_name="your-feed",
+        generated_at=now,
+        expires_at=now + timedelta(days=1),
+        items_meta=[PipelineItemMeta(at_uri="at://preview/0")],
+    )
+    app.state.firestore = MagicMock()
+    app.state.feed_cache = InMemoryFeedCache()
+    request = Request({"type": "http", "app": app})
+    user = UserDocument(user_did="did:plc:testuser", precompute_artifacts=precompute_artifacts)
+    seen_by_generation: list[bool] = []
+
+    async def pipeline_result(*_args, **kwargs):
+        seen_by_generation.append(followed_users_cache._precompute_user.get())
+        return snapshot.model_copy(update={"request_id": kwargs["request_id"]}), []
+
+    with (
+        patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=user),
+        patch("app.routers.xrpc.get_posthog_client", return_value=None),
+        patch("app.routers.xrpc._generation_exclusions", AsyncMock(return_value=[])),
+        patch(
+            "app.routers.xrpc._run_pipeline_capturing_with_timeout",
+            AsyncMock(side_effect=pipeline_result),
+        ),
+        patch("app.routers.xrpc.record_discarded_posts", new_callable=AsyncMock),
+        patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock),
+        patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock),
+        patch("app.routers.xrpc.track_session"),
+    ):
+        await generate_feed_preview(
+            request, "did:plc:testuser", "your-feed", FeedPreferencesDocument()
+        )
+
+    assert seen_by_generation == [precompute_artifacts]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("has_posthog_client", [False, True])
 @pytest.mark.parametrize(
     ("flag_value", "expected_fail_fast"), [(True, True), (False, False), (None, False)]
