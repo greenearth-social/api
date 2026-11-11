@@ -200,6 +200,8 @@ def main() -> None:
         level=os.environ.get("GE_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # As in app.main: httpx logs every request at INFO, several per user walked.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     sys.exit(asyncio.run(_main(args)))
 
 
