@@ -5,6 +5,7 @@ import pytest
 from .elasticsearch import (
     fetch_post_embeddings_and_metadata,
     fetch_post_embeddings_and_politics_scores,
+    fetch_post_perspective_scores,
     fetch_recent_liked_post_uris,
     fetch_recent_liked_post_uris_and_times,
 )
@@ -541,3 +542,31 @@ async def test_fetch_post_embeddings_and_politics_scores_passes_hydrate_op():
 
     await fetch_post_embeddings_and_politics_scores(_FakeES(), ["at://x"])
     assert captured["op"] == "hydrate"
+
+
+class TestFetchPostPerspectiveScores:
+    @pytest.mark.asyncio
+    async def test_returns_scores_keyed_by_uri_and_skips_posts_without_them(self):
+        es = FakeEs(responses={
+            "posts": {
+                "hits": {
+                    "hits": [
+                        {"_source": {"at_uri": "at://1", "perspective_scores": {"toxicity": 0.0}}},
+                        {"_source": {"at_uri": "at://2"}},
+                        {"_source": {"at_uri": "at://3", "perspective_scores": {}}},
+                    ]
+                }
+            }
+        })
+        scores = await fetch_post_perspective_scores(es, ["at://1", "at://2", "at://3"])
+        assert scores == {"at://1": {"toxicity": 0.0}}
+        call = es.calls[0]
+        assert call["index"] == "posts"
+        assert call["query"] == {"terms": {"at_uri": ["at://1", "at://2", "at://3"]}}
+        assert call["_source"] == ["at_uri", "perspective_scores"]
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_for_empty_input(self):
+        es = FakeEs()
+        assert await fetch_post_perspective_scores(es, []) == {}
+        assert es.calls == []

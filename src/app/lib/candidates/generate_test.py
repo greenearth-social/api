@@ -1431,3 +1431,63 @@ async def test_unknown_name_still_raises_with_extra_generators(monkeypatch):
             request, es=object(), extra_generators={"external": _UriGenerator("external", [])},
             feed_name="test-feed",
         )
+
+
+# ---------------------------------------------------------------------------
+# Complete detail (request.detail == "complete")
+# ---------------------------------------------------------------------------
+
+
+class _RecordingPerspectiveFetch:
+    def __init__(
+        self,
+        scores: dict[str, dict[str, float]] | None = None,
+        exc: Exception | None = None,
+    ):
+        self._scores = scores or {}
+        self._exc = exc
+        self.calls: list[list[str]] = []
+
+    async def __call__(self, es, at_uris, index="posts"):
+        self.calls.append(list(at_uris))
+        if self._exc is not None:
+            raise self._exc
+        return dict(self._scores)
+
+
+class TestCompleteDetail:
+    @pytest.mark.asyncio
+    async def test_essential_by_default_skips_es_fetch(self, monkeypatch):
+        fetch = _RecordingPerspectiveFetch({"at://a": {"toxicity": 0.1}})
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
+        monkeypatch.setattr(generate_module, "fetch_post_perspective_scores", fetch)
+
+        result = await run_generate(_make_request("gen"), es=object(), feed_name="test-feed")
+
+        assert fetch.calls == []
+        assert result.candidates[0].perspective_scores is None
+
+    @pytest.mark.asyncio
+    async def test_complete_adds_perspective_scores_to_matched_candidates(self, monkeypatch):
+        candidates = [_candidate("at://a"), _candidate("at://b")]
+        fetch = _RecordingPerspectiveFetch({"at://a": {"toxicity": 0.1, "insult": 0.0}})
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", candidates)})
+        monkeypatch.setattr(generate_module, "fetch_post_perspective_scores", fetch)
+
+        request = _make_request("gen").model_copy(update={"detail": "complete"})
+        result = await run_generate(request, es=object(), feed_name="test-feed")
+
+        assert fetch.calls == [["at://a", "at://b"]]
+        assert result.candidates[0].perspective_scores == {"toxicity": 0.1, "insult": 0.0}
+        assert result.candidates[1].perspective_scores is None
+
+    @pytest.mark.asyncio
+    async def test_complete_raises_when_fetch_fails(self, monkeypatch):
+        """A caller asking for complete data must not get a silently partial answer."""
+        fetch = _RecordingPerspectiveFetch(exc=RuntimeError("es down"))
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [_candidate("at://a")])})
+        monkeypatch.setattr(generate_module, "fetch_post_perspective_scores", fetch)
+
+        request = _make_request("gen").model_copy(update={"detail": "complete"})
+        with pytest.raises(generate_module.DetailHydrationError):
+            await run_generate(request, es=object(), feed_name="test-feed")

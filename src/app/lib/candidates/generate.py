@@ -18,7 +18,10 @@ from ...models import (
     CandidatePost,
     GeneratorSpec,
 )
-from ..elasticsearch import fetch_post_embeddings_and_politics_scores
+from ..elasticsearch import (
+    fetch_post_embeddings_and_politics_scores,
+    fetch_post_perspective_scores,
+)
 from ..embeddings import encode_float32_b64
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
@@ -104,6 +107,10 @@ class GeneratorError(Exception):
         super().__init__(f"Generator '{name}' failed: {cause}")
 
 
+class DetailHydrationError(Exception):
+    """Raised when the extra data for ``detail="complete"`` could not be fetched."""
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -175,6 +182,29 @@ async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePo
             final_candidate = c.model_copy(update=update_dict)
         final_candidates.append(final_candidate)
     return final_candidates
+
+
+async def hydrate_complete_details(
+    es, candidates: list[CandidatePost]
+) -> list[CandidatePost]:
+    """Add the fields that ``detail="complete"`` returns beyond the essentials.
+
+    Raises rather than degrading: a caller that asked for complete data can't
+    tell a failed lookup from a post that simply has none.
+    """
+    uris = [c.at_uri for c in candidates if c.at_uri]
+    try:
+        scores = await asyncio.wait_for(
+            fetch_post_perspective_scores(es, uris),
+            timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        raise DetailHydrationError(f"Fetching complete post details failed: {exc!r}") from exc
+    return [
+        c.model_copy(update={"perspective_scores": scores[c.at_uri]})
+        if c.at_uri in scores else c
+        for c in candidates
+    ]
 
 
 async def run_generate(
@@ -443,6 +473,8 @@ async def run_generate(
     final = deduped[:request.num_candidates]
     if getattr(request, 'hydrate_embeddings', False):
         final = await hydrate_posts(es, final)
+    if request.detail == "complete":
+        final = await hydrate_complete_details(es, final)
     if rec is not None:
         rec.record_final_candidates(final)
     return CandidateGenerateResult(candidates=final)
