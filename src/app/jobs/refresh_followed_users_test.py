@@ -265,3 +265,24 @@ def test_requires_firestore_config_outside_the_emulator(monkeypatch):
 
     with pytest.raises(SystemExit, match="GE_FIRESTORE_DATABASE"):
         job._require_config()
+
+
+def test_main_keeps_httpx_request_logs_out_of_job_logs(monkeypatch):
+    import logging
+    import sys
+
+    httpx_logger = logging.getLogger("httpx")
+    monkeypatch.setattr(httpx_logger, "level", logging.NOTSET)
+
+    def run(coro):
+        coro.close()
+        return 0
+
+    monkeypatch.setattr(job.asyncio, "run", run)
+    monkeypatch.setattr(sys, "argv", ["refresh_followed_users", "--dry-run"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        job.main()
+
+    assert exit_info.value.code == 0
+    assert httpx_logger.level == logging.WARNING
