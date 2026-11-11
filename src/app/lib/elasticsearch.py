@@ -278,6 +278,39 @@ async def fetch_post_embeddings_and_politics_scores(
     return await cache.get_or_compute(key, _fetch)
 
 
+async def fetch_post_perspective_scores(
+    es,
+    at_uris: list[str],
+    index: str = "posts",
+) -> dict[str, dict[str, float]]:
+    """Fetch the per-attribute Perspective scores stored at ingest, keyed by AT URI.
+
+    Reads ``posts`` rather than wherever a candidate came from: the quality
+    corpus does not carry the per-attribute map, but the same post in
+    ``posts`` does. Posts that are missing or have no scores are omitted.
+    """
+    if not at_uris:
+        return {}
+
+    async with timed(logger, "es_post_perspective_scores", n_uris=len(at_uris)):
+        resp = await es.search(
+            index=index,
+            op="hydrate",
+            query={"terms": {"at_uri": at_uris}},
+            size=len(at_uris),
+            _source=["at_uri", "perspective_scores"],
+        )
+
+    scores_by_uri: dict[str, dict[str, float]] = {}
+    for hit in unwrap_es_response(resp).get("hits", {}).get("hits", []):
+        src = hit.get("_source") or {}
+        at_uri = src.get("at_uri")
+        scores = src.get("perspective_scores")
+        if at_uri and isinstance(scores, dict) and scores:
+            scores_by_uri[at_uri] = scores
+    return scores_by_uri
+
+
 async def fetch_post_embeddings_and_metadata(
     es,
     at_uris: list[str],

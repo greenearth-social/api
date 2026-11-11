@@ -17,6 +17,7 @@ from ...models import (
     GeneratorSpec,
 )
 from .generate import (
+    DetailHydrationError,
     GeneratorError,
     GeneratorNotFoundError,
     run_generate,
@@ -58,6 +59,7 @@ register_generator(_llm_query_vector)
 
 __all__ = [
     "CandidateGenerator",
+    "DetailHydrationError",
     "CandidateGenerateRequest",
     "CandidateGenerateResult",
     "CandidateResult",

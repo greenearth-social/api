@@ -44,6 +44,12 @@ is included in the runtime dependencies.
 
 ## Running the Server
 
+> **Tip**: The easiest way to run the API locally is the dev environment in
+> `internal-tools/devenv`, which runs it alongside seeded Elasticsearch,
+> inference and the Firebase emulators with no credentials. `devctl test api`
+> runs this suite in its container. The host setup below is for working
+> without it.
+
 Start the development server with auto-reload:
 
 ```bash
@@ -435,8 +441,8 @@ and TTL policies. The role is project-wide, so either environment's setup is
 sufficient.
 
 > **Note**: The API uses a separate readonly Elasticsearch API key (`elasticsearch-api-key-readonly`)
-> that only has read access. This key is created by running `scripts/k8s_recreate_api_key.sh` in the
-> ingex/ingest directory, which creates both the ingest (read/write) and API (readonly) keys.
+> that only has read access. This key is created by running `ingest/scripts/k8s_recreate_api_keys.sh` in the
+> ingex repository, which creates both the ingest (read/write) and API (readonly) keys.
 
 ### Deploying the Service
 
@@ -616,7 +622,7 @@ Available configuration inputs across `gcp_setup.sh` and `deploy.sh`:
 - `GE_PERSPECTIVE_API_KEY` - Perspective API key for toxicity scoring (pass to `gcp_setup.sh` via `--perspective-api-key`)
 - `GE_PERSPECTIVE_QPM` - Serving's share of the Perspective quota, in requests per minute (default: `26700`). The quota is 36 000 RPM shared with `ingex`, which scores posts at ingest and takes 9 000 RPM via `GE_PERSPECTIVE_QPS`. The two sum to 35 700, leaving a 300 RPM buffer — neither limiter is exact, since this one is per-process and the api runs several
 - `GE_PERSPECTIVE_HOST` - Perspective API host override (default: `https://commentanalyzer.googleapis.com`), used by the local dev stub
-- `GE_ANTHROPIC_API_KEY` - Anthropic API key for LLM query-vector fitting, `POST /llm-query-vectors/fit` (pass to `gcp_setup.sh` via `--anthropic-api-key`)
+- `GE_ANTHROPIC_API_KEY` - Anthropic API key for LLM query-vector fitting, `POST /api/feeds/llm-query-vectors/fit` (pass to `gcp_setup.sh` via `--anthropic-api-key`)
 - `GE_BSKY_APP_PASSWORD` - Bluesky app password for feed publishing (pass to `gcp_setup.sh` via `--bsky-app-password`)
 - `GE_INFERENCE_BASE_URL` - Explicit inference endpoint override (highest priority)
 - `GE_INFERENCE_DOMAIN` - Domain-mapped inference host used when base URL override is not set
@@ -983,8 +989,8 @@ with an API key explicitly granted the `user-config` scope:
 
 | Operation | Firebase-authenticated user | Service (`X-API-Key`) |
 | --- | --- | --- |
-| Read all configurable public feeds | `GET /api/feeds/preferences` | `GET /api/users/{user_did}/feeds/preferences` |
-| Update controls for one public feed | `PATCH /api/feeds/preferences/{feed_name}` | `PATCH /api/users/{user_did}/feeds/preferences/{feed_name}` |
+| Read all configurable public feeds | `GET /api/feeds/preferences` | `GET /users/{user_did}/feeds/preferences` |
+| Update controls for one public feed | `PATCH /api/feeds/preferences/{feed_name}` | `PATCH /users/{user_did}/feeds/preferences/{feed_name}` |
 
 The user endpoints derive the target from the Firebase ID token. The service
 endpoints accept a full DID, such as `did:plc:abc123`, and can access any user's
@@ -998,11 +1004,11 @@ pipenv run python scripts/apikeys.py generate service@example.com --scope user-c
 
 ```bash
 # Read the specified user's preferences.
-curl http://localhost:8000/api/users/did:plc:abc123/feeds/preferences \
+curl http://localhost:8000/users/did:plc:abc123/feeds/preferences \
   -H "X-API-Key: <service-api-key>"
 
 # Change one control, retaining the user's other settings.
-curl -X PATCH http://localhost:8000/api/users/did:plc:abc123/feeds/preferences/random \
+curl -X PATCH http://localhost:8000/users/did:plc:abc123/feeds/preferences/random \
   -H "X-API-Key: <service-api-key>" \
   -H "Content-Type: application/json" \
   -d '{"freshness": 3}'
@@ -1691,8 +1697,9 @@ greenearth/api/
 │       ├── feeds.py                # Feed config definitions
 │       ├── main.py                 # FastAPI entry point
 │       ├── models.py               # Pipeline request/response models
-│       ├── models_feed_debug.py    # Feed-debug API response views
+│       ├── models_feed_transparency.py # Feed-transparency API response views
 │       ├── security.py             # X-API-Key auth
+│       ├── ux_posts.py             # Managed UX post registry
 │       ├── lib/
 │       │   ├── candidates/         # Candidate generators
 │       │   ├── rankers/            # Ranking models
@@ -1707,9 +1714,13 @@ greenearth/api/
 │           ├── embeddings.py       # POST /embeddings/user
 │           ├── rank.py             # POST /rank/predict
 │           ├── diversify.py        # POST /diversify
-│           ├── skylight.py         # /skylight/search, /skylight/similar
+│           ├── slate.py            # POST /slate/generate, /slate/interactions
+│           ├── user_preferences.py # /users/{did}/feeds/preferences (service keys)
+│           ├── skylight.py         # GET /skylight/search
 │           ├── xrpc.py             # AT Protocol feed generator XRPC
-│           ├── feed_debug.py       # GET /api/feeds, GET /api/feeds/{id}
+│           ├── feed_transparency.py # /api/feeds: feed loads, preferences, previews
+│           ├── llm_query_vectors.py # /api/feeds/llm-query-vectors
+│           ├── redirect.py         # /r short links, /admin/redirects
 │           └── health.py           # GET /health
 ├── scripts/
 │   ├── deploy.sh                  # Cloud Run deployment
@@ -1723,7 +1734,8 @@ greenearth/api/
 │   ├── manage_ux_posts.py         # UX post resolve/sync/cleanup
 │   ├── managed_posts.py           # Shared Bluesky post construction and matching
 │   ├── update_feed_descriptions.py # Sync descriptions using each environment's publishing rules
-│   └── publish_feed.py            # Publish/update feed generator records
+│   ├── publish_feed.py            # Publish/update feed generator records
+│   └── ...                        # Profiling, backfills, load tests, etc.
 ├── .gcloudignore                  # Files to exclude from deployment
 ├── .python-version
 ├── Pipfile                        # pipenv dependencies

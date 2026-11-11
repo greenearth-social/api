@@ -268,7 +268,9 @@ The core recommendation pipeline has three stages that can be used
 independently or chained together:
 
 1. **Candidates** – retrieve posts from one or more named generators
-   (popularity, similarity, followed users, random …).
+   (popularity, two-tower, followed users, network likes, random …).
+   Set `detail: "complete"` to also get data ranking doesn't need, such as
+   each post's per-attribute Perspective scores.
 2. **Rank** – score the candidate list with a trained engagement-prediction
    model and return posts in descending score order.
 3. **Diversify** – rerank the ordered list with Maximal Marginal Relevance
@@ -296,10 +298,10 @@ feed load with the same settings opens on the slate they last previewed.
 
 ## Content search
 
-The **Skylight** endpoints (`/skylight/search` and `/skylight/similar`)
-provide standalone full-text and vector-similarity search over the post
-index.  They are independent of the candidate/rank/diversify pipeline and
-can be used on their own.
+The **Skylight** endpoint (`/skylight/search`) provides standalone full-text
+search over posts that contain video, returning each result's stored MiniLM
+embedding.  It is independent of the candidate/rank/diversify pipeline and
+can be used on its own.
 
 ## Authentication
 
@@ -323,8 +325,8 @@ _TAGS = [
         "description": (
             "Retrieve candidate posts from registered generators. "
             "Each generator targets a different content source (popularity, "
-            "post similarity, followed users, random …). Multiple generators "
-            "can be combined with relative weights in a single request."
+            "two-tower, followed users, network likes, random …). Multiple "
+            "generators can be combined with relative weights in a single request."
         ),
     },
     {
@@ -365,10 +367,9 @@ _TAGS = [
     {
         "name": "skylight",
         "description": (
-            "Standalone full-text and vector-similarity search over the post "
-            "index. These endpoints are independent of the candidate/rank/"
-            "diversify pipeline and can be used on their own by applications "
-            "that need direct content search (e.g. the Skylight app)."
+            "Standalone full-text search over posts that contain video. "
+            "Independent of the candidate/rank/diversify pipeline, for "
+            "applications that need direct content search (e.g. the Skylight app)."
         ),
     },
     {
@@ -381,16 +382,39 @@ _TAGS = [
         ),
     },
     {
+        "name": "embeddings",
+        "description": (
+            "Compute a user's embedding from their engagement history, for "
+            "offline jobs such as the average-user-embedding build."
+        ),
+    },
+    {
+        "name": "feed-transparency",
+        "description": (
+            "Backs the Green Earth web app: a user's recent feed loads with "
+            "pipeline detail, their feed preferences, and settings previews. "
+            "Authenticated with a Firebase ID token rather than an API key."
+        ),
+    },
+    {
+        "name": "redirect",
+        "description": (
+            "Short-link redirects (`/r/{slug}`) that append UTM parameters, and "
+            "admin endpoints to manage them."
+        ),
+    },
+    {
         "name": "health",
         "description": "Service liveness check.",
     },
     {
         "name": "xrpc",
         "description": (
-            "AT Protocol XRPC endpoints that implement the Bluesky feed "
-            "generator specification (`app.bsky.feed.describeFeedGenerator` "
-            "and `app.bsky.feed.getFeedSkeleton`). These endpoints are public "
-            "and use AT Protocol JWT authentication rather than an API key."
+            "AT Protocol endpoints that implement the Bluesky feed generator "
+            "specification (`app.bsky.feed.describeFeedGenerator`, "
+            "`app.bsky.feed.getFeedSkeleton`, `app.bsky.feed.sendInteractions` "
+            "and the service's `/.well-known/did.json`). They are public and "
+            "take no API key; requests made for a user carry an AT Protocol JWT."
         ),
     },
 ]
