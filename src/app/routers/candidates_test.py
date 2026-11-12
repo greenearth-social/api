@@ -40,7 +40,7 @@ def stub_inference():
                 UserHistoryItem(
                     at_uri="at://liked/1", liked_at="2026-01-01T00:00:00Z", embedding=[1.0]
                 ),
-            ]),
+            ], raw_like_count=1),
         ),
         patch(
             "app.lib.candidates.two_tower.predict_user_embedding",

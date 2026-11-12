@@ -56,7 +56,7 @@ class HeavyRanker(Ranker):
                         user_history = await fetch_user_history_features(es, user_did)
                         user_history_liked_uris = user_history.liked_uris
 
-                        if not user_history_liked_uris:
+                        if not user_history.raw_like_count:
                             logger.info("No likes found for user %s", user_did)
                             if rec is not None:
                                 rec.record_user_features(self._name, [], 0)
@@ -69,7 +69,7 @@ class HeavyRanker(Ranker):
                             if not embedded_history:
                                 logger.info(
                                     "No embeddings found for %d liked posts of user %s",
-                                    len(user_history_liked_uris),
+                                    user_history.raw_like_count,
                                     user_did,
                                 )
                             else:

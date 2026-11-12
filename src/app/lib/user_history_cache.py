@@ -42,8 +42,9 @@ from .telemetry import timed
 logger = logging.getLogger(__name__)
 
 USER_HISTORY_CACHE_COLLECTION = "user_history_cache"
-USER_HISTORY_CACHE_VERSION = 1
-USER_HISTORY_LIMIT = DEFAULT_LIKED_POSTS_LIMIT
+USER_HISTORY_CACHE_VERSION = 2
+# Model inputs use the most recent usable entries from the larger raw history.
+USER_HISTORY_MODEL_LIMIT = 64
 # Cache reads are an optimization inside model calls whose total budgets are
 # only a few seconds. Bound the entire Firestore operation (including SDK
 # retries) so a slow read fails open with enough time left for
@@ -106,9 +107,11 @@ class UserHistoryItem:
 
 @dataclass(frozen=True)
 class UserHistory:
-    """Ordered recent likes for a user."""
+    """Ordered usable likes, with the fetched count retained before filtering."""
 
     items: list[UserHistoryItem]
+    # Preserve diagnostics without retaining posts excluded from model inputs.
+    raw_like_count: int
 
     @property
     def liked_uris(self) -> list[str]:
@@ -116,6 +119,7 @@ class UserHistory:
 
     @property
     def items_with_embeddings(self) -> list[UserHistoryItem]:
+        """Return the newest usable model inputs."""
         return [item for item in self.items if item.embedding is not None]
 
 
@@ -166,13 +170,15 @@ class _CachedUserHistoryDocument(BaseModel):
     schema_version: int
     user_did: str
     history_limit: int
+    fetch_limit: int
+    raw_like_count: int = Field(ge=0)
     embedding_key: str
     fetched_at: datetime
     expires_at: datetime
     refresh_started_at: datetime | None = None
     refresh_failed_at: datetime | None = None
     api_release_sha: str | None = None
-    items: list[_CachedUserHistoryItem] = Field(max_length=USER_HISTORY_LIMIT)
+    items: list[_CachedUserHistoryItem] = Field(max_length=USER_HISTORY_MODEL_LIMIT)
 
 
 class UserHistoryCache(ABC):
@@ -265,7 +271,8 @@ class FirestoreUserHistoryCache(UserHistoryCache):
             if (
                 document.schema_version != USER_HISTORY_CACHE_VERSION
                 or document.user_did != user_did
-                or document.history_limit != USER_HISTORY_LIMIT
+                or document.history_limit != USER_HISTORY_MODEL_LIMIT
+                or document.fetch_limit != DEFAULT_LIKED_POSTS_LIMIT
                 or document.embedding_key != MINILM_L12_EMBEDDING_KEY
                 or expires_at <= fetched_at
                 or datetime.now(UTC) >= expires_at
@@ -291,7 +298,7 @@ class FirestoreUserHistoryCache(UserHistoryCache):
             return None
 
         return UserHistoryCacheEntry(
-            history=UserHistory(items=items),
+            history=UserHistory(items=items, raw_like_count=document.raw_like_count),
             fetched_at=fetched_at,
         )
 
@@ -300,7 +307,9 @@ class FirestoreUserHistoryCache(UserHistoryCache):
         document = _CachedUserHistoryDocument(
             schema_version=USER_HISTORY_CACHE_VERSION,
             user_did=user_did,
-            history_limit=USER_HISTORY_LIMIT,
+            history_limit=USER_HISTORY_MODEL_LIMIT,
+            fetch_limit=DEFAULT_LIKED_POSTS_LIMIT,
+            raw_like_count=history.raw_like_count,
             embedding_key=MINILM_L12_EMBEDDING_KEY,
             fetched_at=fetched_at,
             expires_at=fetched_at + timedelta(seconds=max_age_seconds()),
@@ -317,7 +326,7 @@ class FirestoreUserHistoryCache(UserHistoryCache):
                     author_did=item.author_did,
                     like_count=item.like_count,
                 )
-                for item in history.items
+                for item in history.items_with_embeddings
             ],
         )
         await self._document(user_did).set(document.model_dump())
@@ -344,7 +353,8 @@ class FirestoreUserHistoryCache(UserHistoryCache):
                     compatible = (
                         document.schema_version == USER_HISTORY_CACHE_VERSION
                         and document.user_did == user_did
-                        and document.history_limit == USER_HISTORY_LIMIT
+                        and document.history_limit == USER_HISTORY_MODEL_LIMIT
+                        and document.fetch_limit == DEFAULT_LIKED_POSTS_LIMIT
                         and document.embedding_key == MINILM_L12_EMBEDDING_KEY
                     )
                     if compatible:
@@ -562,7 +572,7 @@ async def _fetch_user_history_from_es(
         liked_uris, liked_at_times = await fetch_recent_liked_post_uris_and_times(
             es,
             user_did,
-            limit=USER_HISTORY_LIMIT,
+            limit=DEFAULT_LIKED_POSTS_LIMIT,
         )
 
     hydrated_by_uri: dict[str, tuple[list[float], str, int]] = {}
@@ -606,13 +616,6 @@ async def _fetch_user_history_from_es(
     for at_uri, liked_at in zip(liked_uris, liked_at_times, strict=True):
         features = hydrated_by_uri.get(at_uri)
         if features is None:
-            items.append(
-                UserHistoryItem(
-                    at_uri=at_uri,
-                    liked_at=liked_at,
-                    embedding=None,
-                )
-            )
             continue
         embedding, author_did, like_count = features
         items.append(
@@ -624,7 +627,13 @@ async def _fetch_user_history_from_es(
                 like_count=like_count,
             )
         )
-    return _UserHistoryFetchResult(history=UserHistory(items=items), complete=not errors)
+        # Keep model inputs compact before they enter any shared or request cache.
+        if len(items) == USER_HISTORY_MODEL_LIMIT:
+            break
+    return _UserHistoryFetchResult(
+        history=UserHistory(items=items, raw_like_count=len(liked_uris)),
+        complete=not errors,
+    )
 
 
 async def fetch_user_history_features(es, user_did: str) -> UserHistory:
@@ -683,6 +692,7 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
         "fetch_user_history_features",
         user_did,
         USER_HISTORY_CACHE_VERSION,
-        USER_HISTORY_LIMIT,
+        DEFAULT_LIKED_POSTS_LIMIT,
+        USER_HISTORY_MODEL_LIMIT,
     )
     return await request_cache.get_or_compute(key, _fetch)
