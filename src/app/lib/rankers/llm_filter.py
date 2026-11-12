@@ -65,8 +65,8 @@ def llm_filter_scores(
 def llm_filter_multiplier(setting: float, filter_score: float) -> float:
     """Same shape as the politics multiplier: 1.0 at score 0, ``setting`` at score 1.
 
-    ``setting`` is never below 1 (RankPredictRequest enforces it): the prompt says
-    what the person wants, so matching posts only ever move up.
+    Experimental branch: ``setting`` runs 0..3, so below 1 matching posts sink
+    and above 1 they rise, like the politics slider.
     """
     return (setting - 1.0) * filter_score + 1.0
 

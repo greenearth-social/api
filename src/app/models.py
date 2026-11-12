@@ -19,6 +19,10 @@ FeedControlName = Literal[
     "min_rank_score",
     # Experimental, local only: the LLM filter multiplier at a perfect match.
     "llm_filter_strength",
+    # Experimental, local only: multiply (politics shape) instead of blend.
+    "llm_filter_multiply",
+    # Experimental, local only: the multiplier a perfect match earns in multiply mode.
+    "llm_filter_multiplier",
 ]
 
 # What a feed does when the AppView calls getFeedSkeleton with no (or an
@@ -226,6 +230,18 @@ class RankPredictRequest(BaseModel):
         le=1.0,
         description="Experimental branch: blend weight of the LLM filter match in the rank "
         "score, (1 - w) * score + w * match; 0 leaves scores unchanged, 1 ranks by match alone",
+    )
+    llm_filter_mode: Literal["blend", "multiply"] = Field(
+        default="blend",
+        description="Experimental branch: 'blend' uses llm_filter as a blend weight; "
+        "'multiply' scales the score by ((llm_filter_multiplier - 1) * match + 1)",
+    )
+    llm_filter_multiplier: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=3.0,
+        description="Experimental branch: multiply mode's factor at a perfect match; "
+        "below 1 pushes matching posts down, above 1 lifts them, 1 changes nothing",
     )
 
     @model_validator(mode="after")

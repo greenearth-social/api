@@ -69,6 +69,8 @@ class FeedPreferencesDocument(BaseModel):
     min_rank_score: float | None = Field(default=None, ge=0.0, le=1.0)
     # Experimental, local only: blend weight of the filter match, 0 (ranker only) to 1 (match only).
     llm_filter_strength: float | None = Field(default=None, ge=0.0, le=1.0)
+    llm_filter_multiply: bool | None = None
+    llm_filter_multiplier: float | None = Field(default=None, ge=0.0, le=3.0)
 
 
 # The LLM prompt candidate generator ("cg") and the LLM ranking filter (#566).
@@ -722,12 +724,14 @@ class PoliticsAdjustmentMeta(BaseModel):
 
 
 class FilterAdjustmentMeta(BaseModel):
-    """Experimental: LLM filter blend recorded when ranked.
+    """Experimental: LLM filter step recorded when ranked.
 
-    ``score_after = (1 - weight) * score_before + weight * filter_score``.
+    blend: ``score_after = (1 - weight) * score_before + weight * filter_score``.
+    multiply: ``weight`` is this post's factor, ``score_after = weight * score_before``.
     """
 
-    weight: float = Field(ge=0.0, le=1.0)
+    mode: Literal["blend", "multiply"] = "blend"
+    weight: float = Field(ge=0.0, le=3.0)
     filter_score: float | None = Field(default=None, ge=0.0, le=1.0)
     score_before: float
     score_after: float

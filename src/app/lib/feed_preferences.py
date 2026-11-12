@@ -36,6 +36,9 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | bool | SourceWeightsDocume
     "min_rank_score": PERSONALIZED_MIN_RANK_SCORE,
     # Experimental, local only: matches rankers.llm_filter.LLM_FILTER_WEIGHT.
     "llm_filter_strength": 0.5,
+    # Experimental, local only: blend by default; the multiplier lifts matches 2x when on.
+    "llm_filter_multiply": False,
+    "llm_filter_multiplier": 2.0,
 }
 
 
@@ -119,7 +122,13 @@ def control_value(
     user: UserDocument | None,
     feed_name: str,
     control: Literal[
-        "politics", "purpose", "author_penalty", "topic_penalty", "min_rank_score", "llm_filter_strength"
+        "politics",
+        "purpose",
+        "author_penalty",
+        "topic_penalty",
+        "min_rank_score",
+        "llm_filter_strength",
+        "llm_filter_multiplier",
     ],
 ) -> float: ...
 
@@ -128,7 +137,7 @@ def control_value(
 def control_value(
     user: UserDocument | None,
     feed_name: str,
-    control: Literal["normalize_rank_by_generator", "llm_filter"],
+    control: Literal["normalize_rank_by_generator", "llm_filter", "llm_filter_multiply"],
 ) -> bool: ...
 
 

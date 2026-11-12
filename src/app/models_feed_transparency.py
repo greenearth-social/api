@@ -190,6 +190,8 @@ class FeedPreferences(BaseModel):
     llm_filter: bool | None = None
     min_rank_score: float | None = Field(default=None, ge=0.0, le=1.0)
     llm_filter_strength: float | None = Field(default=None, ge=0.0, le=1.0)
+    llm_filter_multiply: bool | None = None
+    llm_filter_multiplier: float | None = Field(default=None, ge=0.0, le=3.0)
 
 
 class AcceptFeedPreviewRequest(BaseModel):

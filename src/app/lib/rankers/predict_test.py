@@ -842,3 +842,68 @@ def test_run_predict_leaves_scores_alone_without_an_effective_filter(
         ("at://post/a", pytest.approx(0.3)),
     ]
     assert fetch.await_count == (0 if llm_filter == 0.0 else 1)
+
+
+@pytest.mark.parametrize(
+    ("multiplier", "expected"),
+    [
+        (
+            2.0,
+            [
+                ("at://post/matching", pytest.approx(0.6)),
+                ("at://post/halfway", pytest.approx(0.525)),
+                ("at://post/unrelated", pytest.approx(0.4)),
+            ],
+        ),
+        (
+            0.5,
+            [
+                ("at://post/unrelated", pytest.approx(0.4)),
+                ("at://post/halfway", pytest.approx(0.2625)),
+                ("at://post/matching", pytest.approx(0.15)),
+            ],
+        ),
+    ],
+    ids=["lifts-matches", "sinks-matches"],
+)
+def test_run_predict_multiplies_by_the_llm_filter_match_in_multiply_mode(
+    monkeypatch, multiplier, expected
+):
+    candidates = [
+        CandidatePost(at_uri="at://post/unrelated", minilm_l12_embedding=b64([0.0, 1.0])),
+        CandidatePost(at_uri="at://post/matching", minilm_l12_embedding=b64([1.0, 0.0])),
+        CandidatePost(at_uri="at://post/halfway", minilm_l12_embedding=b64([0.5, 0.5 * 3**0.5])),
+    ]
+    ranker = StubRanker(
+        "x",
+        {"at://post/unrelated": 0.4, "at://post/matching": 0.3, "at://post/halfway": 0.35},
+    )
+    monkeypatch.setattr(predict_module, "get_ranker", lambda _name: ranker)
+    monkeypatch.setattr(
+        predict_module, "fetch_active_llm_filter", AsyncMock(return_value=_filter_vector())
+    )
+    request = _request(models=[RankModelSpec(name="x", weight=1.0)], candidates=candidates)
+    request = request.model_copy(
+        update={"llm_filter_mode": "multiply", "llm_filter_multiplier": multiplier}
+    )
+
+    result = asyncio.run(predict_module.run_predict(request, es=object()))
+
+    # Politics shape: score * ((multiplier - 1) * match + 1).
+    assert [(r.at_uri, r.rank_score) for r in result.rankings] == expected
+
+
+def test_run_predict_skips_the_fetch_at_a_neutral_multiplier(monkeypatch):
+    ranker = StubRanker("x", {"at://post/a": 0.3})
+    monkeypatch.setattr(predict_module, "get_ranker", lambda _name: ranker)
+    fetch = AsyncMock(return_value=_filter_vector())
+    monkeypatch.setattr(predict_module, "fetch_active_llm_filter", fetch)
+    request = _request(
+        models=[RankModelSpec(name="x", weight=1.0)],
+        candidates=[CandidatePost(at_uri="at://post/a", minilm_l12_embedding=b64([1.0, 0.0]))],
+        llm_filter=0.5,
+    ).model_copy(update={"llm_filter_mode": "multiply", "llm_filter_multiplier": 1.0})
+
+    asyncio.run(predict_module.run_predict(request, es=object()))
+
+    fetch.assert_not_awaited()

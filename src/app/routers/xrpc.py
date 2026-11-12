@@ -459,6 +459,8 @@ def _with_llm_filter_multiplier(
     llm_filter: bool,
     user_doc: UserDocument | None,
     strength: float = LLM_FILTER_WEIGHT,
+    multiply: bool = False,
+    multiplier: float = 1.0,
 ) -> FeedConfig:
     """Return a request-local feed config with the LLM filter switched on.
 
@@ -476,7 +478,13 @@ def _with_llm_filter_multiplier(
 
     return feed_cfg.model_copy(
         update={
-            "rank_request_template": rank_template.model_copy(update={"llm_filter": strength})
+            "rank_request_template": rank_template.model_copy(
+                update={
+                    "llm_filter": strength,
+                    "llm_filter_mode": "multiply" if multiply else "blend",
+                    "llm_filter_multiplier": multiplier,
+                }
+            )
         }
     )
 
@@ -551,8 +559,22 @@ def _configured_generation(
             if "llm_filter_strength" in controls and effective.llm_filter_strength is not None
             else LLM_FILTER_WEIGHT
         )
+        # Experimental: multiply mode and its factor, when the feed exposes them.
+        multiply = bool(
+            "llm_filter_multiply" in controls and effective.llm_filter_multiply
+        )
+        multiplier = (
+            effective.llm_filter_multiplier
+            if "llm_filter_multiplier" in controls and effective.llm_filter_multiplier is not None
+            else 1.0
+        )
         feed_cfg = _with_llm_filter_multiplier(
-            feed_cfg, effective.llm_filter, user_doc, strength=strength
+            feed_cfg,
+            effective.llm_filter,
+            user_doc,
+            strength=strength,
+            multiply=multiply,
+            multiplier=multiplier,
         )
 
     if "normalize_rank_by_generator" in controls:

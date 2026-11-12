@@ -23,7 +23,7 @@ import contextlib
 from contextvars import ContextVar
 from datetime import datetime
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from ..documents import FeedDebugDocument, FeedSnapshotDocument, GeneratorScoreStats
@@ -69,6 +69,7 @@ class FeedDebugRecorder:
         self.politics_adjustments: list[tuple[str, float | None, float, float, float]] = []
         # Experimental: (at_uri, filter_score, score_multiplier, score_before, score_after).
         self.filter_setting: float | None = None
+        self.filter_mode: Literal["blend", "multiply"] = "blend"
         self.filter_adjustments: list[tuple[str, float | None, float, float, float]] = []
         # (at_uri, generator_name, score_before, score_after); only with the slate flag on.
         self.rank_normalization: list[tuple[str, str, float, float]] = []
@@ -143,8 +144,10 @@ class FeedDebugRecorder:
         self,
         setting: float,
         adjustments: list[tuple[str, float | None, float, float, float]],
+        mode: Literal["blend", "multiply"] = "blend",
     ) -> None:
         """Experimental: how the LLM filter changed each candidate's combined score."""
+        self.filter_mode = mode
         self.filter_setting = setting
         self.filter_adjustments = list(adjustments)
 
@@ -548,6 +551,7 @@ class FeedDebugRecorder:
         if self.filter_setting is not None:
             filter_by_uri = {
                 at_uri: FilterAdjustmentMeta(
+                    mode=self.filter_mode,
                     weight=weight,
                     filter_score=filter_score,
                     score_before=score_before,

@@ -14,7 +14,12 @@ from ...models import RankedCandidate, RankPredictRequest, RankPredictResult
 from ..feed_debug import current_recorder
 from ..telemetry import timed
 from .base import Ranker, RankerError, RankerExecutionError, RankerResult, get_ranker
-from .llm_filter import fetch_active_llm_filter, llm_filter_blend, llm_filter_scores
+from .llm_filter import (
+    fetch_active_llm_filter,
+    llm_filter_blend,
+    llm_filter_multiplier,
+    llm_filter_scores,
+)
 from ..metrics import get_metric_collector
 
 logger = logging.getLogger(__name__)
@@ -96,9 +101,11 @@ async def run_predict(
             raise RankModelNotFoundError(spec.name)
         resolved.append((spec.name, spec.weight, ranker))
 
-    # At weight 0 the filter contributes nothing, so nothing to fetch.
+    # At blend weight 0 or multiplier 1 the filter changes nothing, so nothing to fetch.
+    multiply = request.llm_filter_mode == "multiply"
+    filter_neutral = request.llm_filter_multiplier == 1.0 if multiply else request.llm_filter == 0.0
     llm_filter_vector = (
-        await fetch_active_llm_filter(request.user_did) if request.llm_filter != 0.0 else None
+        await fetch_active_llm_filter(request.user_did) if not filter_neutral else None
     )
 
     # return_exceptions=True so one ranker timing out doesn't cancel the
@@ -218,12 +225,22 @@ async def run_predict(
         filter_adjustments: list[tuple[str, float | None, float, float, float]] = []
         for idx, uri, score in multiplied_scores_initial_order:
             filter_score = filter_scores.get(uri)
-            blended = llm_filter_blend(request.llm_filter, score, filter_score or 0.0)
-            filtered.append((idx, uri, blended))
-            filter_adjustments.append((uri, filter_score, request.llm_filter, score, blended))
+            if multiply:
+                # Experimental: politics shape, both directions; no score means no change.
+                factor = llm_filter_multiplier(request.llm_filter_multiplier, filter_score or 0.0)
+                new_score = score * factor
+                filter_adjustments.append((uri, filter_score, factor, score, new_score))
+            else:
+                new_score = llm_filter_blend(request.llm_filter, score, filter_score or 0.0)
+                filter_adjustments.append((uri, filter_score, request.llm_filter, score, new_score))
+            filtered.append((idx, uri, new_score))
         multiplied_scores_initial_order = filtered
         if rec is not None:
-            rec.record_filter_adjustments(request.llm_filter, filter_adjustments)
+            rec.record_filter_adjustments(
+                request.llm_filter_multiplier if multiply else request.llm_filter,
+                filter_adjustments,
+                mode=request.llm_filter_mode,
+            )
 
     ranked = enumerate(sorted(
         multiplied_scores_initial_order,
