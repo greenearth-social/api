@@ -20,7 +20,7 @@ def dependencies(monkeypatch):
     # Keep the real generator and shared pipeline: these tests exercise source
     # allocation and diagnostics, while history, inference, and ES remain local mocks.
     prior = AverageUserEmbedding((1.0, 0.0), 2, "1" * 32, "2" * 32, "test-run", 2)
-    history = UserHistory([UserHistoryItem("at://liked/1", "2026-09-21T00:00:00Z", [1.0])])
+    history = UserHistory([UserHistoryItem("at://liked/1", "2026-09-21T00:00:00Z", [1.0])], raw_like_count=1)
     history_mock = AsyncMock(return_value=history)
     prediction = AsyncMock(return_value=UserEmbeddingResult(1, 1, [0.0, 1.0], "1" * 32, "2" * 32))
     search = AsyncMock(
@@ -72,7 +72,7 @@ async def test_prior_fallback_preserves_other_source_and_diagnostics(
     if not has_prior:
         monkeypatch.setattr(two_tower, "get_average_user_embedding", lambda: None)
     if not has_history:
-        dependencies.history.return_value = UserHistory([])
+        dependencies.history.return_value = UserHistory([], raw_like_count=0)
     context = PipelineContext(feed_name="your-feed", fail_fast=True)
     recorder = FeedDebugRecorder(feed_name="your-feed", regenerated=True)
     with pipeline_context_scope(context), feed_debug_scope(recorder):

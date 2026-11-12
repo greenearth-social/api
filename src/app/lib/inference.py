@@ -230,12 +230,12 @@ async def predict_user_embedding(
     # Shared by the export endpoint and candidate retrieval. Keep the prediction
     # actual-only here; choosing or blending a prior belongs to the generator.
     embedded_history = history.items_with_embeddings
-    like_count = len(history.items)
+    raw_like_count = history.raw_like_count
     embedding_count = len(embedded_history)
-    if not history.items:
-        return UserEmbeddingResult(like_count, embedding_count, reason="no_likes")
+    if not raw_like_count:
+        return UserEmbeddingResult(raw_like_count, embedding_count, reason="no_likes")
     if not embedded_history:
-        return UserEmbeddingResult(like_count, embedding_count, reason="no_embedded_history")
+        return UserEmbeddingResult(raw_like_count, embedding_count, reason="no_embedded_history")
     payload = await predict_user_tower_single(
         [item.embedding for item in embedded_history if item.embedding is not None],
         [item.author_did for item in embedded_history],
@@ -257,7 +257,7 @@ async def predict_user_embedding(
     if not valid:
         raise InferenceResponseFormatError("Expected finite numeric embedding coordinates")
     return UserEmbeddingResult(
-        history_like_count=like_count,
+        history_like_count=raw_like_count,
         history_embedding_count=embedding_count,
         embedding=vector,
         user_model_uuid=user_model_uuid,

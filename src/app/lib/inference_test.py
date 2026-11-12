@@ -347,6 +347,7 @@ async def test_predict_user_embedding_validates_prediction_outputs(monkeypatch, 
             **payload,
         }
     history = UserHistory(
+        raw_like_count=1,
         items=[
             UserHistoryItem(
                 at_uri="at://did:plc:author/app.bsky.feed.post/1",
@@ -370,6 +371,48 @@ async def test_predict_user_embedding_validates_prediction_outputs(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_predict_user_embedding_preserves_selected_history_and_raw_like_count(
+    monkeypatch,
+):
+    # The loader selected 64 usable entries from 128 raw likes before inference.
+    expected_indices = [i for i in range(1, 86) if i % 4]
+    assert len(expected_indices) == 64
+    history = UserHistory([
+        UserHistoryItem(
+            at_uri=f"at://post/{i}",
+            liked_at="2026-01-01T00:00:00+00:00",
+            embedding=[float(i), 1.0],
+            author_did=f"did:plc:author{i}",
+        )
+        for i in expected_indices
+    ], raw_like_count=128)
+    client = AsyncMock()
+    client.post.return_value = httpx.Response(200, json={
+        "outputs": [[0.1, 0.2]],
+        "model_type": "user-tower",
+        "model_uuid": "1" * 32,
+        "paired_post_model_uuid": "2" * 32,
+    })
+    monkeypatch.setattr(inference_module, "get_http_client", lambda: client)
+
+    result = await inference_module.predict_user_embedding(
+        history, base_url="https://inference.example", api_key="secret"
+    )
+
+    client.post.assert_awaited_once_with(
+        "https://inference.example/models/user-tower/predict",
+        json={
+            "history_embeddings": [[float(i), 1.0] for i in expected_indices],
+            "history_author_dids": [f"did:plc:author{i}" for i in expected_indices],
+        },
+        headers={"X-API-Key": "secret"},
+    )
+    assert result.history_like_count == 128
+    assert result.history_embedding_count == 64
+    assert len(history.items) == 64
+
+
+@pytest.mark.asyncio
 async def test_predict_user_embedding_skips_empty_history(monkeypatch):
     predict_user_tower = AsyncMock()
     monkeypatch.setattr(
@@ -379,7 +422,7 @@ async def test_predict_user_embedding_skips_empty_history(monkeypatch):
     )
 
     result = await inference_module.predict_user_embedding(
-        UserHistory(items=[]),
+        UserHistory(items=[], raw_like_count=0),
         base_url="https://inference.example",
         api_key="secret",
     )
@@ -389,10 +432,12 @@ async def test_predict_user_embedding_skips_empty_history(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("compact", [False, True])
 async def test_predict_user_embedding_skips_history_without_embeddings(
-    monkeypatch,
+    monkeypatch, compact,
 ):
     history = UserHistory(
+        raw_like_count=1,
         items=[
             UserHistoryItem(
                 at_uri="at://did:plc:author/app.bsky.feed.post/1",
@@ -401,6 +446,8 @@ async def test_predict_user_embedding_skips_history_without_embeddings(
             )
         ]
     )
+    if compact:
+        history = UserHistory(items=[], raw_like_count=1)
     predict_user_tower = AsyncMock()
     monkeypatch.setattr(
         inference_module,

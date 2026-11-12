@@ -26,6 +26,7 @@ DID = "did:plc:viewer"
 
 def _history(vector=VECTOR):
     return UserHistory(
+        raw_like_count=1,
         items=[
             UserHistoryItem(
                 at_uri="at://post/1",
@@ -122,13 +123,16 @@ def test_export_propagates_actual_pair_and_history_without_candidate_search(
 
 
 @pytest.mark.parametrize(
-    "history,reason",
+    "history,reason,like_count",
     [
-        (UserHistory(items=[]), "no_likes"),
-        (_history(None), "no_embedded_history"),
+        (UserHistory(items=[], raw_like_count=0), "no_likes", 0),
+        (_history(None), "no_embedded_history", 1),
+        (UserHistory(items=[], raw_like_count=128), "no_embedded_history", 128),
     ],
 )
-def test_missing_history_skips_inference_and_excludes_vectors(client, monkeypatch, history, reason):
+def test_missing_history_skips_inference_and_excludes_vectors(
+    client, monkeypatch, history, reason, like_count
+):
     monkeypatch.setattr(
         embeddings, "fetch_user_history_features", AsyncMock(return_value=history)
     )
@@ -137,7 +141,7 @@ def test_missing_history_skips_inference_and_excludes_vectors(client, monkeypatc
     body = response.json()
     assert body["status"] == "skipped"
     assert body["reason"] == reason
-    assert body["history_like_count"] == len(history.items)
+    assert body["history_like_count"] == like_count
     assert body["history_embedding_count"] == 0
     assert not {"embedding", "dimension", "user_model_uuid", "post_model_uuid"} & body.keys()
     _mock_prediction_request().assert_not_called()
@@ -306,7 +310,7 @@ def test_dimension_comes_from_vector_and_uuid_format_is_canonical(client, vector
 def test_real_history_path_uses_production_preparation_and_best_effort_hydration(
     client, monkeypatch, failed_index
 ):
-    # Restore the real history loader for this test. It uses the latest 64 likes,
+    # Restore the real history loader for this test. It uses the latest 128 likes,
     # hydrates posts and replies, and can continue with one failed hydration index.
     monkeypatch.setattr(
         embeddings,
@@ -358,7 +362,7 @@ def test_real_history_path_uses_production_preparation_and_best_effort_hydration
         assert response.json()["history_embedding_count"] == (2 if failed_index is None else 1)
     assert app.state.es.search.await_count == 6
     first = app.state.es.search.call_args_list[0].kwargs
-    assert first["size"] == 64
+    assert first["size"] == 128
     assert first["routing"] == DID
     assert first["sort"] == [{"created_at": "desc"}]
     call = _mock_prediction_request().call_args.kwargs["json"]

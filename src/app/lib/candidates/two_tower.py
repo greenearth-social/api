@@ -90,9 +90,8 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         async with timed(logger, "two_tower_user_side", user_did=user_did):
             history = None
             if self.history_mode == "actual":
-                # Reuse the cached, latest-64-likes history also used by the
-                # embedding endpoint. Only items passed to the tower add weight;
-                # likes whose post embeddings are missing do not count.
+                # Reuse the capped, usable history also used by the embedding
+                # endpoint. Only items passed to the tower add blend weight.
                 history = await fetch_user_history_features(es, user_did)
                 num_likes = len(history.items_with_embeddings)
             # Empty-history mode deliberately skips the loader even for an

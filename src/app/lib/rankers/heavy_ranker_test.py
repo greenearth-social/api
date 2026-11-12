@@ -1,7 +1,7 @@
 """Tests for the heavy ranker."""
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -52,6 +52,7 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
     async def fake_fetch_user_history_features(es, user_did):
         assert user_did == "did:plc:user1"
         return UserHistory(
+            raw_like_count=3,
             items=[
                 UserHistoryItem(
                     "at://liked/a",
@@ -154,6 +155,55 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
     ]
 
 
+def test_predict_preserves_selected_history_with_aligned_metadata(monkeypatch):
+    # Model consumers receive the loader's selected history in newest-first order.
+    expected_indices = [i for i in range(1, 86) if i % 4]
+    assert len(expected_indices) == 64
+    history = UserHistory([
+        UserHistoryItem(
+            at_uri=f"at://liked/{i}",
+            liked_at=(datetime(2026, 1, 1, tzinfo=UTC) - timedelta(seconds=i)).isoformat(),
+            embedding=[float(i), 1.0],
+            author_did=f"did:plc:author{i}",
+            like_count=i + 10,
+        )
+        for i in expected_indices
+    ], raw_like_count=128)
+    predict = AsyncMock(return_value=[0.5])
+    recorder = MagicMock()
+    monkeypatch.setattr(heavy_ranker_module, "get_inference_settings", lambda: ("https://inference", "secret"))
+    monkeypatch.setattr(heavy_ranker_module, "fetch_user_history_features", AsyncMock(return_value=history))
+    monkeypatch.setattr(heavy_ranker_module, "predict_heavy_ranker_single_user", predict)
+    monkeypatch.setattr(heavy_ranker_module, "current_recorder", lambda: recorder)
+
+    asyncio.run(HeavyRanker(name="heavy_ranker", history_mode="actual").predict(
+        es=None,
+        user_did="did:plc:user1",
+        candidates=[CandidatePost(
+            at_uri="at://candidate/1",
+            minilm_l12_embedding=encode_float32_b64([1.0, 0.0]),
+            author_did="did:plc:candidate",
+            like_count=2,
+        )],
+    ))
+
+    predict.assert_awaited_once_with(
+        [[float(i), 1.0] for i in expected_indices],
+        [f"did:plc:author{i}" for i in expected_indices],
+        [
+            (datetime(2026, 1, 1, tzinfo=UTC) - timedelta(seconds=i)).isoformat()
+            for i in expected_indices
+        ],
+        [i + 10 for i in expected_indices],
+        [[1.0, 0.0]], ["did:plc:candidate"], [2],
+        base_url="https://inference", api_key="secret",
+    )
+    recorder.record_user_features.assert_called_once_with(
+        "heavy_ranker", [f"at://liked/{i}" for i in expected_indices], 64
+    )
+    assert len(history.items) == 64
+
+
 def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates(monkeypatch):
     monkeypatch.setattr(
         heavy_ranker_module,
@@ -163,7 +213,7 @@ def test_predict_uses_embedded_candidate_features_and_fetches_missing_candidates
     seen = {}
 
     async def fake_fetch_user_history_features(es, user_did):
-        return UserHistory(items=[])
+        return UserHistory(items=[], raw_like_count=0)
 
     async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         seen["fetched_candidate_uris"] = list(at_uris)
@@ -358,6 +408,7 @@ def test_predict_calls_ranker_with_empty_history_when_likes_have_no_embeddings(m
 
     async def fake_fetch_user_history_features(es, user_did):
         return UserHistory(
+            raw_like_count=1,
             items=[UserHistoryItem("at://liked/a", _time(1), None)]
         )
 
@@ -425,7 +476,7 @@ def test_predict_returns_unscored_candidates_when_candidate_features_are_missing
     )
 
     async def fake_fetch_user_history_features(es, user_did):
-        return UserHistory(items=[])
+        return UserHistory(items=[], raw_like_count=0)
 
     async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         return []
@@ -474,7 +525,7 @@ def test_predict_returns_unscored_candidates_when_output_count_mismatches(monkey
     )
 
     async def fake_fetch_user_history_features(es, user_did):
-        return UserHistory(items=[])
+        return UserHistory(items=[], raw_like_count=0)
 
     async def fake_fetch_post_embeddings_and_metadata(es, at_uris, index="posts"):
         return [

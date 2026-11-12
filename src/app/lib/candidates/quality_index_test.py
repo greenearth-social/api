@@ -120,7 +120,7 @@ class TestTwoTowerUsesQualityIndex:
 
         with (
             patch(GET_PRIOR, return_value=PRIOR),
-            patch(FETCH_HISTORY, new_callable=AsyncMock, return_value=UserHistory([])),
+            patch(FETCH_HISTORY, new_callable=AsyncMock, return_value=UserHistory([], raw_like_count=0)),
             patch(KNN_SEARCH_POSTS, new_callable=AsyncMock, return_value=[]) as knn_search,
         ):
             await generator.generate(object(), "did:plc:user1", num_candidates=10)
@@ -142,7 +142,7 @@ class TestTwoTowerUsesQualityIndex:
 
         with (
             patch(GET_PRIOR, return_value=PRIOR),
-            patch(FETCH_HISTORY, new_callable=AsyncMock, return_value=UserHistory([])),
+            patch(FETCH_HISTORY, new_callable=AsyncMock, return_value=UserHistory([], raw_like_count=0)),
             patch(KNN_SEARCH_POSTS, new_callable=AsyncMock, return_value=[]) as knn_search,
         ):
             await generator.generate(object(), "did:plc:user1", num_candidates=10)
@@ -169,7 +169,7 @@ async def test_generator_emits_exact_prior_vector_and_retrieval_filters(monkeypa
     )
     with (
         patch(GET_PRIOR, return_value=PRIOR),
-        patch(FETCH_HISTORY, new_callable=AsyncMock, return_value=UserHistory([])),
+        patch(FETCH_HISTORY, new_callable=AsyncMock, return_value=UserHistory([], raw_like_count=0)),
     ):
         result = await generator.generate(
             es,

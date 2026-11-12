@@ -1109,11 +1109,12 @@ derived from the returned vector. Missing pairing fails
 explicitly; the producer does not infer it from a separate readiness request.
 The post tower itself does not need to be loaded by inference-service.
 
-The endpoint follows production's latest-64-like preparation, including posts
-and replies and their `all_MiniLM_L12_v2` content embeddings. It uses the same
+The endpoint fetches the latest 128 likes and uses up to 64 successfully hydrated
+posts and replies with `all_MiniLM_L12_v2` content embeddings. It uses the same
 history loader and cache as the feed, including its best-effort handling when
 one hydration index fails. Missing documents or embeddings are excluded from
-the model input. No candidate search or empty-history inference is performed.
+the model input. The cache stores only the selected usable items, plus the raw
+like count for diagnostics. No candidate search or empty-history inference is performed.
 
 The endpoint has one overall deadline of 55 seconds. The shared history loader
 and HTTP client retain their existing timeouts. Upstream failures return 502 and
@@ -1175,8 +1176,8 @@ run-start cutoff, bound query parameters, and DID-ordered pages of 1,000.
 Counts must meet the inclusive threshold. ES like counts query the fixed `likes`
 index in batches of 500 and represent likes **made by the user that remain in
 the index**, not a lifetime total; PostHog is not used to count likes. Missing
-aggregation buckets count as zero. The API separately loads up to 64 recent
-likes for inference.
+aggregation buckets count as zero. The API separately loads up to 128 recent
+likes and supplies the most recent 64 usable entries to inference.
 ES data can change during a run; the PostHog cutoff does not make ES reads a
 point-in-time snapshot.
 
@@ -1392,7 +1393,7 @@ query_embedding = (
 ```
 
 `num_likes` counts usable history embeddings passed to the user tower, up to the
-existing 64-like limit; it is not the user's retained or lifetime like count.
+64-item model-input limit; it is not the user's retained or lifetime like count.
 The final blend is not normalized, since retrieval uses cosine similarity.
 Blending happens only in candidate retrieval. `/embeddings/user` still returns
 actual user-tower predictions, and ranker behavior is unchanged.
