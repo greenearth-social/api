@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 from .routers import (
     candidates, diversify, embeddings, feed_transparency, health, llm_query_vectors, rank,
-    redirect, skylight, slate, user_preferences, xrpc,
+    redirect, skylight, slate, telemetry, user_preferences, xrpc,
 )
 from .security import RequireApiKey
 from .lib.atproto_auth import init_id_resolver
@@ -537,6 +537,7 @@ app.include_router(llm_query_vectors.router)
 app.include_router(rank.router)
 app.include_router(skylight.router)
 app.include_router(slate.router)
+app.include_router(telemetry.router)
 app.include_router(redirect.router)
 app.include_router(user_preferences.router)
 app.include_router(xrpc.router)
