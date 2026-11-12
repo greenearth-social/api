@@ -266,7 +266,13 @@ def _post_seen_classification_update(
     *,
     last_seen_at: datetime,
 ) -> dict[str, object]:
-    """Build the monotonic user fields for live updates and historical backfills."""
+    """Build the PostSeen-derived user fields for live updates and historical backfills.
+
+    Monotonic, except for an account tombstoned as gone: PostSeen activity only
+    revives it (clearing ``account_gone_at`` and setting ``precompute_artifacts``
+    again) when it happened after the tombstone, so a historical backfill never
+    re-flags a dead account.
+    """
     data = existing or {}
     stored_days = _parse_post_seen_days(data.get("post_seen_days_utc"))
     all_days = stored_days | observed_days
@@ -282,7 +288,20 @@ def _post_seen_classification_update(
     cutoff = latest_day - timedelta(days=POST_SEEN_WINDOW_DAYS - 1)
     recent_days = sorted(day for day in all_days if cutoff <= day <= latest_day)
 
+    gone_at = data.get("account_gone_at")
+    revived: dict[str, object] = {}
+    if isinstance(gone_at, datetime):
+        if gone_at.tzinfo is None:
+            gone_at = gone_at.replace(tzinfo=UTC)
+        if last_seen_at <= gone_at:
+            # Activity from before the account went away: record it, but leave
+            # the tombstone (and the cleared flag) in place.
+            observed_days = set()
+        else:
+            revived = {"account_gone_at": None}
+
     return {
+        **revived,
         "precompute_artifacts": bool(data.get("precompute_artifacts")) or bool(observed_days),
         "presumed_pinned": bool(data.get("presumed_pinned"))
         or _has_two_post_seen_days_within_window(all_days),
@@ -364,6 +383,29 @@ async def backfill_user_post_seen(
         )
 
     await _backfill(transaction)
+
+
+async def tombstone_gone_account(db: AsyncClient, user_did: str) -> None:
+    """Stop all precompute work for an account that no longer exists on Bluesky.
+
+    Clears ``precompute_artifacts`` (the refresh job and jetstream follow
+    tracking both select on it) and stamps ``account_gone_at``, keeping the
+    user's settings for a reactivation.  The followed-users cache entry is
+    deleted: a reactivated account starts that cache over.
+    """
+    # Deferred: followed_users_cache imports this module.
+    from .followed_users_cache import FOLLOWED_USERS_CACHE_COLLECTION
+
+    now = datetime.now(UTC)
+    doc_id = user_doc_id(user_did)
+    batch = db.batch()
+    batch.set(
+        db.collection(USERS_COLLECTION).document(doc_id),
+        {"precompute_artifacts": False, "account_gone_at": now, "updated_at": now},
+        merge=True,
+    )
+    batch.delete(db.collection(FOLLOWED_USERS_CACHE_COLLECTION).document(doc_id))
+    await batch.commit()
 
 
 async def mark_settings_visited(

@@ -1039,6 +1039,33 @@ class TestPostSeenClassification:
         assert update["presumed_pinned"] is False
         assert update["post_seen_days_utc"] == ["2026-09-20"]
 
+    def test_activity_before_a_tombstone_does_not_revive_the_account(self):
+        gone_at = datetime(2026, 11, 12, 0, 10, tzinfo=UTC)
+        seen_at = datetime(2026, 11, 1, 10, 0, tzinfo=UTC)
+
+        update = _post_seen_classification_update(
+            {"precompute_artifacts": False, "account_gone_at": gone_at},
+            {seen_at.date()},
+            last_seen_at=seen_at,
+        )
+
+        assert update["precompute_artifacts"] is False
+        assert "account_gone_at" not in update
+        assert update["post_seen_days_utc"] == ["2026-11-01"]
+
+    def test_live_activity_after_a_tombstone_revives_the_account(self):
+        gone_at = datetime(2026, 11, 12, 0, 10, tzinfo=UTC)
+        seen_at = datetime(2026, 12, 1, 10, 0, tzinfo=UTC)
+
+        update = _post_seen_classification_update(
+            {"precompute_artifacts": False, "account_gone_at": gone_at},
+            {seen_at.date()},
+            last_seen_at=seen_at,
+        )
+
+        assert update["precompute_artifacts"] is True
+        assert update["account_gone_at"] is None
+
     def test_backfill_detects_historical_window_while_retaining_only_recent_days(self):
         seen_at = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
         update = _post_seen_classification_update(

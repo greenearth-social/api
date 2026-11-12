@@ -16,7 +16,10 @@ Scheduler::
     python -m src.app.jobs.refresh_followed_users [--dry-run] [--concurrency N]
 
 Exits non-zero only when the flagged users cannot be listed; a user whose
-follows cannot be fetched is counted and left for the next run.
+follows cannot be fetched is counted and left for the next run.  An account
+that no longer exists on Bluesky is tombstoned (``tombstone_gone_account``),
+which takes it out of this job and jetstream's follow tracking until it is
+reactivated.
 """
 
 from __future__ import annotations
@@ -31,7 +34,12 @@ from collections.abc import AsyncIterator
 
 from google.cloud.firestore import AsyncClient, FieldFilter  # type: ignore[import-untyped]
 
-from ..lib.firestore import USERS_COLLECTION, init_firestore_client, user_doc_id
+from ..lib.firestore import (
+    USERS_COLLECTION,
+    init_firestore_client,
+    tombstone_gone_account,
+    user_doc_id,
+)
 from ..lib.followed_users_cache import FOLLOWED_USERS_CACHE_COLLECTION, FollowedUsersCache
 from ..lib.http_client import close_http_client
 from ..lib.metrics import MetricCollector, get_metric_collector, set_metric_collector
@@ -72,7 +80,8 @@ async def run(
     """Refresh every flagged user's cache entry that needs it.
 
     Returns counts keyed by ``flagged``, ``reason:<why>`` for each entry that
-    needed a refresh, and ``outcome:<outcome>`` for each refresh attempted.
+    needed a refresh, ``outcome:<outcome>`` for each refresh attempted, and
+    ``tombstoned`` for each gone account taken out of the job.
     """
     counts: Counter[str] = Counter()
     semaphore = asyncio.Semaphore(concurrency)
@@ -82,6 +91,16 @@ async def run(
         async with semaphore:
             outcome = await cache.refresh(key, did, records=True)
         counts[f"outcome:{outcome}"] += 1
+        if outcome == "account_gone":
+            try:
+                await tombstone_gone_account(db, did)
+            except Exception:
+                # Retried next run: the account still looks gone.
+                logger.exception("Failed to tombstone gone account %s", did)
+                counts["tombstone_failed"] += 1
+            else:
+                logger.info("Tombstoned gone account %s", did)
+                counts["tombstoned"] += 1
 
     async def check(batch: list[str]) -> None:
         keys = {user_doc_id(did): did for did in batch}
@@ -121,7 +140,8 @@ def _report(counts: Counter[str]) -> None:
     failed = sum(
         v
         for k, v in counts.items()
-        if k.startswith("outcome:") and k not in ("outcome:success", "outcome:skipped")
+        if k.startswith("outcome:")
+        and k not in ("outcome:success", "outcome:skipped", "outcome:account_gone")
     )
     if mc := get_metric_collector():
         mc.record("follows_refresh_job.users_rate", counts["flagged"], state="flagged",
@@ -131,6 +151,8 @@ def _report(counts: Counter[str]) -> None:
         mc.record("follows_refresh_job.users_rate", counts["outcome:success"],
                   state="refreshed", **_METRIC_LABELS)
         mc.record("follows_refresh_job.users_rate", failed, state="failed", **_METRIC_LABELS)
+        mc.record("follows_refresh_job.users_rate", counts["tombstoned"], state="tombstoned",
+                  **_METRIC_LABELS)
     logger.info(
         "Followed-users refresh job: flagged=%d needed_refresh=%d %s",
         counts["flagged"],

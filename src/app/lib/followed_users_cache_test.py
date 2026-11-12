@@ -523,6 +523,22 @@ class TestPrecomputeUsers:
         assert stored(db, USER).capped is True
 
 
+    @pytest.mark.asyncio
+    async def test_a_gone_account_is_reported_as_such_not_as_a_failure(
+        self, origin, records, precompute_user, metrics
+    ):
+        from .bsky import AccountGoneError
+
+        records.results = [AccountGoneError("gone")]
+        db = FakeDb()
+        cache = make_cache(db)
+
+        assert await cache.refresh("user1", USER, records=True) == "account_gone"
+        outcomes = [a["outcome"] for n, _, a in metrics.records
+                    if n == "follows_cache.refresh_count"]
+        assert outcomes == ["account_gone"]
+
+
 class TestRefreshReason:
     """What the refresh job re-walks."""
 
