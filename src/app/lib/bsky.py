@@ -19,8 +19,6 @@ def get_metric_collector():
 
 
 def _status_code_label(exc: BaseException) -> str:
-    if isinstance(exc, AccountGoneError):
-        return "account_gone"
     if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
         return "timeout"
     if isinstance(exc, (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError)):
@@ -356,6 +354,10 @@ async def _walk(
         raise FollowedUsersLookupError(
             f"Failed to fetch followed users for {user_did}"
         ) from exc
+    except AccountGoneError:
+        # Not a failure: Bluesky answered, and the answer is that the account
+        # no longer exists.  The caller decides what that means.
+        raise
     except FollowedUsersLookupError as exc:
         _count_failure("bsky.follows.failure_count", exc)
         raise
