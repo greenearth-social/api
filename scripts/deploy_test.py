@@ -1,5 +1,6 @@
 """Exercise embedding selection and deployment ordering without cloud access."""
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -33,8 +34,27 @@ gcloud() {
             printf '%s\0' "$@" > "$TEST_DIRECTORY/job_args"
             ;;
         "run services update-traffic") record update_traffic ;;
+        "secrets versions access")
+            [ "${FAKE_SECRET_STATUS:-0}" = 0 ] || return "$FAKE_SECRET_STATUS"
+            case "$*" in
+                *discord-oncall-channel-id*) printf '%s\n' 4242 ;;
+                *) printf '%s\n' "Bot test-token" ;;
+            esac
+            ;;
+        "config get-value account") printf '%s\n' deployer@example.test ;;
         *) record unexpected_gcloud_command; return 90 ;;
     esac
+}
+
+# Deploy notifications: keep each JSON body Discord would have received.
+curl() {
+    record discord
+    while [ $# -gt 0 ]; do
+        if [ "$1" = -d ]; then
+            printf '%s\n' "$2" >> "$TEST_DIRECTORY/discord"
+        fi
+        shift
+    done
 }
 
 pipenv() {
@@ -81,7 +101,13 @@ def run_deploy(
     environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
-    for name in ("GE_AVERAGE_USER_EMBEDDING_URI", "FAKE_RESOLVER_STATUS", "FAKE_RESOLVER_OUTPUT"):
+    for name in (
+        "GE_AVERAGE_USER_EMBEDDING_URI",
+        "GE_DEPLOY_NOTIFY",
+        "FAKE_RESOLVER_STATUS",
+        "FAKE_RESOLVER_OUTPUT",
+        "FAKE_SECRET_STATUS",
+    ):
         env.pop(name, None)
     env.update(
         TEST_DIRECTORY=str(tmp_path),
@@ -138,9 +164,10 @@ def test_default_selection_is_resolved_and_pinned_before_deployment(
     assert deploy_args[:3] == ["run", "deploy", f"greenearth-api-{environment_name}"]
     assert f"--set-env-vars=GE_AVERAGE_USER_EMBEDDING_URI={artifact_uri}" in deploy_args
     events = (tmp_path / "events").read_text().splitlines()
-    assert events[:5] == [
+    assert events[:6] == [
         "clean_worktree",
         "configure_project",
+        "discord",
         "resolve_embedding",
         "prepare_ux_posts",
         "publisher_preflight",
@@ -191,7 +218,9 @@ def test_missing_or_invalid_selection_stops_before_external_writes(tmp_path: Pat
     assert (tmp_path / "events").read_text().splitlines() == [
         "clean_worktree",
         "configure_project",
+        "discord",
         "resolve_embedding",
+        "discord",
     ]
     assert not (tmp_path / "deploy_args").exists()
 
@@ -249,3 +278,41 @@ def test_unresolvable_image_stops_before_deploying_the_job(tmp_path: Path) -> No
 
     assert result.returncode != 0
     assert "deploy_job" not in (tmp_path / "events").read_text().splitlines()
+
+
+def discord_messages(tmp_path: Path) -> list[str]:
+    return [json.loads(line)["content"] for line in (tmp_path / "discord").read_text().splitlines()]
+
+
+def test_deploy_is_announced_in_oncall_before_and_after(tmp_path: Path) -> None:
+    result = run_deploy(tmp_path, ["--environment", "prod"])
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    start, finish = discord_messages(tmp_path)
+    assert start.startswith("🚀 **api** · **prod** deploy started: ")
+    assert start.endswith("(deployer@example.test)")
+    assert finish.startswith("✅ **api** · **prod** deploy finished after ")
+    events = (tmp_path / "events").read_text().splitlines()
+    assert events.index("discord") < events.index("prepare_ux_posts")
+    assert events[-1] == "discord"
+
+
+def test_failed_deploy_is_reported_in_oncall(tmp_path: Path) -> None:
+    result = run_deploy(tmp_path, environment={"FAKE_IMAGE": ""})
+
+    assert result.returncode != 0
+    finish = discord_messages(tmp_path)[-1]
+    assert finish.startswith("❌ **api** · **stage** deploy failed after ")
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [{"FAKE_SECRET_STATUS": "1"}, {"GE_DEPLOY_NOTIFY": "false"}],
+    ids=["secrets-unreadable", "disabled"],
+)
+def test_deploy_proceeds_without_announcing(tmp_path: Path, environment: dict[str, str]) -> None:
+    result = run_deploy(tmp_path, environment=environment)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "deploy" in (tmp_path / "events").read_text().splitlines()
+    assert not (tmp_path / "discord").exists()
