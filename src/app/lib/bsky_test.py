@@ -766,7 +766,23 @@ class TestAccountGone:
             await fetch_followed_user_dids("did:plc:me", limit=10)
 
     @pytest.mark.asyncio
-    async def test_any_other_400_is_an_ordinary_failure(self, fake_http_client):
+    async def test_a_gone_account_is_not_counted_as_a_failure(
+        self, fake_http_client, monkeypatch
+    ):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
+        fake_http_client.response = _status_400(
+            {"error": "InvalidRequest", "message": "Actor not found: did:plc:me"}
+        )
+
+        with pytest.raises(AccountGoneError):
+            await fetch_followed_user_dids("did:plc:me", limit=10)
+        assert collector.records == []
+
+    @pytest.mark.asyncio
+    async def test_any_other_400_is_an_ordinary_failure(self, fake_http_client, monkeypatch):
+        collector = _RecordingCollector()
+        monkeypatch.setattr(bsky_module, "get_metric_collector", lambda: collector)
         fake_http_client.response = _status_400(
             {"error": "InvalidRequest", "message": "Error: limit must be <= 100"}
         )
@@ -774,6 +790,7 @@ class TestAccountGone:
         with pytest.raises(FollowedUsersLookupError) as raised:
             await fetch_follow_records("did:plc:me", limit=10, timeout_seconds=5)
         assert not isinstance(raised.value, AccountGoneError)
+        assert [r[0] for r in collector.records] == ["bsky.follows.failure_count"]
 
 
 class TestFetchVisibleFollowRecordsAccountGone:
