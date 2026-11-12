@@ -76,6 +76,28 @@ class FakeCollection(FakeQuery):
         return FakeDocRef(self._db, self._collection, doc_id)
 
 
+class FakeBatch:
+    def __init__(self, db: FakeDb):
+        self._db = db
+        self._ops: list = []
+
+    def set(self, ref: FakeDocRef, data: dict, merge: bool = False) -> None:
+        self._ops.append(("set", ref, data, merge))
+
+    def delete(self, ref: FakeDocRef) -> None:
+        self._ops.append(("delete", ref, None, False))
+
+    async def commit(self) -> None:
+        for op, ref, data, merge in self._ops:
+            docs = self._db.data[ref._collection]
+            if op == "delete":
+                docs.pop(ref.id, None)
+            elif merge and ref.id in docs:
+                docs[ref.id].update(data)
+            else:
+                docs[ref.id] = dict(data)
+
+
 class FakeDb:
     def __init__(self):
         self.data: dict[str, dict[str, dict]] = {
@@ -92,6 +114,9 @@ class FakeDb:
 
     def transaction(self):
         return object()
+
+    def batch(self) -> FakeBatch:
+        return FakeBatch(self)
 
 
 def make_cache(db: FakeDb) -> FollowedUsersCache:
@@ -234,6 +259,38 @@ async def test_a_failed_walk_is_counted_not_fatal(walk):
 
 
 @pytest.mark.asyncio
+async def test_a_gone_account_is_tombstoned_and_left_alone_after(walk, monkeypatch):
+    from ..lib.bsky import AccountGoneError
+
+    records: list[tuple[str, float, dict]] = []
+    collector = SimpleNamespace(record=lambda n, v, **a: records.append((n, v, a)))
+    monkeypatch.setattr(job, "get_metric_collector", lambda: collector)
+    walk.result = AccountGoneError("gone")
+    db = FakeDb()
+    add_user(db, "did:plc:gone", flagged=True)
+    db.data[USERS_COLLECTION][user_doc_id("did:plc:gone")]["social_radius"] = 1
+    add_entry(db, "did:plc:gone", generated_at=now() - timedelta(days=2), **FRESH)
+
+    counts = await job.run(cast(Any, db), make_cache(db))
+
+    assert counts["outcome:account_gone"] == 1
+    assert counts["tombstoned"] == 1
+    user = db.data[USERS_COLLECTION][user_doc_id("did:plc:gone")]
+    assert user["precompute_artifacts"] is False
+    assert user["account_gone_at"] is not None
+    assert user["social_radius"] == 1  # settings kept for a reactivation
+    assert user_doc_id("did:plc:gone") not in db.data[FOLLOWED_USERS_CACHE_COLLECTION]
+    gauges = {a["state"]: v for n, v, a in records if n == "follows_refresh_job.users_rate"}
+    assert gauges["failed"] == 0 and gauges["tombstoned"] == 1
+
+    # The next run does no work for it at all.
+    walk.calls.clear()
+    counts = await job.run(cast(Any, db), make_cache(db))
+    assert counts["flagged"] == 0
+    assert walk.calls == []
+
+
+@pytest.mark.asyncio
 async def test_flagged_user_without_user_did_is_skipped(walk):
     db = FakeDb()
     db.data[USERS_COLLECTION]["legacy"] = {"precompute_artifacts": True}
@@ -255,7 +312,9 @@ async def test_reports_population_gauges(walk, monkeypatch):
     await job.run(cast(Any, db), make_cache(db))
 
     gauges = {a["state"]: v for n, v, a in records if n == "follows_refresh_job.users_rate"}
-    assert gauges == {"flagged": 1, "needed_refresh": 1, "refreshed": 1, "failed": 0}
+    assert gauges == {
+        "flagged": 1, "needed_refresh": 1, "refreshed": 1, "failed": 0, "tombstoned": 0
+    }
 
 
 def test_requires_firestore_config_outside_the_emulator(monkeypatch):

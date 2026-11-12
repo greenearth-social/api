@@ -141,7 +141,15 @@ class UserDocument(BaseModel):
     precompute_artifacts: bool = Field(
         default=False,
         description="Whether expensive per-user artifacts should be precomputed. Set after "
-        "the first real interactionSeen event.",
+        "the first real interactionSeen event; cleared when the account is gone (see "
+        "account_gone_at) and set again by its next live PostSeen.",
+    )
+    account_gone_at: datetime | None = Field(
+        default=None,
+        description="When the followed-users refresh job found the Bluesky account deleted, "
+        "deactivated or taken down.  A tombstone: precompute_artifacts is cleared so no "
+        "work is done for the account, while its settings are kept.  Cleared by a live "
+        "PostSeen after this time, which marks the account as reactivated.",
     )
     presumed_pinned: bool = Field(
         default=False,

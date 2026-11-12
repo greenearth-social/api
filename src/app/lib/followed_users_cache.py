@@ -53,6 +53,7 @@ from google.cloud.firestore import (  # type: ignore[import-untyped]
 )
 
 from .bsky import (
+    AccountGoneError,
     FollowedUsersLookupError,
     FollowsFetch,
     fetch_followed_user_dids,
@@ -513,6 +514,13 @@ class FollowedUsersCache:
                     if records
                     else self._fetch(user_did, timeout_seconds=refresh_timeout_seconds())
                 )
+            except AccountGoneError:
+                # The caller decides what a gone account means (the refresh
+                # job tombstones it); here it is just not a failure.
+                logger.info("Followed-users refresh for %s: account is gone", user_did)
+                outcome = "account_gone"
+                await self._release(key, failed=True)
+                return outcome
             except FollowedUsersLookupError:
                 logger.warning("Followed-users refresh for %s found nothing", user_did)
                 outcome = "failed"

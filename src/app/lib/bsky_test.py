@@ -5,6 +5,7 @@ import pytest
 
 from . import bsky as bsky_module
 from .bsky import (
+    AccountGoneError,
     FollowedUsersLookupError,
     FollowsFetch,
     fetch_follow_records,
@@ -715,3 +716,103 @@ class TestFetchVisibleFollowRecords:
 
         with pytest.raises(FollowedUsersLookupError):
             await fetch_visible_follow_records("did:plc:me", 10, 5)
+
+
+def _status_400(body: dict) -> FakeResponse:
+    request = httpx.Request("GET", "https://example.test")
+    response = httpx.Response(400, json=body, request=request)
+    return FakeResponse(
+        status_exc=httpx.HTTPStatusError("bad request", request=request, response=response)
+    )
+
+
+class TestAccountGone:
+    """Only an explicit "not found" from the service walked means gone."""
+
+    @pytest.fixture(autouse=True)
+    def _pds(self, monkeypatch):
+        async def resolve(user_did):
+            return "https://pds.example"
+
+        monkeypatch.setattr(bsky_module, "_resolve_pds", resolve)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"error": "InvalidRequest", "message": "Could not find repo: did:plc:me"},
+            {"error": "RepoTakendown", "message": "Repo has been takendown"},
+            {"error": "RepoDeactivated", "message": "Repo has been deactivated"},
+        ],
+    )
+    async def test_pds_without_the_repo(self, fake_http_client, body):
+        fake_http_client.response = _status_400(body)
+
+        with pytest.raises(AccountGoneError):
+            await fetch_follow_records("did:plc:me", limit=10, timeout_seconds=5)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"error": "InvalidRequest", "message": "Actor not found: did:plc:me"},
+            {"error": "AccountTakedown", "message": "Account has been suspended"},
+        ],
+    )
+    async def test_appview_without_the_actor(self, fake_http_client, body):
+        fake_http_client.response = _status_400(body)
+
+        with pytest.raises(AccountGoneError):
+            await fetch_followed_user_dids("did:plc:me", limit=10)
+
+    @pytest.mark.asyncio
+    async def test_any_other_400_is_an_ordinary_failure(self, fake_http_client):
+        fake_http_client.response = _status_400(
+            {"error": "InvalidRequest", "message": "Error: limit must be <= 100"}
+        )
+
+        with pytest.raises(FollowedUsersLookupError) as raised:
+            await fetch_follow_records("did:plc:me", limit=10, timeout_seconds=5)
+        assert not isinstance(raised.value, AccountGoneError)
+
+
+class TestFetchVisibleFollowRecordsAccountGone:
+    @pytest.fixture
+    def walks(self, monkeypatch):
+        self.records: FollowsFetch | Exception = AccountGoneError("no repo")
+        self.visible: FollowsFetch | Exception = AccountGoneError("no actor")
+
+        async def records(*args, **kwargs):
+            if isinstance(self.records, Exception):
+                raise self.records
+            return self.records
+
+        async def visible(*args, **kwargs):
+            if isinstance(self.visible, Exception):
+                raise self.visible
+            return self.visible
+
+        monkeypatch.setattr(bsky_module, "fetch_follow_records", records)
+        monkeypatch.setattr(bsky_module, "fetch_followed_user_dids", visible)
+
+    @pytest.mark.asyncio
+    async def test_gone_when_pds_and_appview_agree(self, walks):
+        with pytest.raises(AccountGoneError):
+            await fetch_visible_follow_records("did:plc:me", 10, 5)
+
+    @pytest.mark.asyncio
+    async def test_pds_alone_is_an_ordinary_failure(self, walks):
+        self.visible = FollowsFetch(dids=["did:plc:a"])
+
+        with pytest.raises(FollowedUsersLookupError) as raised:
+            await fetch_visible_follow_records("did:plc:me", 10, 5)
+        assert not isinstance(raised.value, AccountGoneError)
+
+    @pytest.mark.asyncio
+    async def test_appview_alone_keeps_the_records_unfiltered(self, walks):
+        self.records = FollowsFetch(dids=["did:plc:a"], rkeys=["ra"])
+
+        fetch = await fetch_visible_follow_records("did:plc:me", 10, 5)
+
+        assert fetch.dids == ["did:plc:a"]
+        assert fetch.complete is False

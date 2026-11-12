@@ -19,6 +19,8 @@ def get_metric_collector():
 
 
 def _status_code_label(exc: BaseException) -> str:
+    if isinstance(exc, AccountGoneError):
+        return "account_gone"
     if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
         return "timeout"
     if isinstance(exc, (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError)):
@@ -58,6 +60,37 @@ FOLLOWS_RETRY_BACKOFF_SECONDS = 0.1
 
 class FollowedUsersLookupError(Exception):
     """Raised when followed-user lookup fails."""
+
+
+class AccountGoneError(FollowedUsersLookupError):
+    """The account no longer exists: deleted, deactivated or taken down.
+
+    Raised only on an explicit "not found" from the service walked, never on a
+    transient failure; :func:`fetch_visible_follow_records` further requires
+    the user's PDS and the AppView to agree.
+    """
+
+
+# What the user's PDS (listRecords) and the AppView (getFollows) answer, with
+# a 400, for an account that is gone.  The reference PDS reports a missing or
+# taken-down repo as InvalidRequest "Could not find repo"; others use the
+# dedicated error names.
+_PDS_GONE_ERRORS = frozenset({"RepoNotFound", "RepoTakendown", "RepoDeactivated", "RepoSuspended"})
+_PDS_GONE_MESSAGE = "Could not find repo"
+_APPVIEW_GONE_ERRORS = frozenset({"AccountTakedown", "AccountDeactivated"})
+_APPVIEW_GONE_MESSAGE = "Actor not found"
+
+
+def _says_gone(exc: httpx.HTTPStatusError, errors: frozenset[str], message: str) -> bool:
+    if exc.response.status_code != 400:
+        return False
+    try:
+        body = exc.response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    return body.get("error") in errors or str(body.get("message", "")).startswith(message)
 
 
 @dataclass(frozen=True)
@@ -148,7 +181,12 @@ async def fetch_followed_user_dids(
         params: dict[str, str | int] = {"actor": user_did, "limit": page_limit}
         if cursor:
             params["cursor"] = cursor
-        data = await _get_follows_page(client, base_url, params)
+        try:
+            data = await _get_follows_page(client, base_url, params)
+        except httpx.HTTPStatusError as exc:
+            if _says_gone(exc, _APPVIEW_GONE_ERRORS, _APPVIEW_GONE_MESSAGE):
+                raise AccountGoneError(f"AppView has no account {user_did}") from exc
+            raise
         if not isinstance(data, dict):
             raise FollowedUsersLookupError(f"Unexpected follows response for {user_did}")
         follows = data.get("follows", [])
@@ -219,7 +257,12 @@ async def fetch_follow_records(
         }
         if cursor:
             params["cursor"] = cursor
-        data = await _get_follows_page(client, base_url, params)
+        try:
+            data = await _get_follows_page(client, base_url, params)
+        except httpx.HTTPStatusError as exc:
+            if _says_gone(exc, _PDS_GONE_ERRORS, _PDS_GONE_MESSAGE):
+                raise AccountGoneError(f"PDS has no repo for {user_did}") from exc
+            raise
         if not isinstance(data, dict):
             raise FollowedUsersLookupError(f"Unexpected listRecords response for {user_did}")
         records = data.get("records", [])
@@ -344,6 +387,9 @@ async def fetch_visible_follow_records(
     When ``getFollows`` cannot be walked in full the records are returned
     unfiltered and marked incomplete: never trusted, and never allowed to
     replace a complete entry.
+
+    Raises :class:`AccountGoneError` only when both the PDS and the AppView
+    say the account is gone; one of them alone is treated as a failed walk.
     """
     if timeout_seconds is None:
         timeout_seconds = FOLLOWS_LOOKUP_TIMEOUT_SECONDS
@@ -352,6 +398,12 @@ async def fetch_visible_follow_records(
         fetch_followed_user_dids(user_did, limit, timeout_seconds),
         return_exceptions=True,
     )
+    if isinstance(records, AccountGoneError):
+        if isinstance(visible, AccountGoneError):
+            raise records
+        raise FollowedUsersLookupError(
+            f"PDS has no repo for {user_did}, but the AppView still has the account"
+        ) from records
     if isinstance(records, BaseException):
         raise records
     if isinstance(visible, BaseException) or not visible.complete:
