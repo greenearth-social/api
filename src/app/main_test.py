@@ -152,6 +152,56 @@ def test_inflight_middleware_releases_on_handler_exception():
     assert inflight.current() == 0
 
 
+class _RecordingCollector:
+    def __init__(self):
+        self.calls: list[tuple[str, float, dict[str, str]]] = []
+
+    def record(self, name: str, value: float, **attributes: str) -> None:
+        self.calls.append((name, value, dict(attributes)))
+
+
+@pytest.mark.parametrize(
+    ("marks_start", "fails", "expected"),
+    [
+        (True, False, [{"traffic": "real", "page": "first", "status": "2xx"}]),
+        (True, True, [{"traffic": "real", "page": "first", "status": "5xx"}]),
+        (False, False, []),
+    ],
+)
+def test_feed_request_duration_recorded_from_handler_marks(marks_start, fails, expected):
+    """The middleware records feed.request.duration_ms with the labels the handler
+    set, even though the handler runs in a copied context; routes that never
+    mark the start of generation are not recorded."""
+    from typing import cast
+
+    from .lib.metrics import MetricCollector, set_metric_collector
+    from .lib.request_context import set_request_shape, set_traffic, start_feed_timing
+
+    collector = _RecordingCollector()
+
+    @app.get("/_feed_timing_probe")
+    async def _probe():
+        if marks_start:
+            start_feed_timing()
+        set_traffic("real")
+        set_request_shape(page="first")
+        if fails:
+            raise RuntimeError("boom")
+        return {"ok": True}
+
+    set_metric_collector(cast(MetricCollector, collector))
+    try:
+        TestClient(app, raise_server_exceptions=False).get("/_feed_timing_probe")
+    finally:
+        set_metric_collector(None)
+        app.router.routes = [
+            r for r in app.router.routes if getattr(r, "path", None) != "/_feed_timing_probe"
+        ]
+
+    calls = [c for c in collector.calls if c[0] == "feed.request.duration_ms"]
+    assert [attrs for _, _, attrs in calls] == expected
+
+
 @pytest.mark.parametrize("configured", [False, True])
 def test_lifespan_loads_prior_once_and_keeps_api_available_on_failure(
     monkeypatch, tmp_path, configured

@@ -63,11 +63,14 @@ from .lib.metrics import MetricCollector, get_metric_collector, set_metric_colle
 from .lib.posthog_client import get_posthog_client, init_posthog_client, set_posthog_client
 from .lib.profiling import install_profiling
 from .lib.request_context import (
+    begin_feed_timing,
     reset_endpoint,
+    reset_feed_timing,
     reset_request_id,
     set_endpoint,
     set_request_id,
 )
+from .lib.telemetry import record_feed_request
 from .lib.user_history_cache import (
     FirestoreUserHistoryCache,
     set_user_history_cache,
@@ -489,14 +492,25 @@ async def request_id_mw(request: Request, call_next):
     The matched endpoint name is likewise stored in a ContextVar so metrics
     recorded anywhere on the request path are tagged with the endpoint that
     generated them (see ``MetricCollector.record``).
+
+    Feed endpoints mark the start of generation on the ``FeedRequestTiming``
+    installed here; ``feed.request.duration_ms`` is recorded once
+    ``call_next`` returns, which is when the response starts.
     """
     rid = uuid.uuid4().hex[:12]
     rid_token = set_request_id(rid)
     endpoint = _resolve_endpoint(request)
     endpoint_token = set_endpoint(endpoint) if endpoint is not None else None
+    timing, timing_token = begin_feed_timing()
     try:
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            record_feed_request(logger, timing, 500)
+            raise
+        record_feed_request(logger, timing, response.status_code)
     finally:
+        reset_feed_timing(timing_token)
         reset_request_id(rid_token)
         if endpoint_token is not None:
             reset_endpoint(endpoint_token)

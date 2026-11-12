@@ -179,6 +179,24 @@ def test_no_traffic_label_outside_request_context():
     assert "traffic" not in _attrs_for(reader, "feed.render.duration_ms")
 
 
+def test_request_shape_labels_added_from_context():
+    import contextvars
+
+    from .request_context import set_request_shape
+
+    collector, reader = _make_collector()
+
+    def _record():
+        set_request_shape(page="first", surface="explore")
+        collector.record("feed.render.duration_ms", 50.0)
+
+    contextvars.copy_context().run(_record)
+
+    attrs = _attrs_for(reader, "feed.render.duration_ms")
+    assert attrs.get("page") == "first"
+    assert attrs.get("surface") == "explore"
+
+
 def test_explicit_traffic_attribute_wins():
     from .request_context import reset_traffic, set_traffic
 
@@ -297,6 +315,7 @@ from .metrics import (  # noqa: E402
     CONCURRENCY_BOUNDARIES,
     EVENTLOOP_LAG_MS_BOUNDARIES,
     FAST_MS_BOUNDARIES,
+    FEED_REQUEST_MS_BOUNDARIES,
     LATENCY_MS_BOUNDARIES,
     RATIO_BOUNDARIES,
     histogram_boundaries,
@@ -372,6 +391,7 @@ class TestHistogramBoundaries:
             LATENCY_MS_BOUNDARIES,
             FAST_MS_BOUNDARIES,
             EVENTLOOP_LAG_MS_BOUNDARIES,
+            FEED_REQUEST_MS_BOUNDARIES,
             CONCURRENCY_BOUNDARIES,
             RATIO_BOUNDARIES,
         ):
@@ -386,6 +406,15 @@ class TestHistogramBoundaries:
         assert 100 in EVENTLOOP_LAG_MS_BOUNDARIES  # eventloop.lag_ms p95
         assert 10 in FAST_MS_BOUNDARIES  # client.pool.wait_ms p95
         assert 100 in CONCURRENCY_BOUNDARIES  # pool caps
+
+    def test_feed_request_resolves_the_sub_second_target(self):
+        """feed.request.duration_ms is read against a 350ms p95 target, and a
+        10-20ms shift in p50/p95 has to be visible."""
+        assert histogram_boundaries("feed.request.duration_ms") == FEED_REQUEST_MS_BOUNDARIES
+        assert 350 in FEED_REQUEST_MS_BOUNDARIES  # dashboard target line
+        in_range = [b for b in FEED_REQUEST_MS_BOUNDARIES if 50 <= b <= 600]
+        assert max(b - a for a, b in zip(in_range, in_range[1:], strict=False)) <= 10
+        assert FEED_REQUEST_MS_BOUNDARIES[-1] >= 10_000
 
     def test_serving_range_is_finely_resolved(self):
         """The 1–5s range is where the serving SLOs live; the OTel default has

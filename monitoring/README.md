@@ -120,6 +120,7 @@ them after any capacity change (instance sizing, ES cluster shape, pool caps).
 
 | Row / chart | Threshold | Source measurement |
 |---|---|---|
+| 0 — `feed.request` p50/p95/p99, getFeedSkeleton and slate API | **350 ms** | The mysky share of BridgEU's 500 ms p95 (api#601): 150 ms is reserved for the EU–US round trip and BridgEU's own work. 350 is an exact bucket edge of `FEED_REQUEST_MS_BOUNDARIES`. |
 | 1 — `feed.render` p50/p95 by traffic | **2500 ms** | Healthy steady-state probe p95 is 1.6–2.2 s; a saturated instance pins at the 10 s client ceiling. 2,500 ms sits just above healthy and well below broken. |
 | 1 — Failure, degradation and 5xx rate | **1%** | Expressed as a share of renders rather than a count per minute, so the goal is comparable between a quiet night and a load test. |
 | 3 — `eventloop.lag_ms` p95 per instance | **100 ms** | A healthy asyncio loop lags <10 ms; a saturated instance lags into the seconds. 100 ms is an order of magnitude above healthy and an order below saturated. |
@@ -146,15 +147,19 @@ Cloud Monitoring enforces these; each one fails silently or at deploy time:
 
 ## Chart inventory
 
-Six rows, 20 charts, one section header per row.
+Seven rows, 23 charts, one section header per row.
 
 p50 is charted alongside p95 only where the shape of the distribution is the
-question — feed render latency and Perspective scoring. Everywhere else the
+question — the BridgEU latency target (with p99 as well), feed render latency
+and Perspective scoring. Everywhere else the
 tail is the signal (a saturation threshold, a pool cap, a slow generator) and
 a median line would only add series to read past.
 
 | Row | Chart | Series | Query |
 |---|---|---|---|
+| 0 | Feed request latency: getFeedSkeleton | 4 | PromQL |
+| 0 | Feed request latency: slate API (BridgEU) | 4 | PromQL |
+| 0 | Feed requests per minute by endpoint and shape | 1 | PromQL |
 | 1 | Feed renders per minute by traffic class | 2 | PromQL |
 | 1 | Feed render latency by traffic class | 2 | PromQL |
 | 1 | Failure, degradation and 5xx rate (% of renders) | 3 | PromQL |
@@ -175,6 +180,18 @@ a median line would only add series to read past.
 | 6 | Ingest freshness by source | 1 | builder |
 | 6 | Ingest bulk-index latency by index | 5 | builder |
 | 6 | Cluster health: JVM GC, circuit breakers and disk latency | 3 | mixed |
+
+Row 0 reads `feed.request.duration_ms`, not `feed.render.duration_ms`. It is
+recorded by the request middleware from the moment the handler finishes
+authenticating the caller to the start of the response, so it also covers the
+user lookup, PostHog flag evaluation and response serialization that sit
+outside the render timer. It carries the request-shape labels the feed
+endpoints set: `page` (`first` | `cursor` | `check`, the last being AppView's
+one-item reachability check), `surface` on getFeedSkeleton (`feed` | `explore`)
+and `status` (`2xx` | `4xx` | `5xx`). Its buckets are 10 ms wide from 50 to
+600 ms, so a 10–20 ms shift in p50 or p95 shows. Row 0 uses 1-hour windows
+rather than the 5-minute ones below: at current traffic a p99 over 5 minutes
+rests on a handful of requests.
 
 Row 2's ranking gap chart pairs series across repos by `model_name`: api's
 `rank.model.duration_ms` value `heavy_ranker` corresponds to inference-service's

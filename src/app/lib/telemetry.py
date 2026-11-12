@@ -5,7 +5,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from .request_context import get_request_id
+from .request_context import FeedRequestTiming, get_request_id
 
 
 @asynccontextmanager
@@ -87,3 +87,42 @@ async def timed(
             collector = get_metric_collector()
             if collector is not None:
                 collector.record(label, elapsed_ms, **(metric_attrs or {}))
+
+
+FEED_REQUEST_METRIC = "feed.request.duration_ms"
+
+
+def _status_class(status_code: int) -> str:
+    return f"{status_code // 100}xx"
+
+
+def record_feed_request(
+    logger: logging.Logger, timing: FeedRequestTiming, status_code: int
+) -> None:
+    """Record a feed request's wallclock, from generation start to response start.
+
+    Only requests whose handler called ``start_feed_timing`` are recorded, so
+    this covers exactly the feed endpoints, and only once the caller is
+    authenticated: auth is excluded, while user lookup, feature flags,
+    generation and response serialization are included.
+    """
+    if timing.start is None:
+        return
+    elapsed_ms = (time.monotonic() - timing.start) * 1000
+    labels = {**timing.labels, "status": _status_class(status_code)}
+
+    if os.environ.get("GE_TIMING_LOGS") == "1":
+        rid = get_request_id()
+        logger.info(
+            "%s rid=%s elapsed_ms=%.1f %s",
+            FEED_REQUEST_METRIC,
+            rid,
+            elapsed_ms,
+            " ".join(f"{k}={v}" for k, v in sorted(labels.items())),
+            extra={"elapsed_ms": elapsed_ms, "rid": rid, **labels},
+        )
+
+    from .metrics import get_metric_collector
+    collector = get_metric_collector()
+    if collector is not None:
+        collector.record(FEED_REQUEST_METRIC, elapsed_ms, **labels)

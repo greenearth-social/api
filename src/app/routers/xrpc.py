@@ -80,7 +80,7 @@ from ..lib.posthog_client import (
     track_interaction,
     track_session,
 )
-from ..lib.request_context import set_traffic
+from ..lib.request_context import set_request_shape, set_traffic, start_feed_timing
 from ..lib.slate_pipeline import (
     feed_request_timeout_sec,
     record_render_metrics,
@@ -1544,6 +1544,10 @@ async def get_feed_skeleton(
     # slate and must not consume a Settings handoff or mutate user history.
     is_appview_one_item_check = cursor is None and limit == 1
     is_explore_preview = _is_explore_preview(cursor, limit)
+    set_request_shape(
+        page="cursor" if cursor is not None else "check" if is_appview_one_item_check else "first",
+        surface="explore" if is_explore_preview else "feed",
+    )
 
     # Cloud Scheduler probe bypass: if GE_PROBE_SECRET is set and the request
     # carries the matching X-Probe-Secret header, skip AT Protocol auth and
@@ -1612,6 +1616,10 @@ async def get_feed_skeleton(
 
             is_anonymous = True
             user_did = ANONYMOUS_DID
+
+    # The caller is authenticated: from here on is feed generation, which is
+    # what feed.request.duration_ms measures (user lookup and flags included).
+    start_feed_timing()
 
     # Tag every metric on this request path (incl. background tasks, which
     # inherit this context at spawn time) with its traffic class so test and
