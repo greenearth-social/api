@@ -585,7 +585,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     )
 
     test_user_did = "did:plc:cache-test-user"
-    expected_history = UserHistory(
+    fetched_history = UserHistory(
         items=[
             UserHistoryItem(
                 at_uri="at://did:plc:reply-new/app.bsky.feed.post/1",
@@ -613,7 +613,12 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
                 author_did="did:plc:reply-old",
                 like_count=3,
             ),
-        ]
+        ],
+        raw_like_count=4,
+    )
+    expected_history = UserHistory(
+        items=[fetched_history.items[i] for i in expected_embedded_indices],
+        raw_like_count=4,
     )
 
     class CountingHistoryCache(UserHistoryCache):
@@ -655,8 +660,8 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     predict_heavy_ranker = AsyncMock(return_value=[0.9])
     fetch_recent_likes = AsyncMock(
         return_value=(
-            expected_history.liked_uris,
-            [item.liked_at for item in expected_history.items],
+            fetched_history.liked_uris,
+            [item.liked_at for item in fetched_history.items],
         )
     )
 
@@ -674,7 +679,7 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         indices = {"posts": [2], "replies": [3, 0]}[index]
         return [
             (item.at_uri, item.embedding, item.author_did, item.like_count)
-            for item in (expected_history.items[i] for i in indices)
+            for item in (fetched_history.items[i] for i in indices)
         ]
 
     fetch_history_metadata = AsyncMock(side_effect=hydrate_history)
@@ -782,12 +787,12 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
     assert fetch_history_metadata.await_count == 2
     fetch_history_metadata.assert_has_awaits(
         [
-            call(es, expected_history.liked_uris, index="posts"),
-            call(es, expected_history.liked_uris, index="replies"),
+            call(es, fetched_history.liked_uris, index="posts"),
+            call(es, fetched_history.liked_uris, index="replies"),
         ],
         any_order=True,
     )
-    expected_embedded = [expected_history.items[i] for i in expected_embedded_indices]
+    expected_embedded = expected_history.items
     predict_user_tower.assert_awaited_once()
     user_tower_call = predict_user_tower.await_args
     assert user_tower_call is not None

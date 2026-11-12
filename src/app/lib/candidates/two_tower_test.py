@@ -34,7 +34,8 @@ def make_history(count: int, missing: int = 0) -> UserHistory:
                 author_did=f"did:plc:author{i}",
             )
             for i in range(count + missing)
-        ]
+        ],
+        raw_like_count=count + missing,
     )
 
 
@@ -104,12 +105,12 @@ def test_registered_generators():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count", [0, 1, 2, 64])
-async def test_exact_blend_uses_usable_history_count(generator, dependencies, count):
-    dependencies.history.return_value = make_history(count)
+@pytest.mark.parametrize("count,raw_like_count", [(0, 0), (1, 1), (2, 2), (64, 64), (64, 128)])
+async def test_exact_blend_uses_usable_history_count(generator, dependencies, count, raw_like_count):
+    dependencies.history.return_value = replace(make_history(count), raw_like_count=raw_like_count)
     dependencies.prediction.return_value = replace(
         dependencies.prediction.return_value,
-        history_like_count=count,
+        history_like_count=raw_like_count,
         history_embedding_count=count,
     )
     es = object()
