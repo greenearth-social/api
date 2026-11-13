@@ -4,6 +4,10 @@ The two-tower user side and heavy ranker consume the same recent-like
 history.  This module assembles that history once, stores it in Firestore in
 the background for reuse across API instances, and uses the existing request
 cache to collapse duplicate work inside a feed render.
+
+Normal and Explore requests share the stored history, fetch/write paths, and
+refresh leases. The request policy only selects freshness and serving ages.
+Firestore retention is independent of those per-policy ages.
 """
 
 from __future__ import annotations
@@ -13,9 +17,12 @@ import hashlib
 import logging
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from google.cloud.firestore import (  # type: ignore[import-untyped]
     AsyncClient,
@@ -60,13 +67,23 @@ USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS = 2.0
 
 # This cache policy is intentionally fixed in code so every API revision uses
 # one consistent set of freshness and retry guarantees across environments.
-# Age at which cached recommendation history is served stale and refreshed in
-# the background (10 minutes).
-USER_HISTORY_CACHE_TTL_SEC = 600
+# Normal feeds serve history without refreshing through 10 minutes, then
+# serve it stale while refreshing in the background until 30 minutes.
+USER_HISTORY_NORMAL_REFRESH_SEC = 600
 
-# Hard serving cutoff and Firestore expiration for cached history. Must be at
-# least USER_HISTORY_CACHE_TTL_SEC (30 minutes).
-USER_HISTORY_CACHE_MAX_AGE_SEC = 1800
+# Normal feeds rebuild history after this age, even when Firestore retains it
+# longer for Explore previews. Must be at least USER_HISTORY_NORMAL_REFRESH_SEC.
+USER_HISTORY_NORMAL_MAX_SERVING_AGE_SEC = 1800
+
+# Explore previews tolerate older history, but fetch it before rendering on a
+# cache miss. From the refresh threshold until the serving limit, previews
+# use cached history while a background refresh runs.
+USER_HISTORY_EXPLORE_REFRESH_SEC = 14 * 24 * 60 * 60
+USER_HISTORY_EXPLORE_MAX_SERVING_AGE_SEC = 30 * 24 * 60 * 60
+
+# Shared Firestore retention, regardless of which request policy fetched the
+# history. Serving an entry never extends its stored expiration.
+USER_HISTORY_CACHE_RETENTION_SEC = 30 * 24 * 60 * 60
 
 # How long one instance may hold a stale-refresh lease before another retries.
 USER_HISTORY_CACHE_LEASE_SEC = 30
@@ -77,20 +94,32 @@ USER_HISTORY_REFRESH_TIMEOUT_SEC = 10
 # Quiet period after a failed refresh, preventing a retry on every request.
 USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC = 60
 
+UserHistoryPolicy = Literal["normal", "explore"]
+_user_history_policy: ContextVar[UserHistoryPolicy] = ContextVar(
+    "ge_user_history_policy", default="normal"
+)
 
-def max_age_seconds() -> int:
-    """Hard age after which history is rebuilt instead of served stale."""
-    max_age = USER_HISTORY_CACHE_MAX_AGE_SEC
-    fresh_ttl = USER_HISTORY_CACHE_TTL_SEC
-    if max_age < fresh_ttl:
-        logger.warning(
-            "USER_HISTORY_CACHE_MAX_AGE_SEC=%d is below the fresh TTL %d; using %d",
-            max_age,
-            fresh_ttl,
-            fresh_ttl,
-        )
-        return fresh_ttl
-    return max_age
+
+def get_user_history_policy() -> UserHistoryPolicy:
+    """Return the current request's cache policy; ordinary feeds use normal."""
+    return _user_history_policy.get()
+
+
+@contextmanager
+def user_history_policy_scope(policy: UserHistoryPolicy) -> Generator[None]:
+    """Select cache ages for this request and its background refresh tasks."""
+    token = _user_history_policy.set(policy)
+    try:
+        yield
+    finally:
+        _user_history_policy.reset(token)
+
+
+def _history_is_fresh_for_policy(age_seconds: float, policy: UserHistoryPolicy) -> bool:
+    """Whether this policy can serve history without scheduling a refresh."""
+    if policy == "explore":
+        return age_seconds < USER_HISTORY_EXPLORE_REFRESH_SEC
+    return age_seconds <= USER_HISTORY_NORMAL_REFRESH_SEC
 
 
 @dataclass(frozen=True)
@@ -176,7 +205,7 @@ class _CachedUserHistoryDocument(BaseModel):
 
 
 class UserHistoryCache(ABC):
-    """Backend and background-work owner for user-history caching."""
+    """Cache backend and background-work owner shared by both feed policies."""
 
     def __init__(self) -> None:
         # Keep task and pending-value state on the installed cache instance so
@@ -194,8 +223,10 @@ class UserHistoryCache(ABC):
         """Store a history using the cache's fixed retention window."""
         ...
 
-    async def claim_refresh(self, user_did: str) -> bool:
-        """Claim a cross-instance stale-refresh lease.
+    async def claim_refresh(
+        self, user_did: str, *, policy: UserHistoryPolicy = "normal"
+    ) -> bool:
+        """Claim a shared stale-refresh lease using the requesting policy's freshness.
 
         Non-Firestore test and alternate backends may rely on the process-local
         task guard and permit the claim by default.
@@ -238,6 +269,42 @@ def _decode_cached_embedding(value: str) -> list[float]:
     return embedding
 
 
+def _decode_cache_entry(
+    data: dict, user_did: str, *, now: datetime
+) -> UserHistoryCacheEntry | None:
+    # A background refresh can claim a lease after the stored history disappears.
+    if "items" not in data and "refresh_started_at" in data:
+        return None
+    document = _CachedUserHistoryDocument.model_validate(data)
+    fetched_at = _as_utc(document.fetched_at)
+    expires_at = _as_utc(document.expires_at)
+    if (
+        document.schema_version != USER_HISTORY_CACHE_VERSION
+        or document.user_did != user_did
+        or document.history_limit != USER_HISTORY_LIMIT
+        or document.embedding_key != MINILM_L12_EMBEDDING_KEY
+        or expires_at <= fetched_at
+        or now >= expires_at
+    ):
+        return None
+
+    items = [
+        UserHistoryItem(
+            at_uri=item.at_uri,
+            liked_at=item.liked_at,
+            embedding=(
+                _decode_cached_embedding(item.embedding_b64)
+                if item.embedding_b64 is not None
+                else None
+            ),
+            author_did=item.author_did,
+            like_count=item.like_count,
+        )
+        for item in document.items
+    ]
+    return UserHistoryCacheEntry(history=UserHistory(items=items), fetched_at=fetched_at)
+
+
 class FirestoreUserHistoryCache(UserHistoryCache):
     """Firestore-backed cache shared by all API instances."""
 
@@ -259,41 +326,10 @@ class FirestoreUserHistoryCache(UserHistoryCache):
             return None
 
         try:
-            document = _CachedUserHistoryDocument.model_validate(data)
-            fetched_at = _as_utc(document.fetched_at)
-            expires_at = _as_utc(document.expires_at)
-            if (
-                document.schema_version != USER_HISTORY_CACHE_VERSION
-                or document.user_did != user_did
-                or document.history_limit != USER_HISTORY_LIMIT
-                or document.embedding_key != MINILM_L12_EMBEDDING_KEY
-                or expires_at <= fetched_at
-                or datetime.now(UTC) >= expires_at
-            ):
-                return None
-
-            items = [
-                UserHistoryItem(
-                    at_uri=item.at_uri,
-                    liked_at=item.liked_at,
-                    embedding=(
-                        _decode_cached_embedding(item.embedding_b64)
-                        if item.embedding_b64 is not None
-                        else None
-                    ),
-                    author_did=item.author_did,
-                    like_count=item.like_count,
-                )
-                for item in document.items
-            ]
+            return _decode_cache_entry(data, user_did, now=datetime.now(UTC))
         except (ValidationError, TypeError, ValueError):
             logger.warning("Invalid user-history cache document", exc_info=True)
             return None
-
-        return UserHistoryCacheEntry(
-            history=UserHistory(items=items),
-            fetched_at=fetched_at,
-        )
 
     async def store(self, user_did: str, history: UserHistory) -> None:
         fetched_at = datetime.now(UTC)
@@ -303,7 +339,7 @@ class FirestoreUserHistoryCache(UserHistoryCache):
             history_limit=USER_HISTORY_LIMIT,
             embedding_key=MINILM_L12_EMBEDDING_KEY,
             fetched_at=fetched_at,
-            expires_at=fetched_at + timedelta(seconds=max_age_seconds()),
+            expires_at=fetched_at + timedelta(seconds=USER_HISTORY_CACHE_RETENTION_SEC),
             refresh_started_at=None,
             refresh_failed_at=None,
             api_release_sha=api_release_sha(),
@@ -322,44 +358,49 @@ class FirestoreUserHistoryCache(UserHistoryCache):
         )
         await self._document(user_did).set(document.model_dump())
 
-    async def claim_refresh(self, user_did: str) -> bool:
-        """Transactionally claim the lease for one stale history refresh."""
+    async def claim_refresh(
+        self, user_did: str, *, policy: UserHistoryPolicy = "normal"
+    ) -> bool:
+        """Claim one refresh unless its policy is already satisfied or leased."""
         ref = self._document(user_did)
-        fresh_ttl = USER_HISTORY_CACHE_TTL_SEC
-        lease = USER_HISTORY_CACHE_LEASE_SEC
-        cooldown = USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC
+        lease_seconds = USER_HISTORY_CACHE_LEASE_SEC
+        cooldown_seconds = USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC
 
         async def claim(transaction) -> bool:
             now = datetime.now(UTC)
             snapshot = await ref.get(transaction=transaction)
             data = snapshot.to_dict() if snapshot.exists else None
+            entry = None
             if data is not None:
-                try:
-                    document = _CachedUserHistoryDocument.model_validate(data)
-                except (ValidationError, TypeError, ValueError):
-                    # An unreadable entry may be claimed and replaced. Lease
-                    # fields cannot be trusted independently of validation.
-                    document = None
-                if document is not None:
-                    compatible = (
-                        document.schema_version == USER_HISTORY_CACHE_VERSION
-                        and document.user_did == user_did
-                        and document.history_limit == USER_HISTORY_LIMIT
-                        and document.embedding_key == MINILM_L12_EMBEDDING_KEY
-                    )
-                    if compatible:
-                        age = _age_seconds(document.fetched_at, now)
-                        if age is not None and age <= fresh_ttl:
-                            # Another instance completed the refresh after this
-                            # process read the stale value.
+                # Lease-only and damaged history documents still participate
+                # in cross-instance coalescing and failure cooldowns.
+                for field, duration in (
+                    ("refresh_started_at", lease_seconds),
+                    ("refresh_failed_at", cooldown_seconds),
+                ):
+                    timestamp = data.get(field)
+                    if isinstance(timestamp, datetime):
+                        elapsed_seconds = _age_seconds(timestamp, now)
+                        if elapsed_seconds is not None and elapsed_seconds < duration:
                             return False
-                    started = _age_seconds(document.refresh_started_at, now)
-                    if started is not None and started < lease:
-                        return False
-                    failed = _age_seconds(document.refresh_failed_at, now)
-                    if failed is not None and failed < cooldown:
-                        return False
-            transaction.set(ref, {"refresh_started_at": now}, merge=True)
+                try:
+                    entry = _decode_cache_entry(data, user_did, now=now)
+                except (ValidationError, TypeError, ValueError):
+                    entry = None
+                if entry is not None and _history_is_fresh_for_policy(
+                    entry.age_seconds(now=now), policy
+                ):
+                    # Only a fully readable, unexpired history can satisfy the
+                    # request. Old retention policies and corrupt embeddings
+                    # must not suppress a needed refresh for days.
+                    return False
+            update: dict = {"refresh_started_at": now}
+            if entry is None:
+                # Replace unusable histories with a lease-only record. In
+                # particular, an expired legacy TTL must not delete the lease
+                # while its replacement history is being fetched.
+                update["expires_at"] = now + timedelta(seconds=USER_HISTORY_CACHE_RETENTION_SEC)
+            transaction.set(ref, update, merge=entry is not None)
             return True
 
         return await self._run_transaction(claim)
@@ -395,10 +436,15 @@ def _pending_user_history(
     return cache._pending_histories.get(user_did)
 
 
-def _record_cache_count(metric: str, outcome: str) -> None:
+def _record_cache_count(
+    metric: str, outcome: str, *, policy: UserHistoryPolicy | None = None
+) -> None:
     collector = get_metric_collector()
     if collector is not None:
-        collector.record(metric, 1, outcome=outcome)
+        labels = {"outcome": outcome}
+        if metric in ("user_history.cache.lookup_count", "user_history.cache.refresh_count"):
+            labels["policy"] = policy or get_user_history_policy()
+        collector.record(metric, 1, **labels)
 
 
 def _record_cache_age(age_seconds: float) -> None:
@@ -502,13 +548,15 @@ async def _refresh_user_history(
     cache: UserHistoryCache,
     es,
     user_did: str,
+    *,
+    policy: UserHistoryPolicy,
 ) -> None:
-    """Refresh one stale history after transactionally claiming its lease."""
+    """Refresh stale history for either policy after claiming the shared lease."""
     claimed = False
     outcome = "error"
     try:
         async with asyncio.timeout(USER_HISTORY_REFRESH_TIMEOUT_SEC):
-            claimed = await cache.claim_refresh(user_did)
+            claimed = await cache.claim_refresh(user_did, policy=policy)
             if not claimed:
                 outcome = "skipped"
                 return
@@ -539,14 +587,18 @@ async def _refresh_user_history(
     finally:
         if claimed and outcome != "success":
             await _release_user_history_refresh(cache, user_did)
-        _record_cache_count("user_history.cache.refresh_count", outcome)
+        _record_cache_count("user_history.cache.refresh_count", outcome, policy=policy)
 
 
-def _schedule_user_history_refresh(cache: UserHistoryCache, es, user_did: str) -> None:
-    """Start at most one in-process refresh per cache/user pair."""
+def _schedule_user_history_refresh(
+    cache: UserHistoryCache, es, user_did: str, *, policy: UserHistoryPolicy
+) -> None:
+    """Start one background refresh per cache/user pair, shared across policies."""
     if user_did in cache._tasks:
         return
-    task = asyncio.create_task(_refresh_user_history(cache, es, user_did))
+    task = asyncio.create_task(
+        _refresh_user_history(cache, es, user_did, policy=policy)
+    )
     _register_user_history_task(cache, user_did, task, clears_pending=False)
 
 
@@ -628,15 +680,20 @@ async def _fetch_user_history_from_es(
 
 
 async def fetch_user_history_features(es, user_did: str) -> UserHistory:
-    """Return recent-like features through request and Firestore caches."""
+    """Return history using the request's normal or Explore cache-age policy.
+
+    Both policies await Elasticsearch when no usable cached history exists;
+    stale-but-servable history uses the shared background refresh path.
+    """
+    policy = get_user_history_policy()
 
     async def _fetch() -> UserHistory:
         cache = get_user_history_cache()
         if cache is not None:
-            pending = _pending_user_history(cache, user_did)
-            if pending is not None:
+            pending_history = _pending_user_history(cache, user_did)
+            if pending_history is not None:
                 _record_cache_count("user_history.cache.lookup_count", "pending_hit")
-                return pending
+                return pending_history
 
             try:
                 async with timed(
@@ -645,24 +702,32 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
                     record_metric=True,
                 ):
                     async with asyncio.timeout(USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS):
-                        cached = await cache.retrieve(user_did)
+                        cached_entry = await cache.retrieve(user_did)
             except Exception:
                 _record_cache_count("user_history.cache.lookup_count", "error")
                 logger.warning(
-                    "User-history cache lookup failed; falling back to Elasticsearch",
+                    "User-history cache lookup failed for %s policy; fetching from Elasticsearch",
+                    policy,
                     exc_info=True,
                 )
             else:
-                if cached is not None:
-                    age = cached.age_seconds()
-                    _record_cache_age(age)
-                    if age <= USER_HISTORY_CACHE_TTL_SEC:
+                if cached_entry is not None:
+                    history_age_seconds = cached_entry.age_seconds()
+                    _record_cache_age(history_age_seconds)
+                    if _history_is_fresh_for_policy(history_age_seconds, policy):
                         _record_cache_count("user_history.cache.lookup_count", "hit")
-                        return cached.history
-                    if age < max_age_seconds():
+                        return cached_entry.history
+                    max_serving_age_seconds = (
+                        USER_HISTORY_EXPLORE_MAX_SERVING_AGE_SEC
+                        if policy == "explore"
+                        else USER_HISTORY_NORMAL_MAX_SERVING_AGE_SEC
+                    )
+                    if history_age_seconds < max_serving_age_seconds:
                         _record_cache_count("user_history.cache.lookup_count", "stale")
-                        _schedule_user_history_refresh(cache, es, user_did)
-                        return cached.history
+                        _schedule_user_history_refresh(
+                            cache, es, user_did, policy=policy
+                        )
+                        return cached_entry.history
                 _record_cache_count("user_history.cache.lookup_count", "miss")
 
         result = await _fetch_user_history_from_es(
@@ -684,5 +749,6 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
         user_did,
         USER_HISTORY_CACHE_VERSION,
         USER_HISTORY_LIMIT,
+        policy,
     )
     return await request_cache.get_or_compute(key, _fetch)
