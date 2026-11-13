@@ -12,7 +12,7 @@
         "widget": {
           "title": "0 — BridgEU latency target (mysky side)",
           "sectionHeader": {
-            "subtitle": "Whether mysky leaves BridgEU its share of a 500 ms p95: the api's own time must stay within 350 ms p95. feed.request.duration_ms runs from the end of caller authentication to the start of the response, so it includes the user lookup and feature flags. Real traffic only, without Explore previews, AppView one-item checks or 4xx responses. Cursor pages are included; the 'p95 first pages only' line shows the same p95 without them. 1-hour windows, because p99 at this traffic level is noise over anything shorter.",
+            "subtitle": "Whether mysky leaves BridgEU its share of a 500 ms p95: the api's own time must stay within 350 ms p95. feed.request.duration_ms runs from the end of caller authentication to the start of the response, so it includes the user lookup and feature flags. Real traffic only, without Explore previews, AppView one-item checks or 4xx responses. Cursor pages are included; the 'p95 first pages only' line shows the same p95 without them. p50 and p95 use 1-hour windows; p99 uses a 1-day window, since about 170 first-page loads an hour leave a 1-hour p99 resting on one or two requests.",
             "dividerBelow": true
           }
         }
@@ -45,9 +45,9 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "p99",
+                "legendTemplate": "p99 (1-day window)",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.99, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"get_feed_skeleton\", traffic=\"real\", surface=\"feed\", page!=\"check\", status!=\"4xx\"}[1h])))"
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"get_feed_skeleton\", traffic=\"real\", surface=\"feed\", page!=\"check\", status!=\"4xx\"}[1d])))"
                 }
               },
               {
@@ -104,9 +104,9 @@
               {
                 "plotType": "LINE",
                 "targetAxis": "Y1",
-                "legendTemplate": "p99",
+                "legendTemplate": "p99 (1-day window)",
                 "timeSeriesQuery": {
-                  "prometheusQuery": "histogram_quantile(0.99, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"slate_generate\", traffic=\"real\", status!=\"4xx\"}[1h])))"
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"slate_generate\", traffic=\"real\", status!=\"4xx\"}[1d])))"
                 }
               },
               {

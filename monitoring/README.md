@@ -189,9 +189,11 @@ outside the render timer. It carries the request-shape labels the feed
 endpoints set: `page` (`first` | `cursor` | `check`, the last being AppView's
 one-item reachability check), `surface` on getFeedSkeleton (`feed` | `explore`)
 and `status` (`2xx` | `4xx` | `5xx`). Its buckets are 10 ms wide from 50 to
-600 ms, so a 10–20 ms shift in p50 or p95 shows. Row 0 uses 1-hour windows
-rather than the 5-minute ones below: at current traffic a p99 over 5 minutes
-rests on a handful of requests.
+600 ms, so a 10–20 ms shift in p50 or p95 shows. Row 0 uses longer windows
+than the 5-minute ones below, because its population is small: about 73% of
+getFeedSkeleton calls are Explore prefetches, leaving roughly 170 first-page
+feed loads an hour in prod. p50 and p95 use 1-hour windows; p99 uses a 1-day
+window, since a 1-hour p99 rests on one or two requests.
 
 Row 2's ranking gap chart pairs series across repos by `model_name`: api's
 `rank.model.duration_ms` value `heavy_ranker` corresponds to inference-service's
