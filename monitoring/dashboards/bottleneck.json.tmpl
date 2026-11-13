@@ -10,6 +10,166 @@
         "width": 12,
         "height": 1,
         "widget": {
+          "title": "0 — BridgEU latency target (mysky side)",
+          "sectionHeader": {
+            "subtitle": "Whether mysky leaves BridgEU its share of a 500 ms p95: the api's own time must stay within 350 ms p95. feed.request.duration_ms runs from the end of caller authentication to the start of the response, so it includes the user lookup and feature flags. Real traffic only, without Explore previews, AppView one-item checks or 4xx responses. Cursor pages are included; the 'p95 first pages only' line shows the same p95 without them. 1-hour windows, because p99 at this traffic level is noise over anything shorter.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 1,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Feed request latency: getFeedSkeleton",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.5, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"get_feed_skeleton\", traffic=\"real\", surface=\"feed\", page!=\"check\", status!=\"4xx\"}[1h])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"get_feed_skeleton\", traffic=\"real\", surface=\"feed\", page!=\"check\", status!=\"4xx\"}[1h])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p99",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"get_feed_skeleton\", traffic=\"real\", surface=\"feed\", page!=\"check\", status!=\"4xx\"}[1h])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 first pages only",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"get_feed_skeleton\", traffic=\"real\", surface=\"feed\", page=\"first\", status!=\"4xx\"}[1h])))"
+                }
+              }
+            ],
+            "thresholds": [
+              {
+                "value": 350,
+                "label": "p95 target (350 ms)",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 4,
+        "yPos": 1,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Feed request latency: slate API (BridgEU)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.5, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"slate_generate\", traffic=\"real\", status!=\"4xx\"}[1h])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"slate_generate\", traffic=\"real\", status!=\"4xx\"}[1h])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p99",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.99, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"slate_generate\", traffic=\"real\", status!=\"4xx\"}[1h])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 first pages only",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", endpoint=\"slate_generate\", traffic=\"real\", status!=\"4xx\", page=\"first\"}[1h])))"
+                }
+              }
+            ],
+            "thresholds": [
+              {
+                "value": 350,
+                "label": "p95 target (350 ms)",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 8,
+        "yPos": 1,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Feed requests per minute by endpoint and shape",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "${metric.labels.endpoint} page=${metric.labels.page} surface=${metric.labels.surface}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "60 * sum by (endpoint, page, surface)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.request.duration_ms_count\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", traffic=\"real\"}[5m]))"
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {
+              "label": "requests / min",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 9,
+        "width": 12,
+        "height": 1,
+        "widget": {
           "title": "1 — Load & user experience",
           "sectionHeader": {
             "subtitle": "Whether users are getting a complete feed quickly right now. Traffic classes separate production users (real) from the synthetic uptime check (probe) and generated load (load_test). Probe and real rising together means users are affected; load_test alone rising means the system is absorbing the extra load.",
@@ -19,7 +179,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 1,
+        "yPos": 10,
         "width": 4,
         "height": 8,
         "widget": {
@@ -56,7 +216,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 1,
+        "yPos": 10,
         "width": 4,
         "height": 8,
         "widget": {
@@ -99,7 +259,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 1,
+        "yPos": 10,
         "width": 4,
         "height": 8,
         "widget": {
@@ -150,7 +310,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 9,
+        "yPos": 18,
         "width": 12,
         "height": 1,
         "widget": {
@@ -163,7 +323,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 10,
+        "yPos": 19,
         "width": 4,
         "height": 8,
         "widget": {
@@ -204,7 +364,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 10,
+        "yPos": 19,
         "width": 4,
         "height": 8,
         "widget": {
@@ -241,7 +401,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 10,
+        "yPos": 19,
         "width": 4,
         "height": 8,
         "widget": {
@@ -290,7 +450,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 18,
+        "yPos": 27,
         "width": 12,
         "height": 1,
         "widget": {
@@ -303,7 +463,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 19,
+        "yPos": 28,
         "width": 4,
         "height": 8,
         "widget": {
@@ -346,7 +506,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 19,
+        "yPos": 28,
         "width": 4,
         "height": 8,
         "widget": {
@@ -424,7 +584,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 19,
+        "yPos": 28,
         "width": 4,
         "height": 8,
         "widget": {
@@ -483,7 +643,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 27,
+        "yPos": 36,
         "width": 6,
         "height": 8,
         "widget": {
@@ -512,7 +672,7 @@
       },
       {
         "xPos": 6,
-        "yPos": 27,
+        "yPos": 36,
         "width": 6,
         "height": 8,
         "widget": {
@@ -555,7 +715,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 35,
+        "yPos": 44,
         "width": 12,
         "height": 1,
         "widget": {
@@ -568,7 +728,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 36,
+        "yPos": 45,
         "width": 4,
         "height": 8,
         "widget": {
@@ -605,7 +765,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 36,
+        "yPos": 45,
         "width": 4,
         "height": 8,
         "widget": {
@@ -652,7 +812,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 36,
+        "yPos": 45,
         "width": 4,
         "height": 8,
         "widget": {
@@ -687,7 +847,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 44,
+        "yPos": 53,
         "width": 12,
         "height": 1,
         "widget": {
@@ -700,7 +860,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 45,
+        "yPos": 54,
         "width": 4,
         "height": 8,
         "widget": {
@@ -729,7 +889,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 45,
+        "yPos": 54,
         "width": 4,
         "height": 8,
         "widget": {
@@ -758,7 +918,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 45,
+        "yPos": 54,
         "width": 4,
         "height": 8,
         "widget": {
@@ -787,7 +947,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 53,
+        "yPos": 62,
         "width": 12,
         "height": 1,
         "widget": {
@@ -800,7 +960,7 @@
       },
       {
         "xPos": 0,
-        "yPos": 54,
+        "yPos": 63,
         "width": 4,
         "height": 8,
         "widget": {
@@ -846,7 +1006,7 @@
       },
       {
         "xPos": 4,
-        "yPos": 54,
+        "yPos": 63,
         "width": 4,
         "height": 8,
         "widget": {
@@ -952,7 +1112,7 @@
       },
       {
         "xPos": 8,
-        "yPos": 54,
+        "yPos": 63,
         "width": 4,
         "height": 8,
         "widget": {

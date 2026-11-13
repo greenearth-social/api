@@ -81,6 +81,16 @@ LATENCY_MS_BOUNDARIES: tuple[float, ...] = (
     15000,
 )
 
+# Whole feed requests, read against a sub-second p95 target where a 10-20ms
+# change has to be visible: 10ms steps through the p50-p95 range, 25ms steps
+# where p99 is expected to land, then enough tail to measure a bad minute.
+FEED_REQUEST_MS_BOUNDARIES: tuple[float, ...] = (
+    (5, 10, 20, 30, 40)
+    + tuple(float(ms) for ms in range(50, 601, 10))
+    + tuple(float(ms) for ms in range(625, 1001, 25))
+    + (1100, 1200, 1300, 1400, 1500, 1750, 2000, 2500, 3000, 4000, 5000, 7500, 10000, 15000)
+)
+
 # Signals that are near zero when healthy and only interesting once they are
 # not: event-loop lag, connection-pool wait, connect time. Sub-millisecond
 # resolution at the bottom, saturation coverage at the top.
@@ -175,6 +185,8 @@ def histogram_boundaries(name: str) -> tuple[float, ...] | None:
     """
     if name == "eventloop.lag_ms":
         return EVENTLOOP_LAG_MS_BOUNDARIES
+    if name == "feed.request.duration_ms":
+        return FEED_REQUEST_MS_BOUNDARIES
     if name == "candidates.two_tower.history_size":
         # Separate no usable history from one like, up to the 64-like window.
         return (0, 1, 2, 4, 8, 16, 32, 64)
@@ -277,12 +289,13 @@ class MetricCollector:
         with an ``endpoint`` label naming the originating API endpoint (e.g.
         ``get_feed_skeleton`` vs ``candidates_generate``) and a ``traffic``
         label naming the traffic class (``real`` | ``probe`` | ``load_test`` |
-        ``logged_out``).
-        Both are read from ContextVars set on the request path, so every
+        ``logged_out``), plus a feed request's shape labels (``page`` and, on
+        getFeedSkeleton, ``surface``) once the endpoint has set them.
+        All are read from ContextVars set on the request path, so every
         callsite gets them for free — including background tasks, which inherit
         the context at spawn time. Explicitly passed attributes win.
         """
-        from .request_context import get_endpoint, get_traffic
+        from .request_context import get_endpoint, get_request_shape, get_traffic
 
         labels: dict[str, str] = dict(attributes)
         endpoint = get_endpoint()
@@ -291,6 +304,8 @@ class MetricCollector:
         traffic = get_traffic()
         if traffic is not None:
             labels.setdefault("traffic", traffic)
+        for key, shape_value in get_request_shape().items():
+            labels.setdefault(key, shape_value)
         attrs = labels or None
         if name.endswith("_count"):
             self._get_counter(name).add(int(value), attrs)

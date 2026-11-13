@@ -48,7 +48,7 @@ from ..lib.firestore import (
 from ..lib.metrics import get_metric_collector
 from ..lib.posthog_client import get_posthog_client, track_slate_generated
 from ..lib.rankers import get_ranker
-from ..lib.request_context import set_traffic
+from ..lib.request_context import set_request_shape, set_traffic, start_feed_timing
 from ..lib.slate_pipeline import record_render_metrics, run_pipeline_capturing_with_timeout
 from ..lib.telemetry import timed
 from ..models import (
@@ -343,7 +343,10 @@ async def slate_generate(
     `feed_name` is yours to choose. It labels this feed in our metrics and
     analytics and is bound into the cursor session and `feed_context` tokens.
     """
+    # The API key was checked as a dependency: from here on is feed generation.
+    start_feed_timing()
     set_traffic("preview" if body.preview else "real")
+    set_request_shape(page="cursor" if body.cursor is not None else "first")
 
     db = getattr(request.app.state, "firestore", None)
     if db is None:

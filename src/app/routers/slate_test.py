@@ -624,6 +624,15 @@ class TestObservability:
                 assert point.attributes["endpoint"] == "slate_generate", name
                 assert point.attributes["feed_name"] == FEED_NAME, name
                 assert point.attributes["traffic"] == "real", name
+                assert point.attributes["page"] == "first", name
+
+            (point,) = metrics["feed.request.duration_ms"].data.data_points
+            assert dict(point.attributes) == {
+                "endpoint": "slate_generate",
+                "traffic": "real",
+                "page": "first",
+                "status": "2xx",
+            }
         finally:
             set_metric_collector(None)
 

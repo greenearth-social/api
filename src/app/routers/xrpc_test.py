@@ -6253,6 +6253,65 @@ class TestGetFeedSkeletonMetrics:
 
         assert [call for call in self.mc.calls if call[0] == "feed.render.success_count"] == []
 
+    def _request_calls(self):
+        return [call for call in self.mc.calls if call[0] == "feed.request.duration_ms"]
+
+    @pytest.mark.parametrize(
+        ("params", "labels"),
+        [
+            ({}, {"page": "first", "surface": "feed", "status": "2xx"}),
+            ({"limit": 8}, {"page": "first", "surface": "explore", "status": "2xx"}),
+            ({"limit": 1}, {"page": "check", "surface": "feed", "status": "2xx"}),
+            ({"cursor": "not-a-cursor"}, {"page": "cursor", "surface": "feed", "status": "4xx"}),
+        ],
+    )
+    def test_request_duration_carries_request_shape(self, params, labels):
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 2)),
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value="did:plc:user",
+            ),
+        ):
+            client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, **params},
+            )
+
+        ((_, duration_ms, attrs),) = self._request_calls()
+        assert duration_ms >= 0
+        assert attrs == {"traffic": "real", **labels}
+
+    def test_request_duration_excludes_auth(self):
+        async def _slow_auth(*args, **kwargs):
+            await asyncio.sleep(0.2)
+            return "did:plc:user"
+
+        with (
+            _patch_unranked_your_feed_generators(_make_candidates("p", 2)),
+            patch("app.routers.xrpc.verify_auth_header", side_effect=_slow_auth),
+        ):
+            client.get("/xrpc/app.bsky.feed.getFeedSkeleton", params={"feed": FEED_URI})
+
+        ((_, duration_ms, _),) = self._request_calls()
+        assert duration_ms < 200
+
+    def test_no_request_duration_before_authentication(self):
+        """A request rejected at auth never started generating, so it is not timed."""
+        with patch(
+            "app.routers.xrpc.verify_auth_header",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+
+        assert response.status_code == 401
+        assert self._request_calls() == []
+
 
 class TestDevSession:
     """The development stand-in for a signed-in user (dev_session_did).
