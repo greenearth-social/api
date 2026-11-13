@@ -109,15 +109,18 @@ class CandidatePost(BaseModel):
     perspective_scored_at: str | None = Field(
         default=None,
         description="When ingest last submitted this post to the Perspective API. Set "
-        "with no combined_perspective_score means the post is permanently unscorable "
-        "(no text, or an unsupported language); absent means it has never been scored.",
+        "with no combined_perspective_score means the post has no PRC score and never "
+        "will (no text, or a non-English language); absent means it has never been scored.",
     )
     perspective_scores: dict[str, float] | None = Field(
         default=None,
         description="Raw Perspective attribute scores in [0, 1] that combined_perspective_score "
         "is computed from, keyed by lower-cased attribute name (e.g. toxicity, "
-        "reasoning_experimental). Only returned with `detail: complete`; None otherwise, "
-        "and when the post has not been scored or was unscorable.",
+        "reasoning_experimental). For non-English posts, holds only the attributes "
+        "Perspective scores in other languages (toxicity, identity_attack, insult, threat) "
+        "and combined_perspective_score is None; a missing key means not scored, never 0. "
+        "Only returned with `detail: complete`; None otherwise, and when the post has not "
+        "been scored or was unscorable.",
     )
 
 
