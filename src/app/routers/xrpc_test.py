@@ -27,6 +27,7 @@ from ..lib.embeddings import encode_float32_b64
 from ..lib.feed_cache import FeedCache, InMemoryFeedCache
 from ..lib.feed_context import decode_feed_context
 from ..lib.metrics import MetricCollector, set_metric_collector
+from ..lib.user_history_cache import get_user_history_policy
 from ..main import app
 from ..models import (
     CandidateGenerateRequest,
@@ -709,7 +710,9 @@ async def test_feed_pipeline_shares_history_between_two_tower_and_heavy_ranker(
         "fetch_post_embeddings_and_metadata",
         fetch_history_metadata,
     )
-    monkeypatch.setattr(user_history_module, "USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(
+        user_history_module, "USER_HISTORY_ES_FETCH_TIMEOUT_SECONDS", 0.02
+    )
     monkeypatch.setattr(
         heavy_ranker_module,
         "get_inference_settings",
@@ -7076,6 +7079,82 @@ def feed_session(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("limit", "paginated", "expected_policy"),
+    [
+        (2, False, "explore"),
+        (8, False, "explore"),
+        (1, False, "normal"),
+        (9, False, "normal"),
+        (8, True, "normal"),
+    ],
+)
+async def test_feed_generation_selects_user_history_policy(
+    feed_session, limit, paginated, expected_policy
+):
+    state = feed_session
+    observed = []
+
+    async def read_policy():
+        observed.append(get_user_history_policy())
+
+    async def generate(*args, **kwargs):
+        # Pipeline branches run in child tasks, as do background refreshes.
+        await asyncio.gather(read_policy(), read_policy())
+        return state.snapshot, []
+
+    state._run_pipeline_capturing_with_timeout.side_effect = generate
+    cursor = FeedCursor(id="expired-feed", offset=9).encode() if paginated else None
+
+    await state.load(limit, cursor)
+
+    assert observed == [expected_policy, expected_policy]
+    assert get_user_history_policy() == "normal"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_explore_and_full_feed_history_policies_are_isolated(feed_session):
+    state = feed_session
+    both_started = asyncio.Event()
+    started = []
+    finished = []
+
+    async def generate(*args, **kwargs):
+        started.append(get_user_history_policy())
+        if len(started) == 2:
+            both_started.set()
+        await both_started.wait()
+        finished.append(get_user_history_policy())
+        return state.snapshot, []
+
+    state._run_pipeline_capturing_with_timeout.side_effect = generate
+
+    await asyncio.wait_for(asyncio.gather(state.load(8), state.load(30)), timeout=1)
+
+    assert sorted(started) == ["explore", "normal"]
+    assert sorted(finished) == ["explore", "normal"]
+    assert get_user_history_policy() == "normal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
+async def test_explore_history_policy_resets_after_pipeline_failure(feed_session, error_type):
+    state = feed_session
+
+    async def fail(*args, **kwargs):
+        assert get_user_history_policy() == "explore"
+        raise error_type()
+
+    state._run_pipeline_capturing_with_timeout.side_effect = fail
+
+    with pytest.raises(error_type):
+        await state.load(8)
+    await asyncio.gather(*xrpc._background_tasks)
+
+    assert get_user_history_policy() == "normal"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("limit", [2, 8])
 @pytest.mark.parametrize("empty", [False, True])
 async def test_explore_skips_feed_state_but_keeps_personalization_and_analytics(
@@ -7277,6 +7356,13 @@ async def test_exhausted_cursor_carries_new_post_metadata_and_retains_it_in_cach
 @pytest.mark.asyncio
 async def test_full_feed_generation_after_explore_resumes_history_reads_and_writes(feed_session):
     state = feed_session
+    policies = []
+
+    async def generate(*args, **kwargs):
+        policies.append(get_user_history_policy())
+        return state.snapshot, ["at://newly-discarded"]
+
+    state._run_pipeline_capturing_with_timeout.side_effect = generate
     await state.load(8)
 
     state.get_recent_seen_uris.assert_not_awaited()
@@ -7285,6 +7371,8 @@ async def test_full_feed_generation_after_explore_resumes_history_reads_and_writ
 
     await state.load(30)
 
+    assert policies == ["explore", "normal"]
+    assert get_user_history_policy() == "normal"
     assert state._run_pipeline_capturing_with_timeout.await_count == 2
     preview_generation, full_generation = [
         call.args[3] for call in state._run_pipeline_capturing_with_timeout.await_args_list
