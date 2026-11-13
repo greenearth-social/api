@@ -267,22 +267,29 @@ class PerspectiveClient:
 # Client-side rate limiter tracking usage within the current calendar-minute
 # bucket, matching how the Perspective API measures its 36 000 RPM quota.
 #
-# That quota is shared with ingest, which scores posts as they arrive (see
-# ingex's internal/perspective) and takes its own configured slice of 9 000
-# RPM. The two budgets are deliberately set to sum to 35 700 rather than to
-# 36 000: a 300 RPM buffer, because neither limiter is exact. This one is a
-# per-process calendar-minute bucket and the api runs several processes, and
-# ingest's is a token bucket in a different process entirely, so the true
-# combined ceiling is above the sum of the two numbers, not equal to it.
+# That quota is per GCP project, and shared with prod and stage ingest, which
+# score posts as they arrive (see ingex's internal/perspective), and with
+# offline scoring jobs (notebooks, dataset backfills) on the same key. The
+# split, whose canonical copy is the PerspectiveQPS comment in ingex's
+# internal/common/config.go:
+#
+#     prod ingest   15 512
+#     stage ingest   1 412
+#     api serving    3 000   this limiter
+#     buffer           300
+#     offline       15 776   unenforced; whatever is left
+#
+# Serving's slice is small because ingest now scores nearly every post before
+# it is a candidate: the live path sees a few hundred posts a day. This is a
+# backstop for when ingest falls behind, not a working budget. It is also
+# inexact — a per-process calendar-minute bucket, and the api runs several
+# processes — so the true ceiling is a multiple of this number; the buffer and
+# the offline headroom are what absorb that.
 #
 # Configurable rather than a constant so the split can be retuned by redeploy
-# in either repo, independently — the two halves of api#368 ship separately and
-# neither should have to wait on the other to change a number. If you raise
-# this, lower ingest's GE_PERSPECTIVE_QPS to match, and keep the buffer.
-#
-# The stored-score path is what actually brings serving's usage down; this is
-# only a backstop.
-_QUOTA_RPM = int(os.environ.get("GE_PERSPECTIVE_QPM", "26700"))
+# in either repo, independently. If you raise this, it comes out of the offline
+# headroom first.
+_QUOTA_RPM = int(os.environ.get("GE_PERSPECTIVE_QPM", "3000"))
 _rate_lock = asyncio.Lock()
 _rate_bucket_minute: int = -1
 _rate_count: int = 0
@@ -331,8 +338,10 @@ def _stored_score(c: CandidatePost) -> tuple[bool, float | None]:
 
     - a stored score: use it, this is the whole point;
     - ``perspective_scored_at`` with no score: ingest submitted the post and
-      the API declined it — no text, or an unsupported language. Permanent, so
-      calling again would spend quota to be refused again;
+      could not get a PRC score for it — no text, or a non-English language.
+      Non-English posts may carry raw scores for the multilingual attributes
+      only, which the PRC score cannot be computed from. Permanent either way,
+      so calling again would spend quota to be refused again;
     - neither: never scored. Fall through to the live call, exactly as before
       any of this existed.
 

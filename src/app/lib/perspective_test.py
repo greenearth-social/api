@@ -996,16 +996,21 @@ class TestScoreCandidatesCacheMetrics:
         assert metrics["perspective.score.live_count"] == 1
 
 
-def test_serving_quota_leaves_a_buffer_under_the_shared_limit():
-    """The 36 000 RPM Perspective quota is shared with ingest, which takes
-    9 000 RPM (GE_PERSPECTIVE_QPS=150 in ingex). The two are set to sum to
-    35 700, not 36 000, because neither limiter is exact — this one is a
-    per-process bucket and the api runs several processes.
+def test_serving_quota_leaves_headroom_for_offline_scoring():
+    """The 36 000 RPM Perspective quota is per GCP project: serving shares it
+    with prod ingest (15 512 RPM: GE_PERSPECTIVE_QPS=250 plus a 512 burst in
+    ingex), stage ingest (1 412), and offline scoring jobs on the same key.
+    300 RPM stays unclaimed as a buffer because no limiter is exact — this one
+    is a per-process bucket and the api runs several processes.
 
-    If you change this, change ingest's to match. The failure mode is 429s in
-    production, which no test on either side can see.
+    Serving is a backstop now that ingest scores nearly every post, so it takes
+    a small slice and leaves the rest for offline jobs. The canonical split is
+    in ingex's internal/common/config.go; if you change this, redo it there.
+    The failure mode is 429s in production, which no test on either side can
+    see.
     """
-    serving_rpm = 26700
-    ingest_rpm = 9000
+    serving_rpm = 3000
+    prod_ingest_rpm, stage_ingest_rpm, buffer_rpm = 15512, 1412, 300
     assert perspective_module._QUOTA_RPM == serving_rpm
-    assert serving_rpm + ingest_rpm == 35700
+    offline_rpm = 36000 - serving_rpm - prod_ingest_rpm - stage_ingest_rpm - buffer_rpm
+    assert offline_rpm >= 15000
