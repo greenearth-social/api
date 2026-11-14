@@ -105,7 +105,7 @@ def test_registered_generators():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count,raw_like_count", [(0, 0), (1, 1), (2, 2), (64, 64), (64, 128)])
+@pytest.mark.parametrize("count,raw_like_count", [(0, 0), (1, 1), (2, 2), (64, 64), (64, 80)])
 async def test_exact_blend_uses_usable_history_count(generator, dependencies, count, raw_like_count):
     dependencies.history.return_value = replace(make_history(count), raw_like_count=raw_like_count)
     dependencies.prediction.return_value = replace(

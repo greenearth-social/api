@@ -157,7 +157,7 @@ def test_predict_filters_history_times_to_embeddable_likes_and_ranks_candidates(
 
 def test_predict_preserves_selected_history_with_aligned_metadata(monkeypatch):
     # Model consumers receive the loader's selected history in newest-first order.
-    expected_indices = [i for i in range(1, 86) if i % 4]
+    expected_indices = [i for i in range(1, 81) if i % 5]
     assert len(expected_indices) == 64
     history = UserHistory([
         UserHistoryItem(
@@ -168,7 +168,7 @@ def test_predict_preserves_selected_history_with_aligned_metadata(monkeypatch):
             like_count=i + 10,
         )
         for i in expected_indices
-    ], raw_like_count=128)
+    ], raw_like_count=80)
     predict = AsyncMock(return_value=[0.5])
     recorder = MagicMock()
     monkeypatch.setattr(heavy_ranker_module, "get_inference_settings", lambda: ("https://inference", "secret"))

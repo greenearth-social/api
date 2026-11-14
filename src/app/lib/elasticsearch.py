@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # The number of raw likes to fetch, before hydration. This larger than USER_HISTORY_MODEL_LIMIT
 # because we may lose some posts (e.g. without embeddings) during hydration. After hydration, we
 # apply the (lower) USER_HISTORY_MODEL_LIMIT to the final list of posts and save those.
-DEFAULT_LIKED_POSTS_LIMIT = 128
+DEFAULT_LIKED_POSTS_LIMIT = 80
 
 # Index alias for KNN searches — targets only the last ~1 week of posts for speed.
 POSTS_KNN_INDEX = "posts_recent"

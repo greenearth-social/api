@@ -1109,7 +1109,7 @@ derived from the returned vector. Missing pairing fails
 explicitly; the producer does not infer it from a separate readiness request.
 The post tower itself does not need to be loaded by inference-service.
 
-The endpoint fetches the latest 128 likes and uses up to 64 successfully hydrated
+The endpoint fetches the latest 80 likes and uses up to 64 successfully hydrated
 posts and replies with `all_MiniLM_L12_v2` content embeddings. It uses the same
 history loader and cache as the feed, including its best-effort handling when
 one hydration index fails. Missing documents or embeddings are excluded from
@@ -1176,7 +1176,7 @@ run-start cutoff, bound query parameters, and DID-ordered pages of 1,000.
 Counts must meet the inclusive threshold. ES like counts query the fixed `likes`
 index in batches of 500 and represent likes **made by the user that remain in
 the index**, not a lifetime total; PostHog is not used to count likes. Missing
-aggregation buckets count as zero. The API separately loads up to 128 recent
+aggregation buckets count as zero. The API separately loads up to 80 recent
 likes and supplies the most recent 64 usable entries to inference.
 ES data can change during a run; the PostHog cutoff does not make ES reads a
 point-in-time snapshot.
@@ -1510,7 +1510,7 @@ existing `traffic` label to exclude probes and load tests. No user IDs are metri
 
 The two-tower generator and heavy ranker share a per-user Firestore document
 (`user_history_cache`) containing the user's recent likes and hydrated post
-features. The loader fetches up to 128 recent likes, drops entries that cannot be
+features. The loader fetches up to 80 recent likes, drops entries that cannot be
 hydrated, and keeps up to 64 usable entries, newest first. The cache stores those
 selected entries and `raw_like_count`, the number of likes fetched before
 filtering. Requests use one of two fixed, bounded stale-while-refresh policies:

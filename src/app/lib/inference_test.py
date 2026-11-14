@@ -374,8 +374,8 @@ async def test_predict_user_embedding_validates_prediction_outputs(monkeypatch, 
 async def test_predict_user_embedding_preserves_selected_history_and_raw_like_count(
     monkeypatch,
 ):
-    # The loader selected 64 usable entries from 128 raw likes before inference.
-    expected_indices = [i for i in range(1, 86) if i % 4]
+    # The loader selected 64 usable entries from 80 raw likes before inference.
+    expected_indices = [i for i in range(1, 81) if i % 5]
     assert len(expected_indices) == 64
     history = UserHistory([
         UserHistoryItem(
@@ -385,7 +385,7 @@ async def test_predict_user_embedding_preserves_selected_history_and_raw_like_co
             author_did=f"did:plc:author{i}",
         )
         for i in expected_indices
-    ], raw_like_count=128)
+    ], raw_like_count=80)
     client = AsyncMock()
     client.post.return_value = httpx.Response(200, json={
         "outputs": [[0.1, 0.2]],
@@ -407,7 +407,7 @@ async def test_predict_user_embedding_preserves_selected_history_and_raw_like_co
         },
         headers={"X-API-Key": "secret"},
     )
-    assert result.history_like_count == 128
+    assert result.history_like_count == 80
     assert result.history_embedding_count == 64
     assert len(history.items) == 64
 

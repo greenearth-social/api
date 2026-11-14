@@ -49,12 +49,12 @@ def _overfetched_history() -> UserHistory:
         UserHistoryItem(
             at_uri=f"at://liked/{index}",
             liked_at=(datetime(2026, 1, 2, tzinfo=UTC) - timedelta(seconds=index)).isoformat(),
-            embedding=VALID_EMBEDDING if index >= 32 else None,
-            author_did=f"did:plc:author{index}" if index >= 32 else "",
-            like_count=index if index >= 32 else 0,
+            embedding=VALID_EMBEDDING if index >= 8 else None,
+            author_did=f"did:plc:author{index}" if index >= 8 else "",
+            like_count=index if index >= 8 else 0,
         )
-        for index in range(128)
-    ], raw_like_count=128)
+        for index in range(80)
+    ], raw_like_count=80)
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +65,7 @@ def clear_shared_cache():
 
 
 def test_cache_policy_constants():
-    assert DEFAULT_LIKED_POSTS_LIMIT == 128
+    assert DEFAULT_LIKED_POSTS_LIMIT == 80
     assert USER_HISTORY_MODEL_LIMIT == 64
     assert USER_HISTORY_NORMAL_REFRESH_SEC == 600
     assert USER_HISTORY_NORMAL_MAX_SERVING_AGE_SEC == 1_800
@@ -190,6 +190,7 @@ async def test_firestore_cache_returns_normal_stale_entry_before_stored_expirati
         lambda data: data.update(user_did="did:plc:someone-else"),
         lambda data: data.update(history_limit=USER_HISTORY_MODEL_LIMIT + 1),
         lambda data: data.update(fetch_limit=64),
+        lambda data: data.update(fetch_limit=128),
         lambda data: data.update(raw_like_count=-1),
         lambda data: data.update(embedding_key="different-embedding"),
         lambda data: data.update(expires_at=datetime.now(UTC) - timedelta(seconds=1)),
@@ -285,13 +286,13 @@ async def test_firestore_cache_roundtrip_stores_only_model_items_and_raw_count()
     db, _collection_ref, doc_ref = _mock_firestore_client()
     cache = FirestoreUserHistoryCache(db)
     # The loader has already selected the newest 64 usable likes before storage.
-    history = UserHistory(items=_overfetched_history().items[32:96], raw_like_count=128)
+    history = UserHistory(items=_overfetched_history().items[8:72], raw_like_count=80)
 
     await cache.store("did:plc:user1", history)
     stored = doc_ref.set.await_args.args[0]
     assert stored["history_limit"] == 64
-    assert stored["fetch_limit"] == 128
-    assert stored["raw_like_count"] == 128
+    assert stored["fetch_limit"] == 80
+    assert stored["raw_like_count"] == 80
     assert len(stored["items"]) == 64
     assert all(item["embedding_b64"] is not None for item in stored["items"])
     snapshot = MagicMock(exists=True)
@@ -310,12 +311,12 @@ async def test_firestore_cache_roundtrip_stores_only_model_items_and_raw_count()
 async def test_firestore_cache_roundtrip_preserves_count_when_no_likes_are_usable():
     db, _collection_ref, doc_ref = _mock_firestore_client()
     cache = FirestoreUserHistoryCache(db)
-    history = UserHistory(items=[], raw_like_count=128)
+    history = UserHistory(items=[], raw_like_count=80)
 
     await cache.store("did:plc:user1", history)
     stored = doc_ref.set.await_args.args[0]
     assert stored["items"] == []
-    assert stored["raw_like_count"] == 128
+    assert stored["raw_like_count"] == 80
     snapshot = MagicMock(exists=True)
     snapshot.to_dict.return_value = stored
     doc_ref.get.return_value = snapshot
@@ -789,15 +790,15 @@ async def test_overfetch_filters_and_caps_history_before_caching(monkeypatch):
     history = await fetch_user_history_features(es, "did:plc:user1")
     await cache.drain()
 
-    recent.assert_awaited_once_with(es, "did:plc:user1", limit=128)
+    recent.assert_awaited_once_with(es, "did:plc:user1", limit=80)
     assert hydrate.await_args_list == [
         call(es, expected.liked_uris, index="posts"),
         call(es, expected.liked_uris, index="replies"),
     ]
-    assert history == UserHistory(items=expected.items[32:96], raw_like_count=128)
+    assert history == UserHistory(items=expected.items[8:72], raw_like_count=80)
     assert len(history.items) == 64
-    assert history.liked_uris == expected.liked_uris[32:96]
-    assert history.items_with_embeddings == expected.items[32:96]
+    assert history.liked_uris == expected.liked_uris[8:72]
+    assert history.items_with_embeddings == expected.items[8:72]
     assert cache.store_calls == [("did:plc:user1", history)]
     assert await fetch_user_history_features(es, "did:plc:user1") is history
     assert recent.await_count == 1

@@ -127,7 +127,7 @@ def test_export_propagates_actual_pair_and_history_without_candidate_search(
     [
         (UserHistory(items=[], raw_like_count=0), "no_likes", 0),
         (_history(None), "no_embedded_history", 1),
-        (UserHistory(items=[], raw_like_count=128), "no_embedded_history", 128),
+        (UserHistory(items=[], raw_like_count=80), "no_embedded_history", 80),
     ],
 )
 def test_missing_history_skips_inference_and_excludes_vectors(
@@ -310,7 +310,7 @@ def test_dimension_comes_from_vector_and_uuid_format_is_canonical(client, vector
 def test_real_history_path_uses_production_preparation_and_best_effort_hydration(
     client, monkeypatch, failed_index
 ):
-    # Restore the real history loader for this test. It uses the latest 128 likes,
+    # Restore the real history loader for this test. It uses the latest 80 likes,
     # hydrates posts and replies, and can continue with one failed hydration index.
     monkeypatch.setattr(
         embeddings,
@@ -362,7 +362,7 @@ def test_real_history_path_uses_production_preparation_and_best_effort_hydration
         assert response.json()["history_embedding_count"] == (2 if failed_index is None else 1)
     assert app.state.es.search.await_count == 6
     first = app.state.es.search.call_args_list[0].kwargs
-    assert first["size"] == 128
+    assert first["size"] == 80
     assert first["routing"] == DID
     assert first["sort"] == [{"created_at": "desc"}]
     call = _mock_prediction_request().call_args.kwargs["json"]
