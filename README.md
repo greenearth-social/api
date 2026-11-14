@@ -1509,24 +1509,27 @@ existing `traffic` label to exclude probes and load tests. No user IDs are metri
 
 The two-tower generator and heavy ranker share a per-user Firestore document
 (`user_history_cache`) containing the user's recent likes and hydrated post
-features. Cache entries use this fixed, bounded stale-while-refresh lifecycle:
+features. Requests use one of two fixed, bounded stale-while-refresh policies:
 
-- Through 10 minutes, an entry is fresh and is returned directly.
-- After 10 and before 30 minutes, the stale entry is returned immediately while a
-  managed background task refreshes it from Elasticsearch.
-- At 30 minutes, the entry is a hard miss and the request synchronously rebuilds
-  it rather than serving older recommendation inputs.
+- Normal feeds return cached history directly through 10 minutes. After 10 and
+  before 30 minutes, they return stale history while a managed background task
+  refreshes it from Elasticsearch. At 30 minutes, the entry is a hard miss.
+- Explore previews return cached history directly before 14 days. From 14 days
+  until 30 days, they return stale history while a background refresh runs. At
+  30 days, the entry is a hard miss. Explore previews are feed requests with no
+  cursor and a requested limit of 2–8 posts.
 
-Stale refreshes use a 30-second transactional Firestore lease, so API instances
-do not duplicate Elasticsearch work. A failed refresh releases the lease and
-sets a 60-second retry cooldown; the stale value remains usable until its fixed
-hard expiry. Cold misses are still fetched
-synchronously because the caller needs a value, but persistence happens in the
+Both policies share the stored history and a 30-second transactional Firestore
+refresh lease, so API instances do not duplicate stale-refresh Elasticsearch
+work. A failed refresh releases the lease and sets a 60-second retry cooldown;
+the stale value remains usable until the requesting policy's serving limit or
+the document's stored expiration, whichever comes first. Both policies fetch
+hard cache misses synchronously, but persistence happens in the
 background and is drained during shutdown. Request-path cache reads fail open
 after 500 ms; background writes and lease releases have a separate 5-second
 timeout.
 
-Recent-like lookup and history hydration share a 1-second Elasticsearch deadline
+Recent-like lookup and history hydration share a 2-second Elasticsearch deadline
 on the request path, after the bounded cache read. Background refreshes use a
 5-second Elasticsearch deadline within their overall 10-second refresh budget.
 Hydration searches posts and replies concurrently, with each search independently
@@ -1543,8 +1546,13 @@ still count as complete and may be cached.
 
 Lookups record `user_history.cache.age_seconds` and
 `user_history.cache.lookup_count`; background work records `refresh_count` and
-`write_count`, each labelled by outcome. Firestore native TTL uses `expires_at`,
-which is set to the fixed 30-minute maximum serving age. These policy values are
+`write_count`, each labelled by outcome. Lookup and refresh counters also carry
+a `policy` label (`normal` or `explore`). Firestore native TTL uses `expires_at`,
+which is set to 30 days after each successful history write, regardless of the
+request policy. Serving cached history does not extend its expiration. Normal
+feeds still stop serving history at 30 minutes even though it remains stored for
+Explore previews. Existing documents retain their previously stored expiration
+until replaced by a successful history write. These policy values are
 code-level constants and intentionally cannot vary by deployment environment;
 changing them requires a code change and a new API deployment. See
 `src/app/lib/user_history_cache.py`.

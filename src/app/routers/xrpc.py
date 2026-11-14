@@ -87,6 +87,7 @@ from ..lib.slate_pipeline import (
     run_pipeline_capturing,
 )
 from ..lib.telemetry import timed
+from ..lib.user_history_cache import user_history_policy_scope
 from ..models import (
     CandidateGenerateRequest,
     FeedConfig,
@@ -2165,17 +2166,20 @@ async def get_feed_skeleton(
             # Generated up front so it can key the debug record too.
             request_id = uuid.uuid4().hex
 
-            generated_snapshot, low_score_uris = await _run_pipeline_capturing_with_timeout(
-                request,
-                db,
-                feed_cfg,
-                gen_request,
-                feed_name=feed_name,
-                user_did=user_did,
-                request_id=request_id,
-                regenerated=False,
-                debug_enabled=debug_enabled,
-            )
+            # Pass the feed load type to all the function nested function calls so that the user
+            # history cache (used for two tower and heavy ranker models) can use it.
+            with user_history_policy_scope("explore" if is_explore_preview else "normal"):
+                generated_snapshot, low_score_uris = await _run_pipeline_capturing_with_timeout(
+                    request,
+                    db,
+                    feed_cfg,
+                    gen_request,
+                    feed_name=feed_name,
+                    user_did=user_did,
+                    request_id=request_id,
+                    regenerated=False,
+                    debug_enabled=debug_enabled,
+                )
             # An Explore load's rejected candidates should not affect future feed loads.
             if (
                 low_score_uris

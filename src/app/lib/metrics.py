@@ -128,6 +128,27 @@ EVENTLOOP_LAG_MS_BOUNDARIES: tuple[float, ...] = FAST_MS_BOUNDARIES + (
     60000,
 )
 
+# History ages span minutes for normal feeds and days for Explore previews.
+# Include both policies' refresh and serving limits so their distributions
+# remain readable throughout the shared 30-day retention window.
+USER_HISTORY_CACHE_AGE_SEC_BOUNDARIES: tuple[float, ...] = (
+    0,
+    60,
+    300,
+    600,
+    900,
+    1800,
+    3600,
+    6 * 3600,
+    12 * 3600,
+    86_400,
+    3 * 86_400,
+    7 * 86_400,
+    14 * 86_400,
+    21 * 86_400,
+    30 * 86_400,
+)
+
 # Small-integer counts: in-flight requests against a pool cap, slate sizes.
 # Distinguishing 1 from 4 matters -- that is the difference between an idle
 # pool and one about to queue.
@@ -187,6 +208,8 @@ def histogram_boundaries(name: str) -> tuple[float, ...] | None:
         return EVENTLOOP_LAG_MS_BOUNDARIES
     if name == "feed.request.duration_ms":
         return FEED_REQUEST_MS_BOUNDARIES
+    if name == "user_history.cache.age_seconds":
+        return USER_HISTORY_CACHE_AGE_SEC_BOUNDARIES
     if name == "candidates.two_tower.history_size":
         # Separate no usable history from one like, up to the 64-like window.
         return (0, 1, 2, 4, 8, 16, 32, 64)
