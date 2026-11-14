@@ -318,6 +318,7 @@ from .metrics import (  # noqa: E402
     FEED_REQUEST_MS_BOUNDARIES,
     LATENCY_MS_BOUNDARIES,
     RATIO_BOUNDARIES,
+    USER_HISTORY_CACHE_AGE_SEC_BOUNDARIES,
     histogram_boundaries,
 )
 
@@ -394,6 +395,7 @@ class TestHistogramBoundaries:
             FEED_REQUEST_MS_BOUNDARIES,
             CONCURRENCY_BOUNDARIES,
             RATIO_BOUNDARIES,
+            USER_HISTORY_CACHE_AGE_SEC_BOUNDARIES,
         ):
             assert list(bounds) == sorted(bounds)
             assert len(set(bounds)) == len(bounds)
@@ -482,6 +484,18 @@ class TestHistogramBoundariesApplied:
         point = self._points(reader, "candidates.two_tower.history_size")
         assert tuple(point.explicit_bounds) == (0, 1, 2, 4, 8, 16, 32, 64)
         assert tuple(point.bucket_counts) == (1, 1, 1, 0, 0, 0, 0, 1, 0)
+
+    def test_user_history_age_covers_normal_and_explore_windows(self):
+        """Minute-old and multi-day histories need distinct finite buckets."""
+        collector, reader = _make_collector()
+        ages = (600, 1800, 86_400, 14 * 86_400, 29 * 86_400)
+        for age in ages:
+            collector.record("user_history.cache.age_seconds", age)
+        point = self._points(reader, "user_history.cache.age_seconds")
+        assert {600, 1800, 14 * 86_400, 30 * 86_400} <= set(point.explicit_bounds)
+        assert point.count == len(ages)
+        assert len([count for count in point.bucket_counts if count]) == len(ages)
+        assert point.bucket_counts[-1] == 0
 
     def test_counters_are_unaffected(self):
         collector, reader = _make_collector()
