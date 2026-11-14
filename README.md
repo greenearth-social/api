@@ -1510,7 +1510,10 @@ existing `traffic` label to exclude probes and load tests. No user IDs are metri
 
 The two-tower generator and heavy ranker share a per-user Firestore document
 (`user_history_cache`) containing the user's recent likes and hydrated post
-features. Requests use one of two fixed, bounded stale-while-refresh policies:
+features. The loader fetches up to 128 recent likes, drops entries that cannot be
+hydrated, and keeps up to 64 usable entries, newest first. The cache stores those
+selected entries and `raw_like_count`, the number of likes fetched before
+filtering. Requests use one of two fixed, bounded stale-while-refresh policies:
 
 - Normal feeds return cached history directly through 10 minutes. After 10 and
   before 30 minutes, they return stale history while a managed background task
@@ -1535,7 +1538,7 @@ on the request path, after the bounded cache read. Background refreshes use a
 5-second Elasticsearch deadline within their overall 10-second refresh budget.
 Hydration searches posts and replies concurrently, with each search independently
 bounded by the same deadline. If one search fails or times out, the request can
-use the other result, keeping unhydrated likes without embeddings. The shared
+use the successfully hydrated items from the other result. The shared
 deadline includes time spent finding recent likes, leaving room for inference
 within the default model budgets. A recent-like lookup timeout fails the fetch
 because no history URIs are available yet. Request cancellation still propagates.
