@@ -583,6 +583,12 @@ def _configured_generation(
             update={"normalize_rank_by_generator": effective.normalize_rank_by_generator}
         )
 
+    # Experimental, local only: z-score instead of min-max.
+    if "normalize_rank_zscore" in controls:
+        feed_cfg = feed_cfg.model_copy(
+            update={"normalize_rank_zscore": bool(effective.normalize_rank_zscore)}
+        )
+
     # Experimental, local only: the user's floor replaces the feed's fixed one.
     if "min_rank_score" in controls:
         assert effective.min_rank_score is not None

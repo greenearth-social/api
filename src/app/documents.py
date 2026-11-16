@@ -71,6 +71,7 @@ class FeedPreferencesDocument(BaseModel):
     llm_filter_strength: float | None = Field(default=None, ge=0.0, le=1.0)
     llm_filter_multiply: bool | None = None
     llm_filter_multiplier: float | None = Field(default=None, ge=0.0, le=3.0)
+    normalize_rank_zscore: bool | None = None
 
 
 # The LLM prompt candidate generator ("cg") and the LLM ranking filter (#566).

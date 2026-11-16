@@ -222,3 +222,28 @@ async def test_flag_on_cuts_on_raw_score_then_grades_each_generator_on_its_curve
         ("at://f/3", "followed_users", 0.5, 0.0),
         ("at://l/2", "llm_query_vector", 0.3, 0.0),
     ]
+
+
+@pytest.mark.asyncio
+async def test_zscore_flag_grades_each_generator_against_its_average():
+    recorder = FeedDebugRecorder(feed_name="your-feed", regenerated=False)
+
+    await _run(
+        _slate(normalize_rank_by_generator=True, normalize_rank_zscore=True), recorder
+    )
+
+    # followed_users 0.9/0.7/0.5: z = +1.22, 0, -1.22. llm 0.4/0.3: z = +1, -1.
+    assert recorder.rank_normalization == [
+        ("at://f/1", "followed_users", 0.9, pytest.approx(0.8897, abs=1e-4)),
+        ("at://l/1", "llm_query_vector", 0.4, pytest.approx(0.8413, abs=1e-4)),
+        ("at://f/2", "followed_users", 0.7, pytest.approx(0.5)),
+        ("at://l/2", "llm_query_vector", 0.3, pytest.approx(0.1587, abs=1e-4)),
+        ("at://f/3", "followed_users", 0.5, pytest.approx(0.1103, abs=1e-4)),
+    ]
+
+
+def test_zscore_group_without_spread_maps_to_fixed_score():
+    lone = CANDIDATES[0].model_copy(update={"score": 0.2, "generator_name": "solo"})
+
+    assert [c.score for c in normalize_scores_by_generator([lone], zscore=True)] == [0.75]
+

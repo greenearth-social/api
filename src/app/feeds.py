@@ -165,6 +165,7 @@ FEEDS: dict[str, FeedConfig] = {
             "llm_filter_strength",
             "llm_filter_multiply",
             "llm_filter_multiplier",
+            "normalize_rank_zscore",
         ),
         pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED),
         explore_pinned_post_uri=ux_post_uri(ux_posts.PIN_YOUR_FEED_EXPLORE),

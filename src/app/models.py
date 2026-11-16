@@ -23,6 +23,8 @@ FeedControlName = Literal[
     "llm_filter_multiply",
     # Experimental, local only: the multiplier a perfect match earns in multiply mode.
     "llm_filter_multiplier",
+    # Experimental, local only: per-source z-score instead of min-max.
+    "normalize_rank_zscore",
 ]
 
 # What a feed does when the AppView calls getFeedSkeleton with no (or an
@@ -343,6 +345,11 @@ class SlateCutoffs(BaseModel):
         description="After the min_rank_score cut, rescale each generator's rank scores to "
         "0..1 before MMR so no generator is crowded out (issue #572). Only applies when "
         "rank_request_template is set.",
+    )
+    normalize_rank_zscore: bool = Field(
+        default=False,
+        description="Experimental branch: with normalize_rank_by_generator on, rescale by "
+        "z-score through the normal CDF instead of min-max.",
     )
 
 

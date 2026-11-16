@@ -39,6 +39,8 @@ CONTROL_DEFAULTS: dict[FeedControlName, int | float | bool | SourceWeightsDocume
     # Experimental, local only: blend by default; the multiplier lifts matches 2x when on.
     "llm_filter_multiply": False,
     "llm_filter_multiplier": 2.0,
+    # Experimental, local only: min-max by default.
+    "normalize_rank_zscore": False,
 }
 
 
@@ -137,7 +139,9 @@ def control_value(
 def control_value(
     user: UserDocument | None,
     feed_name: str,
-    control: Literal["normalize_rank_by_generator", "llm_filter", "llm_filter_multiply"],
+    control: Literal[
+        "normalize_rank_by_generator", "llm_filter", "llm_filter_multiply", "normalize_rank_zscore"
+    ],
 ) -> bool: ...
 
 

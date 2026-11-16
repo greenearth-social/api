@@ -20,6 +20,7 @@ import asyncio
 import logging
 import math
 import os
+import statistics
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -70,13 +71,24 @@ class PipelineResult(NamedTuple):
 UNKNOWN_GENERATOR = "unknown"
 
 
-def normalize_scores_by_generator(ordered: list[CandidatePost]) -> list[CandidatePost]:
+# Experimental: z-score mode's value for a group with no spread (one post, or all equal).
+ZSCORE_NO_SPREAD_SCORE = 0.75
+
+
+def normalize_scores_by_generator(
+    ordered: list[CandidatePost], *, zscore: bool = False
+) -> list[CandidatePost]:
     """Rescale each generator's rank scores to [0, 1] and re-sort (issue #572).
 
     Within each ``generator_name`` group the lowest score maps to 0 and the
     highest to 1; a group with a single score (one post, or all equal) maps
     to 1. Returns copies with ``score`` replaced, sorted descending, ties in
     incoming order.
+
+    Experimental ``zscore``: each score becomes its z-score within the group
+    (population spread), passed through the normal CDF, so 0.5 is the group's
+    average and the value reads as the share of a bell curve it beats. A group
+    with no spread maps to ``ZSCORE_NO_SPREAD_SCORE``.
     """
     by_generator: dict[str, list[CandidatePost]] = {}
     for c in ordered:
@@ -86,9 +98,17 @@ def normalize_scores_by_generator(ordered: list[CandidatePost]) -> list[Candidat
     for group in by_generator.values():
         scores = [c.score or 0.0 for c in group]
         lo, hi = min(scores), max(scores)
+        mean, spread = statistics.fmean(scores), statistics.pstdev(scores)
         for c, s in zip(group, scores, strict=True):
             assert c.at_uri is not None
-            normalized[c.at_uri] = 1.0 if hi == lo else (s - lo) / (hi - lo)
+            if zscore:
+                normalized[c.at_uri] = (
+                    ZSCORE_NO_SPREAD_SCORE
+                    if hi == lo
+                    else 0.5 * (1.0 + math.erf((s - mean) / spread / math.sqrt(2.0)))
+                )
+            else:
+                normalized[c.at_uri] = 1.0 if hi == lo else (s - lo) / (hi - lo)
 
     rescored = [c.model_copy(update={"score": normalized[c.at_uri]}) for c in ordered if c.at_uri]
     return sorted(rescored, key=lambda c: -(c.score or 0.0))
@@ -254,7 +274,7 @@ async def run_ranking_pipeline(
 
         if ranked and slate.normalize_rank_by_generator and ordered:
             raw_by_uri = {c.at_uri: c.score or 0.0 for c in ordered if c.at_uri}
-            ordered = normalize_scores_by_generator(ordered)
+            ordered = normalize_scores_by_generator(ordered, zscore=slate.normalize_rank_zscore)
             if rec is not None:
                 rec.record_rank_normalization(
                     [

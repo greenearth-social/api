@@ -1353,6 +1353,7 @@ def test_get_preferences_returns_default_for_new_user(mock_get_user, client):
                 "llm_filter_strength": 0.5,
                 "llm_filter_multiply": False,
                 "llm_filter_multiplier": 2.0,
+                "normalize_rank_zscore": False,
             },
             "best-of-friends": {
                 "freshness": 5,
@@ -1401,6 +1402,7 @@ def test_get_preferences_returns_stored_value(mock_get_user, client):
             "llm_filter_strength": 0.5,
             "llm_filter_multiply": False,
             "llm_filter_multiplier": 2.0,
+            "normalize_rank_zscore": False,
         },
         "best-of-friends": {
             "freshness": 3,
