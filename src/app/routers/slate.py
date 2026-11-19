@@ -43,6 +43,7 @@ from ..lib.firestore import (
     claim_api_preview,
     delete_api_slate,
     get_api_slate,
+    get_user,
     save_api_slate,
 )
 from ..lib.metrics import get_metric_collector
@@ -67,6 +68,7 @@ from .xrpc import (
     _record_interactions,
     _skeleton_items,
     _spawn_background,
+    _write_feed_debug,
     user_exclusions,
 )
 
@@ -336,6 +338,10 @@ async def slate_generate(
     **Interactions.** Every item carries `feed_context`, the token to report
     back with interactions for that item via `/slate/interactions`.
 
+    **Debugging.** Fresh feed generation saves a full pipeline debug record
+    when the user's `debug_feeds` flag is enabled. Cursor pages and settings
+    previews do not create debug records.
+
     **Authentication.** Requires an API key granted the `user-config` scope:
     the slate is generated on behalf of `user_did`, using and updating their
     history.
@@ -595,6 +601,27 @@ async def _generate_and_store(
     )
     if capture.low_score_uris and not preview:
         _spawn_background(_record_discarded(db, body.user_did, capture.low_score_uris))
+
+    if not preview:
+        # Use the same opt-in record and background writer as MySky's feeds,
+        # so feed_debug.py can inspect partner feeds by user DID too.
+        debug_enabled = False
+        try:
+            user_doc = await get_user(db, body.user_did)
+            debug_enabled = bool(user_doc and user_doc.debug_feeds)
+        except Exception:
+            logger.exception("Failed to read debug flag for user '%s'", body.user_did)
+        if debug_enabled:
+            _spawn_background(
+                _write_feed_debug(
+                    request,
+                    db,
+                    capture.recorder,
+                    request_id,
+                    body.user_did,
+                    capture.snapshot.generated_at,
+                )
+            )
 
     snapshot = capture.snapshot
     cache_doc = FeedCacheDocument(

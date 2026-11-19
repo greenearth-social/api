@@ -1,8 +1,14 @@
 import importlib.util
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+from rich.console import Console
+
+from app.documents import FeedDebugDocument
+from app.lib.candidates.base import CandidateResult
+from app.lib.feed_debug import FeedDebugRecorder
+from app.models import CandidateGenerateRequest, CandidatePost, GeneratorSpec
 
 MODULE_PATH = Path(__file__).with_name("feed_debug.py")
 spec = importlib.util.spec_from_file_location("feed_debug_cli", MODULE_PATH)
@@ -312,3 +318,52 @@ def test_candidate_stats_uses_single_empty_history_heavy_ranker_column():
         "heavy_ranker_empty_history",
         "author_penalty",
     ]
+
+
+def test_render_external_only_diverse_approval_document_shows_raw_scores(monkeypatch):
+    uris = ["at://did:plc:author/app.bsky.feed.post/a", "at://did:plc:author/app.bsky.feed.post/b"]
+    candidates = [
+        CandidatePost(at_uri=uri, score=score, generator_name="external", content="DA post")
+        for uri, score in zip(uris, [0.875, 0.0], strict=True)
+    ]
+    recorder = FeedDebugRecorder(feed_name="beu-diverse-approval", regenerated=False)
+    recorder.set_generate_request(
+        CandidateGenerateRequest(
+            generators=[GeneratorSpec(name="external", weight=1.0)],
+            user_did="did:plc:user",
+            num_candidates=150,
+            video_only=False,
+            max_age_hours=168,
+            infill=None,
+        )
+    )
+    recorder.record_generator_output(
+        CandidateResult(generator_name="external", candidates=candidates)
+    )
+    recorder.record_final_candidates(candidates)
+    recorder.record_order_after_rank(uris)
+    recorder.record_final_order(uris)
+    now = datetime.now(UTC)
+    document = recorder.build_document(
+        request_id="da-request",
+        username="user.test",
+        generated_at=now,
+        expires_at=now + timedelta(days=7),
+    )
+    # Exercise the stored document shape, including absent ranking and empty
+    # diversification, instead of supplying only the fields a renderer reads.
+    document = FeedDebugDocument.model_validate_json(document.model_dump_json())
+    console = Console(width=180, color_system=None)
+    monkeypatch.setattr(feed_debug, "console", console)
+
+    with console.capture() as capture:
+        feed_debug._render_show(document)
+
+    output = capture.get()
+    assert "beu-diverse-approval" in output
+    assert "ranker      (none)   diversify=False" in output
+    assert "external(1)" in output
+    assert "external (gen 0.8750)" in output
+    assert "external (gen 0.0000)" in output
+    assert "final feed — 2 items" in output
+    assert output.index(uris[0]) < output.index(uris[1])

@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ..documents import ApiKeyDocument, FeedCacheDocument, StoredSlateDocument
+from ..documents import ApiKeyDocument, FeedCacheDocument, StoredSlateDocument, UserDocument
 from ..lib.api_keys import generate_key
 from ..lib.candidates.base import CandidateResult
 from ..lib.embeddings import encode_float32_b64
@@ -73,6 +73,13 @@ def no_user_history():
         patch("app.lib.slate_pipeline.hydrate_posts", new=AsyncMock(side_effect=lambda es, c: c)),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def debug_user():
+    """Users are not opted into full debug capture unless a test enables it."""
+    with patch("app.routers.slate.get_user", new_callable=AsyncMock, return_value=None) as lookup:
+        yield lookup
 
 
 @pytest.fixture(autouse=True)
@@ -597,6 +604,183 @@ class TestCursor:
 # ---------------------------------------------------------------------------
 # Observability
 # ---------------------------------------------------------------------------
+
+
+class TestFeedDebugCapture:
+    @staticmethod
+    async def _drain(spawned):
+        for coro in spawned:
+            await coro
+        spawned.clear()
+
+    def test_external_feed_captures_raw_scores_once_before_cursor_pages(self, debug_user):
+        debug_user.return_value = UserDocument(user_did=USER_DID, debug_feeds=True)
+        app.state.es.search = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [
+                        {
+                            "_source": {
+                                "at_uri": "at://ext/b",
+                                "author_did": "did:plc:b",
+                                "content": "second post",
+                            }
+                        },
+                        {
+                            "_source": {
+                                "at_uri": "at://ext/a",
+                                "author_did": "did:plc:a",
+                                "content": "a" * 350,
+                            }
+                        },
+                    ]
+                }
+            }
+        )
+        spawned = []
+        with (
+            patch("app.routers.slate._spawn_background", side_effect=spawned.append),
+            patch(
+                "app.routers.xrpc._resolve_handles",
+                new_callable=AsyncMock,
+                return_value={USER_DID: "viewer.test", "did:plc:a": "author.test"},
+            ),
+            patch("app.routers.xrpc.write_feed_debug", new_callable=AsyncMock) as write,
+        ):
+            response = _post(
+                _body(
+                    feed_name="beu-diverse-approval",
+                    limit=1,
+                    generators=[{"name": "external", "weight": 1.0}],
+                    external_candidates=[
+                        {"at_uri": "at://ext/missing", "score": 0.9},
+                        {"at_uri": "at://ext/a", "score": 0.42},
+                        {"at_uri": "at://ext/b", "score": 0.11},
+                    ],
+                )
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            write.assert_not_awaited()  # Persistence stays off the response path.
+            asyncio.run(self._drain(spawned))
+
+            debug_user.assert_awaited_once_with(app.state.firestore, USER_DID)
+            write.assert_awaited_once()
+            assert write.await_args is not None
+            doc = write.await_args.args[1]
+            assert doc.request_id == data["request_id"]
+            assert doc.user_did == USER_DID
+            assert doc.username == "viewer.test"
+            assert doc.feed_name == "beu-diverse-approval"
+            assert doc.final_order == ["at://ext/a", "at://ext/b"]
+            assert doc.ranker_model is None
+            assert doc.diversify is False
+            assert doc.expires_at - doc.generated_at == timedelta(days=7)
+            (external,) = doc.generator_outputs
+            assert external.generator_name == "external"
+            assert {candidate.at_uri: candidate.score for candidate in external.candidates} == {
+                "at://ext/a": 0.42,
+                "at://ext/b": 0.11,
+            }
+            first = next(
+                candidate for candidate in external.candidates if candidate.at_uri == "at://ext/a"
+            )
+            assert first.content == "a" * 300
+            assert first.author_username == "author.test"
+            # Response metadata normalizes generator scores; debug keeps the raw inputs.
+            assert data["items"][0]["generators"][0]["score"] == 1.0
+
+            debug_user.reset_mock()
+            page = _post(_cursor_body(data["cursor"], feed_name="beu-diverse-approval"))
+            assert page.status_code == 200, page.text
+            assert [item["at_uri"] for item in page.json()["items"]] == ["at://ext/b"]
+            assert page.json()["request_id"] == doc.request_id
+            asyncio.run(self._drain(spawned))
+            debug_user.assert_not_awaited()
+            write.assert_awaited_once()
+
+    @pytest.mark.parametrize("user_exists", [False, True])
+    def test_missing_or_disabled_debug_flag_does_not_write(self, debug_user, user_exists):
+        debug_user.return_value = (
+            UserDocument(user_did=USER_DID, debug_feeds=False) if user_exists else None
+        )
+        gen_patch, lookup_patch, _ = _fake_generators(popularity=_candidates("pop", [0.5]))
+        with (
+            gen_patch,
+            lookup_patch,
+            patch("app.routers.slate._write_feed_debug", new_callable=AsyncMock) as write,
+        ):
+            response = _post(_body())
+
+        assert response.status_code == 200, response.text
+        assert [item["at_uri"] for item in response.json()["items"]] == ["at://pop/0"]
+        debug_user.assert_awaited_once_with(app.state.firestore, USER_DID)
+        write.assert_not_called()
+
+    def test_debug_flag_read_failure_does_not_break_generation(self, debug_user):
+        debug_user.side_effect = RuntimeError("user lookup unavailable")
+        gen_patch, lookup_patch, _ = _fake_generators(popularity=_candidates("pop", [0.5]))
+        with (
+            gen_patch,
+            lookup_patch,
+            patch("app.routers.slate._write_feed_debug", new_callable=AsyncMock) as write,
+        ):
+            response = _post(_body())
+
+        assert response.status_code == 200, response.text
+        assert [item["at_uri"] for item in response.json()["items"]] == ["at://pop/0"]
+        debug_user.assert_awaited_once()
+        write.assert_not_called()
+
+    def test_debug_persistence_failure_does_not_break_the_served_slate(self, debug_user, caplog):
+        debug_user.return_value = UserDocument(user_did=USER_DID, debug_feeds=True)
+        gen_patch, lookup_patch, _ = _fake_generators(popularity=_candidates("pop", [0.5]))
+        spawned = []
+        with (
+            gen_patch,
+            lookup_patch,
+            patch("app.routers.slate._spawn_background", side_effect=spawned.append),
+            patch("app.routers.xrpc._resolve_handles", new_callable=AsyncMock, return_value={}),
+            patch(
+                "app.routers.xrpc.write_feed_debug",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("debug storage unavailable"),
+            ) as write,
+        ):
+            response = _post(_body())
+            assert response.status_code == 200, response.text
+            asyncio.run(self._drain(spawned))
+
+        write.assert_awaited_once()
+        assert [item["at_uri"] for item in response.json()["items"]] == ["at://pop/0"]
+        assert "Failed to write feed debug record" in caplog.text
+
+    def test_previews_and_reused_preview_slates_do_not_capture_debug(self, debug_user):
+        debug_user.return_value = UserDocument(user_did=USER_DID, debug_feeds=True)
+        gen_patch, lookup_patch, gens = _fake_generators(
+            popularity=_candidates("pop", [0.9, 0.5])
+        )
+        with (
+            gen_patch,
+            lookup_patch,
+            patch("app.routers.slate._write_feed_debug", new_callable=AsyncMock) as write,
+        ):
+            preview = _post(_body(preview=True))
+            assert preview.status_code == 200, preview.text
+            assert preview.json()["served_from"] == "generated"
+            load = _post(_body(limit=1))
+            assert load.status_code == 200, load.text
+            assert load.json()["served_from"] == "preview"
+            assert load.json()["request_id"] == preview.json()["request_id"]
+            page = _post(_cursor_body(load.json()["cursor"]))
+            assert page.status_code == 200, page.text
+            again = _post(_body(preview=True))
+            assert again.status_code == 200, again.text
+            assert again.json()["served_from"] == "last_load"
+
+        gens["popularity"].generate.assert_awaited_once()
+        debug_user.assert_not_awaited()
+        write.assert_not_called()
 
 
 class TestObservability:
