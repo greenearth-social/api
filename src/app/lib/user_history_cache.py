@@ -281,12 +281,14 @@ def _decode_cache_entry(
     # A background refresh can claim a lease after the stored history disappears.
     if "items" not in data and "refresh_started_at" in data:
         return None
+    # Other schema versions may lack required fields; treat them as cache misses.
+    if data.get("schema_version") != USER_HISTORY_CACHE_VERSION:
+        return None
     document = _CachedUserHistoryDocument.model_validate(data)
     fetched_at = _as_utc(document.fetched_at)
     expires_at = _as_utc(document.expires_at)
     if (
-        document.schema_version != USER_HISTORY_CACHE_VERSION
-        or document.user_did != user_did
+        document.user_did != user_did
         or document.history_limit != USER_HISTORY_MODEL_LIMIT
         or document.fetch_limit != DEFAULT_LIKED_POSTS_LIMIT
         or document.embedding_key != MINILM_L12_EMBEDDING_KEY

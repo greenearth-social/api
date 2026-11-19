@@ -226,6 +226,37 @@ async def test_firestore_cache_rejects_incompatible_expired_or_malformed_documen
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("schema_version", [1, USER_HISTORY_CACHE_VERSION + 1])
+async def test_firestore_cache_skips_incompatible_schema_without_warning(schema_version, caplog):
+    db, _collection_ref, doc_ref = _mock_firestore_client()
+    data = _cached_document()
+    data["schema_version"] = schema_version
+    # Version 1 predates these required fields; other versions may also differ.
+    data.pop("fetch_limit")
+    data.pop("raw_like_count")
+    snapshot = MagicMock(exists=True)
+    snapshot.to_dict.return_value = data
+    doc_ref.get.return_value = snapshot
+
+    assert await FirestoreUserHistoryCache(db).retrieve("did:plc:user1") is None
+    assert "Invalid user-history cache document" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_field", ["fetch_limit", "raw_like_count"])
+async def test_firestore_cache_warns_for_missing_current_schema_field(missing_field, caplog):
+    db, _collection_ref, doc_ref = _mock_firestore_client()
+    data = _cached_document()
+    data.pop(missing_field)
+    snapshot = MagicMock(exists=True)
+    snapshot.to_dict.return_value = data
+    doc_ref.get.return_value = snapshot
+
+    assert await FirestoreUserHistoryCache(db).retrieve("did:plc:user1") is None
+    assert "Invalid user-history cache document" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_firestore_cache_miss_for_missing_document():
     db, _collection_ref, doc_ref = _mock_firestore_client()
     doc_ref.get.return_value = MagicMock(exists=False)
