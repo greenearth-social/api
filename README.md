@@ -1058,6 +1058,12 @@ service updates and requests whose values already match the saved preferences:
 
 ### Debugging Feeds (CLI)
 
+The same per-user debug flag also captures fresh `/slate/generate` feed loads,
+including BridgEU feeds. Records appear under the feed name supplied to MySky
+(e.g. `beu-diverse-approval`), with supplied DA scores under the `external`
+generator. Cursor pages, settings previews, and loads reusing a saved preview
+do not create new debug records.
+
 Turn on full pipeline capture for your account (stores full candidate/ranker data):
 
 ```bash
@@ -1080,6 +1086,17 @@ Disable when done (full capture has storage/perf cost):
 
 ```bash
 pipenv run scripts/feed_debug.py [username].bsky.social --environment stage --disable
+```
+
+For a seeded user in the local devenv, run from `internal-tools/devenv` using
+the same DID for debugging and the feed request:
+
+```bash
+./devctl exec api pipenv run python scripts/feed_debug.py did:plc:YOUR_DID --enable
+./devctl feed --bridgeu da --user did:plc:YOUR_DID
+./devctl exec api pipenv run python scripts/feed_debug.py did:plc:YOUR_DID --list
+./devctl exec api pipenv run python scripts/feed_debug.py did:plc:YOUR_DID --show REQUEST_ID
+./devctl exec api pipenv run python scripts/feed_debug.py did:plc:YOUR_DID --disable
 ```
 
 ## Offline average user embedding
