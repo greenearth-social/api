@@ -1530,7 +1530,7 @@ The two-tower generator and heavy ranker share a per-user Firestore document
 features. The loader fetches up to 80 recent likes, drops entries that cannot be
 hydrated, and keeps up to 64 usable entries, newest first. The cache stores those
 selected entries and `raw_like_count`, the number of likes fetched before
-filtering. Requests use one of two fixed, bounded stale-while-refresh policies:
+filtering. Requests use one of three fixed, bounded stale-while-refresh policies:
 
 - Normal feeds return cached history directly through 10 minutes. After 10 and
   before 30 minutes, they return stale history while a managed background task
@@ -1539,8 +1539,21 @@ filtering. Requests use one of two fixed, bounded stale-while-refresh policies:
   until 30 days, they return stale history while a background refresh runs. At
   30 days, the entry is a hard miss. Explore previews are feed requests with no
   cursor and a requested limit of 2–8 posts.
+- Tracked feeds are normal feed loads by users with `precompute_artifacts`, the
+  users the jetstream ingester tracks. Their history only changes when they
+  like or unlike a post, and the ingester stamps `invalidated_at` on their
+  document once that like is searchable (see the ingex jetstream README). They
+  return cached history directly for up to 6 hours unless it has been marked
+  since it was fetched. A marked or older entry is returned while a background
+  task refreshes it, until 24 hours; at 24 hours the entry is a hard miss.
+  The time limits only matter when a mark is lost: an ingester outage, or a
+  user who started being tracked in the last hour.
 
-Both policies share the stored history and a 30-second transactional Firestore
+A history's `fetched_at` is when its Elasticsearch fetch started, and writes
+merge into the document without touching `invalidated_at`, so a mark that lands
+while a refresh is running still makes the refreshed entry stale.
+
+All policies share the stored history and a 30-second transactional Firestore
 refresh lease, so API instances do not duplicate stale-refresh Elasticsearch
 work. A failed refresh releases the lease and sets a 60-second retry cooldown;
 the stale value remains usable until the requesting policy's serving limit or
@@ -1568,7 +1581,8 @@ still count as complete and may be cached.
 Lookups record `user_history.cache.age_seconds` and
 `user_history.cache.lookup_count`; background work records `refresh_count` and
 `write_count`, each labelled by outcome. Lookup and refresh counters also carry
-a `policy` label (`normal` or `explore`). Firestore native TTL uses `expires_at`,
+a `policy` label (`normal`, `explore` or `tracked`); a tracked lookup served
+because of a mark has outcome `invalidated`. Firestore native TTL uses `expires_at`,
 which is set to 30 days after each successful history write, regardless of the
 request policy. Serving cached history does not extend its expiration. Normal
 feeds still stop serving history at 30 minutes even though it remains stored for
