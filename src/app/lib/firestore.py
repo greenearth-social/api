@@ -1261,7 +1261,11 @@ def _merge_feed_snapshots(
     incoming: FeedSnapshotDocument,
 ) -> tuple[FeedSnapshotDocument, bool]:
     """Merge two batches for one feed session in chronological order."""
-    incoming_is_earlier = incoming.generated_at < existing.generated_at
+    if incoming.generated_at != existing.generated_at:
+        incoming_is_earlier = incoming.generated_at < existing.generated_at
+    else:
+        # Two pages of one batch: their background writes can land out of order.
+        incoming_is_earlier = incoming.page_offset < existing.page_offset
     earlier, later = (incoming, existing) if incoming_is_earlier else (existing, incoming)
 
     ordered_items = list(dict.fromkeys([*earlier.items, *later.items]))

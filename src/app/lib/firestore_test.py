@@ -1741,6 +1741,20 @@ class TestMergeFeedSnapshots:
         assert merged.items == ["at://a", "at://b", "at://c"]
         assert next(m for m in merged.items_meta if m.at_uri == "at://b").rank == 99
 
+    def test_orders_pages_of_one_batch_by_offset_when_written_out_of_order(self):
+        # Pages served from one cached batch share generated_at. Their snapshot
+        # writes run in the background, so page 2's can land before page 1's.
+        now = datetime.now(UTC)
+        page_two = _feed_snapshot("session-1", now, ["at://c", "at://d"]).model_copy(
+            update={"page_offset": 2}
+        )
+        page_one = _feed_snapshot("session-1", now, ["at://a", "at://b"])
+
+        merged, _ = _merge_feed_snapshots(page_two, page_one)
+
+        assert merged.items == ["at://a", "at://b", "at://c", "at://d"]
+        assert merged.page_offset == 0
+
     def test_orders_out_of_order_background_writes(self):
         now = datetime.now(UTC)
         later = _feed_snapshot("session-1", now + timedelta(minutes=1), ["at://c"])

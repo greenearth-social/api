@@ -1261,6 +1261,38 @@ class TestGetFeedSkeleton:
         assert stamp.await_args is not None
         assert stamp.await_args.args[1:] == ("did:plc:testuser", FEED_RKEY, "last_check_at")
 
+    def test_first_page_reads_exclusions_while_reading_the_user(self):
+        # Which exclusions apply depends only on the feed's static config, so the
+        # seen/discarded reads start before the user document arrives.
+        exclusions_started = asyncio.Event()
+        overlapped: list[bool] = []
+
+        async def slow_get_user(*_args, **_kwargs):
+            try:
+                await asyncio.wait_for(exclusions_started.wait(), timeout=1)
+                overlapped.append(True)
+            except TimeoutError:
+                overlapped.append(False)
+            return None
+
+        async def exclusions(*_args, **_kwargs):
+            exclusions_started.set()
+            return []
+
+        with (
+            self._patch_generators(_make_candidates("p", 3)),
+            patch("app.routers.xrpc.get_user", side_effect=slow_get_user),
+            patch("app.routers.xrpc._generation_exclusions", side_effect=exclusions) as excl,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI},
+            )
+
+        assert response.status_code == 200
+        excl.assert_called_once()
+        assert overlapped == [True]
+
     def test_request_page_size_and_cursor_reach_the_session_record(self):
         # The Bluesky app's surfaces are distinguishable only by the page size
         # they ask for, so the handler must forward the request's own limit and
@@ -7542,3 +7574,30 @@ class TestReadySlateShadowMetric:
         collector = self._record(previous)
 
         collector.record.assert_called_once_with("feed.ready_slate.shadow_no_prior_count", 1)
+
+
+class TestDrainBackgroundTasks:
+    @pytest.mark.asyncio
+    async def test_waits_for_in_flight_writes(self):
+        finished = []
+
+        async def write():
+            await asyncio.sleep(0.01)
+            finished.append(True)
+
+        xrpc._spawn_background(write())
+        await xrpc.drain_background_tasks(timeout=1)
+
+        assert finished == [True]
+
+    @pytest.mark.asyncio
+    async def test_gives_up_after_the_timeout(self, caplog):
+        blocker = asyncio.Event()
+        task = xrpc._spawn_background(blocker.wait())
+
+        await xrpc.drain_background_tasks(timeout=0.01)
+
+        assert not task.done()
+        assert "Abandoning 1 background tasks" in caplog.text
+        blocker.set()
+        await task
