@@ -470,6 +470,14 @@ deploy_api_service() {
     # already saturated. 20 keeps typical per-instance utilization ~75%,
     # comfortably under the ~25-concurrency point where CPU saturates.
     deploy_cmd="$deploy_cmd --concurrency=20"
+    # Keep CPU allocated between requests (instance-based billing). Much of the
+    # serving work finishes after the response: feed snapshot and session
+    # writes, and stale-while-revalidate refreshes of the user-history, follows
+    # and popularity caches. With request-based CPU an idle instance is
+    # throttled, so that work stalls until the instance's next request, and
+    # with ~1 qps spread over the instance floor most instances are idle most
+    # of the time (issue #602).
+    deploy_cmd="$deploy_cmd --no-cpu-throttling"
 
     # Tag the service/revision with the git sha so past deployments are
     # identifiable when picking a rollback target (see issue #228).
