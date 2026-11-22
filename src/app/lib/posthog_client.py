@@ -113,7 +113,20 @@ def get_posthog_client() -> Posthog | None:
     return _posthog_client
 
 
-def init_posthog_client(api_key: str, host: str) -> Posthog:
+def init_posthog_client(
+    api_key: str, host: str, *, feature_flags_key: str | None = None
+) -> Posthog:
+    """Build the PostHog client.
+
+    With *feature_flags_key* (a feature-flags secure API key, or a personal API
+    key), the SDK polls flag definitions every 30 s and evaluates flags in
+    process. Without it, every ``evaluate_flags`` call is a ``/flags`` request,
+    which sits on the feed request path. Flags that cannot be evaluated
+    locally (for example, ones that need person properties we do not send) still
+    fall back to a remote call, so local evaluation never changes a result.
+    """
+    if feature_flags_key:
+        return Posthog(project_api_key=api_key, host=host, personal_api_key=feature_flags_key)
     return Posthog(project_api_key=api_key, host=host)
 
 

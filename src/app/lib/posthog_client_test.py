@@ -60,6 +60,16 @@ def test_init_posthog_client_creates_posthog():
         assert client is MockPosthog.return_value
 
 
+def test_init_posthog_client_enables_local_flag_evaluation_with_a_flags_key():
+    with patch("app.lib.posthog_client.Posthog") as MockPosthog:
+        init_posthog_client("phc_key", "https://us.i.posthog.com", feature_flags_key="phs_key")
+        MockPosthog.assert_called_once_with(
+            project_api_key="phc_key",
+            host="https://us.i.posthog.com",
+            personal_api_key="phs_key",
+        )
+
+
 def test_track_session_none_client_is_noop():
     track_session(
         None, USER_DID, "alice.bsky.app", "your-feed", NOW, requested_limit=30, has_cursor=False

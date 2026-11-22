@@ -169,7 +169,17 @@ async def lifespan(app: FastAPI):
     posthog_api_key = os.environ.get("GE_POSTHOG_API_KEY")
     posthog_host = os.environ.get("GE_POSTHOG_HOST", "https://us.i.posthog.com")
     if posthog_api_key:
-        set_posthog_client(init_posthog_client(posthog_api_key, posthog_host))
+        feature_flags_key = os.environ.get("GE_POSTHOG_FEATURE_FLAGS_KEY") or None
+        if feature_flags_key is None and _is_deployed_environment():
+            logger.warning(
+                "GE_POSTHOG_FEATURE_FLAGS_KEY is not set: feature flags are evaluated "
+                "with a PostHog request on every feed request"
+            )
+        set_posthog_client(
+            init_posthog_client(
+                posthog_api_key, posthog_host, feature_flags_key=feature_flags_key
+            )
+        )
     elif _is_deployed_environment():
         # Local dev intentionally runs without PostHog (no key = silent no-op), but a
         # deployed environment missing the key means the analytics secret didn't wire

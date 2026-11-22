@@ -42,6 +42,7 @@ gcloud() {
             esac
             ;;
         "config get-value account") printf '%s\n' deployer@example.test ;;
+        "secrets describe posthog-feature-flags-key-"*) return "${FAKE_FLAGS_KEY_STATUS:-1}" ;;
         *) record unexpected_gcloud_command; return 90 ;;
     esac
 }
@@ -316,3 +317,16 @@ def test_deploy_proceeds_without_announcing(tmp_path: Path, environment: dict[st
     assert result.returncode == 0, result.stdout + result.stderr
     assert "deploy" in (tmp_path / "events").read_text().splitlines()
     assert not (tmp_path / "discord").exists()
+
+
+@pytest.mark.parametrize(("secret_exists", "mounted"), [(True, True), (False, False)])
+def test_posthog_feature_flags_key_is_mounted_only_when_its_secret_exists(
+    tmp_path: Path, secret_exists: bool, mounted: bool
+) -> None:
+    status = "0" if secret_exists else "1"
+    result = run_deploy(tmp_path, environment={"FAKE_FLAGS_KEY_STATUS": status})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    flag = "--set-secrets=GE_POSTHOG_FEATURE_FLAGS_KEY=posthog-feature-flags-key-stage:latest"
+    assert (flag in recorded_args(tmp_path, "deploy_args")) is mounted
+    assert "unexpected_gcloud_command" not in (tmp_path / "events").read_text()

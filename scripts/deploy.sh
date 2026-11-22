@@ -457,6 +457,15 @@ deploy_api_service() {
     deploy_cmd="$deploy_cmd --set-secrets=GE_PERSPECTIVE_API_KEY=$perspective_api_key_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_ANTHROPIC_API_KEY=$anthropic_api_key_secret:latest"
     deploy_cmd="$deploy_cmd --set-secrets=GE_POSTHOG_API_KEY=$posthog_api_key_secret:latest"
+    # Optional: with a feature-flags key the api evaluates flags in process instead
+    # of calling PostHog on every feed request (issue #602). Created by
+    # gcp_setup.sh --posthog-feature-flags-key.
+    local posthog_flags_key_secret="posthog-feature-flags-key-$ENVIRONMENT"
+    if gcloud secrets describe "$posthog_flags_key_secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+        deploy_cmd="$deploy_cmd --set-secrets=GE_POSTHOG_FEATURE_FLAGS_KEY=$posthog_flags_key_secret:latest"
+    else
+        log_warn "Secret $posthog_flags_key_secret not found; flags will be evaluated remotely per request"
+    fi
 
     # Resource and scaling configuration
     deploy_cmd="$deploy_cmd --min-instances=$API_INSTANCES_MIN"
