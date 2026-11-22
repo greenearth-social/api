@@ -54,3 +54,13 @@ def _disable_posthog(monkeypatch):
         real_init(self, *args, **kwargs)
 
     monkeypatch.setattr(Posthog, "__init__", _disabled_init)
+
+
+@pytest.fixture(autouse=True)
+def _empty_user_embedding_cache():
+    """Start every test without remembered user-tower predictions."""
+    from .lib.candidates import two_tower
+
+    two_tower._user_embedding_cache.clear()
+    yield
+    two_tower._user_embedding_cache.clear()
