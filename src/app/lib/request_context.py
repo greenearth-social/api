@@ -116,6 +116,17 @@ def set_request_shape(*, page: str, surface: str | None = None) -> None:
         timing.labels.update(shape)
 
 
+def detach_feed_timing() -> None:
+    """Stop the current task from writing to its request's timing labels.
+
+    A task spawned from a request copies the request's context, including the
+    mutable timing object the middleware records ``feed.request.duration_ms``
+    from. Background work that relabels its own metrics (``set_request_shape``)
+    calls this first, so the response it was spawned from keeps its labels.
+    """
+    _feed_timing.set(None)
+
+
 def begin_feed_timing() -> tuple[FeedRequestTiming, Token]:
     """Install a fresh ``FeedRequestTiming`` for the request about to run."""
     timing = FeedRequestTiming()

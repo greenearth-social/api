@@ -3,7 +3,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -7080,6 +7080,8 @@ def feed_session(monkeypatch):
     db = AsyncMock()
     cache = AsyncMock(spec=FeedCache)
     cache.retrieve_document.return_value = None
+    # Background cursor prefetch is covered by its own tests; here it never claims.
+    cache.claim_prefetch.return_value = False
     monkeypatch.setattr(app.state, "firestore", db, raising=False)
     monkeypatch.setattr(app.state, "feed_cache", cache, raising=False)
     request = Request({"type": "http", "app": app, "headers": []})
@@ -7601,3 +7603,248 @@ class TestDrainBackgroundTasks:
         assert "Abandoning 1 background tasks" in caplog.text
         blocker.set()
         await task
+
+
+
+class TestCursorPrefetch:
+    """The next batch of a cursor session is generated ahead of the reader."""
+
+    @pytest.fixture(autouse=True)
+    def _authenticated_caller(self):
+        with (
+            patch(
+                "app.routers.xrpc.verify_auth_header",
+                new_callable=AsyncMock,
+                return_value="did:plc:testuser",
+            ),
+            patch("app.routers.xrpc.upsert_user", new_callable=AsyncMock),
+            patch("app.routers.xrpc.upsert_feed_activity", new_callable=AsyncMock),
+            patch("app.routers.xrpc.get_user", new_callable=AsyncMock, return_value=None),
+        ):
+            yield
+
+    def _session(self, items: list[str], **update) -> FeedCacheDocument:
+        now = datetime.now(UTC)
+        return FeedCacheDocument(
+            items=items,
+            items_meta=[PipelineItemMeta(at_uri=uri) for uri in items],
+            user_did="did:plc:testuser",
+            feed_name=FEED_RKEY,
+            generated_at=now,
+            expires_at=now + timedelta(minutes=10),
+            preference_fingerprint=xrpc._configured_generation(
+                FEED_RKEY, None
+            ).preference_fingerprint,
+        ).model_copy(update=update)
+
+    def _generated(self, uris: list[str]) -> FeedSnapshotDocument:
+        now = datetime.now(UTC)
+        return FeedSnapshotDocument(
+            request_id="s",
+            items=uris,
+            items_meta=[PipelineItemMeta(at_uri=uri) for uri in uris],
+            feed_name=FEED_RKEY,
+            generated_at=now,
+            expires_at=now + timedelta(minutes=10),
+        )
+
+    async def _prefetch(self, cache, pipeline_result, **overrides):
+        kwargs: dict[str, Any] = dict(
+            request_id="s",
+            stored_items=["at://a", "at://b"],
+            excluded_uris=["at://a", "at://b"],
+            exclusions=AsyncMock(return_value=["at://seen"]),
+            user_did="did:plc:testuser",
+            feed_name=FEED_RKEY,
+            limit=2,
+            max_age_hours=168,
+            generators_override={},
+            contextual_pin_uris=set(),
+            debug_enabled=False,
+            load_test=False,
+        )
+        kwargs.update(overrides)
+        with (
+            patch(
+                "app.routers.xrpc._run_pipeline_capturing_with_timeout",
+                new_callable=AsyncMock,
+                return_value=pipeline_result,
+            ) as pipeline,
+            patch("app.routers.xrpc._stamp_feed_activity", new_callable=AsyncMock),
+            patch("app.routers.xrpc.merge_feed_snapshot", new_callable=AsyncMock),
+            patch("app.routers.xrpc._record_discarded", new_callable=AsyncMock) as discarded,
+        ):
+            await xrpc._prefetch_next_batch(
+                MagicMock(), MagicMock(), cache, FEEDS[FEED_RKEY], **kwargs
+            )
+        return pipeline, discarded
+
+    @pytest.mark.asyncio
+    async def test_appends_the_next_batch_and_holds_its_discards(self):
+        cache = InMemoryFeedCache()
+        await cache.store_document("s", self._session(["at://a", "at://b"]))
+
+        pipeline, discarded = await self._prefetch(
+            cache, (self._generated(["at://c", "at://d"]), ["at://low"])
+        )
+
+        stored = await cache.retrieve_document("s")
+        assert stored is not None
+        assert stored.items == ["at://a", "at://b", "at://c", "at://d"]
+        assert stored.prefetch_started_at is None
+        assert stored.pending_discards == ["at://low"]
+        assert stored.pending_discards_from == 2
+        # Same exclusions as an end-of-batch regeneration: the session plus seen posts.
+        assert pipeline.await_args is not None
+        gen_request = pipeline.await_args.args[3]
+        assert gen_request.exclude_uris == ["at://a", "at://b", "at://seen"]
+        discarded.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_prefetch_labels_do_not_leak_onto_the_spawning_request(self):
+        from ..lib.request_context import begin_feed_timing, reset_feed_timing
+
+        timing, token = begin_feed_timing()
+        try:
+            xrpc.set_request_shape(page="cursor", surface="feed")
+            cache = InMemoryFeedCache()
+            await cache.store_document("s", self._session(["at://a", "at://b"]))
+            await asyncio.create_task(
+                self._prefetch(cache, (self._generated(["at://c"]), []))
+            )
+        finally:
+            reset_feed_timing(token)
+
+        assert timing.labels == {"page": "cursor", "surface": "feed"}
+
+    @pytest.mark.asyncio
+    async def test_does_nothing_while_another_prefetch_holds_the_lease(self):
+        cache = InMemoryFeedCache()
+        await cache.store_document(
+            "s", self._session(["at://a"], prefetch_started_at=datetime.now(UTC))
+        )
+
+        pipeline, _ = await self._prefetch(cache, (self._generated(["at://c"]), []))
+
+        pipeline.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failed_generation_releases_the_lease(self):
+        cache = InMemoryFeedCache()
+        await cache.store_document("s", self._session(["at://a"]))
+        with patch(
+            "app.routers.xrpc._run_pipeline_capturing_with_timeout",
+            new_callable=AsyncMock,
+            side_effect=TimeoutError(),
+        ):
+            await xrpc._prefetch_next_batch(
+                MagicMock(), MagicMock(), cache, FEEDS[FEED_RKEY],
+                request_id="s", stored_items=["at://a"], excluded_uris=["at://a"],
+                exclusions=AsyncMock(return_value=[]), user_did="did:plc:testuser",
+                feed_name=FEED_RKEY, limit=2, max_age_hours=168, generators_override={},
+                contextual_pin_uris=set(), debug_enabled=False, load_test=False,
+            )
+
+        stored = await cache.retrieve_document("s")
+        assert stored is not None
+        assert stored.prefetch_started_at is None
+        assert stored.items == ["at://a"]
+
+    @pytest.mark.asyncio
+    async def test_held_discards_are_recorded_once_their_batch_is_served(self):
+        doc = self._session(
+            ["at://a", "at://b", "at://c"], pending_discards=["at://low"], pending_discards_from=2
+        )
+        spawned = []
+        with patch("app.routers.xrpc._spawn_background", side_effect=spawned.append):
+            xrpc._record_served_pending_discards(
+                MagicMock(), MagicMock(), "s", doc,
+                served_through=2, user_did="did:plc:testuser", load_test=False,
+            )
+            assert spawned == []
+            xrpc._record_served_pending_discards(
+                MagicMock(), MagicMock(), "s", doc,
+                served_through=3, user_did="did:plc:testuser", load_test=False,
+            )
+        assert len(spawned) == 2
+        for coro in spawned:
+            coro.close()
+
+    @pytest.mark.asyncio
+    async def test_waiting_reader_gets_the_prefetched_batch(self, monkeypatch):
+        cache = InMemoryFeedCache()
+        await cache.store_document(
+            "s", self._session(["at://a"], prefetch_started_at=datetime.now(UTC))
+        )
+        monkeypatch.setattr(xrpc, "PREFETCH_POLL_SECONDS", 0.01)
+
+        async def finish_prefetch():
+            await asyncio.sleep(0.03)
+            await cache.append_document("s", ["at://b"], [PipelineItemMeta(at_uri="at://b")])
+
+        finisher = asyncio.create_task(finish_prefetch())
+        latest = await xrpc._wait_for_prefetch(cache, "s", offset=1)
+        await finisher
+
+        assert latest is not None
+        assert latest.items == ["at://a", "at://b"]
+
+    def test_last_full_page_starts_a_prefetch(self):
+        uris = ["at://a", "at://b", "at://c", "at://d", "at://e"]
+        app.state.feed_cache._docs["s"] = self._session(uris)
+        with (
+            patch("app.routers.xrpc._prefetch_next_batch", new_callable=AsyncMock) as prefetch,
+            patch(
+                "app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock
+            ) as pipeline,
+        ):
+            first = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={
+                    "feed": FEED_URI,
+                    "limit": 2,
+                    "cursor": FeedCursor(id="s", offset=0).encode(),
+                },
+            ).json()
+            after_first = prefetch.call_count
+            second = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 2, "cursor": first["cursor"]},
+            ).json()
+
+        assert [item["post"] for item in first["feed"]] == ["at://a", "at://b"]
+        assert [item["post"] for item in second["feed"]] == ["at://c", "at://d"]
+        # Page 1 left two full pages in the session; page 2 left less than one.
+        assert after_first == 0
+        prefetch.assert_called_once()
+        assert prefetch.call_args.kwargs["stored_items"] == uris
+        pipeline.assert_not_awaited()
+
+    def test_reader_at_the_end_is_served_the_in_flight_prefetch(self):
+        app.state.feed_cache._docs["s"] = self._session(
+            ["at://a", "at://b"], prefetch_started_at=datetime.now(UTC)
+        )
+        prefetched = self._session(["at://a", "at://b", "at://c", "at://d"])
+        with (
+            patch(
+                "app.routers.xrpc._wait_for_prefetch",
+                new_callable=AsyncMock,
+                return_value=prefetched,
+            ) as wait,
+            patch("app.routers.xrpc._prefetch_next_batch", new_callable=AsyncMock),
+            patch(
+                "app.routers.xrpc._run_pipeline_capturing_with_timeout", new_callable=AsyncMock
+            ) as pipeline,
+        ):
+            page = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={
+                    "feed": FEED_URI,
+                    "limit": 2,
+                    "cursor": FeedCursor(id="s", offset=2).encode(),
+                },
+            ).json()
+
+        wait.assert_awaited_once()
+        assert [item["post"] for item in page["feed"]] == ["at://c", "at://d"]
+        pipeline.assert_not_awaited()
