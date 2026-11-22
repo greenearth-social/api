@@ -430,6 +430,60 @@ class TestReadPath:
         assert stored(db, USER).pending_add_records == []
 
 
+class TestExplorePreviews:
+    """Explore previews refresh a stale follow list daily, not every 6 hours."""
+
+    @pytest.fixture(autouse=True)
+    def explore_request(self):
+        from .request_context import _request_shape
+
+        token = _request_shape.set({"page": "first", "surface": "explore"})
+        yield
+        _request_shape.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_stale_entry_younger_than_a_day_is_served_without_refreshing(
+        self, origin, metrics
+    ):
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.ttl_seconds() + 60)
+        put(db, USER, follows=["did:plc:stale"], complete=True, generated_at=old)
+        cache = make_cache(db)
+
+        assert await cache.get_followed_dids(USER) == ["did:plc:stale"]
+        await cache.drain()
+
+        assert origin.calls == []
+        assert [
+            attrs["outcome"]
+            for name, _value, attrs in metrics.records
+            if name == "follows_cache.lookup_count"
+        ] == ["explore_deferred"]
+
+    @pytest.mark.asyncio
+    async def test_entry_older_than_a_day_is_refreshed(self, origin):
+        db = FakeDb()
+        old = now() - timedelta(seconds=cache_module.explore_ttl_seconds() + 60)
+        put(db, USER, follows=["did:plc:stale"], complete=True, generated_at=old)
+        cache = make_cache(db)
+
+        assert await cache.get_followed_dids(USER) == ["did:plc:stale"]
+        await cache.drain()
+
+        assert len(origin.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_incomplete_entry_is_still_refreshed(self, origin):
+        db = FakeDb()
+        put(db, USER, follows=["did:plc:partial"], complete=False, generated_at=now())
+        cache = make_cache(db)
+
+        await cache.get_followed_dids(USER)
+        await cache.drain()
+
+        assert len(origin.calls) == 1
+
+
 class TestPrecomputeUsers:
     """The refresh job owns TTL refreshes for precompute_artifacts users."""
 

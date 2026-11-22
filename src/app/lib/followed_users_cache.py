@@ -62,6 +62,7 @@ from .bsky import (
 from .metrics import get_metric_collector
 from .release import api_release_sha
 from .request_cache import get_request_cache
+from .request_context import get_request_shape
 from .telemetry import firestore_op
 
 if TYPE_CHECKING:
@@ -105,6 +106,19 @@ def _int_env(name: str, default: int) -> int:
 def ttl_seconds() -> int:
     """Age at which an entry is refreshed. A backstop under jetstream, so hours."""
     return _int_env("GE_FOLLOWS_CACHE_TTL_SEC", 21_600)  # 6 hours
+
+
+def explore_ttl_seconds() -> int:
+    """Age at which an Explore preview refreshes a stale entry.
+
+    Explore previews are the bulk of feed traffic (~70%) and come from accounts
+    that mostly never open the feed, so their follow lists were walked from
+    Bluesky every 6 hours: ~190k stale refreshes a week, ~19k of them timing
+    out. Follow lists change slowly, and a preview shows 8 posts, so these
+    users' lists are refreshed daily instead. A user who opens the feed gets the
+    normal TTL on that request.
+    """
+    return _int_env("GE_FOLLOWS_CACHE_EXPLORE_TTL_SEC", 86_400)
 
 
 def lease_seconds() -> int:
@@ -300,6 +314,12 @@ class FollowedUsersCache:
         if reason is None:
             self._record("hit")
             return follows
+
+        if reason == "stale" and get_request_shape().get("surface") == "explore":
+            age = _age_seconds(entry.generated_at, datetime.now(timezone.utc))
+            if age is not None and age <= explore_ttl_seconds():
+                self._record("explore_deferred")
+                return follows
 
         if _precompute_user.get() and reason in JOB_OWNED_STALENESS:
             age = _age_seconds(entry.generated_at, datetime.now(timezone.utc))
