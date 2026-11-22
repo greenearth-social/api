@@ -1,9 +1,13 @@
 """Telemetry helpers for timing API and Elasticsearch operations."""
 
+import asyncio
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
+
+import httpx
+from elastic_transport import ConnectionTimeout
 
 from .request_context import FeedRequestTiming, get_request_id
 
@@ -14,6 +18,8 @@ async def timed(
     label: str,
     *,
     record_metric: bool = False,
+    record_outcome: bool = False,
+    log_failures: bool = False,
     metric_attrs: dict[str, str] | None = None,
     **extra: object,
 ):
@@ -36,6 +42,13 @@ async def timed(
     record_metric:
         When ``True``, record elapsed milliseconds as a metric via the
         active ``MetricCollector``.  Defaults to ``False``.
+    record_outcome:
+        Add a bounded ``outcome`` metric label: success, error, timeout, or
+        cancelled. Cancellation samples include time spent before a caller's
+        deadline, so dependency latency does not hide its slowest operations.
+    log_failures:
+        Log unsuccessful operations at WARNING even without ``GE_TIMING_LOGS``.
+        Request IDs and exception types stay in logs, never metric labels.
     metric_attrs:
         Mapping of low-cardinality label key/values passed to the metric
         (e.g. ``{"feed_name": "nature"}``).  Kept separate from *extra*
@@ -55,16 +68,48 @@ async def timed(
             cached = await feed_cache.retrieve(parsed.id)
     """
     start = time.monotonic()
+    outcome = "success"
+    error_type = None
     try:
         yield
+    except BaseException as exc:
+        if isinstance(exc, asyncio.CancelledError):
+            outcome = "cancelled"
+        elif isinstance(exc, (TimeoutError, httpx.TimeoutException, ConnectionTimeout)):
+            outcome = "timeout"
+        else:
+            outcome = "error"
+        error_type = type(exc).__name__
+        raise
     finally:
         elapsed_ms = (time.monotonic() - start) * 1000
+        attrs = dict(metric_attrs or {})
+        if record_outcome:
+            attrs["outcome"] = outcome
 
-        if os.environ.get("GE_TIMING_LOGS") == "1":
+        if log_failures and outcome != "success":
+            rid = get_request_id()
+            logger.warning(
+                "%s rid=%s elapsed_ms=%.1f outcome=%s error_type=%s %s",
+                label,
+                rid or "-",
+                elapsed_ms,
+                outcome,
+                error_type,
+                " ".join(f"{key}={value}" for key, value in sorted((metric_attrs or {}).items())),
+                extra={
+                    **extra,
+                    **attrs,
+                    "rid": rid,
+                    "elapsed_ms": elapsed_ms,
+                    "outcome": outcome,
+                    "error_type": error_type,
+                },
+            )
+        elif os.environ.get("GE_TIMING_LOGS") == "1":
             rid = get_request_id()
             log_extra: dict[str, object] = {"elapsed_ms": elapsed_ms, **extra}
-            if metric_attrs:
-                log_extra.update(metric_attrs)
+            log_extra.update(attrs)
             if rid is not None:
                 log_extra["rid"] = rid
                 logger.info(
@@ -86,7 +131,7 @@ async def timed(
             from .metrics import get_metric_collector
             collector = get_metric_collector()
             if collector is not None:
-                collector.record(label, elapsed_ms, **(metric_attrs or {}))
+                collector.record(label, elapsed_ms, **attrs)
 
 
 FEED_REQUEST_METRIC = "feed.request.duration_ms"
