@@ -316,3 +316,11 @@ def test_deploy_proceeds_without_announcing(tmp_path: Path, environment: dict[st
     assert result.returncode == 0, result.stdout + result.stderr
     assert "deploy" in (tmp_path / "events").read_text().splitlines()
     assert not (tmp_path / "discord").exists()
+
+
+def test_cpu_stays_allocated_between_requests(tmp_path: Path) -> None:
+    # Background writes and cache refreshes run after the response (issue #602).
+    result = run_deploy(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--no-cpu-throttling" in recorded_args(tmp_path, "deploy_args")

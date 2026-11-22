@@ -7,8 +7,8 @@ including responses already received from ES/inference/Perspective — waits
 this long to run. See issue #343 for the attribution design.
 
 Samples are only recorded for intervals during which a request was in flight
-the whole time. Cloud Run runs this service with ``cpuIdle: true``, so an idle
-instance is CPU-throttled and this task's own wakeups are delayed by hundreds
+the whole time. Under request-based CPU (``cpuIdle: true``, how this service
+ran until issue #602) an idle instance is CPU-throttled and this task's own wakeups are delayed by hundreds
 of milliseconds to seconds — throttling that no request ever experienced. Left
 ungated the metric reports that as loop lag: prod p99 was ~800 ms and p99.9
 ~4.7 s while p50 sat at a healthy 1.5 ms, with the distribution splitting into

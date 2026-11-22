@@ -1,7 +1,9 @@
 """Process-wide in-flight HTTP request tracking.
 
-Cloud Run runs this service with ``cpuIdle: true``, which throttles the
-container's CPU to near zero whenever no request is being handled. Any
+Cloud Run ran this service with ``cpuIdle: true`` until issue #602 (and
+still can, for a revision deployed without ``--no-cpu-throttling``), which
+throttles the container's CPU to near zero whenever no request is being
+handled. Any
 background task that keeps running while the instance is idle — notably the
 event-loop lag monitor — is descheduled for as long as the throttle lasts,
 and cannot tell that apart from the event loop being blocked by real work.
