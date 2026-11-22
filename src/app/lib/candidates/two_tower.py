@@ -4,8 +4,14 @@ Blends the user tower's prediction with an average-user prior, then searches
 for relevant posts via the pre-calculated post embeddings.
 """
 
+import hashlib
+import json
 import logging
 import math
+import os
+import time
+from collections import OrderedDict
+from dataclasses import replace
 
 from ...models import MaxAgeHours
 from ..average_user_embedding import get_average_user_embedding, get_average_user_embedding_error
@@ -15,12 +21,13 @@ from ..feed_debug import current_recorder
 from ..inference import (
     HistoryMode,
     InferenceResponseFormatError,
+    UserEmbeddingResult,
     get_inference_settings,
     predict_user_embedding,
 )
 from ..metrics import get_metric_collector
 from ..telemetry import timed
-from ..user_history_cache import fetch_user_history_features
+from ..user_history_cache import UserHistory, fetch_user_history_features
 from .base import CandidateGenerator, CandidateResult
 from .es_candidates import knn_search_posts
 
@@ -54,6 +61,54 @@ def _valid_query_embedding(vector: list[float] | tuple[float, ...]) -> bool:
 # values are intentionally independent: this one describes what bar the api
 # wants on an *unfiltered* corpus, not ingex's corpus-entry criterion.
 MIN_LIKE_COUNT = 20
+
+
+# The user tower's output depends only on the embedded history (each post's
+# embedding is fixed, so its URI and author identify the input) and the
+# serving model. Checks, cursor regenerations and repeat loads re-send the same
+# history, so remember recent predictions per instance. An entry carries the
+# model pair that produced it, and retrieval filters on that pair's post model,
+# so an entry outliving a model rollout still searches a matching space; the
+# TTL bounds how long it can do so.
+_USER_EMBEDDING_CACHE_TTL_SEC = float(os.environ.get("GE_USER_EMBEDDING_CACHE_TTL_SEC", "600"))
+_USER_EMBEDDING_CACHE_MAX_ENTRIES = 2000
+_user_embedding_cache: OrderedDict[str, tuple[UserEmbeddingResult, float]] = OrderedDict()
+
+
+def _history_key(history: UserHistory, base_url: str) -> str:
+    embedded = [(item.at_uri, item.author_did) for item in history.items_with_embeddings]
+    payload = json.dumps([base_url, history.raw_like_count, embedded], separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+async def _predict_user_embedding_cached(
+    history: UserHistory, *, base_url: str, api_key: str
+) -> UserEmbeddingResult:
+    key = _history_key(history, base_url)
+    now = time.monotonic()
+    cached = _user_embedding_cache.get(key)
+    mc = get_metric_collector()
+    if cached is not None and now - cached[1] < _USER_EMBEDDING_CACHE_TTL_SEC:
+        _user_embedding_cache.move_to_end(key)
+        if mc:
+            mc.record("candidates.two_tower.user_embedding_cache_count", 1, outcome="hit")
+        result = cached[0]
+        # Callers get their own list; the cached one is shared.
+        return replace(
+            result, embedding=list(result.embedding) if result.embedding is not None else None
+        )
+    if mc:
+        mc.record("candidates.two_tower.user_embedding_cache_count", 1, outcome="miss")
+    result = await predict_user_embedding(history, base_url=base_url, api_key=api_key)
+    if result.embedding is not None:
+        _user_embedding_cache[key] = (
+            replace(result, embedding=list(result.embedding)),
+            now,
+        )
+        _user_embedding_cache.move_to_end(key)
+        while len(_user_embedding_cache) > _USER_EMBEDDING_CACHE_MAX_ENTRIES:
+            _user_embedding_cache.popitem(last=False)
+    return result
 
 
 class TwoTowerCandidateGenerator(CandidateGenerator):
@@ -109,7 +164,7 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                 # Prior fallback handles an unavailable prior, not broken user
                 # inference. Prediction errors propagate to pipeline diagnostics.
                 inference_base_url, inference_api_key = get_inference_settings()
-                prediction = await predict_user_embedding(
+                prediction = await _predict_user_embedding_cached(
                     history, base_url=inference_base_url, api_key=inference_api_key
                 )
                 actual_embedding = prediction.embedding

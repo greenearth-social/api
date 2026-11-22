@@ -126,7 +126,8 @@ async def test_explore_consumers_wait_for_shared_history_then_reuse_it(monkeypat
     assert len(cache.writes) == 1
     likes.assert_awaited_once()
     assert hydrate.await_count == 2
-    assert prediction.await_count == 2
+    # The same history needs no second user-tower prediction on this instance.
+    assert prediction.await_count == 1
     assert rank_prediction.await_count == 2
     assert rank_prediction.await_args is not None
     assert rank_prediction.await_args.args[:4] == (

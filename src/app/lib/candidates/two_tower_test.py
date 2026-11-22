@@ -95,6 +95,15 @@ def dependencies(monkeypatch, prior):
     return mocks
 
 
+def _retrieval_metrics(metrics):
+    """Recorded metrics other than the user-embedding cache's hit/miss counter."""
+    return [
+        recorded
+        for recorded in metrics.record.call_args_list
+        if recorded.args[0] != "candidates.two_tower.user_embedding_cache_count"
+    ]
+
+
 def test_registered_generators():
     for name, history_mode in (("two_tower", "actual"), ("two_tower_empty_history", "empty")):
         generator = get_generator(name)
@@ -138,7 +147,7 @@ async def test_exact_blend_uses_usable_history_count(generator, dependencies, co
         "generator_name": "two_tower",
         "retrieval_mode": "blended" if count else "prior_only",
     }
-    assert dependencies.metrics.record.call_args_list == [
+    assert _retrieval_metrics(dependencies.metrics) == [
         call("candidates.two_tower.history_size", count, generator_name="two_tower"),
         call("candidates.two_tower.mode_count", 1, **attrs, reason="none"),
         call("candidates.two_tower.prior_weight_ratio", pytest.approx(expected[0]), **attrs),
@@ -242,7 +251,7 @@ async def test_no_history_and_no_prior_returns_no_candidates(
     dependencies.prediction.assert_not_awaited()
     dependencies.settings.assert_not_called()
     # A skipped retrieval must not look like an actual-only weight of zero.
-    assert dependencies.metrics.record.call_args_list == [
+    assert _retrieval_metrics(dependencies.metrics) == [
         call("candidates.two_tower.history_size", 0, generator_name="two_tower"),
         call(
             "candidates.two_tower.mode_count",
@@ -268,7 +277,7 @@ async def test_failed_prior_load_without_history_raises(dependencies, history_mo
     dependencies.knn.assert_not_awaited()
     dependencies.prediction.assert_not_awaited()
     dependencies.settings.assert_not_called()
-    assert dependencies.metrics.record.call_args_list == [
+    assert _retrieval_metrics(dependencies.metrics) == [
         call("candidates.two_tower.history_size", 0, generator_name="two_tower")
     ]
 
@@ -286,7 +295,7 @@ async def test_actual_only_when_prior_unavailable(generator, dependencies, caplo
     assert result.reason == "average_user_embedding_unavailable"
     assert prior_error in caplog.text
     attrs = {"generator_name": "two_tower", "retrieval_mode": "actual_only"}
-    assert dependencies.metrics.record.call_args_list == [
+    assert _retrieval_metrics(dependencies.metrics) == [
         call("candidates.two_tower.history_size", 2, generator_name="two_tower"),
         call("candidates.two_tower.mode_count", 1, **attrs, reason=result.reason),
         call("candidates.two_tower.prior_weight_ratio", 0.0, **attrs),
@@ -369,7 +378,7 @@ async def test_invalid_actual_fails_instead_of_substituting_prior(generator, dep
     with pytest.raises(InferenceResponseFormatError, match="finite nonzero user embedding"):
         await generator.generate(object(), "did:plc:user1")
     dependencies.knn.assert_not_awaited()
-    assert dependencies.metrics.record.call_args_list == [
+    assert _retrieval_metrics(dependencies.metrics) == [
         call("candidates.two_tower.history_size", 2, generator_name="two_tower")
     ]
 
@@ -458,3 +467,40 @@ async def test_no_debug_recorder_or_metrics_collector_is_required(
     monkeypatch.setattr(two_tower, "get_metric_collector", lambda: None)
     result = await generator.generate(object(), "did:plc:user1")
     assert result.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_repeat_history_reuses_the_user_tower_prediction(generator, dependencies):
+    es = object()
+    first = await generator.generate(es, "did:plc:user1")
+    second = await generator.generate(es, "did:plc:user1")
+
+    dependencies.prediction.assert_awaited_once()
+    assert second.candidates == first.candidates
+    assert dependencies.knn.await_args_list[0] == dependencies.knn.await_args_list[1]
+    dependencies.metrics.record.assert_any_call(
+        "candidates.two_tower.user_embedding_cache_count", 1, outcome="hit"
+    )
+
+
+@pytest.mark.asyncio
+async def test_changed_history_asks_the_user_tower_again(generator, dependencies):
+    await generator.generate(object(), "did:plc:user1")
+    dependencies.history.return_value = make_history(3)
+
+    await generator.generate(object(), "did:plc:user1")
+
+    assert dependencies.prediction.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_expired_prediction_is_not_reused(generator, dependencies):
+    await generator.generate(object(), "did:plc:user1")
+    # Age the remembered prediction past its TTL.
+    for key, (result, stored_at) in list(two_tower._user_embedding_cache.items()):
+        expired_at = stored_at - two_tower._USER_EMBEDDING_CACHE_TTL_SEC - 1
+        two_tower._user_embedding_cache[key] = (result, expired_at)
+
+    await generator.generate(object(), "did:plc:user1")
+
+    assert dependencies.prediction.await_count == 2
