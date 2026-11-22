@@ -5,6 +5,7 @@ towers of the two tower model, etc.
 """
 
 import asyncio
+import base64
 import logging
 import math
 import os
@@ -15,6 +16,7 @@ from typing import Literal
 from uuid import UUID
 
 import httpx
+import numpy as np
 
 from .http_client import get_http_client
 from .request_context import get_request_id
@@ -57,6 +59,20 @@ _post_tower_uuid_cache: dict[tuple[str, str], tuple[str, float]] = {}
 _post_tower_uuid_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 HistoryMode = Literal["actual", "empty"]
+
+
+def encode_embedding_rows(vectors: list[list[float]]) -> list[str]:
+    """Encode an embedding matrix in inference-service's compact form.
+
+    One base64 string of little-endian float32 values per row. As JSON floats
+    a ranker call's ~260 384-dim vectors are ~800 KB and a float->text->float
+    round trip on both ends; this is ~5.3 bytes per value and a memcpy. The
+    vectors are float32 at the source, so nothing is lost.
+    """
+    return [
+        base64.b64encode(np.asarray(row, dtype="<f4").tobytes()).decode("ascii")
+        for row in vectors
+    ]
 
 class InferenceResponseFormatError(RuntimeError):
     """Raised when inference-service returns a successful but malformed response."""
@@ -185,7 +201,7 @@ async def predict_user_tower_single(
     url = f"{base_url}/models/user-tower/predict"
     headers = build_inference_headers(api_key)
     payload = {
-        "history_embeddings": history_embeddings,
+        "history_embeddings_b64": encode_embedding_rows(history_embeddings),
         "history_author_dids": history_author_dids,
     }
 
@@ -291,11 +307,11 @@ async def predict_heavy_ranker_single_user(
     url = f"{base_url}/models/ranker/predict"
     headers = build_inference_headers(api_key)
     payload = {
-        "history_embeddings": history_embeddings,
+        "history_embeddings_b64": encode_embedding_rows(history_embeddings),
         "history_author_dids": history_author_dids,
         "history_liked_at_times": history_liked_at_times,
         "history_prior_cumulative_likes": history_like_counts,
-        "candidate_post_embeddings": candidate_post_embeddings,
+        "candidate_post_embeddings_b64": encode_embedding_rows(candidate_post_embeddings),
         "candidate_author_dids": candidate_author_dids,
         "candidate_prior_cumulative_likes": candidate_like_counts,
     }

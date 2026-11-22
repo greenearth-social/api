@@ -12,7 +12,12 @@ from fastapi.testclient import TestClient
 
 from .. import security
 from ..lib import inference, user_history_cache
-from ..lib.embeddings import MINILM_L12_EMBEDDING_DIM, MINILM_L12_EMBEDDING_FIELD
+from ..lib.embeddings import (
+    MINILM_L12_EMBEDDING_DIM,
+    MINILM_L12_EMBEDDING_FIELD,
+    decode_float32_b64,
+    encode_float32_b64,
+)
 from ..lib.user_history_cache import UserHistory, UserHistoryItem
 from ..main import app
 from ..security import verify_api_key
@@ -112,7 +117,7 @@ def test_export_propagates_actual_pair_and_history_without_candidate_search(
     prediction = _mock_prediction_request()
     prediction.assert_awaited_once()
     assert prediction.call_args.kwargs["json"] == {
-        "history_embeddings": [VECTOR],
+        "history_embeddings_b64": [encode_float32_b64(VECTOR)],
         "history_author_dids": ["did:plc:author"],
     }
     assert "timeout" not in prediction.call_args.kwargs
@@ -375,4 +380,6 @@ def test_real_history_path_uses_production_preparation_and_best_effort_hydration
         if index != failed_index
     ]
     assert call["history_author_dids"] == [author for _, author, _ in expected]
-    assert call["history_embeddings"] == [vector for _, _, vector in expected]
+    assert [decode_float32_b64(row) for row in call["history_embeddings_b64"]] == [
+        vector for _, _, vector in expected
+    ]

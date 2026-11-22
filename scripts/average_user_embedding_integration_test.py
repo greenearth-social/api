@@ -14,7 +14,11 @@ from fastapi.testclient import TestClient
 
 from app.lib import inference, user_history_cache
 from app.lib.average_user_embedding_artifact import load_artifact
-from app.lib.embeddings import MINILM_L12_EMBEDDING_DIM, MINILM_L12_EMBEDDING_FIELD
+from app.lib.embeddings import (
+    MINILM_L12_EMBEDDING_DIM,
+    MINILM_L12_EMBEDDING_FIELD,
+    decode_float32_b64,
+)
 from app.routers import embeddings
 from app.security import verify_api_key
 
@@ -94,7 +98,7 @@ def test_real_endpoint_to_local_artifact(tmp_path, monkeypatch, caplog, model_ch
         # History markers identify contributors without relying on request ordering.
         # Changing b's paired model simulates a rollout during artifact generation.
         assert url.endswith("/models/user-tower/predict")
-        marker = json["history_embeddings"][0][0]
+        marker = decode_float32_b64(json["history_embeddings_b64"][0])[0]
         inference_calls.append(marker)
         return httpx.Response(
             200,

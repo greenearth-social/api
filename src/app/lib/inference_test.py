@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from . import inference as inference_module
+from .embeddings import decode_float32_b64, encode_float32_b64
 from .user_history_cache import UserHistory, UserHistoryItem
 
 
@@ -111,7 +112,7 @@ async def test_predict_user_tower_single_retains_prediction_metadata(monkeypatch
     client.post.assert_awaited_once_with(
         "https://inference.example/models/user-tower/predict",
         json={
-            "history_embeddings": [[1.0, 0.0]],
+            "history_embeddings_b64": [encode_float32_b64([1.0, 0.0])],
             "history_author_dids": ["did:plc:history"],
         },
         headers={"X-API-Key": "secret"},
@@ -157,11 +158,14 @@ async def test_predict_heavy_ranker_single_user_posts_ranker_payload(monkeypatch
             "url": "https://inference.example/models/ranker/predict",
             "headers": {"X-API-Key": "secret"},
             "json": {
-                "history_embeddings": [[1.0, 0.0]],
+                "history_embeddings_b64": [encode_float32_b64([1.0, 0.0])],
                 "history_author_dids": ["did:plc:history"],
                 "history_liked_at_times": ["2026-01-01T00:00:00+00:00"],
                 "history_prior_cumulative_likes": [9],
-                "candidate_post_embeddings": [[0.0, 1.0], [1.0, 1.0]],
+                "candidate_post_embeddings_b64": [
+                    encode_float32_b64([0.0, 1.0]),
+                    encode_float32_b64([1.0, 1.0]),
+                ],
                 "candidate_author_dids": ["did:plc:candidate-a", "did:plc:candidate-b"],
                 "candidate_prior_cumulative_likes": [3, 4],
             },
@@ -402,7 +406,9 @@ async def test_predict_user_embedding_preserves_selected_history_and_raw_like_co
     client.post.assert_awaited_once_with(
         "https://inference.example/models/user-tower/predict",
         json={
-            "history_embeddings": [[float(i), 1.0] for i in expected_indices],
+            "history_embeddings_b64": [
+                encode_float32_b64([float(i), 1.0]) for i in expected_indices
+            ],
             "history_author_dids": [f"did:plc:author{i}" for i in expected_indices],
         },
         headers={"X-API-Key": "secret"},
@@ -622,3 +628,17 @@ async def test_cached_post_tower_uuid_raises_refresh_error_after_stale_grace(
 
     with pytest.raises(RuntimeError, match="ready down"):
         await inference_module.get_cached_post_tower_uuid("https://inference", "key")
+
+
+def test_encode_embedding_rows_round_trips_float32_values():
+    rows = [[0.1, -2.5, 3.0], [], [1e-7, 12345.678]]
+
+    encoded = inference_module.encode_embedding_rows(rows)
+
+    import struct
+
+    assert [decode_float32_b64(row) for row in encoded] == [
+        [struct.unpack("<f", struct.pack("<f", value))[0] for value in row] for row in rows
+    ]
+    # Identical to the api's existing float32 codec, which inference-service decodes.
+    assert encoded[0] == encode_float32_b64(rows[0])
