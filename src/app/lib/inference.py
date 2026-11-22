@@ -23,6 +23,11 @@ from .user_history_cache import UserHistory
 
 logger = logging.getLogger(__name__)
 
+# Wall time of one inference HTTP call as the api sees it: request
+# serialization, network, the model, and response parsing. Compare with the
+# inference service's own predict timing to see how much is transport.
+INFERENCE_HTTP_METRIC = "inference.http.duration_ms"
+
 
 def get_metric_collector():
     """Indirection point so tests can monkeypatch at module level."""
@@ -185,7 +190,13 @@ async def predict_user_tower_single(
     }
 
     client = get_http_client()
-    async with timed(logger, "user_tower_http", n_history=len(history_embeddings)):
+    async with timed(
+        logger,
+        INFERENCE_HTTP_METRIC,
+        record_metric=True,
+        metric_attrs={"model": "user_tower"},
+        n_history=len(history_embeddings),
+    ):
         try:
             resp = await client.post(url, json=payload, headers=headers)
         except httpx.HTTPError as exc:
@@ -292,7 +303,9 @@ async def predict_heavy_ranker_single_user(
     client = get_http_client()
     async with timed(
         logger,
-        "ranker_predict_http",
+        INFERENCE_HTTP_METRIC,
+        record_metric=True,
+        metric_attrs={"model": "ranker"},
         n_history=len(history_embeddings),
         n_candidates=len(candidate_post_embeddings)
     ):

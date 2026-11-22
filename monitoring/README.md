@@ -147,7 +147,7 @@ Cloud Monitoring enforces these; each one fails silently or at deploy time:
 
 ## Chart inventory
 
-Seven rows, 23 charts, one section header per row.
+Eight rows, 26 charts, one section header per row.
 
 p50 is charted alongside p95 only where the shape of the distribution is the
 question — the BridgEU latency target (with p99 as well), feed render latency
@@ -180,6 +180,9 @@ a median line would only add series to read past.
 | 6 | Ingest freshness by source | 1 | builder |
 | 6 | Ingest bulk-index latency by index | 5 | builder |
 | 6 | Cluster health: JVM GC, circuit breakers and disk latency | 3 | mixed |
+| 7 | Firestore operation latency by op (p50 / p95) | 2 | PromQL |
+| 7 | PostHog flag call and inference HTTP latency (p50 / p95) | 4 | PromQL |
+| 7 | Age of the user's previous render at a first-page load | 3 | PromQL |
 
 Row 0 reads `feed.request.duration_ms`, not `feed.render.duration_ms`. It is
 recorded by the request middleware from the moment the handler finishes
@@ -194,6 +197,33 @@ than the 5-minute ones below, because its population is small: about 73% of
 getFeedSkeleton calls are Explore prefetches, leaving roughly 170 first-page
 feed loads an hour in prod. p50 and p95 use 1-hour windows; p99 uses a 1-day
 window, since a 1-hour p99 rests on one or two requests.
+
+Row 7 breaks down an established user's first page (real traffic,
+`surface=feed`, `page=first`) for issue #602. `firestore.op.duration_ms` is
+labelled by `op`: `get_user`, `seen_posts_get`, `discarded_posts_get`,
+`accepted_slate_claim`, `feed_cache_get`, `feed_cache_set`,
+`feed_cache_append`, `feed_activity_get`, `snapshot_merge`, `snapshot_prune`,
+`follows_cache_get` and `popularity_cache_get`.
+`candidates.popularity.direct_query_count{reason}` (not charted) counts renders
+that ran the popularity query inline instead of using the shared pool;
+`es.query` with `op=popularity` cannot show that, because it also counts the
+pool's background refreshes. `posthog.flags.duration_ms`
+is the per-request feature-flag evaluation. `inference.http.duration_ms` is
+the api's wall time for one inference call by `model` (`ranker` |
+`user_tower`); its gap to `inference.predict.duration_ms` is transport and
+serialization. `feed.ready_slate.shadow_age_seconds` is how long ago this
+user's previous render of the feed was (`basis=renders`), or the newer of
+that and their last AppView check (`basis=renders_or_checks`). The share of
+loads under a threshold is the hit rate a ready slate with that freshness
+limit would get (api#633). Loads with no earlier render are counted in
+`feed.ready_slate.shadow_no_prior_count` instead. Its buckets have exact
+edges at 5, 10, 20, 30 and 60 minutes and at 2 hours, so read the hit rate
+for one of those thresholds from the bucket counts:
+
+```promql
+sum by (basis)(rate({__name__="custom.googleapis.com/greenearth-api/feed.ready_slate.shadow_age_seconds_bucket", namespace="prod", le="1800"}[1d]))
+/ sum by (basis)(rate({__name__="custom.googleapis.com/greenearth-api/feed.ready_slate.shadow_age_seconds_count", namespace="prod"}[1d]))
+```
 
 Row 2's ranking gap chart pairs series across repos by `model_name`: api's
 `rank.model.duration_ms` value `heavy_ranker` corresponds to inference-service's

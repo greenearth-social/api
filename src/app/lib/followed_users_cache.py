@@ -62,6 +62,7 @@ from .bsky import (
 from .metrics import get_metric_collector
 from .release import api_release_sha
 from .request_cache import get_request_cache
+from .telemetry import firestore_op
 
 if TYPE_CHECKING:
     from ..documents import FollowedUsersCacheDocument
@@ -323,7 +324,9 @@ class FollowedUsersCache:
         return self._db.collection(FOLLOWED_USERS_CACHE_COLLECTION).document(key)
 
     async def _read(self, key: str) -> "FollowedUsersCacheDocument | None":
-        return self.entry_from(await self._doc_ref(key).get(), key)
+        async with firestore_op(logger, "follows_cache_get"):
+            snapshot = await self._doc_ref(key).get()
+        return self.entry_from(snapshot, key)
 
     def entry_from(self, snapshot, key: str) -> "FollowedUsersCacheDocument | None":
         """The usable cache entry in *snapshot*, or ``None`` (treated as a miss)."""

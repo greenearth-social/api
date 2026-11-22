@@ -26,12 +26,14 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import Lock
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..documents import (
+    FeedActivityDocument,
     FeedCacheDocument,
     FeedPreferencesDocument,
     FeedSnapshotDocument,
@@ -65,6 +67,7 @@ from ..lib.firestore import (
     record_interaction,
     record_seen_posts,
     record_user_post_seen,
+    stamp_feed_activity,
     update_survey_post_seen,
     upsert_feed_activity,
     upsert_user,
@@ -86,7 +89,7 @@ from ..lib.slate_pipeline import (
     record_render_metrics,
     run_pipeline_capturing,
 )
-from ..lib.telemetry import timed
+from ..lib.telemetry import firestore_op, timed
 from ..lib.user_history_cache import user_history_policy_scope
 from ..models import (
     CandidateGenerateRequest,
@@ -926,7 +929,8 @@ async def user_exclusions(
         if not include_seen:
             return []
         try:
-            return await get_recent_seen_uris(db, user_did)
+            async with firestore_op(logger, "seen_posts_get"):
+                return await get_recent_seen_uris(db, user_did)
         except Exception:
             logger.exception("Failed to fetch seen posts for user '%s'", user_did)
             return []
@@ -935,7 +939,8 @@ async def user_exclusions(
         if not include_discarded:
             return []
         try:
-            return await get_recent_discarded_uris(db, user_did)
+            async with firestore_op(logger, "discarded_posts_get"):
+                return await get_recent_discarded_uris(db, user_did)
         except Exception:
             logger.exception("Failed to fetch discarded posts for user '%s'", user_did)
             return []
@@ -1107,6 +1112,55 @@ async def _record_discarded(
         logger.exception("Failed to record discarded posts for user '%s'", user_did)
 
 
+READY_SLATE_SHADOW_METRIC = "feed.ready_slate.shadow_age_seconds"
+
+
+def _record_ready_slate_shadow(previous: FeedActivityDocument | None) -> None:
+    """Record how old a per-user ready slate would be at this first-page load.
+
+    Issue #633 proposes serving first pages from the user's most recent render
+    when it is recent enough. This measures that hit rate without changing
+    behaviour: the age of the previous render (``basis=renders``) and, because
+    the proposal also refreshes a stale slate when an AppView check arrives,
+    the age of the newer of the previous render and check
+    (``basis=renders_or_checks``). Loads with no earlier render are counted in
+    ``feed.ready_slate.shadow_no_prior_count``.
+    """
+    collector = get_metric_collector()
+    if collector is None:
+        return
+    now = datetime.now(UTC)
+    last_render = previous.last_render_at if previous is not None else None
+    last_check = previous.last_check_at if previous is not None else None
+    if not isinstance(last_render, datetime):
+        collector.record("feed.ready_slate.shadow_no_prior_count", 1)
+        return
+    collector.record(
+        READY_SLATE_SHADOW_METRIC,
+        max(0.0, (now - last_render).total_seconds()),
+        basis="renders",
+    )
+    newest = max(last_render, last_check) if isinstance(last_check, datetime) else last_render
+    collector.record(
+        READY_SLATE_SHADOW_METRIC,
+        max(0.0, (now - newest).total_seconds()),
+        basis="renders_or_checks",
+    )
+
+
+async def _stamp_feed_activity(
+    db, user_did: str, feed_name: str, field: Literal["last_render_at", "last_check_at"]
+) -> None:
+    """Background ``stamp_feed_activity``; failures only lose a shadow-metric sample."""
+    try:
+        await stamp_feed_activity(db, user_did, feed_name, field)
+    except Exception:
+        logger.warning(
+            "Failed to stamp %s for user '%s', feed '%s'", field, user_did, feed_name,
+            exc_info=True,
+        )
+
+
 async def _record_session(
     request: Request,
     user_did: str,
@@ -1168,7 +1222,11 @@ async def _record_session(
 
     if record_feed_activity:
         try:
-            await upsert_feed_activity(db, user_did, feed_name, is_initial_load=is_initial_load)
+            upsert = await upsert_feed_activity(
+                db, user_did, feed_name, is_initial_load=is_initial_load
+            )
+            if is_initial_load:
+                _record_ready_slate_shadow(upsert.previous)
         except Exception:
             logger.exception(
                 "Failed to record feed activity for user '%s', feed '%s'", user_did, feed_name
@@ -1251,13 +1309,14 @@ async def _write_feed_snapshot_background(
                 posts_returned / generated_posts_requested if generated_posts_requested else 1.0,
                 feed_name=snapshot.feed_name,
             )
-        truncated = await merge_feed_snapshot(
-            db,
-            user_did,
-            request_id,
-            snapshot,
-            enforce_document_cap=not load_test,
-        )
+        async with firestore_op(logger, "snapshot_merge"):
+            truncated = await merge_feed_snapshot(
+                db,
+                user_did,
+                request_id,
+                snapshot,
+                enforce_document_cap=not load_test,
+            )
         if truncated:
             logger.warning(
                 "Feed snapshot reached item limit for user '%s', request '%s'",
@@ -1655,25 +1714,24 @@ async def get_feed_skeleton(
                 record_feed_activity=not is_explore_preview,
             )
         )
+    elif is_appview_one_item_check and not is_anonymous and not is_load_test and not is_probe:
+        _spawn_background(_stamp_feed_activity(db, user_did, feed_name, "last_check_at"))
 
     posthog_client = get_posthog_client()
     # Flags are evaluated per user, and an anonymous caller isn't one: it would
     # be a single synthetic identity shared by every logged-out request. Take
     # the flag defaults instead.
     feature_flag_list = [FAIL_FAST_FLAG]
-    if is_explore_preview:
+    if is_explore_preview or posthog_client is None or is_anonymous:
         feature_flags = None
     else:
-        feature_flags = (
-            await asyncio.to_thread(
+        async with timed(logger, "posthog.flags.duration_ms", record_metric=True):
+            feature_flags = await asyncio.to_thread(
                 evaluate_feature_flags,
                 posthog_client,
                 user_did,
                 feature_flag_list,
             )
-            if posthog_client is not None and not is_anonymous
-            else None
-        )
     set_fail_fast_for_request(
         bool(feature_flags.get_flag(FAIL_FAST_FLAG)) if feature_flags is not None else False
     )
@@ -1686,7 +1744,8 @@ async def get_feed_skeleton(
     preferences_read_succeeded = is_anonymous
     if not is_anonymous:
         try:
-            user_doc = await get_user(db, user_did)
+            async with firestore_op(logger, "get_user"):
+                user_doc = await get_user(db, user_did)
             preferences_read_succeeded = True
             debug_enabled = bool(user_doc and user_doc.debug_feeds)
         except Exception:
@@ -1732,7 +1791,7 @@ async def get_feed_skeleton(
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid cursor") from exc
 
-            async with timed(logger, "feedcache_retrieve", cache_id=parsed.id):
+            async with firestore_op(logger, "feed_cache_get", cache_id=parsed.id):
                 cache_doc = await feed_cache.retrieve_document(parsed.id)
             if cache_doc is not None:
                 if (
@@ -1785,6 +1844,10 @@ async def get_feed_skeleton(
                         regenerated=True,
                         debug_enabled=debug_enabled,
                     )
+                    if not is_anonymous and not is_load_test:
+                        _spawn_background(
+                            _stamp_feed_activity(db, user_did, feed_name, "last_render_at")
+                        )
                     if low_score_uris and not is_anonymous:
                         _spawn_background(
                             _record_discarded(
@@ -1961,6 +2024,10 @@ async def get_feed_skeleton(
                     regenerated=True,
                     debug_enabled=debug_enabled,
                 )
+                if not is_anonymous and not is_load_test:
+                    _spawn_background(
+                        _stamp_feed_activity(db, user_did, feed_name, "last_render_at")
+                    )
                 if low_score_uris and not is_anonymous:
                     _spawn_background(
                         _record_discarded(db, user_did, low_score_uris, load_test=is_load_test)
@@ -1969,7 +2036,7 @@ async def get_feed_skeleton(
                     uri for uri in generated_snapshot.items if uri not in contextual_pin_uris
                 ][:session_room]
                 if new_uris:
-                    async with timed(logger, "feedcache_append", cache_id=parsed.id):
+                    async with firestore_op(logger, "feed_cache_append", cache_id=parsed.id):
                         new_meta_by_uri = {
                             meta.at_uri: meta for meta in generated_snapshot.items_meta
                         }
@@ -2059,13 +2126,14 @@ async def get_feed_skeleton(
             ):
                 # Keep the Settings handoff available for a full feed open.
                 try:
-                    accepted_request_id = await claim_accepted_feed_slate(
-                        db,
-                        user_did,
-                        feed_name,
-                        claim_grace_seconds=ACCEPTED_SLATE_CLAIM_GRACE_SECONDS,
-                        cache_ttl_seconds=DEFAULT_TTL_SECONDS,
-                    )
+                    async with firestore_op(logger, "accepted_slate_claim"):
+                        accepted_request_id = await claim_accepted_feed_slate(
+                            db,
+                            user_did,
+                            feed_name,
+                            claim_grace_seconds=ACCEPTED_SLATE_CLAIM_GRACE_SECONDS,
+                            cache_ttl_seconds=DEFAULT_TTL_SECONDS,
+                        )
                 except Exception:
                     logger.exception(
                         "Failed to claim accepted feed slate for user '%s' feed '%s'",
@@ -2074,7 +2142,8 @@ async def get_feed_skeleton(
                     )
                     accepted_request_id = None
                 if accepted_request_id is not None:
-                    accepted_cache = await feed_cache.retrieve_document(accepted_request_id)
+                    async with firestore_op(logger, "feed_cache_get"):
+                        accepted_cache = await feed_cache.retrieve_document(accepted_request_id)
                     if (
                         accepted_cache is not None
                         and accepted_cache.mode == "accepted"
@@ -2204,7 +2273,8 @@ async def get_feed_skeleton(
                 and not is_explore_preview
             ):
                 try:
-                    feed_activity_doc = await get_feed_activity(db, user_did, feed_name)
+                    async with firestore_op(logger, "feed_activity_get"):
+                        feed_activity_doc = await get_feed_activity(db, user_did, feed_name)
                 except Exception:
                     logger.exception("Failed to read feed activity for user '%s'", user_did)
                     feed_activity_doc = None
@@ -2291,7 +2361,7 @@ async def get_feed_skeleton(
                 cache_items_meta = [
                     cache_meta_by_uri[uri] for uri in cache_uris if uri in cache_meta_by_uri
                 ]
-                async with timed(logger, "feedcache_store", cache_id=request_id):
+                async with firestore_op(logger, "feed_cache_set", cache_id=request_id):
                     await feed_cache.store_document(
                         request_id,
                         FeedCacheDocument(

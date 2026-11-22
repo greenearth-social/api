@@ -149,6 +149,31 @@ USER_HISTORY_CACHE_AGE_SEC_BOUNDARIES: tuple[float, ...] = (
     30 * 86_400,
 )
 
+# Age of a user's previous render at a first-page load (issue #633's shadow
+# hit rate). The candidate ready-slate thresholds (5, 10, 20, 30, 60 min and
+# the 2 h stale ceiling) are exact edges so each candidate's hit rate reads off
+# the distribution without interpolation.
+READY_SLATE_AGE_SEC_BOUNDARIES: tuple[float, ...] = (
+    30,
+    60,
+    120,
+    300,
+    600,
+    900,
+    1200,
+    1800,
+    2700,
+    3600,
+    5400,
+    7200,
+    3 * 3600,
+    6 * 3600,
+    12 * 3600,
+    86_400,
+    2 * 86_400,
+    7 * 86_400,
+)
+
 # Small-integer counts: in-flight requests against a pool cap, slate sizes.
 # Distinguishing 1 from 4 matters -- that is the difference between an idle
 # pool and one about to queue.
@@ -210,6 +235,8 @@ def histogram_boundaries(name: str) -> tuple[float, ...] | None:
         return FEED_REQUEST_MS_BOUNDARIES
     if name == "user_history.cache.age_seconds":
         return USER_HISTORY_CACHE_AGE_SEC_BOUNDARIES
+    if name == "feed.ready_slate.shadow_age_seconds":
+        return READY_SLATE_AGE_SEC_BOUNDARIES
     if name == "candidates.two_tower.history_size":
         # Separate no usable history from one like, up to the 64-like window.
         return (0, 1, 2, 4, 8, 16, 32, 64)

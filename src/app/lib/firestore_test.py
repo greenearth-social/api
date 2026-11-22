@@ -63,6 +63,7 @@ from ..lib.firestore import (
     record_user_post_seen,
     save_api_slate,
     set_user_debug_flag,
+    stamp_feed_activity,
     upsert_feed_activity,
     upsert_user,
     user_doc_id,
@@ -909,7 +910,7 @@ class TestUpsertFeedActivity:
         db, doc_ref = _mock_feed_activity_client()
         doc_ref.get.return_value = _mock_doc_snapshot(False)
 
-        activity = await upsert_feed_activity(db, USER_DID, FEED_NAME)
+        activity = (await upsert_feed_activity(db, USER_DID, FEED_NAME)).activity
 
         assert activity.feed_name == FEED_NAME
         assert isinstance(activity.first_seen_at, datetime)
@@ -933,7 +934,7 @@ class TestUpsertFeedActivity:
             },
         )
 
-        activity = await upsert_feed_activity(db, USER_DID, FEED_NAME)
+        activity = (await upsert_feed_activity(db, USER_DID, FEED_NAME)).activity
 
         assert activity.last_seen_at > original_time
         doc_ref.update.assert_called_once()
@@ -955,9 +956,71 @@ class TestUpsertFeedActivity:
             },
         )
 
-        activity = await upsert_feed_activity(db, USER_DID, FEED_NAME)
+        activity = (await upsert_feed_activity(db, USER_DID, FEED_NAME)).activity
 
         assert activity.first_seen_at == original_time
+
+    @pytest.mark.asyncio
+    async def test_returns_previous_state_and_stamps_render_on_initial_load(self):
+        db, doc_ref = _mock_feed_activity_client()
+        rendered = datetime(2026, 1, 1, tzinfo=UTC)
+        checked = datetime(2026, 1, 1, 0, 5, tzinfo=UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {
+                "feed_name": FEED_NAME,
+                "first_seen_at": rendered,
+                "last_seen_at": rendered,
+                "last_render_at": rendered,
+                "last_check_at": checked,
+            },
+        )
+
+        result = await upsert_feed_activity(db, USER_DID, FEED_NAME)
+
+        assert result.previous is not None
+        assert result.previous.last_render_at == rendered
+        assert result.previous.last_check_at == checked
+        assert result.activity.last_render_at is not None
+        assert result.activity.last_render_at > rendered
+        assert "last_render_at" in doc_ref.update.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_cursor_load_does_not_stamp_render(self):
+        db, doc_ref = _mock_feed_activity_client()
+        original_time = datetime(2026, 1, 1, tzinfo=UTC)
+        doc_ref.get.return_value = _mock_doc_snapshot(
+            True,
+            {"feed_name": FEED_NAME, "first_seen_at": original_time, "last_seen_at": original_time},
+        )
+
+        await upsert_feed_activity(db, USER_DID, FEED_NAME, is_initial_load=False)
+
+        assert "last_render_at" not in doc_ref.update.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_first_visit_has_no_previous_state(self):
+        db, doc_ref = _mock_feed_activity_client()
+        doc_ref.get.return_value = _mock_doc_snapshot(False)
+
+        result = await upsert_feed_activity(db, USER_DID, FEED_NAME)
+
+        assert result.previous is None
+        assert result.activity.last_render_at is not None
+
+
+class TestStampFeedActivity:
+    @pytest.mark.asyncio
+    async def test_merges_only_the_named_timestamp(self):
+        db, doc_ref = _mock_feed_activity_client()
+
+        await stamp_feed_activity(db, USER_DID, FEED_NAME, "last_check_at")
+
+        doc_ref.get.assert_not_called()
+        written, kwargs = doc_ref.set.call_args[0][0], doc_ref.set.call_args[1]
+        assert kwargs == {"merge": True}
+        assert set(written) == {"feed_name", "last_check_at"}
+        assert isinstance(written["last_check_at"], datetime)
 
 
 # ---------------------------------------------------------------------------

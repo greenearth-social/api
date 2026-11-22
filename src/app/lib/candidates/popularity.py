@@ -22,6 +22,7 @@ from ...models import CandidatePost, MaxAgeHours
 from .base import CandidateGenerator, CandidateResult
 from .popularity_cache import get_popularity_cache, pool_size
 from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
+from ..metrics import get_metric_collector
 from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,17 @@ def take_from_pool(
     return taken
 
 
+def _record_direct_query(reason: str) -> None:
+    """Count a render that ran the popularity query itself instead of using the pool.
+
+    ES ``op=popularity`` queries also include the pool's background refreshes,
+    which inherit the triggering request's labels, so they cannot tell the two
+    apart. This counts only the inline queries a request waits for.
+    """
+    if mc := get_metric_collector():
+        mc.record("candidates.popularity.direct_query_count", 1, reason=reason)
+
+
 class PopularityCandidateGenerator(CandidateGenerator):
     """Returns recent popular posts.
 
@@ -213,6 +225,11 @@ class PopularityCandidateGenerator(CandidateGenerator):
                     len(candidates),
                     num_candidates,
                 )
+                _record_direct_query("exclusions")
+            else:
+                _record_direct_query("no_pool")
+        else:
+            _record_direct_query("no_cache")
 
         candidates = await popularity_search(
             es, num_candidates, generator_name=self.name, video_only=video_only,
