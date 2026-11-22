@@ -31,6 +31,7 @@ class FakeEs:
                 "query": query,
                 "size": size,
                 "sort": sort,
+                "docvalue_fields": kwargs.get("docvalue_fields"),
             }
         )
         return self._responses.get(index, self._default)
@@ -116,6 +117,8 @@ class TestFollowedUsersSearch:
         assert call["index"] == "posts_recent"
         assert call["size"] == 20  # num_candidates=20, no exclude_uris
         assert call["sort"] == [{"created_at": "desc"}]
+        # Hits are the final candidates, so their embeddings come back with them.
+        assert call["docvalue_fields"] == ["embeddings.all_MiniLM_L12_v2"]
 
         query = call["query"]
         assert query == {

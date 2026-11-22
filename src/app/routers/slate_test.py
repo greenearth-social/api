@@ -70,7 +70,10 @@ def no_user_history():
             "app.routers.xrpc.get_recent_discarded_uris", new_callable=AsyncMock, return_value=[]
         ),
         # Nothing on this path needs a real ES round-trip for embeddings.
-        patch("app.lib.slate_pipeline.hydrate_posts", new=AsyncMock(side_effect=lambda es, c: c)),
+        patch(
+            "app.lib.candidates.generate.hydrate_posts",
+            new=AsyncMock(side_effect=lambda es, c: c),
+        ),
     ):
         yield
 

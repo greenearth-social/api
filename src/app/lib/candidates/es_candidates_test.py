@@ -25,6 +25,7 @@ class FakeEs:
             "size": size,
             "sort": sort,
             "_source": _source,
+            "docvalue_fields": kwargs.get("docvalue_fields"),
         })
         return self._responses.get(index, self._default)
 
@@ -210,3 +211,14 @@ class TestKnnSearchPosts:
         call = es.calls[0]
         assert call["size"] == 10
         assert call["knn"]["k"] == 10
+
+
+@pytest.mark.asyncio
+async def test_knn_requests_candidate_embeddings_as_docvalues():
+    es = FakeEs()
+
+    await knn_search_posts(
+        es, [0.1, 0.2], num_candidates=10, search_field=MINILM_L12_EMBEDDING_FIELD
+    )
+
+    assert es.calls[0]["docvalue_fields"] == ["embeddings.all_MiniLM_L12_v2"]

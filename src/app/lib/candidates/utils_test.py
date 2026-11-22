@@ -213,3 +213,28 @@ def test_candidate_post_from_hit_unscorable_post():
     })
     assert candidate.combined_perspective_score is None
     assert candidate.perspective_scored_at == "2026-08-28T00:00:00Z"
+
+
+def test_candidate_post_from_hit_reads_embedding_from_docvalue_fields():
+    from ..embeddings import MINILM_L12_EMBEDDING_FIELD, decode_float32_b64
+
+    hit = {
+        "_source": {"at_uri": "at://a", "content": "text"},
+        "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.5, -0.25]]},
+    }
+
+    candidate = candidate_post_from_hit(hit)
+
+    assert candidate.minilm_l12_embedding is not None
+    assert decode_float32_b64(candidate.minilm_l12_embedding) == [0.5, -0.25]
+
+
+def test_candidate_post_from_hit_ignores_docvalue_embedding_without_source_text():
+    from ..embeddings import MINILM_L12_EMBEDDING_FIELD
+
+    hit = {
+        "_source": {"at_uri": "at://a", "content": "  "},
+        "fields": {MINILM_L12_EMBEDDING_FIELD: [[0.5, -0.25]]},
+    }
+
+    assert candidate_post_from_hit(hit).minilm_l12_embedding is None

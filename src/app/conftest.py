@@ -54,3 +54,17 @@ def _disable_posthog(monkeypatch):
         real_init(self, *args, **kwargs)
 
     monkeypatch.setattr(Posthog, "__init__", _disabled_init)
+
+
+@pytest.fixture(autouse=True)
+def _empty_post_features_cache():
+    """Start every test with an empty process-wide post-features cache.
+
+    ``hydrate_posts`` serves embeddings it fetched earlier in the process, so
+    without this one test's hydration would satisfy another's.
+    """
+    from .lib.candidates.post_features_cache import get_post_features_cache
+
+    get_post_features_cache().clear()
+    yield
+    get_post_features_cache().clear()
