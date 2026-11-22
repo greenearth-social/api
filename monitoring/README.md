@@ -203,7 +203,11 @@ Row 7 breaks down an established user's first page (real traffic,
 labelled by `op`: `get_user`, `seen_posts_get`, `discarded_posts_get`,
 `accepted_slate_claim`, `feed_cache_get`, `feed_cache_set`,
 `feed_cache_append`, `feed_activity_get`, `snapshot_merge`, `snapshot_prune`,
-`follows_cache_get` and `popularity_cache_get`. `posthog.flags.duration_ms`
+`follows_cache_get` and `popularity_cache_get`.
+`candidates.popularity.direct_query_count{reason}` (not charted) counts renders
+that ran the popularity query inline instead of using the shared pool;
+`es.query` with `op=popularity` cannot show that, because it also counts the
+pool's background refreshes. `posthog.flags.duration_ms`
 is the per-request feature-flag evaluation. `inference.http.duration_ms` is
 the api's wall time for one inference call by `model` (`ranker` |
 `user_tower`); its gap to `inference.predict.duration_ms` is transport and

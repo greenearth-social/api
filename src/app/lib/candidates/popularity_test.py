@@ -2,10 +2,12 @@
 
 from datetime import datetime, timezone
 from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
 
 from ...models import CandidatePost
+from ..candidates import popularity as popularity_module
 from ..candidates.popularity import (
     PopularityCandidateGenerator,
     popularity_search,
@@ -387,6 +389,43 @@ class TestPopularityGeneratorWithCache:
 
         assert [c.at_uri for c in result.candidates] == ["at://live/1"]
         assert len(es.calls) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("pool", "exclusions", "reason"),
+        [
+            (None, [], "no_pool"),
+            (["at://pool/0", "at://pool/1", "at://pool/2", "at://pool/3"],
+             ["at://pool/0", "at://pool/1"], "exclusions"),
+        ],
+    )
+    async def test_counts_inline_queries_by_reason(
+        self, generator, install_cache, monkeypatch, pool, exclusions, reason
+    ):
+        # ES op=popularity also counts the pool's background refreshes; this
+        # counter is how a direct query that a request waits for is told apart.
+        monkeypatch.setenv("GE_POPULARITY_CACHE_POOL_SIZE", "4")
+        install_cache(_pool(4) if pool else None)
+        collector = MagicMock()
+        monkeypatch.setattr(popularity_module, "get_metric_collector", lambda: collector)
+
+        await generator.generate(
+            FakeEs(), "did:plc:user1", num_candidates=4, exclude_uris=exclusions
+        )
+
+        collector.record.assert_called_once_with(
+            "candidates.popularity.direct_query_count", 1, reason=reason
+        )
+
+    @pytest.mark.asyncio
+    async def test_pool_hit_records_no_inline_query(self, generator, install_cache, monkeypatch):
+        install_cache(_pool(50))
+        collector = MagicMock()
+        monkeypatch.setattr(popularity_module, "get_metric_collector", lambda: collector)
+
+        await generator.generate(FakeEs(), "did:plc:user1", num_candidates=5)
+
+        collector.record.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_short_pool_is_served_without_a_fallback_query(
