@@ -638,8 +638,14 @@ async def _run_pipeline_capturing_with_timeout(
 def _snapshot_page(
     snapshot: FeedSnapshotDocument,
     uris: list[str],
+    *,
+    offset: int = 0,
 ) -> FeedSnapshotDocument:
-    """Restrict pipeline metadata to posts actually returned in one page."""
+    """Restrict pipeline metadata to posts actually returned in one page.
+
+    *offset* is the page's position in its batch, which orders pages of one
+    batch when their background snapshot writes land out of order.
+    """
     meta_by_uri = {meta.at_uri: meta for meta in snapshot.items_meta}
     items_meta = [meta_by_uri.get(uri, PipelineItemMeta(at_uri=uri)) for uri in uris]
     diagnostics = [
@@ -659,6 +665,7 @@ def _snapshot_page(
             "items": uris,
             "items_meta": items_meta,
             "generator_diagnostics": diagnostics,
+            "page_offset": offset,
         }
     )
 
@@ -911,6 +918,20 @@ def _spawn_background(coro) -> asyncio.Task:
     return task
 
 
+async def drain_background_tasks(timeout: float) -> None:
+    """Wait up to *timeout* seconds for in-flight background writes at shutdown.
+
+    Snapshot, session and discard writes run after the response is sent, so a
+    scale-down would otherwise cancel them mid-transaction.
+    """
+    pending = list(_background_tasks)
+    if not pending:
+        return
+    _done, still_pending = await asyncio.wait(pending, timeout=timeout)
+    if still_pending:
+        logger.warning("Abandoning %d background tasks at shutdown", len(still_pending))
+
+
 async def user_exclusions(
     db,
     user_did: str,
@@ -1146,6 +1167,47 @@ def _record_ready_slate_shadow(previous: FeedActivityDocument | None) -> None:
         max(0.0, (now - newest).total_seconds()),
         basis="renders_or_checks",
     )
+
+
+async def _store_feed_session(
+    feed_cache: FeedCache,
+    request_id: str,
+    uris: list[str],
+    snapshot: FeedSnapshotDocument,
+    *,
+    user_did: str,
+    feed_name: str,
+    preference_fingerprint: str,
+    load_test: bool,
+) -> None:
+    """Store a freshly generated batch as the cursor session *request_id*."""
+    meta_by_uri = {meta.at_uri: meta for meta in snapshot.items_meta}
+    async with firestore_op(logger, "feed_cache_set", cache_id=request_id):
+        await feed_cache.store_document(
+            request_id,
+            FeedCacheDocument(
+                items=uris,
+                items_meta=[meta_by_uri[uri] for uri in uris if uri in meta_by_uri],
+                generator_diagnostics=snapshot.generator_diagnostics,
+                user_did=user_did,
+                feed_name=feed_name,
+                generated_at=snapshot.generated_at,
+                api_release_sha=snapshot.api_release_sha,
+                expires_at=datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS),
+                preference_fingerprint=preference_fingerprint,
+                load_test=load_test,
+            ),
+        )
+
+
+async def _read_feed_activity(db, user_did: str, feed_name: str) -> FeedActivityDocument | None:
+    """The user's feed-activity document, or ``None`` when it cannot be read."""
+    try:
+        async with firestore_op(logger, "feed_activity_get"):
+            return await get_feed_activity(db, user_did, feed_name)
+    except Exception:
+        logger.exception("Failed to read feed activity for user '%s'", user_did)
+        return None
 
 
 async def _stamp_feed_activity(
@@ -1722,34 +1784,48 @@ async def get_feed_skeleton(
     # be a single synthetic identity shared by every logged-out request. Take
     # the flag defaults instead.
     feature_flag_list = [FAIL_FAST_FLAG]
-    if is_explore_preview or posthog_client is None or is_anonymous:
-        feature_flags = None
-    else:
+
+    async def read_feature_flags():
+        if is_explore_preview or posthog_client is None or is_anonymous:
+            return None
         async with timed(logger, "posthog.flags.duration_ms", record_metric=True):
-            feature_flags = await asyncio.to_thread(
+            return await asyncio.to_thread(
                 evaluate_feature_flags,
                 posthog_client,
                 user_did,
                 feature_flag_list,
             )
-    set_fail_fast_for_request(
-        bool(feature_flags.get_flag(FAIL_FAST_FLAG)) if feature_flags is not None else False
-    )
 
     # Per-user opt-in: capture pipeline debugging info for this feed load. This
     # costs one extra Firestore read per request; fail-soft so a hiccup degrades
     # to no-debug rather than breaking feed serving.
-    debug_enabled = False
-    user_doc = None
-    preferences_read_succeeded = is_anonymous
-    if not is_anonymous:
+    async def read_user() -> tuple[UserDocument | None, bool]:
+        """The caller's user document, and whether it could be read."""
+        if is_anonymous:
+            return None, True
         try:
             async with firestore_op(logger, "get_user"):
-                user_doc = await get_user(db, user_did)
-            preferences_read_succeeded = True
-            debug_enabled = bool(user_doc and user_doc.debug_feeds)
+                return await get_user(db, user_did), True
         except Exception:
             logger.exception("Failed to read debug flag for user '%s'", user_did)
+            return None, False
+
+    # A first page needs the user's seen and discarded posts. Which of them to
+    # read depends only on the feed's static config, never on the user's
+    # settings, so start reading them now rather than after the user document.
+    exclusions_task: asyncio.Task[list[str]] | None = None
+    if cursor is None and not is_anonymous and not is_explore_preview:
+        exclusions_task = asyncio.create_task(
+            _generation_exclusions(db, user_did, FEEDS[feed_name])
+        )
+
+    feature_flags, (user_doc, preferences_read_succeeded) = await asyncio.gather(
+        read_feature_flags(), read_user()
+    )
+    set_fail_fast_for_request(
+        bool(feature_flags.get_flag(FAIL_FAST_FLAG)) if feature_flags is not None else False
+    )
+    debug_enabled = bool(user_doc and user_doc.debug_feeds)
 
     # Lets the followed-users cache leave this user's TTL refresh to the job.
     set_precompute_user(bool(user_doc and user_doc.precompute_artifacts))
@@ -1774,6 +1850,8 @@ async def get_feed_skeleton(
         """Post URIs to exclude, including static pins for anonymous callers."""
         if is_anonymous or is_explore_preview:
             return list(_pinned_post_uris(feed_cfg))
+        if exclusions_task is not None:
+            return list(await exclusions_task)
         return await _generation_exclusions(db, user_did, feed_cfg)
 
     async with timed(
@@ -1912,13 +1990,15 @@ async def get_feed_skeleton(
                         batch=parsed.offset // limit,
                     )
                     if not is_probe and not is_anonymous:
-                        await _write_feed_snapshot_background(
-                            db,
-                            user_did,
-                            replacement_request_id,
-                            _snapshot_page(generated_snapshot, page),
-                            limit=limit,
-                            load_test=is_load_test,
+                        _spawn_background(
+                            _write_feed_snapshot_background(
+                                db,
+                                user_did,
+                                replacement_request_id,
+                                _snapshot_page(generated_snapshot, page),
+                                limit=limit,
+                                load_test=is_load_test,
+                            )
                         )
                     return FeedSkeletonResponse(
                         feed=_skeleton_items(
@@ -1958,13 +2038,15 @@ async def get_feed_skeleton(
                         items_meta=cache_doc.items_meta,
                     )
                     if not is_probe and not is_anonymous:
-                        await _write_feed_snapshot_background(
-                            db,
-                            user_did,
-                            parsed.id,
-                            _snapshot_page(cached_snapshot, page),
-                            limit=limit,
-                            load_test=is_load_test,
+                        _spawn_background(
+                            _write_feed_snapshot_background(
+                                db,
+                                user_did,
+                                parsed.id,
+                                _snapshot_page(cached_snapshot, page, offset=parsed.offset),
+                                limit=limit,
+                                load_test=is_load_test,
+                            )
                         )
                     return FeedSkeletonResponse(
                         feed=_skeleton_items(
@@ -2062,13 +2144,15 @@ async def get_feed_skeleton(
                             page, scores_by_uri, feed_name, batch=parsed.offset // limit
                         )
                         if not is_probe and not is_anonymous:
-                            await _write_feed_snapshot_background(
-                                db,
-                                user_did,
-                                parsed.id,
-                                _snapshot_page(generated_snapshot, page),
-                                limit=limit,
-                                load_test=is_load_test,
+                            _spawn_background(
+                                _write_feed_snapshot_background(
+                                    db,
+                                    user_did,
+                                    parsed.id,
+                                    _snapshot_page(generated_snapshot, page),
+                                    limit=limit,
+                                    load_test=is_load_test,
+                                )
                             )
                         return FeedSkeletonResponse(
                             feed=_skeleton_items(
@@ -2086,13 +2170,15 @@ async def get_feed_skeleton(
                     # A cursor session can legitimately exhaust its selected
                     # source. Merge that outcome into the existing session's
                     # diagnostics without replacing posts already served.
-                    await _write_feed_snapshot_background(
-                        db,
-                        user_did,
-                        parsed.id,
-                        _snapshot_page(generated_snapshot, []),
-                        limit=limit,
-                        load_test=is_load_test,
+                    _spawn_background(
+                        _write_feed_snapshot_background(
+                            db,
+                            user_did,
+                            parsed.id,
+                            _snapshot_page(generated_snapshot, []),
+                            limit=limit,
+                            load_test=is_load_test,
+                        )
                     )
 
                 # Append failed or nothing new — end of feed.
@@ -2150,6 +2236,9 @@ async def get_feed_skeleton(
                         and accepted_cache.user_did == user_did
                         and accepted_cache.feed_name == feed_name
                     ):
+                        if exclusions_task is not None:
+                            # The accepted slate is served as-is; generation is skipped.
+                            exclusions_task.cancel()
                         accepted_uris = [
                             uri for uri in accepted_cache.items if uri not in contextual_pin_uris
                         ]
@@ -2182,14 +2271,16 @@ async def get_feed_skeleton(
                             generator_diagnostics=accepted_cache.generator_diagnostics,
                             items_meta=accepted_cache.items_meta,
                         )
-                        await _write_feed_snapshot_background(
-                            db,
-                            user_did,
-                            accepted_request_id,
-                            _snapshot_page(accepted_snapshot, generated_page),
-                            limit=limit,
-                            injected_post_count=1 if pinned_post_uri else 0,
-                            load_test=False,
+                        _spawn_background(
+                            _write_feed_snapshot_background(
+                                db,
+                                user_did,
+                                accepted_request_id,
+                                _snapshot_page(accepted_snapshot, generated_page),
+                                limit=limit,
+                                injected_post_count=1 if pinned_post_uri else 0,
+                                load_test=False,
+                            )
                         )
                         next_cursor = (
                             FeedCursor(id=accepted_request_id, offset=consumed).encode()
@@ -2235,6 +2326,21 @@ async def get_feed_skeleton(
             # Generated up front so it can key the debug record too.
             request_id = uuid.uuid4().hex
 
+            # Survey eligibility needs the user's feed-activity document. It does not
+            # depend on the pipeline, so read it while the pipeline runs.
+            feed_activity_task: asyncio.Task[FeedActivityDocument | None] | None = None
+            if (
+                feed_cfg.survey_post_uri
+                and not is_anonymous
+                and not is_probe
+                and not is_load_test
+                and not is_appview_one_item_check
+                and not is_explore_preview
+            ):
+                feed_activity_task = asyncio.create_task(
+                    _read_feed_activity(db, user_did, feed_name)
+                )
+
             # Pass the feed load type to all the function nested function calls so that the user
             # history cache (used for two tower and heavy ranker models) can use it.
             with user_history_policy_scope("explore" if is_explore_preview else "normal"):
@@ -2261,23 +2367,28 @@ async def get_feed_skeleton(
                 )
             all_uris = [uri for uri in generated_snapshot.items if uri not in contextual_pin_uris]
 
+            # Store the cursor session now, so the write overlaps assembling the page.
+            # Explore only displays a single preview, so it needs no paging state.
+            cache_store_task: asyncio.Task[None] | None = None
+            if all_uris and not is_explore_preview:
+                cache_store_task = asyncio.create_task(
+                    _store_feed_session(
+                        feed_cache,
+                        request_id,
+                        all_uris,
+                        generated_snapshot,
+                        user_did=user_did,
+                        feed_name=feed_name,
+                        preference_fingerprint=preference_fingerprint,
+                        load_test=is_load_test,
+                    )
+                )
+
             # Survey post: eligible for users who loaded the feed at least 3 times
             # and haven't seen it in the past 7 days (tracked via interactionSeen).
             show_survey = False
-            if (
-                feed_cfg.survey_post_uri
-                and not is_anonymous
-                and not is_probe
-                and not is_load_test
-                and not is_appview_one_item_check
-                and not is_explore_preview
-            ):
-                try:
-                    async with firestore_op(logger, "feed_activity_get"):
-                        feed_activity_doc = await get_feed_activity(db, user_did, feed_name)
-                except Exception:
-                    logger.exception("Failed to read feed activity for user '%s'", user_did)
-                    feed_activity_doc = None
+            if feed_activity_task is not None:
+                feed_activity_doc = await feed_activity_task
                 if (
                     feed_activity_doc is not None
                     and feed_activity_doc.load_count >= SURVEY_POST_MIN_VISITS
@@ -2338,45 +2449,30 @@ async def get_feed_skeleton(
                 and not is_appview_one_item_check
                 and not is_explore_preview
             ):
-                await _write_feed_snapshot_background(
-                    db,
-                    user_did,
-                    request_id,
-                    _snapshot_page(generated_snapshot, generated_page),
-                    limit=limit,
-                    injected_post_count=n_injected,
-                    load_test=is_load_test,
+                _spawn_background(
+                    _write_feed_snapshot_background(
+                        db,
+                        user_did,
+                        request_id,
+                        _snapshot_page(generated_snapshot, generated_page),
+                        limit=limit,
+                        injected_post_count=n_injected,
+                        load_test=is_load_test,
+                    )
                 )
 
-            # Explore only displays a single preview, so it needs no paging state.
-            # Otherwise, store every non-empty batch — even a (possibly cutoff-shortened)
+            # Every non-empty batch is stored — even a (possibly cutoff-shortened)
             # batch that fits in one page — so paging past it regenerates
             # instead of ending the feed. ``consumed`` (computed above) counts
             # only the generated URIs the first page actually displayed (a
             # pinned page consumes limit-1 generated URIs, not limit), or
             # later pages would skip posts.
             next_cursor = None
-            if cache_uris and not is_explore_preview:
-                cache_meta_by_uri = {meta.at_uri: meta for meta in generated_snapshot.items_meta}
-                cache_items_meta = [
-                    cache_meta_by_uri[uri] for uri in cache_uris if uri in cache_meta_by_uri
-                ]
-                async with firestore_op(logger, "feed_cache_set", cache_id=request_id):
-                    await feed_cache.store_document(
-                        request_id,
-                        FeedCacheDocument(
-                            items=cache_uris,
-                            items_meta=cache_items_meta,
-                            generator_diagnostics=generated_snapshot.generator_diagnostics,
-                            user_did=user_did,
-                            feed_name=feed_name,
-                            generated_at=generated_snapshot.generated_at,
-                            api_release_sha=generated_snapshot.api_release_sha,
-                            expires_at=datetime.now(UTC) + timedelta(seconds=DEFAULT_TTL_SECONDS),
-                            preference_fingerprint=preference_fingerprint,
-                            load_test=is_load_test,
-                        ),
-                    )
+            if cache_store_task is not None:
+                # Awaited, not backgrounded: the app asks for page 2 as soon as it has
+                # page 1, and a cursor whose session is missing silently restarts the
+                # feed from a fresh first page.
+                await cache_store_task
                 next_cursor = FeedCursor(id=request_id, offset=consumed).encode()
 
             response = FeedSkeletonResponse(

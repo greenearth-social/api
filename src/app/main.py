@@ -200,6 +200,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Feed snapshot, session and discard writes run after their responses are
+        # sent. Give them a bounded window inside Cloud Run's 10 s SIGTERM grace
+        # before the Firestore client below is closed.
+        try:
+            await xrpc.drain_background_tasks(timeout=5.0)
+        except Exception:
+            pass
         # Do not carry a prior into a later lifespan in the same process (tests
         # can start the app repeatedly with different artifact configurations).
         set_average_user_embedding(None)

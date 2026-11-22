@@ -786,6 +786,14 @@ class FeedSnapshotDocument(BaseModel):
     generator_legend: list[GeneratorMeta] = Field(default_factory=list)
     generator_diagnostics: list[GeneratorDiagnostic] = Field(default_factory=list)
     items_meta: list[PipelineItemMeta] = Field(default_factory=list)
+    page_offset: int = Field(
+        default=0,
+        description=(
+            "Position in its generated batch of the first item. Pages of one batch "
+            "share generated_at, and their snapshot writes run in the background, so "
+            "this orders pages whose writes land out of order."
+        ),
+    )
 
 
 class PopularityCacheDocument(BaseModel):
