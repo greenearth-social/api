@@ -157,6 +157,15 @@ def set_precompute_user(flag: bool) -> None:
     _precompute_user.set(flag)
 
 
+def is_precompute_user() -> bool:
+    """Whether the current request's user is a precompute_artifacts user.
+
+    These are the users the jetstream ingester tracks: it applies their follow
+    deltas and marks their like-history cache stale when they like a post.
+    """
+    return _precompute_user.get()
+
+
 # Rate-limits the population sweep per process. Module-level rather than
 # per-instance so it survives a cache being rebuilt in tests and scripts.
 _last_sweep_at: float | None = None

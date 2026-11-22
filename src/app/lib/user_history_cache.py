@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -41,6 +41,7 @@ from .embeddings import (
     decode_float32_b64,
     encode_float32_b64,
 )
+from .followed_users_cache import is_precompute_user
 from .metrics import get_metric_collector
 from .release import api_release_sha
 from .request_cache import get_request_cache
@@ -76,6 +77,16 @@ USER_HISTORY_NORMAL_REFRESH_SEC = 600
 # longer for Explore previews. Must be at least USER_HISTORY_NORMAL_REFRESH_SEC.
 USER_HISTORY_NORMAL_MAX_SERVING_AGE_SEC = 1800
 
+# Users the jetstream ingester tracks (precompute_artifacts) get their cached
+# history marked stale (``invalidated_at``) when they like or unlike a post,
+# once that like is searchable. Their history is therefore current until it is
+# marked, and is kept much longer: served without a refresh for 6 hours unless
+# marked, and served stale while refreshing until 24 hours. The time bounds
+# only matter if a mark is lost (an ingester outage, a user tracked within the
+# last hour).
+USER_HISTORY_TRACKED_REFRESH_SEC = 6 * 60 * 60
+USER_HISTORY_TRACKED_MAX_SERVING_AGE_SEC = 24 * 60 * 60
+
 # Explore previews tolerate older history, but fetch it before rendering on a
 # cache miss. From the refresh threshold until the serving limit, previews
 # use cached history while a background refresh runs.
@@ -95,7 +106,7 @@ USER_HISTORY_REFRESH_TIMEOUT_SEC = 10
 # Quiet period after a failed refresh, preventing a retry on every request.
 USER_HISTORY_CACHE_RETRY_COOLDOWN_SEC = 60
 
-UserHistoryPolicy = Literal["normal", "explore"]
+UserHistoryPolicy = Literal["normal", "explore", "tracked"]
 _user_history_policy: ContextVar[UserHistoryPolicy] = ContextVar(
     "ge_user_history_policy", default="normal"
 )
@@ -116,11 +127,35 @@ def user_history_policy_scope(policy: UserHistoryPolicy) -> Generator[None]:
         _user_history_policy.reset(token)
 
 
-def _history_is_fresh_for_policy(age_seconds: float, policy: UserHistoryPolicy) -> bool:
+def _effective_policy() -> UserHistoryPolicy:
+    """The request's policy, upgraded to ``tracked`` for ingester-tracked users.
+
+    Only normal feed loads are upgraded; Explore previews keep their own,
+    longer policy.
+    """
+    policy = get_user_history_policy()
+    if policy == "normal" and is_precompute_user():
+        return "tracked"
+    return policy
+
+
+def _history_is_fresh_for_policy(
+    age_seconds: float, policy: UserHistoryPolicy, *, invalidated: bool = False
+) -> bool:
     """Whether this policy can serve history without scheduling a refresh."""
     if policy == "explore":
         return age_seconds < USER_HISTORY_EXPLORE_REFRESH_SEC
+    if policy == "tracked":
+        return not invalidated and age_seconds <= USER_HISTORY_TRACKED_REFRESH_SEC
     return age_seconds <= USER_HISTORY_NORMAL_REFRESH_SEC
+
+
+def _max_serving_age_for_policy(policy: UserHistoryPolicy) -> float:
+    if policy == "explore":
+        return USER_HISTORY_EXPLORE_MAX_SERVING_AGE_SEC
+    if policy == "tracked":
+        return USER_HISTORY_TRACKED_MAX_SERVING_AGE_SEC
+    return USER_HISTORY_NORMAL_MAX_SERVING_AGE_SEC
 
 
 @dataclass(frozen=True)
@@ -141,6 +176,11 @@ class UserHistory:
     items: list[UserHistoryItem]
     # Preserve diagnostics without retaining posts excluded from model inputs.
     raw_like_count: int
+    # When the Elasticsearch fetch that produced this history started. Stored
+    # as the cache entry's fetched_at, so a staleness mark written while the
+    # fetch was running still counts against it. None for histories built
+    # elsewhere; the write time is used then.
+    fetched_at: datetime | None = field(default=None, compare=False)
 
     @property
     def liked_uris(self) -> list[str]:
@@ -170,6 +210,15 @@ class UserHistoryCacheEntry:
 
     history: UserHistory
     fetched_at: datetime
+    # Set by the jetstream ingester when the user liked or unliked a post.
+    invalidated_at: datetime | None = None
+
+    @property
+    def invalidated(self) -> bool:
+        """Whether a like or unlike landed after this history was fetched."""
+        return self.invalidated_at is not None and _as_utc(self.invalidated_at) > _as_utc(
+            self.fetched_at
+        )
 
     def age_seconds(self, *, now: datetime | None = None) -> float:
         current = now or datetime.now(UTC)
@@ -206,6 +255,9 @@ class _CachedUserHistoryDocument(BaseModel):
     expires_at: datetime
     refresh_started_at: datetime | None = None
     refresh_failed_at: datetime | None = None
+    # Written only by the jetstream ingester (never by store()), see
+    # USER_HISTORY_TRACKED_REFRESH_SEC.
+    invalidated_at: datetime | None = None
     api_release_sha: str | None = None
     items: list[_CachedUserHistoryItem] = Field(max_length=USER_HISTORY_MODEL_LIMIT)
 
@@ -312,8 +364,11 @@ def _decode_cache_entry(
         for item in document.items
     ]
     return UserHistoryCacheEntry(
-         history=UserHistory(items=items, raw_like_count=document.raw_like_count),
-         fetched_at=fetched_at
+        history=UserHistory(
+            items=items, raw_like_count=document.raw_like_count, fetched_at=fetched_at
+        ),
+        fetched_at=fetched_at,
+        invalidated_at=document.invalidated_at,
     )
 
 
@@ -344,7 +399,7 @@ class FirestoreUserHistoryCache(UserHistoryCache):
             return None
 
     async def store(self, user_did: str, history: UserHistory) -> None:
-        fetched_at = datetime.now(UTC)
+        fetched_at = history.fetched_at or datetime.now(UTC)
         document = _CachedUserHistoryDocument(
             schema_version=USER_HISTORY_CACHE_VERSION,
             user_did=user_did,
@@ -370,7 +425,13 @@ class FirestoreUserHistoryCache(UserHistoryCache):
                 for item in history.items_with_embeddings
             ],
         )
-        await self._document(user_did).set(document.model_dump())
+        # Merge so a staleness mark the ingester wrote while this history was
+        # being fetched survives the write (invalidated_at is never written
+        # here); it is later than fetched_at, so the entry stays stale. Arrays
+        # such as items are replaced wholesale by a merge.
+        await self._document(user_did).set(
+            document.model_dump(exclude={"invalidated_at"}), merge=True
+        )
 
     async def claim_refresh(
         self, user_did: str, *, policy: UserHistoryPolicy = "normal"
@@ -402,7 +463,7 @@ class FirestoreUserHistoryCache(UserHistoryCache):
                 except (ValidationError, TypeError, ValueError):
                     entry = None
                 if entry is not None and _history_is_fresh_for_policy(
-                    entry.age_seconds(now=now), policy
+                    entry.age_seconds(now=now), policy, invalidated=entry.invalidated
                 ):
                     # Only a fully readable, unexpired history can satisfy the
                     # request. Old retention policies and corrupt embeddings
@@ -622,6 +683,7 @@ async def _fetch_user_history_from_es(
     *,
     timeout_seconds: float,
 ) -> _UserHistoryFetchResult:
+    started_at = datetime.now(UTC)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
     async with asyncio.timeout_at(deadline):
@@ -687,7 +749,9 @@ async def _fetch_user_history_from_es(
         if len(items) == USER_HISTORY_MODEL_LIMIT:
             break
     return _UserHistoryFetchResult(
-        history=UserHistory(items=items, raw_like_count=len(liked_uris)),
+        history=UserHistory(
+            items=items, raw_like_count=len(liked_uris), fetched_at=started_at
+        ),
         complete=not errors,
     )
 
@@ -698,14 +762,14 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
     Both policies await Elasticsearch when no usable cached history exists;
     stale-but-servable history uses the shared background refresh path.
     """
-    policy = get_user_history_policy()
+    policy = _effective_policy()
 
     async def _fetch() -> UserHistory:
         cache = get_user_history_cache()
         if cache is not None:
             pending_history = _pending_user_history(cache, user_did)
             if pending_history is not None:
-                _record_cache_count("user_history.cache.lookup_count", "pending_hit")
+                _record_cache_count("user_history.cache.lookup_count", "pending_hit", policy=policy)
                 return pending_history
 
             try:
@@ -717,7 +781,7 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
                     async with asyncio.timeout(USER_HISTORY_CACHE_READ_TIMEOUT_SECONDS):
                         cached_entry = await cache.retrieve(user_did)
             except Exception:
-                _record_cache_count("user_history.cache.lookup_count", "error")
+                _record_cache_count("user_history.cache.lookup_count", "error", policy=policy)
                 logger.warning(
                     "User-history cache lookup failed for %s policy; fetching from Elasticsearch",
                     policy,
@@ -727,21 +791,26 @@ async def fetch_user_history_features(es, user_did: str) -> UserHistory:
                 if cached_entry is not None:
                     history_age_seconds = cached_entry.age_seconds()
                     _record_cache_age(history_age_seconds)
-                    if _history_is_fresh_for_policy(history_age_seconds, policy):
-                        _record_cache_count("user_history.cache.lookup_count", "hit")
+                    if _history_is_fresh_for_policy(
+                        history_age_seconds, policy, invalidated=cached_entry.invalidated
+                    ):
+                        _record_cache_count(
+                            "user_history.cache.lookup_count", "hit", policy=policy
+                        )
                         return cached_entry.history
-                    max_serving_age_seconds = (
-                        USER_HISTORY_EXPLORE_MAX_SERVING_AGE_SEC
-                        if policy == "explore"
-                        else USER_HISTORY_NORMAL_MAX_SERVING_AGE_SEC
-                    )
-                    if history_age_seconds < max_serving_age_seconds:
-                        _record_cache_count("user_history.cache.lookup_count", "stale")
+                    if history_age_seconds < _max_serving_age_for_policy(policy):
+                        _record_cache_count(
+                            "user_history.cache.lookup_count",
+                            "invalidated"
+                            if policy == "tracked" and cached_entry.invalidated
+                            else "stale",
+                            policy=policy,
+                        )
                         _schedule_user_history_refresh(
                             cache, es, user_did, policy=policy
                         )
                         return cached_entry.history
-                _record_cache_count("user_history.cache.lookup_count", "miss")
+                _record_cache_count("user_history.cache.lookup_count", "miss", policy=policy)
 
         result = await _fetch_user_history_from_es(
             es,

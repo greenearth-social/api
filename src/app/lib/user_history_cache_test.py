@@ -1904,3 +1904,156 @@ async def test_cold_refresh_lease_and_failure_cooldown_span_cache_instances(
     assert await first.claim_refresh("did:plc:user1", policy="explore") is False
     history_clock.current += timedelta(seconds=USER_HISTORY_CACHE_LEASE_SEC)
     assert await first.claim_refresh("did:plc:user1", policy="explore") is True
+
+
+# ---------------------------------------------------------------------------
+# Tracked users: history kept until the jetstream ingester marks it stale.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tracked_user(monkeypatch):
+    """The request's user is one the jetstream ingester tracks (precompute_artifacts)."""
+    monkeypatch.setattr(user_history_module, "is_precompute_user", lambda: True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("age", "invalidated", "outcome"),
+    [
+        (user_history_module.USER_HISTORY_TRACKED_REFRESH_SEC - 1, False, "hit"),
+        (user_history_module.USER_HISTORY_TRACKED_REFRESH_SEC + 1, False, "stale"),
+        (60, True, "invalidated"),
+        (user_history_module.USER_HISTORY_TRACKED_MAX_SERVING_AGE_SEC - 1, False, "stale"),
+        (user_history_module.USER_HISTORY_TRACKED_MAX_SERVING_AGE_SEC, False, "miss"),
+    ],
+)
+async def test_tracked_user_history_is_kept_until_marked_stale(
+    monkeypatch, history_clock, tracked_user, age, invalidated, outcome
+):
+    retained = UserHistory([UserHistoryItem("at://old", "2026-01-01T00:00:00Z", [1.0])], 1)
+    fresh = UserHistory([UserHistoryItem("at://new", "2026-01-02T00:00:00Z", [2.0])], 1)
+    fetched_at = history_clock.current - timedelta(seconds=age)
+    cache = _FakeCache(
+        UserHistoryCacheEntry(
+            retained,
+            fetched_at,
+            invalidated_at=fetched_at + timedelta(seconds=1) if invalidated else None,
+        )
+    )
+    set_user_history_cache(cache)
+    fetched = AsyncMock(
+        return_value=user_history_module._UserHistoryFetchResult(fresh, complete=True)
+    )
+    monkeypatch.setattr(user_history_module, "_fetch_user_history_from_es", fetched)
+    collector = _RecordingCollector()
+    monkeypatch.setattr(user_history_module, "get_metric_collector", lambda: collector)
+
+    result = await fetch_user_history_features(object(), "did:plc:user1")
+    await cache.drain()
+
+    assert result == (retained if outcome != "miss" else fresh)
+    # Served-but-stale and invalidated entries are refreshed in the background.
+    assert cache.claim_calls == (["did:plc:user1"] if outcome in ("stale", "invalidated") else [])
+    lookups = [r for r in collector.records if r[0] == "user_history.cache.lookup_count"]
+    assert lookups == [
+        ("user_history.cache.lookup_count", 1, {"policy": "tracked", "outcome": outcome})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mark_older_than_the_fetch_does_not_make_history_stale(
+    monkeypatch, history_clock, tracked_user
+):
+    retained = UserHistory([UserHistoryItem("at://old", "2026-01-01T00:00:00Z", [1.0])], 1)
+    fetched_at = history_clock.current - timedelta(minutes=30)
+    cache = _FakeCache(
+        UserHistoryCacheEntry(
+            retained, fetched_at, invalidated_at=fetched_at - timedelta(seconds=1)
+        )
+    )
+    set_user_history_cache(cache)
+
+    assert await fetch_user_history_features(object(), "did:plc:user1") == retained
+    assert cache.claim_calls == []
+
+
+@pytest.mark.asyncio
+async def test_explore_previews_keep_their_own_policy_for_tracked_users(
+    monkeypatch, history_clock, tracked_user
+):
+    retained = UserHistory([UserHistoryItem("at://old", "2026-01-01T00:00:00Z", [1.0])], 1)
+    fetched_at = history_clock.current - timedelta(days=2)
+    cache = _FakeCache(
+        UserHistoryCacheEntry(retained, fetched_at, invalidated_at=history_clock.current)
+    )
+    set_user_history_cache(cache)
+
+    with user_history_policy_scope("explore"):
+        assert await fetch_user_history_features(object(), "did:plc:user1") == retained
+    assert cache.claim_calls == []
+
+
+@pytest.mark.asyncio
+async def test_firestore_store_keeps_a_mark_written_during_the_fetch():
+    db, _collection_ref, doc_ref = _mock_firestore_client()
+    started = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+    history = UserHistory(
+        items=[UserHistoryItem("at://liked/a", "2026-01-01T00:00:00+00:00", VALID_EMBEDDING)],
+        raw_like_count=1,
+        fetched_at=started,
+    )
+
+    await FirestoreUserHistoryCache(db).store("did:plc:user1", history)
+
+    stored = doc_ref.set.await_args.args[0]
+    # fetched_at is when the fetch started, so a mark written while it ran is
+    # later than it; the merge leaves that mark (invalidated_at) in place.
+    assert stored["fetched_at"] == started
+    assert "invalidated_at" not in stored
+    assert doc_ref.set.await_args.kwargs == {"merge": True}
+
+
+@pytest.mark.asyncio
+async def test_firestore_decodes_the_ingesters_mark():
+    db, _collection_ref, doc_ref = _mock_firestore_client()
+    fetched_at = datetime.now(UTC) - timedelta(minutes=5)
+    document = _cached_document(fetched_at=fetched_at)
+    document["invalidated_at"] = fetched_at + timedelta(minutes=1)
+    doc_ref.get.return_value = MagicMock(exists=True, to_dict=MagicMock(return_value=document))
+
+    entry = await FirestoreUserHistoryCache(db).retrieve("did:plc:user1")
+
+    assert entry is not None
+    assert entry.invalidated
+
+
+@pytest.mark.asyncio
+async def test_firestore_claims_a_refresh_for_a_marked_tracked_history(monkeypatch):
+    db, _collection_ref, doc_ref = _mock_firestore_client()
+    now = datetime.now(UTC)
+    document = _cached_document(fetched_at=now - timedelta(minutes=5))
+    document["invalidated_at"] = now - timedelta(minutes=1)
+    doc_ref.get.return_value = MagicMock(exists=True, to_dict=MagicMock(return_value=document))
+    cache = FirestoreUserHistoryCache(db)
+    _install_direct_transaction(cache, MagicMock(), monkeypatch)
+
+    assert await cache.claim_refresh("did:plc:user1", policy="tracked") is True
+
+    del document["invalidated_at"]
+    assert await cache.claim_refresh("did:plc:user1", policy="tracked") is False
+
+
+@pytest.mark.asyncio
+async def test_es_fetch_records_when_it_started(monkeypatch, history_clock):
+    monkeypatch.setattr(
+        user_history_module,
+        "fetch_recent_liked_post_uris_and_times",
+        AsyncMock(return_value=([], [])),
+    )
+
+    result = await user_history_module._fetch_user_history_from_es(
+        object(), "did:plc:user1", timeout_seconds=1
+    )
+
+    assert result.history.fetched_at == history_clock.current
