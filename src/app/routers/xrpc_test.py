@@ -1244,6 +1244,23 @@ class TestGetFeedSkeleton:
         record_session.assert_not_awaited()
         record_discarded.assert_not_awaited()
 
+    def test_appview_one_item_check_stamps_last_check_at(self):
+        # The ready-slate shadow metric (issue #633) needs to know when the
+        # AppView last polled, since a poll would refresh a stale slate.
+        with (
+            self._patch_generators(_make_candidates("p", 3)),
+            patch("app.routers.xrpc._stamp_feed_activity", new_callable=AsyncMock) as stamp,
+        ):
+            response = client.get(
+                "/xrpc/app.bsky.feed.getFeedSkeleton",
+                params={"feed": FEED_URI, "limit": 1},
+            )
+
+        assert response.status_code == 200
+        stamp.assert_awaited_once()
+        assert stamp.await_args is not None
+        assert stamp.await_args.args[1:] == ("did:plc:testuser", FEED_RKEY, "last_check_at")
+
     def test_request_page_size_and_cursor_reach_the_session_record(self):
         # The Bluesky app's surfaces are distinguishable only by the page size
         # they ask for, so the handler must forward the request's own limit and
@@ -7469,3 +7486,59 @@ async def test_explore_preserves_accepted_settings_slate_for_next_full_feed_load
     assert state._write_feed_snapshot_background.await_args.kwargs["injected_post_count"] == 1
     state.upsert_feed_activity.assert_awaited_once()
     state._run_pipeline_capturing_with_timeout.assert_awaited_once()
+
+
+class TestReadySlateShadowMetric:
+    """``_record_ready_slate_shadow`` measures issue #633's would-be hit rate."""
+
+    def _record(self, previous):
+        collector = MagicMock()
+        with patch("app.routers.xrpc.get_metric_collector", return_value=collector):
+            xrpc._record_ready_slate_shadow(previous)
+        return collector
+
+    def _activity(self, **fields):
+        from ..documents import FeedActivityDocument
+
+        return FeedActivityDocument(feed_name="your-feed", **fields)
+
+    def test_records_age_of_previous_render_and_newer_check(self):
+        now = datetime.now(UTC)
+        previous = self._activity(
+            last_render_at=now - timedelta(minutes=40),
+            last_check_at=now - timedelta(minutes=5),
+        )
+
+        collector = self._record(previous)
+
+        calls = {
+            call.kwargs["basis"]: call.args[1]
+            for call in collector.record.call_args_list
+            if call.args[0] == xrpc.READY_SLATE_SHADOW_METRIC
+        }
+        assert calls["renders"] == pytest.approx(40 * 60, abs=5)
+        assert calls["renders_or_checks"] == pytest.approx(5 * 60, abs=5)
+
+    def test_check_older_than_render_does_not_lower_the_age(self):
+        now = datetime.now(UTC)
+        previous = self._activity(
+            last_render_at=now - timedelta(minutes=3),
+            last_check_at=now - timedelta(hours=2),
+        )
+
+        collector = self._record(previous)
+
+        ages = [
+            call.args[1]
+            for call in collector.record.call_args_list
+            if call.args[0] == xrpc.READY_SLATE_SHADOW_METRIC
+        ]
+        assert ages == [pytest.approx(180, abs=5), pytest.approx(180, abs=5)]
+
+    @pytest.mark.parametrize("has_document", [False, True])
+    def test_no_prior_render_is_counted_not_timed(self, has_document):
+        previous = self._activity() if has_document else None
+
+        collector = self._record(previous)
+
+        collector.record.assert_called_once_with("feed.ready_slate.shadow_no_prior_count", 1)

@@ -1167,6 +1167,160 @@
             }
           }
         }
+      },
+      {
+        "xPos": 0,
+        "yPos": 71,
+        "width": 12,
+        "height": 1,
+        "widget": {
+          "title": "7 \u2014 Feed first-page request path (issue #602)",
+          "sectionHeader": {
+            "subtitle": "Where an established user's first page spends its time outside the pipeline stages above, plus how old that user's previous render was (the would-be hit rate of the ready slate proposed in api#633). Real traffic, feed surface, first pages only; 15-minute windows because there are only ~170 such loads an hour.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 72,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Firestore operation latency by op (p50 / p95)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 op=${metric.labels.op}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, op)(rate({__name__=\"custom.googleapis.com/greenearth-api/firestore.op.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", traffic=\"real\", surface=\"feed\", page=\"first\"}[15m])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 op=${metric.labels.op}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.5, sum by (le, op)(rate({__name__=\"custom.googleapis.com/greenearth-api/firestore.op.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", traffic=\"real\", surface=\"feed\", page=\"first\"}[15m])))"
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 4,
+        "yPos": 72,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "PostHog flag call and inference HTTP latency (p50 / p95)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 PostHog flags",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/posthog.flags.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", traffic=\"real\", surface=\"feed\", page=\"first\"}[15m])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 PostHog flags",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.5, sum by (le)(rate({__name__=\"custom.googleapis.com/greenearth-api/posthog.flags.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", traffic=\"real\", surface=\"feed\", page=\"first\"}[15m])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p95 inference HTTP model=${metric.labels.model}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.95, sum by (le, model)(rate({__name__=\"custom.googleapis.com/greenearth-api/inference.http.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", traffic=\"real\", surface=\"feed\", page=\"first\"}[15m])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 inference HTTP model=${metric.labels.model}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.5, sum by (le, model)(rate({__name__=\"custom.googleapis.com/greenearth-api/inference.http.duration_ms_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", traffic=\"real\", surface=\"feed\", page=\"first\"}[15m])))"
+                }
+              }
+            ],
+            "thresholds": [],
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 8,
+        "yPos": 72,
+        "width": 4,
+        "height": 8,
+        "widget": {
+          "title": "Age of the user's previous render at a first-page load",
+          "xyChart": {
+            "dataSets": [
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p25 basis=${metric.labels.basis}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.25, sum by (le, basis)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.ready_slate.shadow_age_seconds_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", traffic=\"real\", surface=\"feed\", page=\"first\"}[15m])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p50 basis=${metric.labels.basis}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.5, sum by (le, basis)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.ready_slate.shadow_age_seconds_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", traffic=\"real\", surface=\"feed\", page=\"first\"}[15m])))"
+                }
+              },
+              {
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "legendTemplate": "p75 basis=${metric.labels.basis}",
+                "timeSeriesQuery": {
+                  "prometheusQuery": "histogram_quantile(0.75, sum by (le, basis)(rate({__name__=\"custom.googleapis.com/greenearth-api/feed.ready_slate.shadow_age_seconds_bucket\", monitored_resource=\"generic_task\", namespace=\"${NAMESPACE}\", traffic=\"real\", surface=\"feed\", page=\"first\"}[15m])))"
+                }
+              }
+            ],
+            "thresholds": [
+              {
+                "value": 1800,
+                "label": "proposed 30 min freshness",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "seconds",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
       }
     ]
   }

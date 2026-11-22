@@ -373,6 +373,17 @@ class FeedActivityDocument(BaseModel):
         default=0,
         description="Number of initial (no-cursor) feed loads recorded for this feed.",
     )
+    last_render_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Most recent time the pipeline rendered this feed for the user outside "
+            "Explore: a first page or a cursor session regenerating past its batch."
+        ),
+    )
+    last_check_at: datetime | None = Field(
+        default=None,
+        description="Most recent AppView one-item check (limit=1) of this feed for the user.",
+    )
 
 
 class ApiKeyDocument(BaseModel):

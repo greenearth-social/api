@@ -126,3 +126,17 @@ def record_feed_request(
     collector = get_metric_collector()
     if collector is not None:
         collector.record(FEED_REQUEST_METRIC, elapsed_ms, **labels)
+
+
+FIRESTORE_OP_METRIC = "firestore.op.duration_ms"
+
+
+def firestore_op(logger: logging.Logger, op: str, **extra: object):
+    """Time one Firestore operation on the request path as ``firestore.op.duration_ms``.
+
+    *op* is a low-cardinality name for the operation (``get_user``,
+    ``feed_cache_get``, ...), so the dashboard can attribute request time to
+    individual reads and writes. Failures are timed too: a slow error costs the
+    caller as much as a slow success.
+    """
+    return timed(logger, FIRESTORE_OP_METRIC, record_metric=True, metric_attrs={"op": op}, **extra)

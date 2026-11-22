@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
@@ -37,6 +38,7 @@ from ..documents import (
 )
 from .feed_cache import FEED_CACHE_COLLECTION
 from .feed_preferences import preference_source, resolve_feed_preferences
+from .telemetry import firestore_op
 
 logger = logging.getLogger(__name__)
 
@@ -937,15 +939,27 @@ async def get_feed_activity(
     return FeedActivityDocument.model_validate(data)
 
 
+@dataclass(frozen=True)
+class FeedActivityUpsert:
+    """A feed-activity write and the state it replaced (``None`` on first visit)."""
+
+    activity: FeedActivityDocument
+    previous: FeedActivityDocument | None
+
+
 async def upsert_feed_activity(
     db: AsyncClient, user_did: str, feed_name: str, *, is_initial_load: bool = True
-) -> FeedActivityDocument:
+) -> FeedActivityUpsert:
     """Record that a user loaded a feed.
 
     On first visit creates the document with both timestamps set to now.
     On subsequent visits updates only ``last_seen_at``; ``first_seen_at`` is
     never overwritten.  When ``is_initial_load`` is True (no pagination cursor),
-    ``load_count`` is also incremented so survey-post eligibility can be checked.
+    ``load_count`` is also incremented so survey-post eligibility can be checked,
+    and ``last_render_at`` is stamped, since a first page renders the feed.
+
+    The document is read before it is written, so the previous state comes back
+    with the new one at no extra cost (it feeds the ready-slate shadow metric).
     """
     ref = (
         db.collection(USERS_COLLECTION)
@@ -964,23 +978,48 @@ async def upsert_feed_activity(
                 "Firestore feed_activity document exists but to_dict() returned "
                 f"None for {user_did}/{feed_name}"
             )
+        previous = FeedActivityDocument.model_validate(data)
         update: dict = {"last_seen_at": now}
         if is_initial_load:
             update["load_count"] = Increment(1)
+            update["last_render_at"] = now
         await ref.update(update)
         data["last_seen_at"] = now
         if is_initial_load:
             data["load_count"] = (data.get("load_count") or 0) + 1
-        return FeedActivityDocument.model_validate(data)
+            data["last_render_at"] = now
+        return FeedActivityUpsert(FeedActivityDocument.model_validate(data), previous)
 
     activity = FeedActivityDocument(
         feed_name=feed_name,
         first_seen_at=now,
         last_seen_at=now,
         load_count=1 if is_initial_load else 0,
+        last_render_at=now if is_initial_load else None,
     )
     await ref.set(activity.model_dump())
-    return activity
+    return FeedActivityUpsert(activity, None)
+
+
+async def stamp_feed_activity(
+    db: AsyncClient,
+    user_did: str,
+    feed_name: str,
+    field: Literal["last_render_at", "last_check_at"],
+) -> None:
+    """Set one feed-activity timestamp to now without reading the document.
+
+    Used where no upsert already runs: cursor sessions that regenerate
+    (``last_render_at``) and AppView one-item checks (``last_check_at``). A
+    merge write, so a missing document is created with just this field.
+    """
+    ref = (
+        db.collection(USERS_COLLECTION)
+        .document(user_doc_id(user_did))
+        .collection(FEED_ACTIVITY_COLLECTION)
+        .document(feed_name)
+    )
+    await ref.set({"feed_name": feed_name, field: datetime.now(UTC)}, merge=True)
 
 
 async def update_survey_post_seen(db: AsyncClient, user_did: str) -> None:
@@ -1335,7 +1374,8 @@ async def merge_feed_snapshot(
 
     truncated, created = await _merge(transaction)
     if created and enforce_document_cap:
-        await prune_feed_snapshots(db, user_did)
+        async with firestore_op(logger, "snapshot_prune"):
+            await prune_feed_snapshots(db, user_did)
     return truncated
 
 

@@ -43,6 +43,7 @@ from pydantic import TypeAdapter
 from ...models import CandidatePost, MaxAgeHours
 from ..metrics import get_metric_collector
 from ..release import api_release_sha
+from ..telemetry import firestore_op
 
 if TYPE_CHECKING:
     from ...documents import PopularityCacheDocument
@@ -271,7 +272,8 @@ class PopularityCache:
         # documents -> candidates.base -> ... -> popularity_cache -> documents.
         from ...documents import PopularityCacheDocument
 
-        doc = await self._doc_ref(key).get()
+        async with firestore_op(logger, "popularity_cache_get"):
+            doc = await self._doc_ref(key).get()
         if not doc.exists:
             return None
         data = doc.to_dict()
