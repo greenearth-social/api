@@ -50,7 +50,7 @@ from ..feeds import (
 )
 from ..lib.atproto_auth import verify_auth_header
 from ..lib.config import set_fail_fast_for_request
-from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache
+from ..lib.feed_cache import DEFAULT_TTL_SECONDS, FeedCache, prefetch_lease_held
 from ..lib.feed_context import FeedContextPayload, decode_feed_context, encode_feed_context
 from ..lib.feed_debug import FeedDebugRecorder
 from ..lib.feed_preferences import configured_controls, resolve_feed_preferences
@@ -83,7 +83,12 @@ from ..lib.posthog_client import (
     track_interaction,
     track_session,
 )
-from ..lib.request_context import set_request_shape, set_traffic, start_feed_timing
+from ..lib.request_context import (
+    detach_feed_timing,
+    set_request_shape,
+    set_traffic,
+    start_feed_timing,
+)
 from ..lib.slate_pipeline import (
     feed_request_timeout_sec,
     record_render_metrics,
@@ -1169,6 +1174,184 @@ def _record_ready_slate_shadow(previous: FeedActivityDocument | None) -> None:
     )
 
 
+# Cursor-session prefetch: when a reader is served the session's last full page,
+# the next batch is generated in the background so their next page comes from
+# the cache instead of waiting on the pipeline. The lease keeps two instances
+# from generating the same batch; a reader that arrives while it is held waits
+# up to PREFETCH_WAIT_SECONDS for it before generating the batch itself.
+PREFETCH_LEASE_SECONDS = 15.0
+PREFETCH_WAIT_SECONDS = 4.0
+PREFETCH_POLL_SECONDS = 0.25
+
+
+def _prefetch_in_progress(cache_doc: FeedCacheDocument) -> bool:
+    return prefetch_lease_held(cache_doc, PREFETCH_LEASE_SECONDS)
+
+
+async def _wait_for_prefetch(
+    feed_cache: FeedCache, request_id: str, offset: int
+) -> FeedCacheDocument | None:
+    """Poll the session until a prefetched batch covers *offset* or the lease ends.
+
+    Returns the latest document read (``None`` if it disappeared); the caller
+    decides whether it now covers the requested page.
+    """
+    deadline = time.monotonic() + PREFETCH_WAIT_SECONDS
+    latest: FeedCacheDocument | None = None
+    outcome = "timed_out"
+    while time.monotonic() < deadline:
+        await asyncio.sleep(PREFETCH_POLL_SECONDS)
+        async with firestore_op(logger, "feed_cache_get", cache_id=request_id):
+            latest = await feed_cache.retrieve_document(request_id)
+        if latest is None:
+            outcome = "expired"
+            break
+        if len(latest.items) > offset:
+            outcome = "served"
+            break
+        if not _prefetch_in_progress(latest):
+            outcome = "abandoned"
+            break
+    if collector := get_metric_collector():
+        collector.record("feed.cache.prefetch_wait_count", 1, outcome=outcome)
+    return latest
+
+
+def _record_served_pending_discards(
+    db,
+    feed_cache: FeedCache,
+    request_id: str,
+    cache_doc: FeedCacheDocument,
+    *,
+    served_through: int,
+    user_did: str,
+    load_test: bool,
+) -> None:
+    """Record a prefetched batch's low-score discards once a page of it is served.
+
+    A prefetched batch the reader never reaches must not exclude its rejected
+    posts from their later feeds, so its discards wait on the session until then.
+    """
+    start = cache_doc.pending_discards_from
+    if not cache_doc.pending_discards or start is None or served_through <= start:
+        return
+    _spawn_background(
+        _record_discarded(db, user_did, list(cache_doc.pending_discards), load_test=load_test)
+    )
+    _spawn_background(_clear_pending_discards(feed_cache, request_id))
+
+
+async def _clear_pending_discards(feed_cache: FeedCache, request_id: str) -> None:
+    try:
+        await feed_cache.clear_pending_discards(request_id)
+    except Exception:
+        logger.warning("Failed to clear pending discards for '%s'", request_id, exc_info=True)
+
+
+async def _prefetch_next_batch(
+    request: Request,
+    db,
+    feed_cache: FeedCache,
+    feed_cfg: FeedConfig,
+    *,
+    request_id: str,
+    stored_items: list[str],
+    excluded_uris: list[str],
+    exclusions,
+    user_did: str,
+    feed_name: str,
+    limit: int,
+    max_age_hours: int,
+    generators_override: dict,
+    contextual_pin_uris: set[str],
+    debug_enabled: bool,
+    load_test: bool,
+) -> None:
+    """Generate and append the session's next batch ahead of the reader.
+
+    Mirrors the end-of-batch regeneration on the cursor path (same exclusions,
+    batch size and session cap), except that low-score discards are held on
+    the session until the batch is served.
+    """
+    # Label this work's metrics as a prefetch without relabelling the cursor
+    # request it was spawned from.
+    detach_feed_timing()
+    set_request_shape(page="prefetch", surface="feed")
+    collector = get_metric_collector()
+
+    def record(outcome: str) -> None:
+        if collector is not None:
+            collector.record("feed.cache.prefetch_count", 1, feed_name=feed_name, outcome=outcome)
+
+    try:
+        claimed = await feed_cache.claim_prefetch(request_id, lease_seconds=PREFETCH_LEASE_SECONDS)
+    except Exception:
+        logger.warning("Failed to claim prefetch for '%s'", request_id, exc_info=True)
+        record("failed")
+        return
+    if not claimed:
+        record("lease_held")
+        return
+
+    appended = False
+    try:
+        session_room = MAX_CURSOR_SESSION_ITEMS - len(stored_items)
+        excluded = await exclusions()
+        gen_request = feed_cfg.gen_request_template.model_copy(
+            update={
+                "user_did": user_did,
+                "num_candidates": min(_batch_size(limit), session_room),
+                "exclude_uris": list(dict.fromkeys([*excluded_uris, *excluded])),
+                "max_age_hours": max_age_hours,
+                **generators_override,
+            }
+        )
+        generated_snapshot, low_score_uris = await _run_pipeline_capturing_with_timeout(
+            request,
+            db,
+            feed_cfg,
+            gen_request,
+            feed_name=feed_name,
+            user_did=user_did,
+            request_id=request_id,
+            regenerated=True,
+            debug_enabled=debug_enabled,
+        )
+        if not load_test:
+            await _stamp_feed_activity(db, user_did, feed_name, "last_render_at")
+        new_uris = [
+            uri for uri in generated_snapshot.items if uri not in contextual_pin_uris
+        ][:session_room]
+        if not new_uris:
+            record("empty")
+            return
+        meta_by_uri = {meta.at_uri: meta for meta in generated_snapshot.items_meta}
+        async with firestore_op(logger, "feed_cache_append", cache_id=request_id):
+            updated = await feed_cache.append_document(
+                request_id,
+                new_uris,
+                [meta_by_uri[uri] for uri in new_uris if uri in meta_by_uri],
+                pending_discards=low_score_uris,
+            )
+        appended = updated is not None
+        record("appended" if appended else "expired")
+        if appended and not load_test:
+            # Pages of this batch are served from the cache with the first batch's
+            # metadata; record this generation's diagnostics in the snapshot now.
+            await merge_feed_snapshot(
+                db, user_did, request_id, _snapshot_page(generated_snapshot, [])
+            )
+    except Exception:
+        logger.warning("Cursor prefetch failed for '%s'", request_id, exc_info=True)
+        record("failed")
+    finally:
+        if not appended:
+            try:
+                await feed_cache.release_prefetch(request_id)
+            except Exception:
+                logger.warning("Failed to release prefetch for '%s'", request_id, exc_info=True)
+
+
 async def _store_feed_session(
     feed_cache: FeedCache,
     request_id: str,
@@ -2012,7 +2195,9 @@ async def get_feed_skeleton(
                         cursor=next_cursor,
                     )
 
-                if parsed.offset < len(cached_uris):
+                async def serve_from_cache(
+                    cache_doc: FeedCacheDocument, cached_uris: list[str]
+                ) -> FeedSkeletonResponse:
                     # Serve from the existing cached batch.
                     page = cached_uris[parsed.offset : parsed.offset + limit]
                     next_offset = parsed.offset + len(page)
@@ -2027,6 +2212,44 @@ async def get_feed_skeleton(
                     _record_similarity_metric(
                         page, scores_by_uri, feed_name, batch=parsed.offset // limit
                     )
+                    if not is_probe and not is_anonymous:
+                        _record_served_pending_discards(
+                            db,
+                            feed_cache,
+                            parsed.id,
+                            cache_doc,
+                            served_through=next_offset,
+                            user_did=user_did,
+                            load_test=is_load_test,
+                        )
+                        if (
+                            page
+                            and preferences_read_succeeded
+                            and len(cached_uris) - next_offset < limit
+                            and len(cache_doc.items) < MAX_CURSOR_SESSION_ITEMS
+                        ):
+                            # The reader is on the session's last full page: make the
+                            # next batch now so the next page is served from cache.
+                            _spawn_background(
+                                _prefetch_next_batch(
+                                    request,
+                                    db,
+                                    feed_cache,
+                                    feed_cfg,
+                                    request_id=parsed.id,
+                                    stored_items=list(cache_doc.items),
+                                    excluded_uris=cached_uris,
+                                    exclusions=generation_exclusions,
+                                    user_did=user_did,
+                                    feed_name=feed_name,
+                                    limit=limit,
+                                    max_age_hours=max_age_hours,
+                                    generators_override=generators_override,
+                                    contextual_pin_uris=contextual_pin_uris,
+                                    debug_enabled=debug_enabled,
+                                    load_test=is_load_test,
+                                )
+                            )
                     cached_snapshot = FeedSnapshotDocument(
                         request_id=parsed.id,
                         items=cached_uris,
@@ -2059,6 +2282,22 @@ async def get_feed_skeleton(
                         ),
                         cursor=next_cursor,
                     )
+
+
+                if parsed.offset < len(cached_uris):
+                    return await serve_from_cache(cache_doc, cached_uris)
+
+                # A prefetch of the next batch is under way: wait briefly for it
+                # rather than generating the same batch a second time.
+                if _prefetch_in_progress(cache_doc):
+                    prefetched = await _wait_for_prefetch(feed_cache, parsed.id, parsed.offset)
+                    if prefetched is not None:
+                        prefetched_uris = [
+                            uri for uri in prefetched.items if uri not in contextual_pin_uris
+                        ]
+                        if parsed.offset < len(prefetched_uris):
+                            return await serve_from_cache(prefetched, prefetched_uris)
+                        cache_doc, cached_uris = prefetched, prefetched_uris
 
                 # Offset is at or past the end — regenerate with exclusions,
                 # unless the session is already as large as it may grow.

@@ -220,6 +220,20 @@ class FeedCacheDocument(BaseModel):
         default=None,
         description="Deterministic fingerprint of the effective generation preferences.",
     )
+    prefetch_started_at: datetime | None = Field(
+        default=None,
+        description="Lease on generating this session's next batch ahead of the reader; "
+        "cleared when the batch is appended or the attempt ends.",
+    )
+    pending_discards: list[str] = Field(
+        default_factory=list,
+        description="Low-score URIs from a prefetched batch, recorded as discarded only once "
+        "that batch is served (from item pending_discards_from on).",
+    )
+    pending_discards_from: int | None = Field(
+        default=None,
+        description="Offset of the first item of the prefetched batch pending_discards came from.",
+    )
     load_test: bool = Field(
         default=False,
         description="True when this cache entry was created by a load-test session. The cache "

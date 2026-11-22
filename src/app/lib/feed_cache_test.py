@@ -12,6 +12,7 @@ from ..lib.feed_cache import (
     DEFAULT_TTL_SECONDS,
     FEED_CACHE_COLLECTION,
     FirestoreFeedCache,
+    InMemoryFeedCache,
 )
 from ..models import FeedCursor
 
@@ -321,3 +322,63 @@ class TestFirestoreFeedCacheAppend:
 
         result = await cache.append("key1", ["at://a/2"])
         assert result is None
+
+
+class TestPrefetchLeaseAndAppend:
+    """Session bookkeeping for cursor prefetch (shared by both backends)."""
+
+    def _doc(self, items: list[str]) -> FeedCacheDocument:
+        return FeedCacheDocument(
+            items=items,
+            items_meta=[PipelineItemMeta(at_uri=uri) for uri in items],
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+
+    @pytest.mark.asyncio
+    async def test_only_one_claim_holds_the_lease_until_released(self):
+        cache = InMemoryFeedCache()
+        await cache.store_document("s", self._doc(["at://a"]))
+
+        assert await cache.claim_prefetch("s", lease_seconds=15) is True
+        assert await cache.claim_prefetch("s", lease_seconds=15) is False
+        await cache.release_prefetch("s")
+        assert await cache.claim_prefetch("s", lease_seconds=15) is True
+
+    @pytest.mark.asyncio
+    async def test_a_stale_lease_can_be_taken_over(self):
+        cache = InMemoryFeedCache()
+        doc = self._doc(["at://a"]).model_copy(
+            update={"prefetch_started_at": datetime.now(timezone.utc) - timedelta(seconds=30)}
+        )
+        await cache.store_document("s", doc)
+
+        assert await cache.claim_prefetch("s", lease_seconds=15) is True
+
+    @pytest.mark.asyncio
+    async def test_missing_session_cannot_be_claimed(self):
+        assert await InMemoryFeedCache().claim_prefetch("nope", lease_seconds=15) is False
+
+    @pytest.mark.asyncio
+    async def test_append_releases_the_lease_and_holds_discards_from_the_new_batch(self):
+        cache = InMemoryFeedCache()
+        await cache.store_document("s", self._doc(["at://a", "at://b"]))
+        await cache.claim_prefetch("s", lease_seconds=15)
+
+        updated = await cache.append_document(
+            "s",
+            ["at://c"],
+            [PipelineItemMeta(at_uri="at://c")],
+            pending_discards=["at://low"],
+        )
+
+        assert updated is not None
+        assert updated.items == ["at://a", "at://b", "at://c"]
+        assert updated.prefetch_started_at is None
+        assert updated.pending_discards == ["at://low"]
+        assert updated.pending_discards_from == 2
+
+        await cache.clear_pending_discards("s")
+        cleared = await cache.retrieve_document("s")
+        assert cleared is not None
+        assert cleared.pending_discards == []
+        assert cleared.pending_discards_from is None
