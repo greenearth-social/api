@@ -32,6 +32,7 @@ for step in \
     ensure_firestore_api_key_secret ensure_inference_api_key_secret_access \
     ensure_feed_context_secret ensure_probe_secret ensure_load_test_secret \
     setup_secrets setup_bsky_secret setup_perspective_secret setup_posthog_secret \
+    setup_posthog_feature_flags_secret \
     check_vpc_connector setup_feed_probe_cloud_scheduler \
     setup_follows_refresh_cloud_scheduler; do
     eval "$step() { record '$step'; }"

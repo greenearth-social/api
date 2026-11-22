@@ -31,6 +31,7 @@ GE_ANTHROPIC_API_KEY=""
 
 # PostHog API key for user analytics (each environment is a separate PostHog project)
 GE_POSTHOG_API_KEY=""
+GE_POSTHOG_FEATURE_FLAGS_KEY=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -714,6 +715,36 @@ setup_posthog_secret() {
         --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $posthog_secret"
 }
 
+setup_posthog_feature_flags_secret() {
+    # Optional. Lets the api evaluate PostHog feature flags in process instead of
+    # calling PostHog on every feed request. Use the project's "Feature flags
+    # secure API key" (Settings -> Project -> Feature flags) or a personal API
+    # key with feature-flag read access. deploy.sh mounts it only if it exists.
+    local secret="posthog-feature-flags-key-$ENVIRONMENT"
+    local sa_email="api-runner-$ENVIRONMENT@$PROJECT_ID.iam.gserviceaccount.com"
+
+    if [ -n "$GE_POSTHOG_FEATURE_FLAGS_KEY" ]; then
+        if ! gcloud secrets describe "$secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+            echo -n "$GE_POSTHOG_FEATURE_FLAGS_KEY" | gcloud secrets create "$secret" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "PostHog feature-flags key secret created: $secret"
+        else
+            echo -n "$GE_POSTHOG_FEATURE_FLAGS_KEY" | gcloud secrets versions add "$secret" \
+                --data-file=- --project="$PROJECT_ID"
+            log_info "PostHog feature-flags key secret updated: $secret"
+        fi
+    elif ! gcloud secrets describe "$secret" --project="$PROJECT_ID" > /dev/null 2>&1; then
+        log_warn "PostHog feature-flags key not provided; flags will be evaluated remotely."
+        log_warn "Run with --posthog-feature-flags-key '<key>' to enable local evaluation."
+        return 0
+    fi
+
+    gcloud secrets add-iam-policy-binding "$secret" \
+        --member="serviceAccount:$sa_email" \
+        --role="roles/secretmanager.secretAccessor" \
+        --condition=None > /dev/null 2>&1 || log_info "Service account already has access to $secret"
+}
+
 _setup_bsky_secret() {
     local secret_name="$1"
     local password="$2"
@@ -944,6 +975,7 @@ main() {
     setup_perspective_secret
     setup_anthropic_secret
     setup_posthog_secret
+    setup_posthog_feature_flags_secret
     check_vpc_connector
     setup_feed_probe_cloud_scheduler
     setup_follows_refresh_cloud_scheduler
@@ -1013,6 +1045,10 @@ while [[ $# -gt 0 ]]; do
             GE_POSTHOG_API_KEY="$2"
             shift 2
             ;;
+        --posthog-feature-flags-key)
+            GE_POSTHOG_FEATURE_FLAGS_KEY="$2"
+            shift 2
+            ;;
         --no-fetch-es-key)
             FETCH_ES_KEY=false
             shift
@@ -1040,6 +1076,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --posthog-api-key KEY    PostHog project API key for this environment"
             echo "                           (stored in Secret Manager; stage and prod use separate"
             echo "                           PostHog projects, so pass a different key per environment)"
+            echo "  --posthog-feature-flags-key KEY"
+            echo "                           Optional PostHog feature-flags secure API key, so the api"
+            echo "                           evaluates flags in process (stored in Secret Manager)"
             echo "  --no-fetch-es-key        Skip fetching ES API key from K8s"
             echo ""
             echo "Existing inference secrets:"
