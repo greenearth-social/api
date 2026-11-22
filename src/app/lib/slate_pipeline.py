@@ -32,7 +32,6 @@ from ..documents import FeedSnapshotDocument
 from ..models import CandidateGenerateRequest, CandidatePost, SlateConfig
 from .candidates import run_generate
 from .candidates.base import CandidateGenerator
-from .candidates.generate import hydrate_posts
 from .diversify import mmr_rerank
 from .feed_debug import FeedDebugRecorder, current_recorder, feed_debug_scope
 from .metrics import get_metric_collector
@@ -154,6 +153,7 @@ async def run_ranking_pipeline(
                 es,
                 extra_generators=extra_generators,
                 feed_name=feed_name,
+                hydrate_per_generator=True,
             )
         candidates = result.candidates
 
@@ -179,9 +179,9 @@ async def run_ranking_pipeline(
         if not candidates:
             return PipelineResult([], [])
 
-        # Generators fetch lightweight candidates. Backfill embeddings and topic
-        # scores in one batched ES call after deduping to the working set.
-        candidates = await hydrate_posts(es, candidates)
+        # Embeddings and topic scores were filled in each generator's own task
+        # (run_generate's hydrate_per_generator), overlapping the slower
+        # generators instead of following them.
 
         low_score_uris: list[str] = []
         # True once model rank scores are on the candidates, not the fail-open ordering.

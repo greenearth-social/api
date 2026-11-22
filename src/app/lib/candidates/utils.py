@@ -1,16 +1,20 @@
 from ...models import CandidatePost
-from ..elasticsearch import post_has_embedding_source, unwrap_es_response
-from ..embeddings import MINILM_L12_EMBEDDING_KEY, encode_float32_b64
+from ..elasticsearch import (
+    embedding_from_fields,
+    post_has_embedding_source,
+    unwrap_es_response,
+)
+from ..embeddings import MINILM_L12_EMBEDDING_FIELD, MINILM_L12_EMBEDDING_KEY, encode_float32_b64
 from ..topic_scores import politics_score_from_source
-
 
 # Fields every candidate generator should pull from ES via `_source`.
 # Critically, this does NOT include the 384-dim embedding array, even
 # though MMR and the heavy ranker need it downstream. A kNN search
 # at k=250 with embeddings in _source returns ~1.8 MB; without them it
-# returns ~50 KB. We refetch embeddings in one batched call after
-# dedup, against the much smaller set of candidates that actually make
-# it through.
+# returns ~50 KB. A generator whose hits are exactly its candidates adds
+# CANDIDATE_EMBEDDING_DOCVALUE_FIELDS instead (doc values, not _source);
+# the rest are filled by hydrate_posts, per generator and from the
+# post-features cache where possible.
 CANDIDATE_SOURCE_FIELDS = [
     "at_uri",
     "author_did",
@@ -31,6 +35,13 @@ CANDIDATE_SOURCE_FIELDS = [
     "combined_perspective_score",
     "perspective_scored_at",
 ]
+
+
+# Pass as ``docvalue_fields`` to a generator query whose hits are the
+# generator's final candidates, so they arrive with the MiniLM embedding the
+# ranker needs and skip a later hydration lookup. Not for queries that
+# overfetch: at ~4.5 KB per hit the vector dominates the response size.
+CANDIDATE_EMBEDDING_DOCVALUE_FIELDS = [MINILM_L12_EMBEDDING_FIELD]
 
 
 def candidate_posts_from_es_response(
@@ -56,6 +67,10 @@ def candidate_post_from_hit(
         if isinstance(embeddings_obj, dict)
         else None
     )
+    if l12 is None:
+        # Generators that request CANDIDATE_EMBEDDING_DOCVALUE_FIELDS get the
+        # vector from doc values rather than _source (see embedding_from_fields).
+        l12 = embedding_from_fields(hit)
 
     encoded = None
     if l12 is not None and post_has_embedding_source(src):

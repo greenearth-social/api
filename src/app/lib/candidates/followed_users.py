@@ -12,7 +12,12 @@ from ..config import fail_fast
 from ..followed_users_cache import MAX_FOLLOWED_USERS, get_followed_dids_cached
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult
-from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
+from .post_features_cache import remember_post_features
+from .utils import (
+    CANDIDATE_EMBEDDING_DOCVALUE_FIELDS,
+    CANDIDATE_SOURCE_FIELDS,
+    candidate_posts_from_es_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +105,13 @@ async def _followed_users_search_with_reason(
             size=num_candidates,
             sort=[{"created_at": "desc"}],
             _source=CANDIDATE_SOURCE_FIELDS,
+            # The hits are exactly the candidates, so fetching their embeddings
+            # here saves the ranker's hydration lookup.
+            docvalue_fields=CANDIDATE_EMBEDDING_DOCVALUE_FIELDS,
         )
 
     candidates = candidate_posts_from_es_response(resp, generator_name=generator_name)
+    remember_post_features(candidates)
     if exclude_uris:
         # ES already excluded these; kept as a cheap safety net.
         exclude_set = set(exclude_uris)

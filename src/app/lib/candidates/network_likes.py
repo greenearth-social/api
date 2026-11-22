@@ -24,7 +24,12 @@ from ..followed_users_cache import get_followed_dids_cached
 from ..metrics import get_metric_collector
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult
-from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
+from .post_features_cache import remember_post_features
+from .utils import (
+    CANDIDATE_EMBEDDING_DOCVALUE_FIELDS,
+    CANDIDATE_SOURCE_FIELDS,
+    candidate_posts_from_es_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,10 +145,18 @@ async def fetch_posts_by_uris(
     video_only: bool = False,
     exclude_uris: list[str] | None = None,
     max_age_hours: MaxAgeHours = MAX_AGE_HOURS,
-) -> list[CandidatePost]:
-    """Fetch posts for the supplied URIs, preserving the requested URI order."""
+    *,
+    limit: int | None = None,
+) -> tuple[list[CandidatePost], int]:
+    """Fetch posts for the supplied URIs, preserving the requested URI order.
+
+    Returns the posts and how many of *at_uris* matched in total. With
+    *limit*, ES sorts the matches by their position in *at_uris* and returns
+    only the first *limit*, with their embeddings, so a caller that ranks more
+    URIs than it keeps does not pay for the vectors of posts it drops.
+    """
     if not at_uris:
-        return []
+        return [], 0
 
     filters: list[dict] = [
         {"range": {"created_at": {"gte": f"now-{max_age_hours}h"}}},
@@ -151,7 +164,7 @@ async def fetch_posts_by_uris(
     if video_only:
         filters.append({"term": {"contains_video": True}})
 
-    posts_query = {
+    posts_query: dict = {
         "bool": {
             "filter": [
                 *filters,
@@ -159,22 +172,51 @@ async def fetch_posts_by_uris(
             ],
         }
     }
+    if exclude_uris:
+        posts_query["bool"]["must_not"] = [{"terms": {"at_uri": exclude_uris}}]
+
+    search_kwargs: dict = {}
+    if limit is not None:
+        position = {uri: index for index, uri in enumerate(at_uris)}
+        search_kwargs = {
+            "sort": [
+                {
+                    "_script": {
+                        "type": "number",
+                        "order": "asc",
+                        "script": {
+                            "source": (
+                                "params.position.getOrDefault(doc['at_uri'].value, "
+                                "params.unranked)"
+                            ),
+                            "params": {"position": position, "unranked": len(at_uris)},
+                        },
+                    }
+                }
+            ],
+            "docvalue_fields": CANDIDATE_EMBEDDING_DOCVALUE_FIELDS,
+            "track_total_hits": True,
+        }
 
     resp = await es.search(
         index="posts_recent",
         op="hydrate",
         query=posts_query,
-        size=len(at_uris),
+        size=len(at_uris) if limit is None else min(limit, len(at_uris)),
         _source=CANDIDATE_SOURCE_FIELDS,
+        **search_kwargs,
     )
 
+    data = unwrap_es_response(resp)
     exclude_set = set(exclude_uris) if exclude_uris else set()
     candidates_by_uri: dict[str, CandidatePost] = {}
     for candidate in candidate_posts_from_es_response(resp, generator_name=generator_name):
         if candidate.at_uri and candidate.at_uri not in exclude_set:
             candidates_by_uri[candidate.at_uri] = candidate
 
-    return [candidates_by_uri[at_uri] for at_uri in at_uris if at_uri in candidates_by_uri]
+    total = (data.get("hits", {}).get("total") or {}).get("value")
+    matched = total if isinstance(total, int) else len(candidates_by_uri)
+    return [candidates_by_uri[at_uri] for at_uri in at_uris if at_uri in candidates_by_uri], matched
 
 
 def _record_scan_telemetry(
@@ -293,21 +335,23 @@ async def _network_likes_search_with_reason(
             key=lambda uri: (-like_counts[uri], last_seen_order[uri]),
         )[: hydrated_uri_limit(num_candidates)]
 
-        hydrated = await fetch_posts_by_uris(
+        hydrated, hydrated_hits = await fetch_posts_by_uris(
             es,
             ranked_uris,
             generator_name=generator_name,
             video_only=video_only,
             exclude_uris=exclude_uris,
             max_age_hours=max_age_hours,
+            limit=num_candidates,
         )
+    remember_post_features(hydrated)
 
     _record_scan_telemetry(
         scanned_likes=len(liked_uris),
         scan_size=scan_size,
         unique_uris=len(like_counts),
         hydrated_uris=len(ranked_uris),
-        hydrated_hits=len(hydrated),
+        hydrated_hits=hydrated_hits,
     )
 
     # fetch_posts_by_uris preserves the requested URI order, which is already

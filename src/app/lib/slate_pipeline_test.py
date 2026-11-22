@@ -169,11 +169,6 @@ async def _run(slate: SlateConfig, recorder: FeedDebugRecorder | None = None):
             return_value=CandidateGenerateResult(candidates=CANDIDATES),
         ),
         patch(
-            "app.lib.slate_pipeline.hydrate_posts",
-            new_callable=AsyncMock,
-            return_value=CANDIDATES,
-        ),
-        patch(
             "app.lib.slate_pipeline.run_predict",
             new_callable=AsyncMock,
             return_value=RANKINGS,

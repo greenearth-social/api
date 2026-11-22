@@ -5,7 +5,11 @@ import logging
 
 from ...models import CandidatePost
 from ..elasticsearch import POSTS_KNN_INDEX
-from .utils import CANDIDATE_SOURCE_FIELDS, candidate_posts_from_es_response
+from .utils import (
+    CANDIDATE_EMBEDDING_DOCVALUE_FIELDS,
+    CANDIDATE_SOURCE_FIELDS,
+    candidate_posts_from_es_response,
+)
 from ..telemetry import timed
 
 logger = logging.getLogger(__name__)
@@ -91,6 +95,10 @@ async def knn_search_posts(
             knn=knn_clause,
             size=num_candidates,
             _source=CANDIDATE_SOURCE_FIELDS,
+            # The hits are exactly the candidates, so fetching their embeddings
+            # here saves the ranker's hydration lookup. (Politics scores still
+            # come from hydration: the quality index has no topic_scores.)
+            docvalue_fields=CANDIDATE_EMBEDDING_DOCVALUE_FIELDS,
             # Callers abandon this search after a few seconds (the candidate
             # generator timeout), but ES keeps executing abandoned queries to
             # completion — a long client timeout here lets a pathological query

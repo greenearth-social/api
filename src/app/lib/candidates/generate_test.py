@@ -1491,3 +1491,131 @@ class TestCompleteDetail:
         request = _make_request("gen").model_copy(update={"detail": "complete"})
         with pytest.raises(generate_module.DetailHydrationError):
             await run_generate(request, es=object(), feed_name="test-feed")
+
+
+class _SlowGenerator(_FixedGenerator):
+    """A fixed generator that finishes only once *release* is set."""
+
+    def __init__(self, name: str, candidates: list[CandidatePost], release: asyncio.Event):
+        super().__init__(name, candidates)
+        self._release = release
+
+    async def generate(self, es, user_did, num_candidates=100, video_only=False,
+                       exclude_uris=None, max_age_hours=168):
+        await asyncio.wait_for(self._release.wait(), timeout=2)
+        return await super().generate(es, user_did)
+
+
+class TestPostFeaturesCacheInHydration:
+    @pytest.mark.asyncio
+    async def test_second_hydration_of_a_post_is_served_from_cache(self, monkeypatch):
+        fetch = _RecordingFetch([("at://a", [1.0, 0.5], 0.25)])
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
+
+        first = await generate_module.hydrate_posts(object(), [_candidate("at://a")])
+        second = await generate_module.hydrate_posts(object(), [_candidate("at://a")])
+
+        assert len(fetch.calls) == 1
+        assert second[0].minilm_l12_embedding == first[0].minilm_l12_embedding
+        assert second[0].politics_score == 0.25
+
+    @pytest.mark.asyncio
+    async def test_a_post_without_an_embedding_is_not_looked_up_again(self, monkeypatch):
+        fetch = _RecordingFetch([])
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
+
+        await generate_module.hydrate_posts(object(), [_candidate("at://empty")])
+        result = await generate_module.hydrate_posts(object(), [_candidate("at://empty")])
+
+        assert len(fetch.calls) == 1
+        assert result[0].minilm_l12_embedding is None
+
+    @pytest.mark.asyncio
+    async def test_failed_hydration_is_not_cached(self, monkeypatch):
+        calls = 0
+
+        async def failing(es, at_uris, index="posts"):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("Elasticsearch failed")
+
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", failing)
+
+        await generate_module.hydrate_posts(object(), [_candidate("at://a")])
+        await generate_module.hydrate_posts(object(), [_candidate("at://a")])
+
+        assert calls == 2
+
+    @pytest.mark.asyncio
+    async def test_remembered_generator_output_resolves_a_post_without_topic_scores(
+        self, monkeypatch
+    ):
+        # followed_users and network_likes read embeddings and topic scores from
+        # posts_recent themselves; a post with no topic scores is then resolved,
+        # not refetched only to learn the same thing.
+        from ..candidates.post_features_cache import remember_post_features
+
+        embedding = encode_float32_b64([1.0, 0.5])
+        candidate = CandidatePost(at_uri="at://a", minilm_l12_embedding=embedding)
+        fetch = _RecordingFetch([])
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
+
+        remember_post_features([candidate])
+        result = await generate_module.hydrate_posts(object(), [candidate])
+
+        assert fetch.calls == []
+        assert result == [candidate]
+
+
+class TestPerGeneratorHydration:
+    @pytest.mark.asyncio
+    async def test_fast_generator_is_hydrated_before_a_slow_one_finishes(self, monkeypatch):
+        release = asyncio.Event()
+        fetch_calls: list[list[str]] = []
+
+        async def fetch(es, at_uris, index="posts"):
+            fetch_calls.append(list(at_uris))
+            # The fast generator's hydration runs while the slow one still waits.
+            release.set()
+            return [(uri, [1.0, 0.5], 0.5) for uri in at_uris]
+
+        _stub_generators(
+            monkeypatch,
+            {
+                "fast": _FixedGenerator("fast", [_candidate("at://fast", "fast")]),
+                "slow": _SlowGenerator("slow", [_candidate("at://slow", "slow")], release),
+            },
+        )
+        monkeypatch.setattr(generate_module, "fetch_post_embeddings_and_politics_scores", fetch)
+        request = _hydrate_request("fast", hydrate=False).model_copy(
+            update={
+                "generators": [
+                    GeneratorSpec(name="fast", weight=0.5),
+                    GeneratorSpec(name="slow", weight=0.5),
+                ]
+            }
+        )
+
+        result = await run_generate(
+            request, es=object(), feed_name="test-feed", hydrate_per_generator=True
+        )
+
+        assert fetch_calls[0] == ["at://fast"]
+        assert all(c.minilm_l12_embedding for c in result.candidates)
+        assert {c.at_uri for c in result.candidates} == {"at://fast", "at://slow"}
+
+    @pytest.mark.asyncio
+    async def test_candidates_api_does_not_return_embeddings_it_did_not_ask_for(
+        self, monkeypatch
+    ):
+        embedded = CandidatePost(
+            at_uri="at://a", minilm_l12_embedding=encode_float32_b64([1.0]), politics_score=0.5
+        )
+        _stub_generators(monkeypatch, {"gen": _FixedGenerator("gen", [embedded])})
+
+        result = await run_generate(
+            _hydrate_request("gen", hydrate=False), es=object(), feed_name="test-feed"
+        )
+
+        assert result.candidates[0].minilm_l12_embedding is None
+        assert result.candidates[0].politics_score == 0.5

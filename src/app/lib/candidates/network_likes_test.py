@@ -109,13 +109,22 @@ class FakeEs:
         if index == "posts_recent":
             assert query is not None
             requested_uris = post_terms_from_query(query)
+            excluded = {
+                uri
+                for clause in query.get("bool", {}).get("must_not", [])
+                for uri in clause.get("terms", {}).get("at_uri", [])
+            }
             return_order = self.posts_return_order or requested_uris
-            hits = [
-                self.posts_by_uri[uri]
+            matched = [
+                uri
                 for uri in return_order
-                if uri in requested_uris and uri in self.posts_by_uri
+                if uri in requested_uris and uri in self.posts_by_uri and uri not in excluded
             ]
-            return {"hits": {"hits": hits}}
+            if sort and "_script" in sort[0]:
+                position = sort[0]["_script"]["script"]["params"]["position"]
+                matched.sort(key=lambda uri: position[uri])
+            hits = [self.posts_by_uri[uri] for uri in matched][: size or len(matched)]
+            return {"hits": {"hits": hits, "total": {"value": len(matched)}}}
 
         return {"hits": {"hits": []}}
 
@@ -236,11 +245,12 @@ class TestFetchPostsByUris:
             posts_return_order=["at://post/b", "at://post/a"],
         )
 
-        candidates = await fetch_posts_by_uris(
+        candidates, matched = await fetch_posts_by_uris(
             es,
             ["at://post/a", "at://post/b"],
             generator_name="network_likes",
         )
+        assert matched == 2
 
         assert [candidate.at_uri for candidate in candidates] == [
             "at://post/a",
@@ -252,7 +262,7 @@ class TestFetchPostsByUris:
         assert es.calls[0]["index"] == "posts_recent"
 
     @pytest.mark.asyncio
-    async def test_applies_video_filter_in_es_and_exclude_filter_in_python(self):
+    async def test_applies_video_and_exclude_filters_in_es(self):
         es = FakeEs(
             posts_by_uri={
                 "at://post/a": post_hit("at://post/a"),
@@ -260,7 +270,7 @@ class TestFetchPostsByUris:
             },
         )
 
-        candidates = await fetch_posts_by_uris(
+        candidates, _matched = await fetch_posts_by_uris(
             es,
             ["at://post/a", "at://post/seen"],
             video_only=True,
@@ -271,8 +281,32 @@ class TestFetchPostsByUris:
         assert {"term": {"contains_video": True}} in query["bool"]["filter"]
         assert {"range": {"created_at": {"gte": "now-168h"}}} in query["bool"]["filter"]
         assert {"terms": {"at_uri": ["at://post/a", "at://post/seen"]}} in query["bool"]["filter"]
-        assert "must_not" not in query["bool"]
+        assert query["bool"]["must_not"] == [{"terms": {"at_uri": ["at://post/seen"]}}]
         assert [c.at_uri for c in candidates] == ["at://post/a"]
+
+    @pytest.mark.asyncio
+    async def test_limit_returns_only_the_top_ranked_posts_with_embeddings(self):
+        # The generator ranks more URIs than it keeps; with a limit ES sorts the
+        # matches by that ranking and returns only the kept ones, carrying their
+        # embeddings so the ranker needs no second lookup.
+        uris = ["at://post/c", "at://post/a", "at://post/b"]
+        es = FakeEs(
+            posts_by_uri={uri: post_hit(uri) for uri in uris},
+            posts_return_order=["at://post/a", "at://post/b", "at://post/c"],
+        )
+
+        candidates, matched = await fetch_posts_by_uris(es, uris, limit=2)
+
+        assert [c.at_uri for c in candidates] == ["at://post/c", "at://post/a"]
+        assert matched == 3
+        call = es.calls[0]
+        assert call["size"] == 2
+        assert call["sort"][0]["_script"]["script"]["params"]["position"] == {
+            "at://post/c": 0,
+            "at://post/a": 1,
+            "at://post/b": 2,
+        }
+        assert call["kwargs"]["docvalue_fields"] == ["embeddings.all_MiniLM_L12_v2"]
 
     @pytest.mark.asyncio
     async def test_empty_uri_list_skips_es(self):
@@ -280,7 +314,7 @@ class TestFetchPostsByUris:
 
         candidates = await fetch_posts_by_uris(es, [])
 
-        assert candidates == []
+        assert candidates == ([], 0)
         assert es.calls == []
 
 

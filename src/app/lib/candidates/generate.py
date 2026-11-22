@@ -28,6 +28,7 @@ from ..metrics import get_metric_collector
 from ..pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult, get_generator
+from .post_features_cache import PostFeatures, get_post_features_cache
 
 logger = logging.getLogger(__name__)
 
@@ -123,65 +124,82 @@ try:
 except ValueError:
     _EMBED_HYDRATION_TIMEOUT_SEC = 1.5
 
+def _needs_hydration(candidate: CandidatePost) -> bool:
+    return bool(candidate.at_uri) and (
+        not candidate.minilm_l12_embedding or candidate.politics_score is None
+    )
+
+
+def _with_features(candidate: CandidatePost, features: PostFeatures) -> CandidatePost:
+    """Fill a candidate's missing embedding and politics score from *features*."""
+    update: dict = {}
+    if not candidate.minilm_l12_embedding and features.embedding:
+        update["minilm_l12_embedding"] = features.embedding
+    if candidate.politics_score is None and features.politics_score is not None:
+        update["politics_score"] = features.politics_score
+    return candidate.model_copy(update=update) if update else candidate
+
+
 async def hydrate_posts(es, candidates: list[CandidatePost]) -> list[CandidatePost]:
-    """Fetch missing L12 embeddings and politics scores in a single batched ES call."""
-    missing = [
-        c.at_uri for c in candidates
-        if c.at_uri and (not c.minilm_l12_embedding or c.politics_score is None)
-    ]
-    if not missing:
+    """Fill missing L12 embeddings and politics scores, from cache or one ES call.
+
+    Both features are fixed once a post is indexed, so they are served from the
+    instance's :mod:`post_features_cache` when an earlier render fetched them,
+    and only the remainder is fetched from ``posts_recent``. Posts the query
+    does not return (no embedding) are cached as such too.
+    """
+    pending = [c for c in candidates if _needs_hydration(c)]
+    if not pending:
         return candidates
 
-    try:
-        async with timed(logger, "hydrate_posts", n_missing=len(missing)):
-            hydration_results = await asyncio.wait_for(
-                fetch_post_embeddings_and_politics_scores(es, missing, index="posts_recent"),
-                timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
-            )
-    except Exception as exc:
-        if isinstance(exc, TimeoutError):
-            logger.warning(
-                "Post hydration timed out after %.1fs; continuing without",
-                _EMBED_HYDRATION_TIMEOUT_SEC,
-            )
-        else:
-            logger.exception("Post hydration failed; continuing without")
+    cache = get_post_features_cache()
+    known = cache.get_many([c.at_uri for c in pending if c.at_uri])
+    missing = list(dict.fromkeys(c.at_uri for c in pending if c.at_uri and c.at_uri not in known))
 
-        ctx = current_pipeline_context()
-        if ctx is not None:
-            ctx.record(
-                DegradationEvent(
-                    stage=DegradationStage.EMBED_HYDRATION,
-                    component="fetch_post_embeddings_and_politics_scores",
-                    cause=exc,
-                )
-            )
-        return candidates
-
-    politics_scores: dict[str, float | None] = {}
-    encoded: dict[str, str] = {}
-    for uri, vec, politics_score in hydration_results:
-        politics_scores[uri] = politics_score
+    if missing:
         try:
-            encoded[uri] = encode_float32_b64(vec)
-        except Exception:
-            continue
+            async with timed(logger, "hydrate_posts", n_missing=len(missing)):
+                hydration_results = await asyncio.wait_for(
+                    fetch_post_embeddings_and_politics_scores(es, missing, index="posts_recent"),
+                    timeout=_EMBED_HYDRATION_TIMEOUT_SEC,
+                )
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                logger.warning(
+                    "Post hydration timed out after %.1fs; continuing without",
+                    _EMBED_HYDRATION_TIMEOUT_SEC,
+                )
+            else:
+                logger.exception("Post hydration failed; continuing without")
 
-    if not encoded and not politics_scores:
+            ctx = current_pipeline_context()
+            if ctx is not None:
+                ctx.record(
+                    DegradationEvent(
+                        stage=DegradationStage.EMBED_HYDRATION,
+                        component="fetch_post_embeddings_and_politics_scores",
+                        cause=exc,
+                    )
+                )
+        else:
+            for uri, vec, politics_score in hydration_results:
+                try:
+                    embedding: str | None = encode_float32_b64(vec)
+                except Exception:
+                    embedding = None
+                known[uri] = PostFeatures(embedding, politics_score)
+            for uri in missing:
+                # Not returned: the post has no embedding (or no embedding source text).
+                known.setdefault(uri, PostFeatures(None, None))
+            for uri in missing:
+                cache.put(uri, known[uri])
+
+    if not known:
         return candidates
-
-    final_candidates = []
-    for c in candidates:
-        final_candidate = c
-        update_dict = {}
-        if c.at_uri and not c.minilm_l12_embedding and c.at_uri in encoded:
-            update_dict["minilm_l12_embedding"] = encoded[c.at_uri]
-        if c.at_uri and c.politics_score is None and c.at_uri in politics_scores:
-            update_dict["politics_score"] = politics_scores[c.at_uri]
-        if update_dict:
-            final_candidate = c.model_copy(update=update_dict)
-        final_candidates.append(final_candidate)
-    return final_candidates
+    return [
+        _with_features(c, known[c.at_uri]) if c.at_uri in known and _needs_hydration(c) else c
+        for c in candidates
+    ]
 
 
 async def hydrate_complete_details(
@@ -213,8 +231,15 @@ async def run_generate(
     *,
     extra_generators: Mapping[str, CandidateGenerator] | None = None,
     feed_name: str,
+    hydrate_per_generator: bool = False,
 ) -> CandidateGenerateResult:
     """Execute a candidate-generation pipeline described by *request*.
+
+    With ``hydrate_per_generator`` each generator's candidates get their
+    embeddings and politics scores (``hydrate_posts``) in that generator's own
+    task, so hydration overlaps the slower generators instead of following
+    them all. The feed pipeline sets it. Without it, embeddings are returned
+    only when ``request.hydrate_embeddings`` asks for them.
 
     ``feed_name`` labels metrics with the requested feed, or ``candidates_api``
     for direct candidate-generation requests.
@@ -271,6 +296,12 @@ async def run_generate(
                             max_age_hours=request.max_age_hours,
                         ),
                         timeout=_GENERATOR_TIMEOUT_SEC,
+                    )
+                ]
+            if hydrate_per_generator and results[0].candidates:
+                results = [
+                    results[0].model_copy(
+                        update={"candidates": await hydrate_posts(es, results[0].candidates)}
                     )
                 ]
             if results[0].status == "not_run":
@@ -466,6 +497,10 @@ async def run_generate(
                 raise GeneratorError(request.infill, exc, is_infill=True) from exc
 
         infill_result = infill_result.model_copy(update={"mode": "infill"})
+        if hydrate_per_generator and infill_result.candidates:
+            infill_result = infill_result.model_copy(
+                update={"candidates": await hydrate_posts(es, infill_result.candidates)}
+            )
         if rec is not None:
             rec.record_generator_output(infill_result)
         deduped = dedup_candidates(deduped + infill_result.candidates)
@@ -473,6 +508,13 @@ async def run_generate(
     final = deduped[:request.num_candidates]
     if getattr(request, 'hydrate_embeddings', False):
         final = await hydrate_posts(es, final)
+    elif not hydrate_per_generator:
+        # Some generators read embeddings in their own query; a caller that did
+        # not ask for them gets the same response as before that change.
+        final = [
+            c.model_copy(update={"minilm_l12_embedding": None}) if c.minilm_l12_embedding else c
+            for c in final
+        ]
     if request.detail == "complete":
         final = await hydrate_complete_details(es, final)
     if rec is not None:

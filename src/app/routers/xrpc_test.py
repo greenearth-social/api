@@ -3032,7 +3032,7 @@ class TestRankedFeed:
         with (
             self._patch_generators(candidates),
             patch(
-                "app.lib.slate_pipeline.hydrate_posts",
+                "app.lib.candidates.generate.hydrate_posts",
                 new_callable=AsyncMock,
                 return_value=candidates,
             ),
