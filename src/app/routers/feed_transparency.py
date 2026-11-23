@@ -17,7 +17,7 @@ import logging
 import re
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from google.cloud.firestore import AsyncClient
 
 from ..documents import FeedPreferencesDocument, FeedSnapshotDocument, PipelineItemMeta
@@ -32,6 +32,7 @@ from ..lib.firestore import (
     mark_settings_visited,
 )
 from ..lib.metrics import get_metric_collector
+from ..lib.post_blocks import get_author_block_statuses
 from ..lib.post_hydration import hydrate_posts
 from ..lib.request_context import set_traffic
 from ..lib.user_preferences import get_preferences_for_user, patch_preferences_for_user
@@ -62,6 +63,7 @@ router = APIRouter(tags=["feed-transparency"], prefix="/api/feeds")
 
 CACHE_WINDOW_HOURS = 24
 DEFAULT_LIST_LIMIT = 100
+POST_URI = re.compile(r"^at://([^/]+)/app\.bsky\.feed\.post/([^/]+)$")
 PUBLIC_MODERATION_LABELS = frozenset(
     {
         "porn",
@@ -78,7 +80,7 @@ PUBLIC_MODERATION_LABELS = frozenset(
 
 
 def _at_uri_to_bsky_url(at_uri: str, handle: str | None = None) -> str | None:
-    match = re.match(r"^at://([^/]+)/app\.bsky\.feed\.post/([^/]+)$", at_uri)
+    match = POST_URI.fullmatch(at_uri)
     if match is None:
         return None
     did, post_id = match.groups()
@@ -129,11 +131,6 @@ def _build_items(
             else None
         )
         hyd = hydrated.get(meta.at_uri, {})
-        # The AppView applies user-specific moderation after this generator
-        # returns skeleton URIs, so that exact state is not available here.
-        # Missing hydration does reliably indicate a deleted or unavailable
-        # post, which should remain in the stored audit but not render as a
-        # recurring blank observability row.
         if not _has_usable_hydration(hyd):
             unavailable_count += 1
             if include_unavailable:
@@ -215,6 +212,62 @@ def _build_items(
             )
         )
     return items, publicly_filtered_count, unavailable_count, partial_item_count
+
+
+async def _hydrate_snapshot(
+    db: AsyncClient,
+    snapshot: FeedSnapshotDocument,
+    viewer_did: str,
+    *,
+    include_unavailable: bool = False,
+) -> FeedDetailResponse:
+    metadata_authors = {meta.at_uri: meta.author_did for meta in snapshot.items_meta}
+    authors: dict[str, str] = {}
+    for uri in snapshot.items:
+        if match := POST_URI.fullmatch(uri):
+            authority = match[1]
+            did = authority if authority.startswith("did:") else metadata_authors.get(uri)
+            if did and did.startswith("did:"):
+                authors[uri] = did
+
+    statuses = await get_author_block_statuses(viewer_did, list(authors.values()))
+    visible_uris: list[str] = []
+    blocked = unchecked = unavailable = 0
+    for uri in snapshot.items:
+        did = authors.get(uri)
+        relationship = statuses.get(did) if did else "unavailable"
+        if relationship == "clear":
+            visible_uris.append(uri)
+        elif relationship == "blocked":
+            blocked += 1
+        elif relationship == "unavailable":
+            unavailable += 1
+        else:
+            unchecked += 1
+
+    hydrated = await hydrate_posts(db, visible_uris)
+    items, publicly_filtered, missing_hydration, partial = _build_items(
+        snapshot.model_copy(update={"items": visible_uris}),
+        hydrated,
+        include_unavailable=include_unavailable,
+    )
+    return FeedDetailResponse(
+        request_id=snapshot.request_id,
+        generated_at=snapshot.generated_at,
+        api_release_sha=snapshot.api_release_sha,
+        items=items,
+        stored_item_count=len(snapshot.items),
+        displayed_item_count=len(items),
+        publicly_filtered_count=publicly_filtered,
+        blocked_item_count=blocked,
+        block_check_unavailable_count=unchecked,
+        unavailable_count=unavailable + missing_hydration,
+        partial_item_count=partial,
+        generator_diagnostics=[
+            GeneratorDiagnosticView(**diagnostic.model_dump())
+            for diagnostic in snapshot.generator_diagnostics
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +421,7 @@ async def create_feed_preview(
 @router.get("/previews/{request_id}", response_model=FeedDetailResponse)
 async def get_feed_preview(
     request: Request,
+    response: Response,
     request_id: str,
     user_doc_id: FirebaseUser,
 ) -> FeedDetailResponse:
@@ -380,7 +434,7 @@ async def get_feed_preview(
     user_did = f"did:plc:{user_doc_id}"
     if (
         cache_doc is None
-        or cache_doc.mode != "preview"
+        or cache_doc.mode not in {"preview", "accepted"}
         # Slate API previews belong to the partner that made them.
         or cache_doc.api_key_id is not None
         or cache_doc.user_did != user_did
@@ -400,32 +454,26 @@ async def get_feed_preview(
         items_meta=cache_doc.items_meta,
     )
     db: AsyncClient = request.app.state.firestore
-    hydrated = await hydrate_posts(db, snapshot.items)
-    items, publicly_filtered_count, unavailable_count, partial_item_count = _build_items(
-        snapshot,
-        hydrated,
-        include_unavailable=True,
-    )
-    diagnostics = [
-        GeneratorDiagnosticView(**diagnostic.model_dump())
-        for diagnostic in snapshot.generator_diagnostics
-    ]
+    detail = await _hydrate_snapshot(db, snapshot, user_did, include_unavailable=True)
+    response.headers["Cache-Control"] = "private, no-store"
     logger.info(
         "Hydrated settings preview",
         extra={
             "request_id": request_id,
             "feed_name": snapshot.feed_name,
             "stored_item_count": len(snapshot.items),
-            "displayed_item_count": len(items),
-            "partial_item_count": partial_item_count,
-            "unavailable_count": unavailable_count,
-            "generator_diagnostics": [diagnostic.model_dump() for diagnostic in diagnostics],
+            "displayed_item_count": detail.displayed_item_count,
+            "partial_item_count": detail.partial_item_count,
+            "unavailable_count": detail.unavailable_count,
+            "blocked_item_count": detail.blocked_item_count,
+            "block_check_unavailable_count": detail.block_check_unavailable_count,
+            "generator_diagnostics": [d.model_dump() for d in detail.generator_diagnostics],
         },
     )
     if collector := get_metric_collector():
         collector.record(
             "feed.preview.partial_hydration_count",
-            partial_item_count,
+            detail.partial_item_count,
             feed_name=snapshot.feed_name,
         )
         failed_generator = any(
@@ -434,12 +482,14 @@ async def get_feed_preview(
             if diagnostic.weight > 0
         )
         outcome = (
-            "partial_hydration"
-            if partial_item_count
+            "partial_block_check"
+            if detail.block_check_unavailable_count
+            else "partial_hydration"
+            if detail.partial_item_count
             else "generator_failure"
-            if not items and failed_generator
+            if not detail.stored_item_count and failed_generator
             else "empty"
-            if not items
+            if not detail.items
             else "success"
         )
         collector.record(
@@ -448,18 +498,7 @@ async def get_feed_preview(
             feed_name=snapshot.feed_name,
             outcome=outcome,
         )
-    return FeedDetailResponse(
-        request_id=request_id,
-        generated_at=snapshot.generated_at,
-        api_release_sha=snapshot.api_release_sha,
-        items=items,
-        stored_item_count=len(snapshot.items),
-        displayed_item_count=len(items),
-        publicly_filtered_count=publicly_filtered_count,
-        unavailable_count=unavailable_count,
-        partial_item_count=partial_item_count,
-        generator_diagnostics=diagnostics,
-    )
+    return detail
 
 
 @router.post(
@@ -555,6 +594,7 @@ async def accept_preview(
 @router.get("/{request_id}", response_model=FeedDetailResponse)
 async def get_feed_detail(
     request: Request,
+    response: Response,
     request_id: str,
     user_doc_id: FirebaseUser,
 ) -> FeedDetailResponse:
@@ -568,23 +608,5 @@ async def get_feed_detail(
             detail="Feed snapshot not found",
         )
 
-    hydrated = await hydrate_posts(db, snapshot.items)
-    items, publicly_filtered_count, unavailable_count, partial_item_count = _build_items(
-        snapshot, hydrated
-    )
-
-    return FeedDetailResponse(
-        request_id=request_id,
-        generated_at=snapshot.generated_at,
-        api_release_sha=snapshot.api_release_sha,
-        items=items,
-        stored_item_count=len(snapshot.items),
-        displayed_item_count=len(items),
-        publicly_filtered_count=publicly_filtered_count,
-        unavailable_count=unavailable_count,
-        partial_item_count=partial_item_count,
-        generator_diagnostics=[
-            GeneratorDiagnosticView(**diagnostic.model_dump())
-            for diagnostic in snapshot.generator_diagnostics
-        ],
-    )
+    response.headers["Cache-Control"] = "private, no-store"
+    return await _hydrate_snapshot(db, snapshot, f"did:plc:{user_doc_id}")

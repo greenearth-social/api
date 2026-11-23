@@ -117,6 +117,8 @@ class FeedDetailResponse(BaseModel):
     stored_item_count: int = 0
     displayed_item_count: int = 0
     publicly_filtered_count: int = 0
+    blocked_item_count: int = 0
+    block_check_unavailable_count: int = 0
     unavailable_count: int = 0
     partial_item_count: int = 0
     generator_diagnostics: list[GeneratorDiagnosticView] = Field(default_factory=list)

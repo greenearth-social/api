@@ -29,7 +29,14 @@ from ..main import app
 
 
 @pytest.fixture
-def client() -> Generator[TestClient]:
+def block_statuses(monkeypatch):
+    lookup = AsyncMock(side_effect=lambda _viewer, authors: dict.fromkeys(authors, "clear"))
+    monkeypatch.setattr("app.routers.feed_transparency.get_author_block_statuses", lookup)
+    return lookup
+
+
+@pytest.fixture
+def client(block_statuses) -> Generator[TestClient]:
     """Client with Firebase auth bypassed and Firestore mocked on app state."""
     from ..lib.firebase_auth import verify_firebase_auth
 
@@ -546,7 +553,8 @@ def test_create_feed_preview_validates_feed_controls(client, feed_name, body, ex
 
 
 @patch("app.routers.feed_transparency.hydrate_posts", new_callable=AsyncMock)
-def test_get_feed_preview_reads_owned_preview_cache(mock_hydrate, client):
+@pytest.mark.parametrize("cache_mode", ["preview", "accepted"])
+def test_get_feed_preview_reads_owned_preview_cache(mock_hydrate, client, cache_mode):
     snapshot = _snapshot_doc(request_id="preview-1")
     cache = MagicMock()
     cache.retrieve_document = AsyncMock(
@@ -559,7 +567,7 @@ def test_get_feed_preview_reads_owned_preview_cache(mock_hydrate, client):
             generated_at=snapshot.generated_at,
             api_release_sha=snapshot.api_release_sha,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
-            mode="preview",
+            mode=cache_mode,
         )
     )
     app.state.feed_cache = cache
@@ -577,6 +585,7 @@ def test_get_feed_preview_reads_owned_preview_cache(mock_hydrate, client):
     response = client.get("/api/feeds/previews/preview-1")
 
     assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "private, no-store"
     assert response.json()["items"][0]["content"] == "Preview post"
 
 
@@ -637,6 +646,86 @@ def test_get_feed_preview_preserves_ranked_items_when_hydration_is_unavailable(
     assert data["unavailable_count"] == 2
     assert data["partial_item_count"] == 2
     assert data["generator_diagnostics"][0]["name"] == "followed_users"
+
+
+@patch("app.routers.feed_transparency.hydrate_posts", new_callable=AsyncMock)
+def test_preview_omits_blocked_and_unverified_partial_cards(mock_hydrate, client, block_statuses):
+    uris = [
+        "at://did:plc:blocked/app.bsky.feed.post/one",
+        "at://did:plc:unknown/app.bsky.feed.post/two",
+        "at://clear.test/app.bsky.feed.post/three",
+    ]
+    app.state.feed_cache = MagicMock(
+        retrieve_document=AsyncMock(
+            return_value=FeedCacheDocument(
+                items=uris,
+                items_meta=[PipelineItemMeta(at_uri=uris[2], author_did="did:plc:clear", rank=3)],
+                user_did="did:plc:test-user",
+                feed_name="your-feed",
+                generated_at=datetime.now(UTC),
+                expires_at=datetime.now(UTC) + timedelta(minutes=10),
+                mode="preview",
+            )
+        )
+    )
+    block_statuses.side_effect = None
+    block_statuses.return_value = {"did:plc:blocked": "blocked", "did:plc:clear": "clear"}
+    mock_hydrate.return_value = {}
+
+    response = client.get("/api/feeds/previews/preview-partial")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["stored_item_count"] == 3
+    assert data["blocked_item_count"] == 1
+    assert data["block_check_unavailable_count"] == 1
+    assert data["partial_item_count"] == 1
+    assert [(item["at_uri"], item["rank"]) for item in data["items"]] == [(uris[2], 3)]
+    mock_hydrate.assert_awaited_once_with(app.state.firestore, [uris[2]])
+    block_statuses.assert_awaited_once_with(
+        "did:plc:test-user", ["did:plc:blocked", "did:plc:unknown", "did:plc:clear"]
+    )
+
+    block_statuses.return_value = {}
+    response = client.get("/api/feeds/previews/preview-partial")
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert response.json()["block_check_unavailable_count"] == 3
+
+
+@patch("app.routers.feed_transparency.get_feed_snapshot", new_callable=AsyncMock)
+@patch("app.lib.post_hydration.get_cached_hydrated_posts", new_callable=AsyncMock)
+def test_detail_rechecks_blocks_for_each_viewer_on_cache_hits(
+    mock_cached, mock_snapshot, client, block_statuses
+):
+    from ..lib.firebase_auth import verify_firebase_auth
+
+    author = "did:plc:author"
+    snapshot = _snapshot_doc()
+    uri = snapshot.items[0]
+    mock_snapshot.return_value = snapshot
+    mock_cached.return_value = (_hydrated(uri), [])
+    block_statuses.side_effect = [
+        {author: "clear"},
+        {author: "blocked"},
+        {author: "clear"},
+        {author: "clear"},
+    ]
+
+    assert len(client.get("/api/feeds/req-abc").json()["items"]) == 1
+    response = client.get("/api/feeds/req-abc")
+    assert response.json()["items"] == []
+    assert response.json()["blocked_item_count"] == 1
+    with patch.dict(app.dependency_overrides, {verify_firebase_auth: lambda: "other-viewer"}):
+        assert len(client.get("/api/feeds/req-abc").json()["items"]) == 1
+    assert len(client.get("/api/feeds/req-abc").json()["items"]) == 1
+    assert mock_cached.await_count == 3
+    assert [call.args[0] for call in block_statuses.await_args_list] == [
+        "did:plc:test-user",
+        "did:plc:test-user",
+        "did:plc:other-viewer",
+        "did:plc:test-user",
+    ]
 
 
 def test_get_feed_preview_hides_wrong_owner(client):
