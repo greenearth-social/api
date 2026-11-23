@@ -26,6 +26,7 @@ from ..embeddings import encode_float32_b64
 from ..feed_debug import current_recorder
 from ..metrics import get_metric_collector
 from ..pipeline_context import DegradationEvent, DegradationStage, current_pipeline_context
+from ..request_context import get_request_id
 from ..telemetry import timed
 from .base import CandidateGenerator, CandidateResult, get_generator
 
@@ -50,6 +51,38 @@ def _resolve_generator(
     if extra_generators is not None and name in extra_generators:
         return extra_generators[name]
     return get_generator(name)
+
+
+def _log_generator_timeout(
+    name: str,
+    *,
+    started_at: float,
+    timeout: asyncio.Timeout,
+    is_infill: bool,
+) -> None:
+    # A dependency can raise TimeoutError before the generator's own deadline.
+    # Inspect the timeout scope rather than attributing every timeout to its budget.
+    elapsed_ms = (asyncio.get_running_loop().time() - started_at) * 1000
+    budget_ms = _GENERATOR_TIMEOUT_SEC * 1000
+    timeout_source = "generator_budget" if timeout.expired() else "dependency"
+    rid = get_request_id() or "-"
+    logger.warning(
+        "%s generator '%s' timed out: elapsed_ms=%.1f budget_ms=%.1f timeout_source=%s rid=%s",
+        "Infill" if is_infill else "Candidate",
+        name,
+        elapsed_ms,
+        budget_ms,
+        timeout_source,
+        rid,
+        extra={
+            "generator_name": name,
+            "is_infill": is_infill,
+            "elapsed_ms": elapsed_ms,
+            "budget_ms": budget_ms,
+            "timeout_source": timeout_source,
+            "rid": rid,
+        },
+    )
 
 
 def allocate_counts(specs: list[GeneratorSpec], total: int) -> list[int]:
@@ -249,6 +282,8 @@ async def run_generate(
     async def _run_one(
         spec: GeneratorSpec, count: int, gen: CandidateGenerator
     ) -> list[CandidateResult]:
+        started_at = asyncio.get_running_loop().time()
+        timeout = asyncio.timeout(_GENERATOR_TIMEOUT_SEC)
         try:
             async with timed(
                 logger,
@@ -260,19 +295,17 @@ async def run_generate(
                 },
                 count=count,
             ):
-                results = [
-                    await asyncio.wait_for(
-                        gen.generate(
+                async with timeout:
+                    results = [
+                        await gen.generate(
                             es=es,
                             user_did=request.user_did,
                             num_candidates=count,
                             video_only=request.video_only,
                             exclude_uris=request.exclude_uris or None,
                             max_age_hours=request.max_age_hours,
-                        ),
-                        timeout=_GENERATOR_TIMEOUT_SEC,
-                    )
-                ]
+                        )
+                    ]
             if results[0].status == "not_run":
                 if mc := get_metric_collector():
                     mc.record(
@@ -328,10 +361,11 @@ async def run_generate(
             return normalized
         except Exception as exc:
             if isinstance(exc, TimeoutError):
-                logger.warning(
-                    "Candidate generator '%s' timed out after %.1fs",
+                _log_generator_timeout(
                     spec.name,
-                    _GENERATOR_TIMEOUT_SEC,
+                    started_at=started_at,
+                    timeout=timeout,
+                    is_infill=False,
                 )
                 outcome = "timeout"
             else:
@@ -395,20 +429,20 @@ async def run_generate(
             if c.at_uri and c.at_uri not in infill_exclude_uris:
                 infill_exclude_uris.append(c.at_uri)
 
+        started_at = asyncio.get_running_loop().time()
+        timeout = asyncio.timeout(_GENERATOR_TIMEOUT_SEC)
         try:
             # Infill receives the same freshness window as primary generation;
             # it may compensate for deduplication but must never widen eligibility.
-            infill_result = await asyncio.wait_for(
-                infill_gen.generate(
+            async with timeout:
+                infill_result = await infill_gen.generate(
                     es=es,
                     user_did=request.user_did,
                     num_candidates=shortfall * 2,
                     video_only=request.video_only,
                     exclude_uris=infill_exclude_uris or None,
                     max_age_hours=request.max_age_hours,
-                ),
-                timeout=_GENERATOR_TIMEOUT_SEC,
-            )
+                )
             if mc := get_metric_collector():
                 if infill_result.status == "not_run":
                     mc.record(
@@ -429,10 +463,11 @@ async def run_generate(
                     )
         except Exception as exc:
             if isinstance(exc, TimeoutError):
-                logger.warning(
-                    "Infill generator '%s' timed out after %.1fs",
+                _log_generator_timeout(
                     request.infill,
-                    _GENERATOR_TIMEOUT_SEC,
+                    started_at=started_at,
+                    timeout=timeout,
+                    is_infill=True,
                 )
                 outcome = "timeout"
             else:

@@ -1510,7 +1510,7 @@ Successful startup loads and retrieval counts are logged at `INFO`. Stage and
 production default to `WARNING`; set `GE_LOG_LEVEL=INFO` on the API process or
 Cloud Run revision to see those messages. Artifact-loading failures are warnings.
 
-Cloud Monitoring records three metrics under `candidates.two_tower`:
+Cloud Monitoring records these retrieval metrics under `candidates.two_tower`:
 
 - `mode_count`: counter labeled by `generator_name`, `retrieval_mode` (`blended`,
   `actual_only`, `prior_only`, or `skipped`), and `reason` (`none` or the fallback/skip reason).
@@ -1522,6 +1522,64 @@ History is recorded after loading; mode and weight are recorded after vector sel
 before Elasticsearch search. These measure generator invocations, not unique users or cached
 feed views. Filter by `generator_name` to separate forced empty-history runs, and use the
 existing `traffic` label to exclude probes and load tests. No user IDs are metric labels.
+
+### Diagnosing two-tower timeouts
+
+Stage timing is recorded without enabling verbose timing logs. The
+`candidates.two_tower.stage.duration_ms` histogram uses the
+`custom.googleapis.com/greenearth-api/` prefix in GCP and records three stages:
+
+- `history`: loading user history, including cache access.
+- `user_tower`: the prediction call and validation of its output.
+- `knn`: Elasticsearch candidate retrieval.
+
+Samples carry `stage`, `generator_name`, `feed_name`, and `outcome` labels, and
+inherit `endpoint`, `traffic`, `surface`, and `page` from the request. Stages
+skipped by empty-history or prior-only retrieval emit no sample.
+`feed_name` comes from the pipeline context and is empty for calls outside a feed
+pipeline. Outcomes are `success`, `error`, `timeout`, and `cancelled`. A cancelled
+operation contributes its elapsed time to the histogram; it is not dropped as an
+incomplete sample. Cancellation can come from the generator deadline or an outer
+request cancellation, so it is not by itself a count of generator timeouts.
+Keep using `candidates.generate.failure_count{outcome="timeout"}` for that count.
+
+The `user_tower` stage includes client work, network delays, and inference-service
+time. It does not distinguish those components or isolate model execution.
+
+For example, this Metrics Explorer PromQL query shows p95 milliseconds by stage
+and outcome for normal `your-feed` requests. Preserve outcome when looking at the
+tail, or deliberately select `outcome="success"` to measure completed work only:
+
+```promql
+histogram_quantile(0.95,
+  sum by (le, stage, outcome) (
+    rate({__name__="custom.googleapis.com/greenearth-api/candidates.two_tower.stage.duration_ms_bucket",
+      monitored_resource="generic_task", namespace="prod",
+      endpoint="get_feed_skeleton", traffic="real", surface="feed",
+      page=~"first|cursor", feed_name="your-feed", generator_name="two_tower"}[1h])
+  )
+)
+```
+
+To locate failures and cancellations by stage, use the distribution's count:
+
+```promql
+sum by (stage, outcome) (
+  increase({__name__="custom.googleapis.com/greenearth-api/candidates.two_tower.stage.duration_ms_count",
+    monitored_resource="generic_task", namespace="prod",
+    endpoint="get_feed_skeleton", traffic="real", surface="feed",
+    page=~"first|cursor", feed_name="your-feed", generator_name="two_tower",
+    outcome!="success"}[1h])
+)
+```
+
+For an individual incident, API warnings include `rid`, stage, outcome, and
+elapsed milliseconds. Generator timeout warnings also
+include the actual `elapsed_ms`, configured `budget_ms`, and
+`timeout_source=generator_budget` or `timeout_source=dependency`. An inner history
+deadline is therefore distinguishable from the generator's overall deadline.
+Failure warnings do not require `GE_TIMING_LOGS=1`. Request IDs and exception
+details stay in logs, never metric labels.
 
 ## User-History Feature Cache
 

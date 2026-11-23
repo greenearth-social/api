@@ -19,6 +19,7 @@ from ..inference import (
     predict_user_embedding,
 )
 from ..metrics import get_metric_collector
+from ..pipeline_context import current_pipeline_context
 from ..telemetry import timed
 from ..user_history_cache import fetch_user_history_features
 from .base import CandidateGenerator, CandidateResult
@@ -29,6 +30,24 @@ logger = logging.getLogger(__name__)
 # Treat the prior as two usable history items: it dominates sparse histories,
 # has equal weight at two items, and fades as actual history grows.
 AVG_USER_EMBEDDING_WEIGHT = 2.0
+
+
+def _timed_stage(generator_name: str, stage: str):
+    # Keep cancellation samples: an outer generator deadline interrupts the
+    # dependency as CancelledError, while a dependency's own deadline is a timeout.
+    ctx = current_pipeline_context()
+    return timed(
+        logger,
+        "candidates.two_tower.stage.duration_ms",
+        record_metric=True,
+        record_outcome=True,
+        log_failures=True,
+        metric_attrs={
+            "generator_name": generator_name,
+            "feed_name": ctx.feed_name if ctx is not None else "",
+            "stage": stage,
+        },
+    )
 
 
 def _valid_query_embedding(vector: list[float] | tuple[float, ...]) -> bool:
@@ -92,7 +111,8 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
             if self.history_mode == "actual":
                 # Reuse the capped, usable history also used by the embedding
                 # endpoint. Only items passed to the tower add blend weight.
-                history = await fetch_user_history_features(es, user_did)
+                async with _timed_stage(self.name, "history"):
+                    history = await fetch_user_history_features(es, user_did)
                 num_likes = len(history.items_with_embeddings)
             # Empty-history mode deliberately skips the loader even for an
             # established user. Snapshots still record that no history was used.
@@ -109,16 +129,19 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
                 # Prior fallback handles an unavailable prior, not broken user
                 # inference. Prediction errors propagate to pipeline diagnostics.
                 inference_base_url, inference_api_key = get_inference_settings()
-                prediction = await predict_user_embedding(
-                    history, base_url=inference_base_url, api_key=inference_api_key
-                )
-                actual_embedding = prediction.embedding
-                if actual_embedding is None or not _valid_query_embedding(actual_embedding):
-                    raise InferenceResponseFormatError(
-                        "Expected a finite nonzero user embedding for two-tower retrieval"
+                async with _timed_stage(self.name, "user_tower"):
+                    prediction = await predict_user_embedding(
+                        history, base_url=inference_base_url, api_key=inference_api_key
                     )
-                if not prediction.user_model_uuid or not prediction.post_model_uuid:
-                    raise InferenceResponseFormatError("Expected user-tower model pair metadata")
+                    actual_embedding = prediction.embedding
+                    if actual_embedding is None or not _valid_query_embedding(actual_embedding):
+                        raise InferenceResponseFormatError(
+                            "Expected a finite nonzero user embedding for two-tower retrieval"
+                        )
+                    if not prediction.user_model_uuid or not prediction.post_model_uuid:
+                        raise InferenceResponseFormatError(
+                            "Expected user-tower model pair metadata"
+                        )
                 user_embedding = actual_embedding
                 # This is paired_post_model_uuid from the prediction response.
                 # A separate /ready lookup could observe a different model pair
@@ -246,19 +269,20 @@ class TwoTowerCandidateGenerator(CandidateGenerator):
         # MIN_LIKE_COUNT's docstring for why it would be redundant against the
         # quality corpus.
         min_like_count = None if resolved_index == POSTS_QUALITY_KNN_INDEX else MIN_LIKE_COUNT
-        candidates = await knn_search_posts(
-            es,
-            user_embedding,
-            num_candidates,
-            search_field=GE_POST_EMBEDDING_FIELD,
-            generator_name=self.name,
-            video_only=video_only,
-            exclude_uris=exclude_uris,
-            ge_post_embedding_model_uuid=post_tower_uuid,
-            min_like_count=min_like_count,
-            max_age_hours=max_age_hours,
-            index=resolved_index,
-        )
+        async with _timed_stage(self.name, "knn"):
+            candidates = await knn_search_posts(
+                es,
+                user_embedding,
+                num_candidates,
+                search_field=GE_POST_EMBEDDING_FIELD,
+                generator_name=self.name,
+                video_only=video_only,
+                exclude_uris=exclude_uris,
+                ge_post_embedding_model_uuid=post_tower_uuid,
+                min_like_count=min_like_count,
+                max_age_hours=max_age_hours,
+                index=resolved_index,
+            )
 
         logger.info(
             "%s retrieved %d/%d candidates mode=%s post_model_uuid=%s",

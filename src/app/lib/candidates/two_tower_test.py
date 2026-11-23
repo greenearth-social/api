@@ -1,5 +1,6 @@
 """Tests for average-prior and actual-user two-tower retrieval."""
 
+import asyncio
 import logging
 from dataclasses import replace
 from types import SimpleNamespace
@@ -13,6 +14,8 @@ from ..candidates import get_generator, list_generators
 from ..elasticsearch import POSTS_QUALITY_KNN_INDEX
 from ..embeddings import GE_POST_EMBEDDING_FIELD
 from ..inference import InferenceResponseFormatError, UserEmbeddingResult
+from ..pipeline_context import PipelineContext, pipeline_context_scope
+from ..request_context import reset_request_id, set_request_id
 from ..user_history_cache import UserHistory, UserHistoryItem
 from . import two_tower
 from .two_tower import AVG_USER_EMBEDDING_WEIGHT, TwoTowerCandidateGenerator
@@ -150,6 +153,154 @@ async def test_blend_is_not_normalized(generator, dependencies):
     await generator.generate(object(), "did:plc:user1")
     # Two orthogonal unit inputs with equal weights retain magnitude sqrt(0.5).
     assert dependencies.knn.await_args.args[1] == [0.5, 0.5]
+
+
+def _stage_samples(metrics):
+    return [
+        c for c in metrics.record.call_args_list
+        if c.args[0] == "candidates.two_tower.stage.duration_ms"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "history_mode,history_count,stages",
+    [
+        ("actual", 2, ["history", "user_tower", "knn"]),
+        ("actual", 0, ["history", "knn"]),
+        ("empty", 2, ["knn"]),
+    ],
+)
+async def test_stage_timings_only_include_work_performed(
+    dependencies, history_mode, history_count, stages
+):
+    generator = TwoTowerCandidateGenerator(name="two_tower", history_mode=history_mode)
+    dependencies.history.return_value = make_history(history_count)
+    with (
+        patch("app.lib.metrics.get_metric_collector", return_value=dependencies.metrics),
+        pipeline_context_scope(PipelineContext(feed_name="your-feed")),
+    ):
+        result = await generator.generate(object(), "did:plc:user1")
+    assert result.candidates
+    samples = _stage_samples(dependencies.metrics)
+    assert [c.kwargs["stage"] for c in samples] == stages
+    for sample in samples:
+        assert sample.args[1] >= 0
+        assert sample.kwargs == {
+            "generator_name": "two_tower",
+            "feed_name": "your-feed",
+            "stage": sample.kwargs["stage"],
+            "outcome": "success",
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dependency,stage,completed",
+    [
+        ("history", "history", []),
+        ("prediction", "user_tower", ["history"]),
+        ("knn", "knn", ["history", "user_tower"]),
+    ],
+)
+async def test_cancelled_stage_is_recorded_and_logged_with_request_id(
+    generator, dependencies, dependency, stage, completed, caplog, monkeypatch
+):
+    monkeypatch.delenv("GE_TIMING_LOGS", raising=False)
+    started = asyncio.Event()
+
+    async def blocked(*args, **kwargs):
+        started.set()
+        await asyncio.Future()
+
+    getattr(dependencies, dependency).side_effect = blocked
+    token = set_request_id("abc123def456")
+    try:
+        with (
+            patch("app.lib.metrics.get_metric_collector", return_value=dependencies.metrics),
+            pipeline_context_scope(PipelineContext(feed_name="your-feed")),
+        ):
+            task = asyncio.create_task(generator.generate(object(), "did:plc:user1"))
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        samples = _stage_samples(dependencies.metrics)
+        assert [(c.kwargs["stage"], c.kwargs["outcome"]) for c in samples] == [
+            *((name, "success") for name in completed),
+            (stage, "cancelled"),
+        ]
+        assert all(c.kwargs["feed_name"] == "your-feed" for c in samples)
+        warnings = [r for r in caplog.records if r.msg.startswith("%s rid=")]
+        assert len(warnings) == 1
+        assert warnings[0].stage == stage
+        assert warnings[0].rid == "abc123def456"
+        assert warnings[0].outcome == "cancelled"
+    finally:
+        reset_request_id(token)
+
+
+@pytest.mark.asyncio
+async def test_history_dependency_timeout_is_distinct_from_cancellation(
+    generator, dependencies, caplog
+):
+    error = TimeoutError("history deadline")
+    dependencies.history.side_effect = error
+    with patch("app.lib.metrics.get_metric_collector", return_value=dependencies.metrics):
+        with pytest.raises(TimeoutError) as raised:
+            await generator.generate(object(), "did:plc:user1")
+    assert raised.value is error
+    samples = _stage_samples(dependencies.metrics)
+    assert len(samples) == 1
+    assert samples[0].kwargs["stage"] == "history"
+    assert samples[0].kwargs["outcome"] == "timeout"
+    assert samples[0].kwargs["feed_name"] == ""
+    dependencies.prediction.assert_not_awaited()
+    dependencies.knn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invalid_prediction_records_failed_user_tower_stage(generator, dependencies):
+    dependencies.prediction.return_value = replace(
+        dependencies.prediction.return_value, embedding=[0.0, 0.0]
+    )
+    with patch("app.lib.metrics.get_metric_collector", return_value=dependencies.metrics):
+        with pytest.raises(InferenceResponseFormatError):
+            await generator.generate(object(), "did:plc:user1")
+    samples = _stage_samples(dependencies.metrics)
+    assert [(c.kwargs["stage"], c.kwargs["outcome"]) for c in samples] == [
+        ("history", "success"), ("user_tower", "error"),
+    ]
+    dependencies.knn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_stage_timings_keep_their_feed_context(generator, dependencies):
+    both_started = asyncio.Event()
+    arrivals = 0
+
+    async def shared_history(*args, **kwargs):
+        nonlocal arrivals
+        arrivals += 1
+        if arrivals == 2:
+            both_started.set()
+        await both_started.wait()
+        return make_history(2)
+
+    dependencies.history.side_effect = shared_history
+
+    async def run(feed_name):
+        with pipeline_context_scope(PipelineContext(feed_name=feed_name)):
+            return await generator.generate(object(), "did:plc:user1")
+
+    with patch("app.lib.metrics.get_metric_collector", return_value=dependencies.metrics):
+        await asyncio.gather(run("your-feed"), run("another-feed"))
+    samples = _stage_samples(dependencies.metrics)
+    assert len(samples) == 6
+    for feed in ("your-feed", "another-feed"):
+        assert [c.kwargs["stage"] for c in samples if c.kwargs["feed_name"] == feed] == [
+            "history", "user_tower", "knn",
+        ]
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,6 +24,7 @@ from ..pipeline_context import (
     PipelineContext,
     pipeline_context_scope,
 )
+from ..request_context import reset_request_id, set_request_id
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -655,6 +657,123 @@ class TestLlmConfigurationFailures:
 # ---------------------------------------------------------------------------
 # Infill generator timeout/error tests
 # ---------------------------------------------------------------------------
+
+
+class TestGeneratorTimeoutDiagnostics:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_infill", [False, True])
+    @pytest.mark.parametrize("timeout_source", ["dependency", "generator_budget"])
+    @pytest.mark.parametrize("failure_mode", ["soft", "hard", "fail_fast"])
+    async def test_timeout_source_elapsed_and_request_id(
+        self, monkeypatch, caplog, is_infill, timeout_source, failure_mode
+    ):
+        budget = 1.0 if timeout_source == "dependency" else 0.01
+        monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", budget)
+        cleaned_up = asyncio.Event()
+
+        async def generate(**kwargs):
+            try:
+                if timeout_source == "dependency":
+                    async with asyncio.timeout(0.001):
+                        await asyncio.Event().wait()
+                else:
+                    await asyncio.Event().wait()
+            finally:
+                cleaned_up.set()
+
+        target = _EmptyGenerator("target")
+        monkeypatch.setattr(target, "generate", generate)
+        _stub_generators(monkeypatch, {"primary": _EmptyGenerator("primary"), "target": target})
+        request = (
+            _make_request("primary", infill="target")
+            if is_infill else _make_request("target")
+        )
+        mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, mc))
+        ctx = (
+            None if failure_mode == "hard"
+            else PipelineContext(feed_name="your-feed", fail_fast=failure_mode == "fail_fast")
+        )
+        token = set_request_id("timeout-test-rid")
+        try:
+            with caplog.at_level(logging.WARNING, logger=generate_module.logger.name):
+                with pipeline_context_scope(ctx) if ctx is not None else nullcontext():
+                    if failure_mode == "soft":
+                        result = await run_generate(request, es=None, feed_name="your-feed")
+                        assert result.candidates == []
+                    else:
+                        expected_error = GeneratorError if failure_mode == "hard" else TimeoutError
+                        with pytest.raises(expected_error):
+                            await run_generate(request, es=None, feed_name="your-feed")
+        finally:
+            reset_request_id(token)
+
+        assert cleaned_up.is_set()
+        logs = [r for r in caplog.records if "timed out" in r.getMessage()]
+        assert len(logs) == 1
+        log = logs[0]
+        assert log.levelno == logging.WARNING
+        assert log.exc_info is None
+        assert log.timeout_source == timeout_source
+        assert log.budget_ms == budget * 1000
+        assert log.generator_name == "target"
+        assert log.is_infill is is_infill
+        assert log.rid == "timeout-test-rid"
+        assert f"elapsed_ms={log.elapsed_ms:.1f}" in log.getMessage()
+        assert f"budget_ms={budget * 1000:.1f}" in log.getMessage()
+        assert f"timeout_source={timeout_source}" in log.getMessage()
+        assert "rid=timeout-test-rid" in log.getMessage()
+        if timeout_source == "dependency":
+            assert 0 <= log.elapsed_ms < log.budget_ms
+        else:
+            assert log.elapsed_ms >= log.budget_ms
+        failures = [
+            attrs for name, _, attrs in mc.calls if name == "candidates.generate.failure_count"
+        ]
+        assert len(failures) == 1
+        assert failures[0]["outcome"] == "timeout"
+        assert failures[0]["is_infill"] == ("true" if is_infill else "false")
+        if ctx is not None:
+            assert len(ctx.degradations) == 1
+            assert isinstance(ctx.degradations[0].cause, TimeoutError)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_infill", [False, True])
+    async def test_parent_cancellation_propagates_without_timeout_failure(
+        self, monkeypatch, caplog, is_infill
+    ):
+        monkeypatch.setattr(generate_module, "_GENERATOR_TIMEOUT_SEC", 1.0)
+        started = asyncio.Event()
+        cleaned_up = asyncio.Event()
+
+        async def generate(**kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned_up.set()
+
+        target = _EmptyGenerator("target")
+        monkeypatch.setattr(target, "generate", generate)
+        _stub_generators(monkeypatch, {"primary": _EmptyGenerator("primary"), "target": target})
+        request = (
+            _make_request("primary", infill="target")
+            if is_infill else _make_request("target")
+        )
+        mc = FakeMetricCollector()
+        set_metric_collector(cast(MetricCollector, mc))
+        ctx = PipelineContext(feed_name="your-feed")
+        with pipeline_context_scope(ctx):
+            task = asyncio.create_task(run_generate(request, es=None, feed_name="your-feed"))
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert cleaned_up.is_set()
+        assert ctx.degradations == []
+        assert not [c for c in mc.calls if c[0] == "candidates.generate.failure_count"]
+        assert not [r for r in caplog.records if "timed out" in r.getMessage()]
 
 
 class TestInfillGeneratorTimeout:
