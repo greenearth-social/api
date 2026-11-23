@@ -58,6 +58,8 @@ async def test_fetch_latest_post_created_at_success():
     es.search.assert_awaited_once()
     kwargs = es.search.await_args.kwargs
     assert kwargs["index"] == "posts_recent"
+    # Future-dated posts (client-set created_at) must not mask ingest lag.
+    assert kwargs["query"] == {"range": {"created_at": {"lte": "now"}}}
     assert kwargs["size"] == 1
     assert kwargs["sort"] == [{"created_at": "desc"}]
 

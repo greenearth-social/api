@@ -55,12 +55,17 @@ def parse_post_timestamp(ts_str: str) -> datetime | None:
 
 
 async def fetch_latest_post_created_at(es: Any) -> datetime | None:
-    """Query Elasticsearch for the newest post created_at timestamp in posts_recent."""
+    """Query Elasticsearch for the newest post created_at timestamp in posts_recent.
+
+    created_at is client-set, so future-dated posts are excluded: a single one
+    would otherwise pin the max and mask an ingest outage.
+    """
     try:
         resp = await es.search(
             index=POSTS_KNN_INDEX,
             op="freshness",
             size=1,
+            query={"range": {"created_at": {"lte": "now"}}},
             sort=[{"created_at": "desc"}],
             _source=["created_at"],
             request_timeout=5,
